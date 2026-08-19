@@ -1,0 +1,11 @@
+[project]
+name = "codex-orchestrator-mcp"
+version = "0.1.0"
+description = "Dispatch tasks to remote Codex App Server instances."
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=1.12,<2",
+  "pydantic-settings>=2",
+  "websockets>=14",
+]
+

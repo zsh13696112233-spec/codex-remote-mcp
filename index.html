@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Codex Fleet · Agent 调度台</title>
+  <style>
+    :root { --ink:#172133; --muted:#758197; --paper:#f5f7fb; --card:#fff; --line:#e6eaf1; --blue:#315df4; --cyan:#20b8ce; --green:#16a875; --navy:#111d35; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--paper); color:var(--ink); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    button, select, textarea { font:inherit; } button { cursor:pointer; }
+    .shell { max-width:1460px; margin:auto; min-height:100vh; padding:28px 32px 44px; }
+    header { display:flex; align-items:center; justify-content:space-between; margin-bottom:28px; }
+    .brand { display:flex; align-items:center; gap:12px; font-weight:760; letter-spacing:-.5px; font-size:20px; }.mark { width:34px;height:34px;border-radius:11px;background:linear-gradient(135deg,#315df4,#7a57ec);box-shadow:0 8px 20px #315df444;position:relative; }.mark:after{content:"";position:absolute;width:11px;height:11px;background:#fff;border-radius:4px;left:11px;top:11px;box-shadow:8px 0 #a8eff7;}.env { display:flex;gap:9px;align-items:center;font-size:13px;color:#5f6b80; }.live { width:8px;height:8px;border-radius:50%;background:#20bf83;box-shadow:0 0 0 4px #20bf8322; }
+    .hero { display:flex;justify-content:space-between;align-items:flex-end; margin:4px 0 24px; }.eyebrow { color:var(--blue); font-size:12px;letter-spacing:1.2px;font-weight:800; }.hero h1 { margin:6px 0 0; font-size:30px; letter-spacing:-1px; }.hero p { color:var(--muted); font-size:14px; margin:0 0 3px; }
+    .layout { display:grid;grid-template-columns:minmax(0,1fr) 365px;gap:20px; }.card { background:var(--card);border:1px solid var(--line);border-radius:18px;box-shadow:0 9px 28px #273c6810; }.main { padding:24px; }
+    .section-title { display:flex;align-items:center;gap:10px;font-size:16px;font-weight:760; }.step { width:25px;height:25px;border-radius:50%;display:grid;place-items:center;background:#e9efff;color:var(--blue);font-size:12px;font-weight:800; }.divider{height:1px;background:var(--line);margin:22px 0;}
+    .leaders { display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:15px; }.leader { text-align:left;padding:14px;border-radius:13px;border:1px solid var(--line);background:#fff;transition:.18s; }.leader:hover { border-color:#aebeff;transform:translateY(-1px); }.leader.active{border-color:var(--blue);background:#f4f6ff;box-shadow:inset 0 0 0 1px var(--blue);}.avatar { width:30px;height:30px;border-radius:10px;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:800;margin-bottom:9px; }.violet{background:#7864ed}.orange{background:#f29b55}.teal{background:#1fa9a1}.leader strong,.leader small { display:block; }.leader strong {font-size:13px}.leader small { color:var(--muted);font-size:11px;margin-top:2px; }
+    label { display:block;font-size:12px;font-weight:700;margin-bottom:8px;color:#4b5870; }.prompt-wrap{position:relative}.prompt { width:100%;height:150px;resize:vertical;border:1px solid var(--line);border-radius:13px;padding:14px 15px;outline:none;line-height:1.65;color:#25314a;background:#fbfcfe; }.prompt:focus { border-color:#8ba0ff;box-shadow:0 0 0 3px #315df41a; }.count { position:absolute;right:12px;bottom:10px;color:#9ba5b4;font-size:11px; }
+    .agents {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px;margin-top:15px}.agent { display:flex;align-items:center;gap:11px;padding:13px;border:1px solid var(--line);background:#fff;border-radius:13px;text-align:left; }.agent.selected {border-color:#20b8ce;background:#f1fcfd;box-shadow:inset 0 0 0 1px #20b8ce}.checkbox {width:19px;height:19px;border-radius:6px;border:1.5px solid #c1cad8;display:grid;place-items:center;flex:0 0 auto;color:#fff;font-size:12px}.selected .checkbox {background:var(--cyan);border-color:var(--cyan)}.agent-name{font-weight:750;font-size:13px}.agent-ip{font-size:11px;color:var(--muted);margin-top:3px}.state{font-size:10px;color:var(--green);margin-left:auto;align-self:flex-start;}
+    .command { margin-top:14px;padding:12px 13px;background:#101b31;border-radius:10px;color:#c9d6f5;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap; }.command em{color:#7ee7e0;font-style:normal}.toolbar {display:grid;grid-template-columns:1fr 1fr;gap:13px;align-items:end}.select {position:relative}.select select {appearance:none;width:100%;background:#fbfcfe;border:1px solid var(--line);border-radius:11px;padding:11px 35px 11px 12px;color:#34415a;outline:none;font-size:13px}.select:after{content:"⌄";position:absolute;right:13px;bottom:9px;color:#758197;font-size:17px;pointer-events:none}.launch {border:0;border-radius:11px;padding:12px 16px;background:var(--blue);color:white;font-weight:750;font-size:13px;box-shadow:0 8px 18px #315df440;}.launch:hover{background:#254ee0}.launch:disabled{opacity:.65;cursor:wait}.launch small{opacity:.75;font-weight:600}
+    .side{padding:20px}.side-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.side-heading strong{font-size:15px}.badge{font-size:11px;background:#e9fbf5;color:#10845d;padding:4px 7px;border-radius:99px}.flow{position:relative;padding-left:31px}.flow:before{content:"";position:absolute;left:12px;top:16px;bottom:17px;border-left:1px dashed #cbd4e3}.flow-row{position:relative;padding:0 0 20px}.dot{position:absolute;left:-24px;top:2px;width:12px;height:12px;border:3px solid #fff;border-radius:50%;background:#9aa7bb;box-shadow:0 0 0 1px #cbd4e3}.dot.active{background:var(--blue);box-shadow:0 0 0 4px #315df420}.flow-row strong{font-size:13px;display:block}.flow-row p{margin:4px 0 0;font-size:11px;line-height:1.5;color:var(--muted)}.summary {margin-top:3px;border-top:1px solid var(--line);padding-top:16px}.summary-line{display:flex;justify-content:space-between;font-size:12px;margin:9px 0}.summary-line span{color:var(--muted)}.summary-line code{font-size:11px;color:#44506a}.notice{margin-top:17px;padding:12px;border-radius:11px;background:#f4f6ff;color:#59678b;font-size:11px;line-height:1.6}.notice b{color:#3d4b6e}
+    .toast{position:fixed;right:28px;bottom:26px;background:#172133;color:white;padding:13px 17px;border-radius:12px;font-size:13px;box-shadow:0 10px 30px #17213344;transform:translateY(80px);opacity:0;transition:.25s}.toast.show{transform:none;opacity:1}
+    @media(max-width:900px){.layout{grid-template-columns:1fr}.side{order:-1}.hero{align-items:flex-start;gap:14px;flex-direction:column}.leaders{grid-template-columns:1fr}.agents{grid-template-columns:1fr}}@media(max-width:520px){.shell{padding:20px 15px}.main,.side{padding:17px}.toolbar{grid-template-columns:1fr}.hero h1{font-size:25px}.env{display:none}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header><div class="brand"><i class="mark"></i>Codex Fleet</div><div class="env"><i class="live"></i>编排器已连接 · MCP Ready</div></header>
+    <section class="hero"><div><div class="eyebrow">MULTI-MACHINE ORCHESTRATION</div><h1>把任务交给一个决策者，再由它调用整支 Codex 队伍。</h1></div><p>一次任务 · 可并行调度多个物理机执行者</p></section>
+    <div class="layout">
+      <section class="card main">
+        <div class="section-title"><span class="step">1</span>选择决策者 Agent</div>
+        <div class="leaders" id="leaders">
+          <button class="leader active" data-leader="Orion"><i class="avatar violet">O</i><strong>Orion</strong><small>主策划 · 任务拆解</small></button>
+          <button class="leader" data-leader="Atlas"><i class="avatar orange">A</i><strong>Atlas</strong><small>研究决策 · 风险把关</small></button>
+          <button class="leader" data-leader="Nova"><i class="avatar teal">N</i><strong>Nova</strong><small>交付决策 · 质量验收</small></button>
+        </div>
+        <div class="divider"></div>
+        <div class="section-title"><span class="step">2</span>给决策者的主提示词</div>
+        <div class="prompt-wrap"><textarea id="prompt" class="prompt" maxlength="100000">你是本次任务的主策划。请先分析目标、拆分为可并行的子任务，然后按每台执行机的能力分配工作。执行完成后，汇总结果并给出可执行的最终交付。</textarea><span class="count" id="count">0 / 100,000</span></div>
+        <div class="divider"></div>
+        <div class="section-title"><span class="step">3</span>为决策者配置执行机</div>
+        <div class="agents" id="agents">
+          <button class="agent selected" data-id="remote-192-168-3-7" data-ip="192.168.3.7" data-cwd="/tmp" data-model="gpt-5.6-sol"><span class="checkbox">✓</span><span><span class="agent-name">Codex · Build Node</span><span class="agent-ip">192.168.3.7 · macOS · <b>gpt-5.6-sol</b></span></span><span class="state">在线</span></button>
+          <button class="agent" data-id="remote-192-168-3-8" data-ip="192.168.3.8" data-cwd="/workspace" data-model="gpt-5.6-terra"><span class="checkbox"></span><span><span class="agent-name">Codex · Research Node</span><span class="agent-ip">192.168.3.8 · Linux · <b>gpt-5.6-terra</b></span></span><span class="state">在线</span></button>
+          <button class="agent" data-id="remote-192-168-3-11" data-ip="192.168.3.11" data-cwd="/projects" data-model="gpt-5.6-luna"><span class="checkbox"></span><span><span class="agent-name">Codex · Test Node</span><span class="agent-ip">192.168.3.11 · Linux · <b>gpt-5.6-luna</b></span></span><span class="state">在线</span></button>
+          <button class="agent" data-id="remote-192-168-3-15" data-ip="192.168.3.15" data-cwd="/Users/codex" data-model="gpt-5.5"><span class="checkbox"></span><span><span class="agent-name">Codex · Review Node</span><span class="agent-ip">192.168.3.15 · macOS · <b>gpt-5.5</b></span></span><span class="state">在线</span></button>
+        </div>
+        <div class="command" id="command">MCP 调度上下文：<em>remote-192-168-3-7</em> → 192.168.3.7</div>
+        <div class="divider"></div>
+        <div class="toolbar"><div class="select"><label for="model">选中执行机的模型</label><select id="model"><option>gpt-5.6-sol</option><option>gpt-5.6-terra</option><option>gpt-5.6-luna</option><option>gpt-5.5</option></select></div><button class="launch" id="launch">启动决策者并调度 <small>⌘ ↵</small></button></div>
+      </section>
+      <aside class="card side"><div class="side-heading"><strong>本次调度预览</strong><span class="badge" id="agentCount">1 台执行机</span></div><div class="flow"><div class="flow-row"><i class="dot active"></i><strong id="leaderName">Orion · 决策者</strong><p>读取主提示词，制定任务计划并选择执行机。</p></div><div class="flow-row"><i class="dot"></i><strong>Codex Orchestrator MCP</strong><p>使用 <code>list_agents</code> 读取白名单，再以 <code>dispatch</code> 派发子任务。</p></div><div class="flow-row"><i class="dot"></i><strong>远程 Codex 执行者</strong><p id="machineList">192.168.3.7 · gpt-5.6-sol</p></div><div class="flow-row"><i class="dot"></i><strong>汇总与交付</strong><p>决策者查询任务状态，整合所有执行结果。</p></div></div><div class="summary"><div class="summary-line"><span>模型策略</span><code>按执行机指定</code></div><div class="summary-line"><span>执行权限</span><code>read-only</code></div><div class="summary-line"><span>超时</span><code>1,800 sec</code></div></div><div class="notice"><b>Demo 提示：</b>页面中的“启动”仅生成调度预览。接入后由决策者通过 MCP 的 <code>dispatch</code> 对选中节点逐一派发子任务。</div></aside>
+    </div>
+  </main><div class="toast" id="toast"></div>
+  <script>
+    const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+    const prompt = $('#prompt'), count = $('#count'), command = $('#command'), list = $('#machineList');
+    function selectedAgents(){ return $$('.agent.selected'); }
+    function update(){ const active = selectedAgents(), ips = active.map(x=>x.dataset.ip), ids = active.map(x=>x.dataset.id); count.textContent = `${prompt.value.length.toLocaleString()} / 100,000`; $('#agentCount').textContent = `${active.length} 台执行机`; list.textContent = active.map(x=>`${x.dataset.ip} · ${x.dataset.model}`).join('  |  ') || '尚未选择执行机'; command.innerHTML = active.length ? `MCP 调度上下文：<em>${ids.join('</em>、<em>')}</em> → ${ips.join('、')}` : 'MCP 调度上下文：<em>等待选择执行机</em>'; }
+    $$('#leaders .leader').forEach(btn=>btn.addEventListener('click',()=>{$$('#leaders .leader').forEach(x=>x.classList.remove('active'));btn.classList.add('active');$('#leaderName').textContent=`${btn.dataset.leader} · 决策者`;}));
+    function setModelTarget(){ const active=selectedAgents(); const model=$('#model'); model.disabled=active.length!==1; model.value=active.length===1 ? active[0].dataset.model : 'gpt-5.6-sol'; }
+    $$('.agent').forEach(btn=>btn.addEventListener('click',()=>{btn.classList.toggle('selected'); const box=btn.querySelector('.checkbox'); box.textContent=btn.classList.contains('selected')?'✓':'';setModelTarget();update();}));
+    prompt.addEventListener('input',update); $('#model').addEventListener('change',e=>{ const active=selectedAgents(); if(active.length!==1) return; active[0].dataset.model=e.target.value; active[0].querySelector('.agent-ip b').textContent=e.target.value; update(); });
+    function dispatchPreview(){ const active=selectedAgents(); if(!active.length){ toast('请至少选择一台 Codex 执行机'); return; } const launch=$('#launch'); launch.disabled=true; launch.innerHTML='正在创建调度计划…'; setTimeout(()=>{launch.disabled=false;launch.innerHTML='启动决策者并调度 <small>⌘ ↵</small>';toast(`调度计划已创建：${active.length} 台执行机待 ${$('#leaderName').textContent.split(' ·')[0]} 分配任务`);},700); }
+    function toast(text){const t=$('#toast');t.textContent=text;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200)} $('#launch').addEventListener('click',dispatchPreview); document.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')dispatchPreview();}); setModelTarget(); update();
+  </script>
+</body>
+</html>

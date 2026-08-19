@@ -1,0 +1,17 @@
+{
+  "agents": {
+    "remote-192-168-3-16": {
+      "url": "ws://192.168.3.16:4500",
+      "cwd": "/tmp",
+      "token_env": "REMOTE_CODEX_316_TOKEN",
+      "allow_write": false,
+      "allow_cwd_override": false
+    },
+    "remote-192-168-3-7": {
+      "url": "ws://127.0.0.1:4501",
+      "cwd": "/tmp",
+      "allow_write": false,
+      "allow_cwd_override": true
+    }
+  }
+}

@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex Fleet Console · 交互演示</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --ink: #162033;
+      --muted: #68758a;
+      --line: #e4e9f1;
+      --primary: #5b5ce2;
+      --primary-dark: #494ac9;
+      --primary-soft: #eeeeff;
+      --blue: #3578e5;
+      --cyan: #12a6b4;
+      --green: #169c70;
+      --green-soft: #eaf9f3;
+      --amber: #c77b12;
+      --amber-soft: #fff6e6;
+      --red: #dc4c64;
+      --red-soft: #fff0f2;
+      --shadow: 0 12px 34px rgba(27, 39, 68, .08);
+      --radius-lg: 18px;
+      --radius-md: 13px;
+    }
+
+    * { box-sizing: border-box; }
+    html { color-scheme: light; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "PingFang SC", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, textarea, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .52; }
+    .hidden { display: none !important; }
+
+    .app { min-height: 100vh; display: grid; grid-template-columns: 232px minmax(0, 1fr); }
+    .sidebar {
+      position: sticky; top: 0; height: 100vh; padding: 25px 18px;
+      background: #11182b; color: #fff; display: flex; flex-direction: column;
+    }
+    .brand { display: flex; align-items: center; gap: 11px; padding: 0 9px 28px; font-weight: 760; }
+    .brand-mark {
+      width: 34px; height: 34px; border-radius: 11px; position: relative;
+      background: linear-gradient(145deg, #8e79ff, #5964e8 58%, #32b7c8);
+      box-shadow: 0 8px 24px rgba(100, 101, 230, .35);
+    }
+    .brand-mark::before, .brand-mark::after { content: ""; position: absolute; border: 2px solid white; border-radius: 50%; }
+    .brand-mark::before { width: 13px; height: 13px; left: 6px; top: 9px; }
+    .brand-mark::after { width: 8px; height: 8px; right: 5px; top: 7px; opacity: .78; }
+    .brand small { display: block; color: #8e9ab2; font-size: 10px; font-weight: 650; letter-spacing: .8px; margin-top: 2px; }
+    .nav-label { color: #68738a; padding: 0 12px; margin: 8px 0 8px; font-size: 10px; font-weight: 800; letter-spacing: 1.25px; }
+    .nav-item {
+      width: 100%; border: 0; color: #aeb8cc; background: transparent; padding: 11px 12px;
+      border-radius: 10px; display: flex; align-items: center; gap: 10px; text-align: left; font-weight: 650; font-size: 13px;
+    }
+    .nav-item:hover { background: rgba(255,255,255,.055); color: #fff; }
+    .nav-item.active { background: rgba(114, 111, 237, .19); color: #fff; }
+    .nav-item svg { width: 18px; height: 18px; opacity: .86; }
+    .nav-count { margin-left: auto; min-width: 21px; padding: 2px 6px; border-radius: 99px; background: rgba(255,255,255,.09); font-size: 10px; text-align: center; }
+    .side-foot { margin-top: auto; padding: 15px 12px 2px; border-top: 1px solid rgba(255,255,255,.075); color: #8994aa; font-size: 11px; line-height: 1.6; }
+    .side-foot strong { display: flex; color: #c8d0df; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 12px; }
+    .pulse { width: 7px; height: 7px; border-radius: 50%; background: #39c990; box-shadow: 0 0 0 4px rgba(57,201,144,.12); }
+
+    .main-shell { min-width: 0; }
+    .topbar {
+      height: 72px; padding: 0 30px; background: rgba(255,255,255,.88); border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(12px); display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 20;
+    }
+    .crumb { color: var(--muted); font-size: 12px; }
+    .crumb strong { color: var(--ink); margin-left: 6px; }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+    .env-chip { padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: #fff; font-size: 11px; }
+    .profile-chip { width: 33px; height: 33px; display: grid; place-items: center; border-radius: 10px; background: #e7e9ff; color: var(--primary); font-weight: 800; font-size: 12px; }
+    .content { padding: 29px 30px 50px; max-width: 1480px; margin: 0 auto; }
+    .page { display: none; animation: reveal .2s ease; }
+    .page.active { display: block; }
+    @keyframes reveal { from { opacity: 0; transform: translateY(4px); } }
+    .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 23px; }
+    .page-head h1 { margin: 0 0 5px; font-size: 25px; letter-spacing: -.6px; }
+    .page-head p { margin: 0; color: var(--muted); font-size: 13px; }
+    .head-actions { display: flex; gap: 9px; }
+    .btn {
+      border: 1px solid var(--line); background: #fff; color: #344057; border-radius: 10px; padding: 9px 13px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px; font-weight: 700; font-size: 12px;
+    }
+    .btn:hover { border-color: #cbd3df; background: #fbfcfe; }
+    .btn.primary { color: #fff; background: var(--primary); border-color: var(--primary); box-shadow: 0 7px 17px rgba(91,92,226,.23); }
+    .btn.primary:hover { background: var(--primary-dark); }
+    .btn.danger { color: var(--red); border-color: #f0cbd2; background: #fff8f9; }
+    .btn svg { width: 15px; height: 15px; }
+
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 13px; margin-bottom: 21px; }
+    .metric { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; }
+    .metric-top { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 11px; }
+    .metric-icon { width: 29px; height: 29px; border-radius: 9px; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); }
+    .metric-icon svg { width: 15px; }
+    .metric-value { font-size: 25px; font-weight: 780; margin: 9px 0 2px; letter-spacing: -.7px; }
+    .metric-note { font-size: 10px; color: var(--green); }
+
+    .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: 0 5px 20px rgba(30,44,71,.035); }
+    .panel-head { min-height: 61px; padding: 15px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+    .panel-head h2 { margin: 0; font-size: 14px; }
+    .panel-head p { margin: 3px 0 0; color: var(--muted); font-size: 10px; }
+    .tabs { display: flex; padding: 3px; gap: 3px; background: #f0f3f8; border-radius: 9px; }
+    .tab { border: 0; background: transparent; color: var(--muted); border-radius: 7px; padding: 7px 11px; font-size: 11px; font-weight: 700; }
+    .tab.active { background: #fff; color: var(--ink); box-shadow: 0 1px 4px rgba(28,40,64,.1); }
+    .machine-grid { padding: 16px; display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+    .machine-card { border: 1px solid var(--line); background: #fff; border-radius: 13px; padding: 15px; text-align: left; transition: .18s; min-width: 0; }
+    .machine-card:hover { transform: translateY(-1px); border-color: #cbd3e1; box-shadow: 0 7px 18px rgba(25,41,70,.06); }
+    .machine-top { display: flex; align-items: flex-start; gap: 10px; }
+    .machine-avatar { width: 36px; height: 36px; border-radius: 11px; flex: 0 0 auto; display: grid; place-items: center; font-size: 12px; font-weight: 800; background: #eeefff; color: var(--primary); }
+    .machine-avatar.worker { background: #e8f8f8; color: #088b99; }
+    .machine-name { min-width: 0; flex: 1; }
+    .machine-name strong { font-size: 13px; display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .machine-name span { color: var(--muted); font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .status { display: inline-flex; align-items: center; gap: 5px; border-radius: 99px; padding: 4px 7px; font-size: 9px; font-weight: 750; white-space: nowrap; }
+    .status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+    .status.online, .status.completed { background: var(--green-soft); color: var(--green); }
+    .status.offline, .status.failed { background: var(--red-soft); color: var(--red); }
+    .status.checking, .status.running { background: var(--primary-soft); color: var(--primary); }
+    .status.waiting { background: var(--amber-soft); color: var(--amber); }
+    .machine-note { margin: 13px 0 11px; color: var(--muted); font-size: 11px; height: 34px; line-height: 1.55; overflow: hidden; }
+    .machine-meta { display: flex; justify-content: space-between; padding-top: 11px; border-top: 1px solid #edf0f5; color: #8994a7; font-size: 9px; }
+    .machine-empty { grid-column: 1/-1; padding: 48px; text-align: center; color: var(--muted); font-size: 12px; }
+
+    .create-grid { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: 18px; align-items: start; }
+    .form-panel { padding: 22px; }
+    .step-section + .step-section { border-top: 1px solid var(--line); padding-top: 22px; margin-top: 22px; }
+    .step-title { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .step-no { width: 25px; height: 25px; border-radius: 8px; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); font-size: 11px; font-weight: 800; }
+    .step-title strong { font-size: 14px; }
+    .step-title span { color: var(--muted); font-size: 10px; margin-left: auto; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+    .field { min-width: 0; }
+    .field + .field.block { margin-top: 13px; }
+    .field label { display: block; color: #4b5870; font-size: 10px; font-weight: 750; margin: 0 0 7px; }
+    .field-shortcut { margin-left: 6px; color: var(--primary); font-size: 9px; font-weight: 650; }
+    .control { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px; outline: 0; color: var(--ink); background: #fbfcfe; font-size: 12px; }
+    .control:focus { border-color: #9c9df1; box-shadow: 0 0 0 3px rgba(91,92,226,.09); background: #fff; }
+    textarea.control { min-height: 92px; resize: vertical; line-height: 1.6; }
+    .skill-mention-field { position: relative; }
+    .skill-mention-menu { position: absolute; z-index: 15; left: 0; right: 0; top: calc(100% + 6px); max-height: 260px; overflow-y: auto; border: 1px solid #dce3ed; border-radius: 11px; background: #fff; box-shadow: 0 14px 35px rgba(31,44,72,.16); }
+    .skill-mention-head { position: sticky; top: 0; z-index: 1; padding: 9px 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #536078; background: #f8fafc; border-bottom: 1px solid #e7ebf1; font-size: 9px; }
+    .skill-mention-head strong { color: var(--ink); font-size: 10px; }
+    .skill-mention-options { padding: 5px; }
+    .skill-mention-option { width: 100%; padding: 8px 9px; border: 0; border-radius: 8px; display: flex; align-items: center; gap: 10px; color: var(--ink); background: transparent; text-align: left; }
+    .skill-mention-option:hover, .skill-mention-option.active { background: var(--primary-soft); }
+    .skill-command { flex: 0 0 auto; padding: 4px 6px; border-radius: 6px; color: #6753a3; background: #f4f0ff; border: 1px solid #e5dcfb; font: 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .skill-source { min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 8px; }
+    .skill-mention-empty { padding: 15px 11px; color: var(--muted); text-align: center; font-size: 9px; }
+    .capability-overview { margin-top: 13px; border: 1px solid #dfe6ef; border-radius: 12px; background: #f8fafc; overflow: hidden; }
+    .capability-head { min-height: 45px; padding: 10px 12px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #e6ebf2; background: #fff; }
+    .capability-head-icon { width: 27px; height: 27px; border-radius: 8px; display: grid; place-items: center; flex: 0 0 auto; color: var(--primary); background: var(--primary-soft); font: 800 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .capability-head-copy { min-width: 0; flex: 1; }
+    .capability-head-copy strong { display: block; font-size: 11px; }
+    .capability-head-copy small { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; }
+    .capability-summary { color: #56637a; background: #f1f4f8; border-radius: 99px; padding: 5px 8px; font-size: 9px; font-weight: 750; white-space: nowrap; }
+    .capability-list { padding: 10px; display: grid; gap: 8px; }
+    .capability-empty { padding: 18px 12px; text-align: center; color: var(--muted); font-size: 10px; }
+    .capability-card { display: grid; grid-template-columns: minmax(150px,.8fr) minmax(0,1fr) minmax(0,1fr); gap: 12px; align-items: start; padding: 11px 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+    .capability-machine { min-width: 0; }
+    .capability-machine strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+    .capability-machine small { display: block; margin-top: 3px; color: var(--muted); font: 8px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .capability-group { min-width: 0; }
+    .capability-label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; color: #647188; font-size: 8px; font-weight: 800; letter-spacing: .45px; text-transform: uppercase; }
+    .capability-label b { color: #9aa5b5; font-size: 8px; }
+    .capability-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+    .capability-tag { max-width: 100%; padding: 4px 6px; border-radius: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #315d85; background: #edf6fd; border: 1px solid #d9eaf7; font: 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .capability-tag.skill { color: #6753a3; background: #f4f0ff; border-color: #e5dcfb; }
+    .capability-tag.pending { color: #8b6a31; background: var(--amber-soft); border-color: #f1dfbd; font-family: inherit; }
+    .strategy-options { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+    .strategy-option, .worker-option { position: relative; display: block; }
+    .strategy-option input, .worker-option > input { position: absolute; opacity: 0; pointer-events: none; }
+    .strategy-box { border: 1px solid var(--line); border-radius: 12px; padding: 13px; display: flex; gap: 10px; background: #fff; cursor: pointer; }
+    .strategy-option input:checked + .strategy-box { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); background: #f8f8ff; }
+    .radio-dot { width: 17px; height: 17px; border: 1.5px solid #bcc5d4; border-radius: 50%; margin-top: 1px; display: grid; place-items: center; flex: 0 0 auto; }
+    .strategy-option input:checked + .strategy-box .radio-dot { border-color: var(--primary); }
+    .strategy-option input:checked + .strategy-box .radio-dot::after { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--primary); }
+    .option-copy { min-width: 0; flex: 1; }
+    .option-copy strong { display: block; font-size: 12px; }
+    .option-copy small { color: var(--muted); font-size: 9px; }
+    .model-select { width: 100%; margin-top: 9px; padding: 8px 29px 8px 9px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: #41506a; font-size: 10px; outline: 0; }
+    .worker-list { display: grid; gap: 9px; }
+    .worker-box { border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px; display: grid; grid-template-columns: 20px minmax(0,1fr) 170px; gap: 10px; align-items: center; background: #fff; cursor: pointer; }
+    .worker-option > input:checked + .worker-box { border-color: #65bdc6; background: #f7fdfd; box-shadow: inset 0 0 0 1px #65bdc6; }
+    .check-box { width: 18px; height: 18px; border-radius: 6px; border: 1.5px solid #bdc7d5; display: grid; place-items: center; color: #fff; font-size: 11px; }
+    .worker-option > input:checked + .worker-box .check-box { background: var(--cyan); border-color: var(--cyan); }
+    .worker-option > input:checked + .worker-box .check-box::after { content: "✓"; }
+    .worker-box .model-select { margin: 0; }
+    .summary-panel { position: sticky; top: 94px; overflow: hidden; }
+    .summary-body { padding: 18px; }
+    .summary-title { font-size: 14px; font-weight: 760; margin-bottom: 16px; }
+    .route { position: relative; padding-left: 29px; }
+    .route::before { content: ""; position: absolute; left: 8px; top: 12px; bottom: 21px; border-left: 1px dashed #c9d2df; }
+    .route-row { position: relative; padding-bottom: 18px; }
+    .route-dot { position: absolute; left: -27px; top: 2px; width: 13px; height: 13px; border-radius: 50%; border: 3px solid #fff; background: #b1bbc9; box-shadow: 0 0 0 1px #ccd4df; }
+    .route-row:first-child .route-dot { background: var(--primary); box-shadow: 0 0 0 3px rgba(91,92,226,.12); }
+    .route-row strong { display: block; font-size: 11px; }
+    .route-row p { margin: 3px 0 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
+    .summary-data { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 3px; }
+    .summary-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; margin: 9px 0; font-size: 10px; }
+    .summary-line span { color: var(--muted); }
+    .summary-line strong { text-align: right; font-size: 10px; max-width: 180px; }
+    .launch { width: 100%; margin-top: 14px; padding: 11px; }
+    .form-hint { min-height: 18px; margin-top: 8px; color: var(--red); text-align: center; font-size: 9px; }
+
+    .monitor-shell { display: grid; grid-template-columns: minmax(0,1fr) 342px; gap: 15px; align-items: start; }
+    .task-bar { grid-column: 1/-1; padding: 14px 17px; display: flex; align-items: center; gap: 13px; }
+    .task-state-icon { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; color: var(--primary); background: var(--primary-soft); }
+    .task-state-icon svg { width: 17px; }
+    .task-info { min-width: 0; flex: 1; }
+    .task-info strong { font-size: 13px; }
+    .task-info p { margin: 3px 0 0; color: var(--muted); font-size: 9px; }
+    .task-kpis { display: flex; gap: 24px; margin-right: 12px; }
+    .task-kpi span { display: block; color: var(--muted); font-size: 8px; margin-bottom: 2px; }
+    .task-kpi strong { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .chat-panel { height: calc(100vh - 164px); min-height: 610px; display: flex; flex-direction: column; overflow: hidden; }
+    .chat-head { padding: 14px 17px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+    .chat-avatar { width: 33px; height: 33px; border-radius: 10px; display: grid; place-items: center; color: #fff; background: linear-gradient(135deg,#696be8,#8c6ee4); font-size: 11px; font-weight: 800; }
+    .chat-head strong { display: block; font-size: 12px; }
+    .chat-head small { color: var(--green); font-size: 9px; }
+    .chat-head .status { margin-left: auto; }
+    .messages { flex: 1; padding: 19px; overflow-y: auto; background: #fbfcfe; }
+    .message { display: flex; gap: 9px; margin-bottom: 17px; max-width: 88%; }
+    .message.user { margin-left: auto; flex-direction: row-reverse; }
+    .msg-avatar { width: 27px; height: 27px; border-radius: 9px; display: grid; place-items: center; flex: 0 0 auto; background: #e8e9ff; color: var(--primary); font-size: 9px; font-weight: 800; }
+    .message.user .msg-avatar { background: #e8f5f0; color: var(--green); }
+    .bubble { min-width: 0; }
+    .bubble-meta { color: #8d98aa; font-size: 8px; margin: 0 0 4px 2px; }
+    .message.user .bubble-meta { text-align: right; }
+    .bubble-body { padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px 12px 12px 12px; background: #fff; font-size: 11px; line-height: 1.7; white-space: pre-wrap; }
+    .message.user .bubble-body { color: #fff; background: var(--primary); border-color: var(--primary); border-radius: 12px 4px 12px 12px; }
+    .typing::after { content: "▋"; animation: blink .8s steps(1) infinite; color: var(--primary); }
+    @keyframes blink { 50% { opacity: 0; } }
+    .system-message { display: flex; align-items: center; gap: 8px; color: #8792a5; font-size: 9px; margin: 11px 35px 17px; }
+    .system-message::before, .system-message::after { content: ""; height: 1px; background: #e7ebf1; flex: 1; }
+    .approval-card { margin-top: 9px; width: min(520px, 100%); border: 1px solid #f1d19b; border-radius: 13px; background: #fffdfa; overflow: hidden; box-shadow: 0 8px 22px rgba(100,70,23,.08); }
+    .approval-head { padding: 11px 13px; display: flex; gap: 9px; align-items: center; background: var(--amber-soft); border-bottom: 1px solid #f3dfbb; }
+    .approval-icon { width: 27px; height: 27px; border-radius: 8px; display: grid; place-items: center; background: #fff; color: var(--amber); font-weight: 800; }
+    .approval-head strong { display: block; font-size: 11px; }
+    .approval-head small { color: #9a6a27; font-size: 8px; }
+    .approval-body { padding: 12px 13px; }
+    .approval-grid { display: grid; grid-template-columns: 78px 1fr; gap: 7px 9px; font-size: 9px; }
+    .approval-grid span { color: var(--muted); }
+    .approval-grid code { padding: 2px 5px; border-radius: 5px; background: #f3f5f8; color: #39465c; white-space: normal; word-break: break-all; }
+    .approval-reason { margin-top: 10px; padding: 9px; border-radius: 8px; color: #70552e; background: #fff8eb; font-size: 9px; line-height: 1.55; }
+    .approval-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 11px; }
+    .approval-result { display: flex; align-items: center; gap: 6px; margin-top: 11px; font-size: 9px; font-weight: 700; }
+    .approval-result.accept { color: var(--green); }
+    .approval-result.decline { color: var(--red); }
+    .composer { padding: 12px; border-top: 1px solid var(--line); background: #fff; display: flex; gap: 8px; }
+    .composer input { flex: 1; min-width: 0; border: 1px solid var(--line); background: #f9fafc; border-radius: 9px; padding: 9px 11px; outline: 0; font-size: 10px; }
+    .composer input:focus { border-color: #aaaaf0; }
+    .composer button { width: 36px; border: 0; border-radius: 9px; color: #fff; background: var(--primary); }
+    .composer button svg { width: 14px; }
+    .monitor-side { display: grid; gap: 13px; max-height: calc(100vh - 164px); overflow-y: auto; padding-right: 2px; }
+    .side-panel-head { padding: 14px 15px 11px; display: flex; justify-content: space-between; align-items: center; }
+    .side-panel-head strong { font-size: 12px; }
+    .side-panel-head span { color: var(--muted); font-size: 9px; }
+    .runtime-list { padding: 0 11px 11px; display: grid; gap: 8px; }
+    .runtime-card { border: 1px solid var(--line); border-radius: 11px; padding: 11px; }
+    .runtime-top { display: flex; align-items: center; gap: 8px; }
+    .runtime-avatar { width: 27px; height: 27px; border-radius: 8px; display: grid; place-items: center; background: #eaf7f7; color: #138c98; font-size: 8px; font-weight: 800; }
+    .runtime-name { min-width: 0; flex: 1; }
+    .runtime-name strong { display: block; font-size: 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .runtime-name small { color: var(--muted); font-size: 8px; }
+    .runtime-task { margin: 9px 0 8px; color: #5d687b; font-size: 9px; line-height: 1.5; }
+    .progress { height: 5px; background: #eef1f5; border-radius: 99px; overflow: hidden; }
+    .progress i { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg,var(--primary),#8c80ea); transition: width .6s ease; }
+    .runtime-bottom { display: flex; justify-content: space-between; color: #8b95a6; margin-top: 6px; font-size: 8px; }
+    .timeline { padding: 0 16px 15px; }
+    .timeline-item { position: relative; padding: 0 0 14px 19px; color: var(--muted); font-size: 9px; line-height: 1.4; }
+    .timeline-item::before { content: ""; position: absolute; left: 3px; top: 4px; width: 7px; height: 7px; border-radius: 50%; background: #c1c9d5; box-shadow: 0 0 0 3px #f0f2f6; }
+    .timeline-item::after { content: ""; position: absolute; left: 6px; top: 13px; bottom: 1px; border-left: 1px solid #e1e6ed; }
+    .timeline-item:last-child::after { display: none; }
+    .timeline-item.active::before { background: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+    .timeline-item strong { color: #3c485d; font-size: 9px; display: block; }
+    .timeline-item time { color: #9aa4b5; font: 8px ui-monospace, monospace; }
+    .empty-monitor { padding: 80px 20px; text-align: center; }
+    .empty-orbit { width: 68px; height: 68px; margin: 0 auto 18px; border: 1px dashed #aeb9ca; border-radius: 50%; position: relative; }
+    .empty-orbit::before { content: ""; position: absolute; width: 20px; height: 20px; border-radius: 7px; background: var(--primary); left: 23px; top: 23px; box-shadow: 0 5px 14px rgba(91,92,226,.25); }
+    .empty-orbit::after { content: ""; position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); right: 1px; top: 15px; }
+    .empty-monitor h2 { margin: 0 0 7px; font-size: 16px; }
+    .empty-monitor p { margin: 0 0 18px; color: var(--muted); font-size: 11px; }
+
+    .overlay { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: rgba(15,22,37,.42); backdrop-filter: blur(3px); }
+    .modal { width: min(510px,100%); max-height: calc(100vh - 40px); overflow-y: auto; border-radius: 17px; background: #fff; box-shadow: 0 25px 70px rgba(12,20,35,.25); animation: modalIn .2s ease; }
+    @keyframes modalIn { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+    .modal-head { padding: 17px 19px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; }
+    .modal-head h3 { margin: 0; font-size: 15px; }
+    .icon-btn { width: 30px; height: 30px; border: 0; border-radius: 8px; color: var(--muted); background: #f2f4f8; }
+    .modal-body { padding: 19px; }
+    .role-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-bottom: 16px; }
+    .role-btn { border: 1px solid var(--line); border-radius: 10px; padding: 11px; background: #fff; color: var(--muted); font-size: 11px; font-weight: 700; }
+    .role-btn.active { border-color: var(--primary); background: var(--primary-soft); color: var(--primary); }
+    .test-zone { margin-top: 16px; padding: 12px; border: 1px dashed #cfd6e1; border-radius: 11px; background: #fafbfc; }
+    .test-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .test-copy strong { display: block; font-size: 10px; }
+    .test-copy small { color: var(--muted); font-size: 8px; }
+    .test-result { margin-top: 9px; padding-top: 9px; border-top: 1px solid #e8ecf2; color: var(--muted); font-size: 9px; }
+    .test-result.success { color: var(--green); }
+    .test-result.error { color: var(--red); }
+    .modal-foot { padding: 13px 19px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+    .detail-list { display: grid; grid-template-columns: 90px 1fr; gap: 12px; font-size: 11px; }
+    .detail-list dt { color: var(--muted); }
+    .detail-list dd { margin: 0; font-weight: 650; word-break: break-all; }
+    .detail-warning { margin-top: 17px; padding: 11px; border-radius: 10px; color: #815f2d; background: var(--amber-soft); font-size: 9px; line-height: 1.55; }
+
+    .toast-stack { position: fixed; z-index: 120; right: 22px; bottom: 22px; display: grid; gap: 8px; }
+    .toast { min-width: 240px; max-width: 360px; padding: 11px 13px; color: #fff; background: #202a3e; border-radius: 11px; box-shadow: var(--shadow); font-size: 10px; animation: toastIn .22s ease; }
+    @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } }
+
+    @media (max-width: 1100px) {
+      .machine-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+      .create-grid { grid-template-columns: 1fr; }
+      .summary-panel { position: static; }
+      .monitor-shell { grid-template-columns: minmax(0,1fr) 300px; }
+      .task-kpis { display: none; }
+    }
+    @media (max-width: 820px) {
+      .app { grid-template-columns: 72px minmax(0,1fr); }
+      .sidebar { padding: 20px 10px; }
+      .brand { padding: 0 9px 25px; }
+      .brand > div:last-child, .nav-label, .nav-item span:not(.nav-count), .side-foot { display: none; }
+      .nav-item { justify-content: center; padding: 12px; }
+      .nav-count { position: absolute; transform: translate(14px,-12px); }
+      .content { padding: 22px 18px 40px; }
+      .topbar { padding: 0 18px; }
+      .metrics { grid-template-columns: 1fr 1fr; }
+      .monitor-shell { grid-template-columns: 1fr; }
+      .monitor-side { max-height: none; grid-template-columns: 1fr 1fr; }
+      .chat-panel { height: 650px; }
+    }
+    @media (max-width: 600px) {
+      .app { display: block; }
+      .sidebar { position: fixed; z-index: 50; top: auto; bottom: 0; width: 100%; height: 62px; padding: 7px 12px; flex-direction: row; justify-content: space-around; border-top: 1px solid rgba(255,255,255,.1); }
+      .brand, .nav-label, .side-foot { display: none; }
+      .nav-item { width: auto; flex-direction: column; gap: 2px; padding: 6px 15px; font-size: 8px; }
+      .nav-item span:not(.nav-count) { display: block; }
+      .nav-item svg { width: 17px; }
+      .nav-count { display: none; }
+      .topbar { height: 58px; }
+      .env-chip { display: none; }
+      .content { padding: 19px 13px 90px; }
+      .page-head { align-items: flex-start; flex-direction: column; }
+      .metrics { grid-template-columns: 1fr 1fr; gap: 8px; }
+      .metric { padding: 13px; }
+      .machine-grid, .strategy-options { grid-template-columns: 1fr; }
+      .machine-grid { padding: 11px; }
+      .form-row { grid-template-columns: 1fr; }
+      .worker-box { grid-template-columns: 20px minmax(0,1fr); }
+      .worker-box .model-select { grid-column: 2; }
+      .capability-card { grid-template-columns: 1fr; gap: 10px; }
+      .monitor-side { grid-template-columns: 1fr; }
+      .task-bar { align-items: flex-start; flex-wrap: wrap; }
+      .task-bar .head-actions { width: 100%; }
+      .task-bar .head-actions .btn { flex: 1; }
+      .message { max-width: 96%; }
+      .chat-panel { min-height: 580px; height: calc(100vh - 155px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark"></div><div>Codex Fleet<small>CONTROL PLANE</small></div></div>
+      <div class="nav-label">工作台</div>
+      <button class="nav-item active" data-page="machines" aria-label="机器管理">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></svg>
+        <span>机器管理</span><b class="nav-count" id="machineCount">6</b>
+      </button>
+      <button class="nav-item" data-page="create" aria-label="创建任务">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/><circle cx="12" cy="12" r="9"/></svg>
+        <span>创建任务</span>
+      </button>
+      <button class="nav-item" data-page="monitor" aria-label="任务监控">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17l4-5 4 3 5-8 3 3"/><path d="M4 4v16h16"/></svg>
+        <span>任务监控</span><b class="nav-count hidden" id="runningCount">1</b>
+      </button>
+      <div class="side-foot"><strong><i class="pulse"></i>控制平面正常</strong>Demo 环境 · 固定端口 4500</div>
+    </aside>
+
+    <main class="main-shell">
+      <header class="topbar">
+        <div class="crumb">Codex Fleet / <strong id="pageCrumb">机器管理</strong></div>
+        <div class="top-actions"><span class="env-chip">内网环境 · Demo</span><span class="profile-chip">管</span></div>
+      </header>
+
+      <div class="content">
+        <section class="page active" id="page-machines">
+          <div class="page-head">
+            <div><h1>Codex 机器</h1><p>统一管理参与策略决策和任务执行的内网物理机。</p></div>
+            <div class="head-actions"><button class="btn primary" id="openAddMachine"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>新增机器</button></div>
+          </div>
+          <div class="metrics">
+            <article class="metric"><div class="metric-top"><span>全部机器</span><i class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/></svg></i></div><div class="metric-value" id="totalMetric">6</div><div class="metric-note">已纳入控制平面</div></article>
+            <article class="metric"><div class="metric-top"><span>策略机</span><i class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg></i></div><div class="metric-value" id="strategyMetric">2</div><div class="metric-note">负责拆解与汇总</div></article>
+            <article class="metric"><div class="metric-top"><span>执行机</span><i class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 9l-3 3 3 3M16 9l3 3-3 3M14 5l-4 14"/></svg></i></div><div class="metric-value" id="workerMetric">4</div><div class="metric-note">可并行接受调度</div></article>
+            <article class="metric"><div class="metric-top"><span>当前在线</span><i class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12.5l4 4L19 7"/></svg></i></div><div class="metric-value" id="onlineMetric">5</div><div class="metric-note">83% 可用率</div></article>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><div><h2>机器清单</h2><p>点击任意机器查看连接详情</p></div><div class="tabs"><button class="tab active" data-role-filter="all">全部</button><button class="tab" data-role-filter="strategy">策略机</button><button class="tab" data-role-filter="worker">执行机</button></div></div>
+            <div class="machine-grid" id="machineGrid"></div>
+          </div>
+        </section>
+
+        <section class="page" id="page-create">
+          <div class="page-head"><div><h1>创建调度任务</h1><p>选择一台策略机，并为参与协作的每台 Codex 指定本次模型。</p></div></div>
+          <div class="create-grid">
+            <div class="panel form-panel">
+              <section class="step-section">
+                <div class="step-title"><i class="step-no">1</i><strong>任务信息</strong><span>定义本次任务目标</span></div>
+                <div class="form-row"><div class="field"><label for="taskName">任务名称</label><input class="control" id="taskName" value="完成订单服务的性能优化与回归验证"></div><div class="field"><label for="taskWorkspace">工作目录</label><input class="control" id="taskWorkspace" value="/workspace/order-service"></div></div>
+                <div class="field block"><label for="taskGoal">任务目标 <span class="field-shortcut">输入 @ 快捷选择 Skill</span></label><div class="skill-mention-field"><textarea class="control" id="taskGoal" aria-autocomplete="list" aria-controls="skillMentionMenu">分析当前接口性能瓶颈，给出优化方案并完成代码修改、测试和质量审查。所有高风险命令必须等待用户确认。</textarea><div class="skill-mention-menu hidden" id="skillMentionMenu" role="listbox"><div class="skill-mention-head"><strong>选择 Skill 指令</strong><span>↑↓ 选择 · Enter 插入 · Esc 关闭</span></div><div class="skill-mention-options" id="skillMentionOptions"></div></div></div></div>
+                <div class="capability-overview" aria-live="polite">
+                  <div class="capability-head"><i class="capability-head-icon">{ }</i><div class="capability-head-copy"><strong>已选执行机能力</strong><small>随执行机勾选实时更新，策略机将据此拆分任务</small></div><span class="capability-summary" id="capabilitySummary">0 台 · 0 MCP · 0 Skill</span></div>
+                  <div class="capability-list" id="selectedCapabilities"><div class="capability-empty">请在下方勾选执行机以查看可调用能力。</div></div>
+                </div>
+              </section>
+              <section class="step-section">
+                <div class="step-title"><i class="step-no">2</i><strong>选择策略机</strong><span>单选 · 单独指定模型</span></div>
+                <div class="strategy-options" id="strategyOptions"></div>
+              </section>
+              <section class="step-section">
+                <div class="step-title"><i class="step-no">3</i><strong>选择执行机</strong><span>多选 · 每台独立指定模型</span></div>
+                <div class="worker-list" id="workerOptions"></div>
+              </section>
+            </div>
+            <aside class="panel summary-panel">
+              <div class="summary-body">
+                <div class="summary-title">调度预览</div>
+                <div class="route"><div class="route-row"><i class="route-dot"></i><strong id="previewStrategy">尚未选择策略机</strong><p>接收目标、拆分子任务并汇总交付。</p></div><div class="route-row"><i class="route-dot"></i><strong>Codex Orchestrator MCP</strong><p>按任务范围向选中执行机派发工作。</p></div><div class="route-row"><i class="route-dot"></i><strong id="previewWorkers">尚未选择执行机</strong><p id="previewWorkerNames">等待配置参与本次调度的节点。</p></div><div class="route-row"><i class="route-dot"></i><strong>结果汇总与用户审批</strong><p>实时展示进展，危险操作由用户直接决定。</p></div></div>
+                <div class="summary-data"><div class="summary-line"><span>参与节点</span><strong id="previewCount">0 台</strong></div><div class="summary-line"><span>策略模型</span><strong id="previewModel">—</strong></div><div class="summary-line"><span>连接方式</span><strong>ws://内网IP:4500</strong></div></div>
+                <button class="btn primary launch" id="launchTask">启动策略机并开始调度</button><div class="form-hint" id="formHint"></div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="page" id="page-monitor">
+          <div id="monitorEmpty" class="panel empty-monitor"><div class="empty-orbit"></div><h2>暂时没有运行中的任务</h2><p>创建一个调度任务，即可在这里查看实时对话和执行状态。</p><button class="btn primary" data-go-create>创建任务</button></div>
+          <div id="monitorActive" class="monitor-shell hidden">
+            <div class="panel task-bar"><i class="task-state-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.5l4 4L19 7"/></svg></i><div class="task-info"><strong id="runtimeTaskName">任务名称</strong><p><span id="runtimeTaskId">TASK-DEMO</span> · 由 <span id="runtimeStrategy">策略机</span> 调度</p></div><div class="task-kpis"><div class="task-kpi"><span>运行时间</span><strong id="elapsed">00:00</strong></div><div class="task-kpi"><span>执行进度</span><strong id="overallProgress">0%</strong></div></div><span class="status running" id="taskStatus">运行中</span><div class="head-actions"><button class="btn" id="resetDemo">重新演示</button><button class="btn danger" id="stopTask">停止任务</button></div></div>
+            <section class="panel chat-panel">
+              <div class="chat-head"><i class="chat-avatar" id="chatAvatar">S</i><div><strong id="chatName">策略 Codex</strong><small id="chatPresence">正在规划与调度</small></div><span class="status running" id="chatStatus">思考中</span></div>
+              <div class="messages" id="messages"></div>
+              <form class="composer" id="composer"><input id="chatInput" autocomplete="off" placeholder="向策略 Codex 补充信息…"><button aria-label="发送"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg></button></form>
+            </section>
+            <aside class="monitor-side">
+              <section class="panel"><div class="side-panel-head"><strong>执行机状态</strong><span id="runtimeCount">0 台参与</span></div><div class="runtime-list" id="runtimeList"></div></section>
+              <section class="panel"><div class="side-panel-head"><strong>任务时间线</strong><span>实时事件</span></div><div class="timeline" id="timeline"></div></section>
+            </aside>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="overlay hidden" id="machineModal" role="dialog" aria-modal="true" aria-labelledby="machineModalTitle">
+    <div class="modal">
+      <div class="modal-head"><h3 id="machineModalTitle">新增 Codex 机器</h3><button class="icon-btn" data-close-modal aria-label="关闭">×</button></div>
+      <div class="modal-body">
+        <div class="role-choice"><button class="role-btn active" data-new-role="strategy">策略机</button><button class="role-btn" data-new-role="worker">执行机</button></div>
+        <div class="form-row"><div class="field"><label for="machineName">机器名称</label><input class="control" id="machineName" placeholder="例如：策略机 · 上海 01"></div><div class="field"><label for="machineIp">内网 IP</label><input class="control" id="machineIp" placeholder="例如：192.168.10.21"></div></div>
+        <div class="field block"><label for="machineNote">备注</label><textarea class="control" id="machineNote" placeholder="说明机器用途或配置"></textarea></div>
+        <div class="test-zone"><div class="test-row"><div class="test-copy"><strong>Codex app-server 连通测试</strong><small>固定检测 ws://IP:4500</small></div><button class="btn" id="testConnection">测试连接</button></div><div class="test-result" id="testResult">保存前必须完成连通测试。</div></div>
+      </div>
+      <div class="modal-foot"><button class="btn" data-close-modal>取消</button><button class="btn primary" id="saveMachine" disabled>保存机器</button></div>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="detailModal" role="dialog" aria-modal="true" aria-labelledby="detailTitle"><div class="modal"><div class="modal-head"><h3 id="detailTitle">机器详情</h3><button class="icon-btn" data-close-detail aria-label="关闭">×</button></div><div class="modal-body"><dl class="detail-list" id="detailList"></dl><div class="detail-warning">Demo 当前使用内网裸 WebSocket。正式部署应启用 capability token，并通过 TLS 或 SSH 隧道保护连接。</div></div><div class="modal-foot"><button class="btn" data-close-detail>关闭</button></div></div></div>
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+  <script>
+    (() => {
+      const models = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'];
+      const seedMachines = [
+        { id:'s1', role:'strategy', name:'策略中枢 · Alpha', ip:'192.168.10.11', note:'主策略节点，负责复杂任务拆分和最终验收。', status:'online', latency:18 },
+        { id:'s2', role:'strategy', name:'策略中枢 · Beta', ip:'192.168.10.12', note:'备用策略节点，适合研究和风险评审任务。', status:'online', latency:24 },
+        { id:'w1', role:'worker', name:'构建执行机 · Build 01', ip:'192.168.10.21', note:'负责后端代码修改、依赖构建与本地验证。', status:'online', latency:15, mcps:['filesystem','git','build-tools'], skills:['backend-refactor','dependency-audit','test-runner'] },
+        { id:'w2', role:'worker', name:'分析执行机 · Research 01', ip:'192.168.10.22', note:'负责代码检索、性能分析和方案调研。', status:'online', latency:21, mcps:['repo-search','openai-docs','web-search'], skills:['codebase-analysis','performance-profiling','technical-research'] },
+        { id:'w3', role:'worker', name:'测试执行机 · QA 01', ip:'192.168.10.23', note:'负责自动化测试、回归验证与交付证据。', status:'online', latency:17, mcps:['playwright','junit','coverage'], skills:['regression-testing','api-testing','test-report'] },
+        { id:'w4', role:'worker', name:'审查执行机 · Review 01', ip:'192.168.10.24', note:'负责代码审查与安全检查，当前维护中。', status:'offline', latency:null, mcps:['git','codex-security','semgrep'], skills:['code-review','security-audit','risk-assessment'] }
+      ];
+      let machines = seedMachines.map(x => ({...x}));
+      let roleFilter = 'all';
+      let newRole = 'strategy';
+      let connectionPassed = false;
+      let timers = [];
+      let elapsedTimer = null;
+      let runStartedAt = null;
+      let runState = null;
+      let skillMentionItems = [];
+      let skillMentionIndex = 0;
+      let skillMentionRange = null;
+
+      const $ = (selector, root=document) => root.querySelector(selector);
+      const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
+      const iconRole = role => role === 'strategy' ? 'S' : 'E';
+      const now = () => new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+      const escapeHtml = value => String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+      const statusLabel = status => ({online:'在线',offline:'离线',checking:'检测中',running:'运行中',waiting:'等待审批',completed:'已完成',failed:'失败'}[status] || status);
+      const modelOptions = selected => models.map(m => `<option ${m===selected?'selected':''}>${m}</option>`).join('');
+      const schedule = (fn, delay) => { const id = setTimeout(fn, delay); timers.push(id); return id; };
+
+      function toast(message) {
+        const item = document.createElement('div'); item.className = 'toast'; item.textContent = message;
+        $('#toastStack').appendChild(item); setTimeout(() => item.remove(), 3200);
+      }
+
+      function navigate(page) {
+        $$('.page').forEach(x => x.classList.toggle('active', x.id === `page-${page}`));
+        $$('.nav-item').forEach(x => x.classList.toggle('active', x.dataset.page === page));
+        $('#pageCrumb').textContent = ({machines:'机器管理',create:'创建任务',monitor:'任务监控'})[page];
+        if (page === 'create') renderTaskSelectors();
+      }
+      $$('.nav-item').forEach(btn => btn.addEventListener('click', () => navigate(btn.dataset.page)));
+      $$('[data-go-create]').forEach(btn => btn.addEventListener('click', () => navigate('create')));
+
+      function renderMetrics() {
+        $('#machineCount').textContent = machines.length;
+        $('#totalMetric').textContent = machines.length;
+        $('#strategyMetric').textContent = machines.filter(x=>x.role==='strategy').length;
+        $('#workerMetric').textContent = machines.filter(x=>x.role==='worker').length;
+        const online = machines.filter(x=>x.status==='online').length;
+        $('#onlineMetric').textContent = online;
+        $('#onlineMetric').nextElementSibling.textContent = `${Math.round(online/machines.length*100)}% 可用率`;
+      }
+
+      function renderMachines() {
+        renderMetrics();
+        const visible = machines.filter(m => roleFilter === 'all' || m.role === roleFilter);
+        $('#machineGrid').innerHTML = visible.length ? visible.map(m => `
+          <button class="machine-card" data-machine-id="${m.id}">
+            <div class="machine-top"><i class="machine-avatar ${m.role==='worker'?'worker':''}">${iconRole(m.role)}</i><div class="machine-name"><strong>${escapeHtml(m.name)}</strong><span>${m.ip}:4500</span></div><span class="status ${m.status}">${statusLabel(m.status)}</span></div>
+            <p class="machine-note">${escapeHtml(m.note || '暂无备注')}</p>
+            <div class="machine-meta"><span>${m.role==='strategy'?'策略决策节点':'任务执行节点'}</span><span>${m.latency ? `${m.latency} ms` : '不可达'}</span></div>
+          </button>`).join('') : '<div class="machine-empty">当前分类下没有机器。</div>';
+        $$('[data-machine-id]').forEach(card => card.addEventListener('click', () => showMachineDetail(card.dataset.machineId)));
+      }
+      $$('[data-role-filter]').forEach(tab => tab.addEventListener('click', () => {
+        roleFilter = tab.dataset.roleFilter;
+        $$('[data-role-filter]').forEach(x => x.classList.toggle('active', x === tab)); renderMachines();
+      }));
+
+      function showMachineDetail(id) {
+        const m = machines.find(x=>x.id===id); if (!m) return;
+        $('#detailTitle').textContent = m.name;
+        $('#detailList').innerHTML = `<dt>机器角色</dt><dd>${m.role==='strategy'?'策略机':'执行机'}</dd><dt>连接状态</dt><dd><span class="status ${m.status}">${statusLabel(m.status)}</span></dd><dt>app-server</dt><dd>ws://${m.ip}:4500</dd><dt>最近延迟</dt><dd>${m.latency ? `${m.latency} ms` : '连接不可达'}</dd><dt>机器备注</dt><dd>${escapeHtml(m.note || '暂无备注')}</dd>`;
+        $('#detailModal').classList.remove('hidden');
+      }
+      $$('[data-close-detail]').forEach(x=>x.addEventListener('click',()=>$('#detailModal').classList.add('hidden')));
+
+      function resetMachineModal() {
+        newRole='strategy'; connectionPassed=false;
+        $$('.role-btn').forEach(x=>x.classList.toggle('active',x.dataset.newRole==='strategy'));
+        $('#machineName').value=''; $('#machineIp').value=''; $('#machineNote').value='';
+        $('#testResult').className='test-result'; $('#testResult').textContent='保存前必须完成连通测试。';
+        $('#saveMachine').disabled=true; $('#testConnection').disabled=false; $('#testConnection').textContent='测试连接';
+      }
+      $('#openAddMachine').addEventListener('click',()=>{resetMachineModal();$('#machineModal').classList.remove('hidden');});
+      $$('[data-close-modal]').forEach(x=>x.addEventListener('click',()=>$('#machineModal').classList.add('hidden')));
+      $$('.role-btn').forEach(btn=>btn.addEventListener('click',()=>{newRole=btn.dataset.newRole;$$('.role-btn').forEach(x=>x.classList.toggle('active',x===btn));}));
+      function validIp(ip) {
+        const parts=ip.trim().split('.'); return parts.length===4 && parts.every(p=>/^\d+$/.test(p)&&Number(p)>=0&&Number(p)<=255);
+      }
+      $('#machineIp').addEventListener('input',()=>{connectionPassed=false;$('#saveMachine').disabled=true;$('#testResult').className='test-result';$('#testResult').textContent='IP 已变化，请重新测试连接。';});
+      $('#testConnection').addEventListener('click',()=>{
+        const ip=$('#machineIp').value.trim(), name=$('#machineName').value.trim();
+        if(!name || !validIp(ip)){toast('请先填写机器名称和有效的内网 IP');return;}
+        const btn=$('#testConnection'); btn.disabled=true;btn.textContent='检测中…';
+        $('#testResult').className='test-result';$('#testResult').textContent=`正在握手 ws://${ip}:4500 …`;
+        setTimeout(()=>{
+          const fail=ip.endsWith('.0') || ip.endsWith('.255');
+          btn.disabled=false;btn.textContent='重新测试'; connectionPassed=!fail;
+          $('#testResult').className=`test-result ${fail?'error':'success'}`;
+          $('#testResult').textContent=fail?'连接失败：目标 app-server 无响应。请检查 IP 和服务状态。':`连接成功 · initialize 完成 · 延迟 ${14+Math.floor(Math.random()*17)} ms`;
+          $('#saveMachine').disabled=fail;
+        },900);
+      });
+      $('#saveMachine').addEventListener('click',()=>{
+        if(!connectionPassed)return;
+        const ip=$('#machineIp').value.trim();
+        if(machines.some(x=>x.ip===ip)){toast('该 IP 已存在，不能重复添加');return;}
+        machines.push({id:`m${Date.now()}`,role:newRole,name:$('#machineName').value.trim(),ip,note:$('#machineNote').value.trim(),status:'online',latency:14+Math.floor(Math.random()*17),mcps:[],skills:[]});
+        $('#machineModal').classList.add('hidden'); renderMachines(); toast('机器已通过检测并添加');
+      });
+
+      function renderTaskSelectors() {
+        const strategies=machines.filter(x=>x.role==='strategy'&&x.status==='online');
+        const workers=machines.filter(x=>x.role==='worker');
+        const selectedStrategy=$('input[name="strategy"]:checked')?.value || strategies[0]?.id;
+        const priorWorkers=new Map($$('#workerOptions input[type="checkbox"]:checked').map(x=>[x.value,true]));
+        $('#strategyOptions').innerHTML=strategies.map((m,i)=>`<label class="strategy-option"><input type="radio" name="strategy" value="${m.id}" ${(m.id===selectedStrategy||(!selectedStrategy&&i===0))?'checked':''}><span class="strategy-box"><i class="radio-dot"></i><span class="option-copy"><strong>${escapeHtml(m.name)}</strong><small>${m.ip} · 在线</small><select class="model-select strategy-model" aria-label="${escapeHtml(m.name)} 模型">${modelOptions(i===0?'gpt-5.6-sol':'gpt-5.6-terra')}</select></span></span></label>`).join('');
+        $('#workerOptions').innerHTML=workers.map((m,i)=>`<label class="worker-option"><input type="checkbox" value="${m.id}" ${(priorWorkers.size?priorWorkers.has(m.id):i<3)&&m.status==='online'?'checked':''} ${m.status!=='online'?'disabled':''}><span class="worker-box"><i class="check-box"></i><span class="option-copy"><strong>${escapeHtml(m.name)}</strong><small>${m.ip} · ${m.status==='online'?'在线':'离线不可选'}</small></span><select class="model-select worker-model" aria-label="${escapeHtml(m.name)} 模型" ${m.status!=='online'?'disabled':''}>${modelOptions(models[(i+1)%models.length])}</select></span></label>`).join('');
+        $$('#strategyOptions input, #strategyOptions select, #workerOptions input, #workerOptions select').forEach(x=>x.addEventListener('change',updateTaskPreview));
+        $$('.model-select').forEach(select=>select.addEventListener('click',e=>e.stopPropagation()));
+        updateTaskPreview();
+      }
+
+      function getTaskConfig() {
+        const strategyInput=$('input[name="strategy"]:checked');
+        const strategy=strategyInput?machines.find(x=>x.id===strategyInput.value):null;
+        const strategyModel=strategyInput?strategyInput.closest('.strategy-option').querySelector('select').value:null;
+        const workers=$$('#workerOptions input[type="checkbox"]:checked').map(input=>({machine:machines.find(x=>x.id===input.value),model:input.closest('.worker-option').querySelector('select').value}));
+        return {name:$('#taskName').value.trim(),workspace:$('#taskWorkspace').value.trim(),goal:$('#taskGoal').value.trim(),strategy,strategyModel,workers};
+      }
+      function updateTaskPreview() {
+        const c=getTaskConfig();
+        renderSelectedCapabilities(c.workers);
+        if (!$('#skillMentionMenu').classList.contains('hidden')) renderSkillMentionMenu();
+        $('#previewStrategy').textContent=c.strategy?c.strategy.name:'尚未选择策略机';
+        $('#previewModel').textContent=c.strategyModel||'—';
+        $('#previewWorkers').textContent=c.workers.length?`${c.workers.length} 台执行机并行协作`:'尚未选择执行机';
+        $('#previewWorkerNames').textContent=c.workers.length?c.workers.map(x=>`${x.machine.name} · ${x.model}`).join('；'):'等待配置参与本次调度的节点。';
+        $('#previewCount').textContent=`${(c.strategy?1:0)+c.workers.length} 台`;
+        const issues=[]; if(!c.name)issues.push('请填写任务名称'); if(!c.goal)issues.push('请填写任务目标'); if(!c.strategy)issues.push('请选择策略机'); if(!c.workers.length)issues.push('请至少选择一台执行机');
+        $('#launchTask').disabled=issues.length>0; $('#formHint').textContent=issues[0]||'';
+      }
+      function renderSelectedCapabilities(workers) {
+        const mcpCount=workers.reduce((sum,x)=>sum+(x.machine.mcps||[]).length,0);
+        const skillCount=workers.reduce((sum,x)=>sum+(x.machine.skills||[]).length,0);
+        $('#capabilitySummary').textContent=`${workers.length} 台 · ${mcpCount} MCP · ${skillCount} Skill`;
+        $('#selectedCapabilities').innerHTML=workers.length ? workers.map(({machine})=>{
+          const mcps=machine.mcps||[], skills=machine.skills||[];
+          const mcpTags=mcps.length ? mcps.map(name=>`<span class="capability-tag" title="${escapeHtml(name)}">${escapeHtml(name)}</span>`).join('') : '<span class="capability-tag pending">待连接后读取</span>';
+          const skillTags=skills.length ? skills.map(name=>`<span class="capability-tag skill" title="${escapeHtml(name)}">${escapeHtml(name)}</span>`).join('') : '<span class="capability-tag pending">待连接后读取</span>';
+          return `<article class="capability-card"><div class="capability-machine"><strong>${escapeHtml(machine.name)}</strong><small>${escapeHtml(machine.ip)}:4500</small></div><div class="capability-group"><div class="capability-label"><span>MCP</span><b>${mcps.length}</b></div><div class="capability-tags">${mcpTags}</div></div><div class="capability-group"><div class="capability-label"><span>Skill</span><b>${skills.length}</b></div><div class="capability-tags">${skillTags}</div></div></article>`;
+        }).join('') : '<div class="capability-empty">请在下方勾选执行机以查看可调用能力。</div>';
+      }
+      function getSkillMentionContext() {
+        const input=$('#taskGoal'), caret=input.selectionStart;
+        const before=input.value.slice(0,caret);
+        const match=before.match(/@([\w./-]*)$/);
+        if(!match)return null;
+        const start=before.lastIndexOf('@');
+        return {start,end:caret,query:match[1].toLowerCase()};
+      }
+      function collectSelectedSkills(query='') {
+        const sources=new Map();
+        getTaskConfig().workers.forEach(({machine})=>(machine.skills||[]).forEach(skill=>{
+          if(!sources.has(skill))sources.set(skill,[]);
+          sources.get(skill).push(machine.name);
+        }));
+        return [...sources.entries()]
+          .filter(([skill])=>skill.toLowerCase().includes(query))
+          .map(([skill,machines])=>({skill,machines}));
+      }
+      function renderSkillMentionMenu() {
+        const context=getSkillMentionContext();
+        if(!context){closeSkillMentionMenu();return;}
+        skillMentionRange=context;
+        skillMentionItems=collectSelectedSkills(context.query);
+        skillMentionIndex=Math.min(skillMentionIndex,Math.max(0,skillMentionItems.length-1));
+        const options=$('#skillMentionOptions');
+        options.innerHTML=skillMentionItems.length ? skillMentionItems.map((item,index)=>`<button type="button" class="skill-mention-option ${index===skillMentionIndex?'active':''}" role="option" aria-selected="${index===skillMentionIndex}" data-skill="${escapeHtml(item.skill)}"><code class="skill-command">@${escapeHtml(item.skill)}</code><span class="skill-source">${escapeHtml(item.machines.join('、'))}</span></button>`).join('') : `<div class="skill-mention-empty">${getTaskConfig().workers.length?'没有匹配的 Skill':'请先在下方勾选执行机'}</div>`;
+        $('#skillMentionMenu').classList.remove('hidden');
+        $('#taskGoal').setAttribute('aria-expanded','true');
+      }
+      function closeSkillMentionMenu() {
+        $('#skillMentionMenu').classList.add('hidden');
+        $('#taskGoal').setAttribute('aria-expanded','false');
+        skillMentionRange=null;skillMentionItems=[];skillMentionIndex=0;
+      }
+      function insertSkillCommand(skill) {
+        const input=$('#taskGoal'), range=skillMentionRange||getSkillMentionContext();
+        if(!range)return;
+        const command=`@${skill} `;
+        input.value=input.value.slice(0,range.start)+command+input.value.slice(range.end);
+        const caret=range.start+command.length;
+        closeSkillMentionMenu();input.focus();input.setSelectionRange(caret,caret);updateTaskPreview();
+      }
+      $('#taskGoal').addEventListener('input',()=>{skillMentionIndex=0;renderSkillMentionMenu();});
+      $('#taskGoal').addEventListener('click',()=>{if(getSkillMentionContext())renderSkillMentionMenu();});
+      $('#taskGoal').addEventListener('keydown',e=>{
+        if($('#skillMentionMenu').classList.contains('hidden'))return;
+        if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+          e.preventDefault();
+          if(skillMentionItems.length){skillMentionIndex=(skillMentionIndex+(e.key==='ArrowDown'?1:-1)+skillMentionItems.length)%skillMentionItems.length;renderSkillMentionMenu();}
+        }else if(e.key==='Enter'&&skillMentionItems.length){e.preventDefault();insertSkillCommand(skillMentionItems[skillMentionIndex].skill);}
+        else if(e.key==='Escape'){e.preventDefault();closeSkillMentionMenu();}
+      });
+      $('#taskGoal').addEventListener('blur',()=>setTimeout(closeSkillMentionMenu,120));
+      $('#skillMentionOptions').addEventListener('mousedown',e=>e.preventDefault());
+      $('#skillMentionOptions').addEventListener('click',e=>{const option=e.target.closest('[data-skill]');if(option)insertSkillCommand(option.dataset.skill);});
+      ['taskName','taskGoal','taskWorkspace'].forEach(id=>$('#'+id).addEventListener('input',updateTaskPreview));
+
+      function clearRunTimers() { timers.forEach(clearTimeout);timers=[];if(elapsedTimer)clearInterval(elapsedTimer);elapsedTimer=null; }
+      function addTimeline(title, detail='') {
+        const item=document.createElement('div');item.className='timeline-item active';item.innerHTML=`<strong>${escapeHtml(title)}</strong>${escapeHtml(detail)}<br><time>${now()}</time>`;
+        $$('.timeline-item').forEach(x=>x.classList.remove('active'));$('#timeline').prepend(item);
+      }
+      function addSystem(text) { const el=document.createElement('div');el.className='system-message';el.textContent=text;$('#messages').appendChild(el);scrollMessages(); }
+      function addMessage(role,text) {
+        const el=document.createElement('div');el.className=`message ${role==='user'?'user':''}`;
+        el.innerHTML=`<i class="msg-avatar">${role==='user'?'你':'S'}</i><div class="bubble"><div class="bubble-meta">${role==='user'?'用户':escapeHtml(runState.config.strategy.name)} · ${now()}</div><div class="bubble-body"></div></div>`;
+        $('.bubble-body',el).textContent=text;$('#messages').appendChild(el);scrollMessages();return el;
+      }
+      function streamMessage(text, done) {
+        const el=addMessage('agent','');const body=$('.bubble-body',el);body.classList.add('typing');let index=0;
+        const tick=()=>{body.textContent=text.slice(0,index+=2);scrollMessages();if(index<text.length){schedule(tick,24);}else{body.classList.remove('typing');done&&done();}};tick();
+      }
+      function scrollMessages() { const box=$('#messages');requestAnimationFrame(()=>box.scrollTop=box.scrollHeight); }
+      function renderRuntimeWorkers() {
+        if(!runState)return;
+        $('#runtimeList').innerHTML=runState.workers.map(w=>`<article class="runtime-card" data-runtime-id="${w.id}"><div class="runtime-top"><i class="runtime-avatar">E</i><div class="runtime-name"><strong>${escapeHtml(w.name)}</strong><small>${w.model}</small></div><span class="status ${w.state}">${statusLabel(w.state)}</span></div><p class="runtime-task">${escapeHtml(w.task)}</p><div class="progress"><i style="width:${w.progress}%"></i></div><div class="runtime-bottom"><span>${w.progress}%</span><span>${w.elapsed}s</span></div></article>`).join('');
+        const total=Math.round(runState.workers.reduce((sum,w)=>sum+w.progress,0)/runState.workers.length);$('#overallProgress').textContent=`${total}%`;$('#runtimeCount').textContent=`${runState.workers.length} 台参与`;
+      }
+      function updateWorker(index, patch) { if(!runState||!runState.workers[index])return;Object.assign(runState.workers[index],patch);renderRuntimeWorkers(); }
+      function finishRun(decision) {
+        const rejected=decision==='decline';
+        if(elapsedTimer){clearInterval(elapsedTimer);elapsedTimer=null;}
+        runState.workers.forEach((w,i)=>{if(i!==runState.approvalIndex)Object.assign(w,{state:'completed',progress:100,elapsed:12+i*3});});
+        renderRuntimeWorkers();
+        $('#taskStatus').className=`status ${rejected?'failed':'completed'}`;$('#taskStatus').textContent=rejected?'部分失败':'已完成';
+        $('#chatStatus').className='status completed';$('#chatStatus').textContent='已完成';$('#chatPresence').textContent='任务已结束';
+        $('#stopTask').disabled=true;$('#runningCount').classList.add('hidden');
+        addTimeline(rejected?'任务部分完成':'任务执行完成',rejected?'审批被拒绝，已生成降级交付':'所有执行结果已汇总');
+        const text=rejected
+          ? '任务已结束。测试执行机的高风险操作被拒绝，因此未执行缓存清理和完整压测；其余分析与代码优化已完成。我已保留拒绝记录，并整理出不包含该操作的阶段性交付。'
+          : '全部子任务已完成。性能分析、代码优化与回归验证均已通过：接口 P95 延迟由 420ms 降至 176ms，核心测试 128 项全部通过。审批记录和执行证据已纳入最终交付。';
+        streamMessage(text);
+      }
+      function showApproval() {
+        if(!runState)return;const approvalIndex=runState.approvalIndex;const approvalWorker=runState.workers[approvalIndex];updateWorker(approvalIndex,{state:'waiting',progress:62,elapsed:8});
+        $('#taskStatus').className='status waiting';$('#taskStatus').textContent='等待审批';
+        $('#chatStatus').className='status waiting';$('#chatStatus').textContent='等待用户';$('#chatPresence').textContent='执行机请求用户确认';
+        addTimeline('等待用户审批',`${approvalWorker.name} 请求执行高风险命令`);
+        addSystem(`${approvalWorker.name} 暂停执行并提交审批`);
+        const el=document.createElement('div');el.className='message';el.innerHTML=`<i class="msg-avatar">S</i><div class="bubble"><div class="bubble-meta">${escapeHtml(runState.config.strategy.name)} · ${now()}</div><div class="bubble-body">执行机需要你的确认。审批结果会直接回传给该执行机，并记录在本次任务审计中。<div class="approval-card"><div class="approval-head"><i class="approval-icon">!</i><div><strong>执行操作需要用户审批</strong><small>来源：${escapeHtml(approvalWorker.name)}</small></div></div><div class="approval-body"><div class="approval-grid"><span>操作类型</span><strong>命令执行</strong><span>命令</span><code>./scripts/reset-cache.sh --environment test</code><span>工作目录</span><code>${escapeHtml(runState.config.workspace)}</code><span>申请原因</span><strong>清空测试缓存后执行完整性能回归</strong></div><div class="approval-reason">该操作会删除测试环境缓存数据，但不会影响生产环境。请确认是否允许本次执行。</div><div class="approval-actions"><button class="btn danger" data-decision="decline">拒绝</button><button class="btn primary" data-decision="accept">同意本次执行</button></div><div class="approval-result hidden"></div></div></div></div></div>`;
+        $('#messages').appendChild(el);scrollMessages();
+        $$('[data-decision]',el).forEach(btn=>btn.addEventListener('click',()=>resolveApproval(btn.dataset.decision,el)));
+      }
+      function resolveApproval(decision,el) {
+        if(runState.approvalResolved)return;runState.approvalResolved=true;
+        const approvalIndex=runState.approvalIndex;
+        $$('.approval-actions button',el).forEach(x=>x.disabled=true);const result=$('.approval-result',el);result.classList.remove('hidden');
+        if(decision==='accept') {
+          result.className='approval-result accept';result.textContent=`✓ 已同意 · ${now()} · 决定已回传执行机`;
+          $('#taskStatus').className='status running';$('#taskStatus').textContent='运行中';$('#chatStatus').className='status running';$('#chatStatus').textContent='思考中';$('#chatPresence').textContent='执行机已恢复运行';
+          updateWorker(approvalIndex,{state:'running',progress:70,elapsed:9});addTimeline('用户同意执行','执行机恢复命令与测试流程');addSystem('审批已通过，执行机继续运行');
+          schedule(()=>updateWorker(approvalIndex,{state:'running',progress:88,elapsed:12}),1000);
+          schedule(()=>{updateWorker(approvalIndex,{state:'completed',progress:100,elapsed:15});finishRun('accept');},2300);
+        } else {
+          result.className='approval-result decline';result.textContent=`× 已拒绝 · ${now()} · 执行机已停止该操作`;
+          updateWorker(approvalIndex,{state:'failed',progress:62,elapsed:9});addTimeline('用户拒绝执行','高风险操作已取消，任务进入降级汇总');addSystem('审批被拒绝，执行机已取消命令');schedule(()=>finishRun('decline'),1200);
+        }
+        scrollMessages();
+      }
+
+      function startTask() {
+        const config=getTaskConfig();if(!config.strategy||!config.workers.length)return;
+        clearRunTimers();runStartedAt=Date.now();
+        const subtasks=['定位接口瓶颈并提交优化代码','执行缓存清理与完整性能回归','审查变更并核对测试证据','补充并发场景验证'];
+        runState={config,approvalResolved:false,approvalIndex:config.workers.length>1?1:0,workers:config.workers.map((x,i)=>({id:x.machine.id,name:x.machine.name,model:x.model,state:'running',progress:8,elapsed:0,task:subtasks[i]||`执行子任务 ${i+1}`}))};
+        $('#monitorEmpty').classList.add('hidden');$('#monitorActive').classList.remove('hidden');$('#messages').innerHTML='';$('#timeline').innerHTML='';
+        $('#runtimeTaskName').textContent=config.name;$('#runtimeTaskId').textContent=`TASK-${String(Date.now()).slice(-6)}`;$('#runtimeStrategy').textContent=config.strategy.name;
+        $('#chatName').textContent=config.strategy.name;$('#chatAvatar').textContent=config.strategy.name.includes('Beta')?'B':'A';$('#chatPresence').textContent='正在规划与调度';
+        $('#taskStatus').className='status running';$('#taskStatus').textContent='运行中';$('#chatStatus').className='status running';$('#chatStatus').textContent='思考中';$('#stopTask').disabled=false;
+        $('#runningCount').classList.remove('hidden');renderRuntimeWorkers();addTimeline('任务已创建',`${config.workers.length} 台执行机加入调度`);
+        addMessage('user',config.goal);addSystem(`${config.strategy.name} 已建立会话 · ${config.strategyModel}`);
+        elapsedTimer=setInterval(()=>{if(!runStartedAt)return;const s=Math.floor((Date.now()-runStartedAt)/1000);$('#elapsed').textContent=`${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;if(runState)runState.workers.forEach(w=>{if(w.state==='running')w.elapsed=s;});renderRuntimeWorkers();},1000);
+        navigate('monitor');
+        schedule(()=>streamMessage(`收到。我会把任务拆成 ${config.workers.length} 个并行子任务：性能定位、代码优化、回归测试与交付核验。任何高风险操作都会暂停，并直接请求你的确认。`,()=>addTimeline('策略规划完成','子任务已分配到各执行机')),450);
+        schedule(()=>{addSystem(`已向 ${config.workers.length} 台执行机派发子任务`);runState.workers.forEach((w,i)=>updateWorker(i,{progress:24+i*3,elapsed:2}));},2300);
+        schedule(()=>{updateWorker(0,{progress:58,elapsed:5});if(runState.workers[2])updateWorker(2,{progress:48,elapsed:5});addTimeline('执行机返回进展','性能瓶颈定位完成，测试准备中');},3900);
+        schedule(showApproval,5600);
+      }
+      $('#launchTask').addEventListener('click',startTask);
+
+      $('#composer').addEventListener('submit',e=>{e.preventDefault();const input=$('#chatInput');const text=input.value.trim();if(!text||!runState)return;addMessage('user',text);input.value='';schedule(()=>streamMessage('补充信息已收到，我会将它加入当前调度上下文，并同步给相关执行机。'),350);});
+      $('#stopTask').addEventListener('click',()=>{if(!runState)return;clearRunTimers();runState.workers.forEach(w=>{if(w.state==='running'||w.state==='waiting')w.state='failed';});renderRuntimeWorkers();$('#taskStatus').className='status failed';$('#taskStatus').textContent='已停止';$('#chatStatus').className='status failed';$('#chatStatus').textContent='已停止';addTimeline('用户停止任务','所有运行中 turn 已请求中断');addSystem('任务已由用户停止');$('#stopTask').disabled=true;$('#runningCount').classList.add('hidden');});
+      function resetDemo() {
+        clearRunTimers();runState=null;runStartedAt=null;$('#monitorActive').classList.add('hidden');$('#monitorEmpty').classList.remove('hidden');$('#runningCount').classList.add('hidden');$('#elapsed').textContent='00:00';navigate('create');renderTaskSelectors();toast('演示已重置，可以重新启动任务');
+      }
+      $('#resetDemo').addEventListener('click',resetDemo);
+
+      [$('#machineModal'),$('#detailModal')].forEach(modal=>modal.addEventListener('click',e=>{if(e.target===modal)modal.classList.add('hidden');}));
+      document.addEventListener('keydown',e=>{if(e.key==='Escape'){$('#machineModal').classList.add('hidden');$('#detailModal').classList.add('hidden');}});
+      renderMachines();renderTaskSelectors();
+    })();
+  </script>
+</body>
+</html>
