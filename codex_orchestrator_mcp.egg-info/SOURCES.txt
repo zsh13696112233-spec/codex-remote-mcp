@@ -1,7 +1,0 @@
-codex_orchestrator_mcp.py
-pyproject.toml
-codex_orchestrator_mcp.egg-info/PKG-INFO
-codex_orchestrator_mcp.egg-info/SOURCES.txt
-codex_orchestrator_mcp.egg-info/dependency_links.txt
-codex_orchestrator_mcp.egg-info/requires.txt
-codex_orchestrator_mcp.egg-info/top_level.txt

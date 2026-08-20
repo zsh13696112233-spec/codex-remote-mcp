@@ -8,7 +8,9 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+PYTHON_SOURCE = REPOSITORY_ROOT / "services" / "python-workflow" / "src"
+sys.path.insert(0, str(PYTHON_SOURCE))
 
 from workflow_store import WorkflowStore  # noqa: E402
 

@@ -1,172 +1,124 @@
-# Codex 主会话工作流编排
+# Codex 工作流编排平台
 
-完整中文架构、部署、Java 接入和监控说明见
-[`WORKFLOW_GUIDE.zh-CN.md`](WORKFLOW_GUIDE.zh-CN.md)。
+本仓库是一套由 Python 工作流服务和两个 Java Web 应用组成的 Codex 多执行机编排平台。配置中心负责定义并提交任务，Python 服务负责调度 Codex，监控中心负责展示执行过程并与主监督会话交互。
 
-带节点编辑和实时监控界面的 Spring Boot 控制台见
-[`workflow-console/README.md`](workflow-console/README.md)。
+## 系统架构
 
-这个项目把 Codex `app-server` 包装成一个可由 Java 调用、可持续监控的工作流服务。
-
-运行时有三个角色：
-
-1. `workflow_gateway.py` 接收工作流 JSON，启动一个 Codex 主监督会话，并提供状态与 SSE 接口。
-2. 主监督会话调用 `codex_orchestrator_mcp.py` 暴露的 `dispatch_node`、`wait_node` 等工具。
-3. MCP 编排器为每个节点新建独立 Codex thread，连接本机或远程 `app-server`。节点依赖由 SQLite 强制检查，不只依赖模型自觉遵守。
-
-`workflow_gateway.py` 和 MCP 进程必须使用同一个 `CODEX_WORKFLOW_DB` 绝对路径。主会话消息、节点状态、thread/turn ID，以及 app-server 原始通知都会进入这个数据库。
-
-## 1. 配置执行机
-
-复制 `agents.example.json` 为自己的配置。`local` 和 `remote-build` 只是业务名称；两者底层都通过 WebSocket 连接 app-server。
-
-```json
-{
-  "agents": {
-    "local": {
-      "url": "ws://127.0.0.1:4500",
-      "cwd": "C:\\work",
-      "allow_write": true,
-      "allow_cwd_override": true
-    },
-    "remote-build": {
-      "url": "wss://worker.example.com/codex",
-      "cwd": "/srv/work",
-      "token_env": "REMOTE_CODEX_TOKEN",
-      "allow_write": false,
-      "allow_cwd_override": false
-    }
-  }
-}
+```text
+角色任务配置中心（8091）
+          │ 提交工作流
+          ▼
+Python 工作流网关（8080）── Codex Orchestrator MCP ── Codex App Server
+          ▲
+          │ 查询、事件和对话
+任务运行监控中心（8090）
 ```
 
-不要把 token 写进 JSON；只写环境变量名。生产环境建议用 WSS，或者把未加密 WebSocket 限制在回环地址/SSH 隧道中。
+Python 网关与 MCP 进程通过同一个 SQLite 数据库共享工作流、节点、消息和事件状态。配置中心另外使用 MySQL 保存角色、SOP、任务定义和运行快照。
 
-## 2. 把编排器注册给主会话
+## 仓库结构
 
-主监督会话所在的 Codex app-server 必须配置本项目的 MCP server。下面是 Codex `config.toml` 的示例；路径应改成部署机上的绝对路径。
+```text
+.
+├── services/
+│   ├── python-workflow/          Python 网关、MCP 编排器和状态存储
+│   ├── workflow-console/         Java 任务运行监控中心
+│   └── role-task-config-center/  Java 角色任务配置中心
+├── config/                       执行机配置示例和本机配置
+├── docs/                         架构、协议和部署文档
+├── prototypes/                   不参与运行的历史交互原型
+└── scripts/                      运维和端到端验证脚本
+```
+
+各模块的详细说明：
+
+- [Python 工作流服务](services/python-workflow/README.md)
+- [任务运行监控中心](services/workflow-console/README.md)
+- [角色任务配置中心](services/role-task-config-center/README.md)
+- [完整工作流指南](docs/WORKFLOW_GUIDE.zh-CN.md)
+
+## 快速启动
+
+### 1. 准备执行机配置
+
+```powershell
+Copy-Item .\config\agents.example.json .\config\agents.json
+```
+
+编辑 `config/agents.json`，为每个执行机配置 Codex app-server WebSocket 地址、默认工作目录和权限。访问令牌只填写环境变量名，不要直接写入 JSON。
+
+### 2. 启动 Python 网关
+
+网关和 MCP 必须使用同一个 `CODEX_WORKFLOW_DB` 绝对路径。
+
+```powershell
+$ProjectRoot = (Resolve-Path .).Path
+$env:CODEX_AGENTS_FILE = (Resolve-Path .\config\agents.json).Path
+$env:CODEX_WORKFLOW_DB = Join-Path $ProjectRoot "workflows.db"
+
+uv run --project .\services\python-workflow `
+  python .\services\python-workflow\src\workflow_gateway.py `
+  --host 127.0.0.1 --port 8080 `
+  --db $env:CODEX_WORKFLOW_DB --agents $env:CODEX_AGENTS_FILE
+```
+
+主监督 app-server 的 MCP 配置示例。`<PROJECT_ROOT>` 必须替换为仓库的真实绝对路径；Windows TOML 双引号字符串中的反斜杠需要写成 `\\`，Linux/macOS 直接使用 `/absolute/path`：
 
 ```toml
 [mcp_servers.codex_orchestrator]
-command = "python"
-args = ["C:\\services\\codex-remote-mcp\\codex_orchestrator_mcp.py"]
+command = "uv"
+args = [
+  "run", "--project", "<PROJECT_ROOT>\\services\\python-workflow",
+  "python", "<PROJECT_ROOT>\\services\\python-workflow\\src\\codex_orchestrator_mcp.py"
+]
 required = true
 
 [mcp_servers.codex_orchestrator.env]
-CODEX_AGENTS_FILE = "C:\\services\\codex-remote-mcp\\agents.json"
-CODEX_WORKFLOW_DB = "C:\\services\\codex-remote-mcp\\workflows.db"
+CODEX_AGENTS_FILE = "<PROJECT_ROOT>\\config\\agents.json"
+CODEX_WORKFLOW_DB = "<PROJECT_ROOT>\\workflows.db"
 ```
 
-重启 app-server 使 MCP 配置生效。启动 HTTP 网关时必须传入同一份 agent 配置和同一个数据库：
-
-主监督任务会由网关单独设置为 `approvalPolicy=on-request` 和
-`approvalsReviewer=auto_review`，从而让 Codex 自动审核 `dispatch_node`、
-`wait_node` 等 MCP 调度调用。普通节点任务仍保持 `approvalPolicy=never`。
-不要把整个 MCP 永久配置成无条件批准；这样可以把自动审批限制在主监督任务内。
+### 3. 启动两个 Java Web 应用
 
 ```powershell
-$env:CODEX_WORKFLOW_DB = "C:\services\codex-remote-mcp\workflows.db"
-python workflow_gateway.py --host 127.0.0.1 --port 8080 `
-  --db $env:CODEX_WORKFLOW_DB --agents .\agents.json
+cd .\services\workflow-console
+mvn spring-boot:run
 ```
 
-默认只监听 `127.0.0.1`。如果 Java 主机跨机器访问，建议由带 TLS 和认证的反向代理暴露，不要直接把无认证的 8080 端口开放到网络。
-
-## 3. 提交串行节点
-
-下面的三个节点都会创建新的 Codex thread。依赖关系保证 `a -> b -> c` 串行；节点也可以分别指定不同的本地/远程 agent。
-
-```json
-{
-  "workflowId": "demo-20260820-001",
-  "name": "serial-a-b-c",
-  "supervisorAgentId": "local",
-  "failurePolicy": "stop",
-  "nodes": [
-    {
-      "id": "node-a",
-      "executor": {"type": "local", "agentId": "local"},
-      "prompt": "只输出一个小写字母 a，不要输出其他内容",
-      "dependsOn": []
-    },
-    {
-      "id": "node-b",
-      "executor": {"type": "local", "agentId": "local"},
-      "prompt": "只输出一个小写字母 b，不要输出其他内容",
-      "dependsOn": ["node-a"]
-    },
-    {
-      "id": "node-c",
-      "executor": {"type": "remote", "agentId": "remote-build"},
-      "prompt": "只输出一个小写字母 c，不要输出其他内容",
-      "dependsOn": ["node-b"]
-    }
-  ]
-}
-```
-
-提交接口：
-
-```text
-POST /workflows                         提交，返回 202 和初始快照
-GET  /workflows/{workflowId}            当前节点、进度、主会话消息和所有节点状态
-GET  /workflows/{workflowId}/events     SSE 实时事件流，可用 ?after=序号 断点续传
-GET  /workflows/{workflowId}/events/history?after=0&limit=200
-POST /workflows/{workflowId}/cancel     请求取消主监督会话
-GET  /readyz                            存活检查
-```
-
-Java 不需要再调用 Python。Java 直接向 HTTP 网关发送 JSON，再通过 `GET` 轮询或 SSE 监听即可。Python 只部署在 Codex 执行机上，充当协议适配和持久化服务。
-
-失败工作流需要保留原记录并复制重试时，可以运行：
+另一个终端：
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\retry_workflow.py <原workflowId> `
-  --db .\workflows.db --gateway-url http://127.0.0.1:8080
+cd .\services\role-task-config-center
+mvn spring-boot:run
 ```
 
-状态快照里最关键的字段：
+默认访问地址：
 
-```json
-{
-  "status": "running",
-  "currentNodes": ["node-b"],
-  "progress": {"completed": 1, "total": 3},
-  "supervisor": {
-    "threadId": "...",
-    "turnId": "...",
-    "status": "running",
-    "lastMessage": "node-a 已完成，正在启动 node-b"
-  },
-  "nodes": [
-    {"id": "node-a", "status": "completed", "response": "a"},
-    {"id": "node-b", "status": "running"},
-    {"id": "node-c", "status": "pending"}
-  ]
-}
-```
+- 配置中心：`http://127.0.0.1:8091`
+- 监控中心：`http://127.0.0.1:8090/?workflowId=<workflowId>`
+- Python 网关健康检查：`http://127.0.0.1:8080/readyz`
 
-SSE 不只包含汇总状态，也包含 `appserver.item/agentMessage/delta`、`appserver.item/completed`、`appserver.turn/completed`、MCP 工具调用等原始通知，所以可以展示主会话的实时对话过程。
+配置中心还需要 MySQL 8；数据库初始化和环境变量见其模块 README。
 
-## 4. Java 调用最小示例
+## 测试
 
-```java
-HttpClient client = HttpClient.newHttpClient();
-HttpRequest request = HttpRequest.newBuilder()
-    .uri(URI.create("http://127.0.0.1:8080/workflows"))
-    .header("Content-Type", "application/json")
-    .POST(HttpRequest.BodyPublishers.ofString(workflowJson))
-    .build();
-HttpResponse<String> response = client.send(
-    request, HttpResponse.BodyHandlers.ofString());
-```
-
-Java 11 的 `HttpClient` 可以用 `BodyHandlers.ofLines()` 消费 SSE；也可以先用普通 GET 轮询状态。提交时自带唯一 `workflowId`，重复 ID 会返回 400，便于调用方实现幂等控制。
-
-## 运行测试
+Python：
 
 ```powershell
-python -m unittest discover -s tests -v
+uv run --project .\services\python-workflow `
+  python -m unittest discover -s .\services\python-workflow\tests -v
 ```
 
-这里的“thread”指 Codex 会话线程，不等同于 JVM/Python 操作系统线程。一个工作流通常包含一个主监督 Codex thread，加上每个节点一个独立 Codex thread。
+Java：
+
+```powershell
+mvn -f .\services\workflow-console\pom.xml test
+mvn -f .\services\role-task-config-center\pom.xml test
+```
+
+## 运行与安全边界
+
+- 三个 HTTP 服务默认仅监听本机回环地址，不能直接暴露到公网。
+- `config/agents.json`、SQLite 数据库、IDE 配置及构建产物均不提交 Git。
+- 当前任务运行中的异步作业仍保存在 Python 进程内存；进程重启后历史状态仍在，但不会自动重新附着到运行中的 Codex turn。
+- `prototypes/` 仅保存早期页面方案，不是生产入口。

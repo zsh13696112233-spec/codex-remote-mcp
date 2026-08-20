@@ -4,7 +4,7 @@
     python scripts/verify_long_job.py
 
 开发时可缩短：
-    python scripts/verify_long_job.py --delay-sec 1 --wait-sec 1
+    python scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
 """
 
 import argparse
@@ -20,9 +20,12 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+PYTHON_SERVICE = REPOSITORY_ROOT / "services" / "python-workflow"
+PYTHON_SOURCE = PYTHON_SERVICE / "src"
+for import_path in (PYTHON_SOURCE, PYTHON_SERVICE):
+    if str(import_path) not in sys.path:
+        sys.path.insert(0, str(import_path))
 
 from tests.mock_app_server import MockAppServer
 
@@ -66,8 +69,8 @@ async def verify(delay_sec: float, wait_sec: int) -> dict[str, Any]:
             child_env["VERIFY_REMOTE_CODEX_TOKEN"] = secret
             server = StdioServerParameters(
                 command=sys.executable,
-                args=[str(PROJECT_ROOT / "codex_orchestrator_mcp.py")],
-                cwd=PROJECT_ROOT,
+                args=[str(PYTHON_SOURCE / "codex_orchestrator_mcp.py")],
+                cwd=PYTHON_SERVICE,
                 env=child_env,
             )
 

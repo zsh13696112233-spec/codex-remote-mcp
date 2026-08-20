@@ -1,9 +1,29 @@
+# Python environments and caches
 .venv/
 .uv-cache/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python packaging output
+build/
+dist/
+*.egg-info/
+
+# Java/Maven output
+target/
+*.class
+
+# IDE and operating-system files
+.idea/
+*.iml
+.DS_Store
+
+# Local runtime data and secrets
 *.db
 *.db-shm
 *.db-wal
-workflow-console/target/
-.DS_Store
+.env
+config/agents.json
