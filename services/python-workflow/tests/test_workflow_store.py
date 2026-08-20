@@ -1,9 +1,11 @@
+import asyncio
+import json
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
 
-from workflow_store import WorkflowStore, utc_now
+from workflow_store import AsyncEventBatcher, WorkflowStore, utc_now
 
 
 def serial_workflow() -> dict:
@@ -45,6 +47,45 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertEqual([node["status"] for node in snapshot["nodes"]], ["pending"] * 3)
         events = self.store.list_events("serial-demo")
         self.assertEqual(events[0]["type"], "workflow.created")
+
+    def test_compressed_spec_preserves_full_prompt_without_legacy_duplicate(self) -> None:
+        value = serial_workflow()
+        value["nodes"][0]["prompt"] = "长提示" * 10_000
+        self.store.create_workflow(value)
+
+        with self.store._connect() as connection:
+            workflow = connection.execute(
+                "SELECT spec_json, spec_zlib FROM workflows WHERE workflow_id = ?",
+                ("serial-demo",),
+            ).fetchone()
+            node = connection.execute(
+                "SELECT prompt, original_prompt FROM workflow_nodes "
+                "WHERE workflow_id = ? AND node_id = ?",
+                ("serial-demo", "a"),
+            ).fetchone()
+
+        self.assertIsNotNone(workflow["spec_zlib"])
+        self.assertNotIn("长提示", workflow["spec_json"])
+        self.assertEqual(node["prompt"], "")
+        self.assertEqual(node["original_prompt"], value["nodes"][0]["prompt"])
+        self.assertEqual(
+            self.store.get_spec("serial-demo")["nodes"][0]["prompt"],
+            value["nodes"][0]["prompt"],
+        )
+
+    def test_old_uncompressed_spec_remains_readable(self) -> None:
+        value = serial_workflow()
+        self.store.create_workflow(value)
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE workflows SET spec_json = ?, spec_zlib = NULL "
+                "WHERE workflow_id = ?",
+                (json.dumps(value, ensure_ascii=False), "serial-demo"),
+            )
+        self.assertEqual(
+            self.store.get_spec("serial-demo")["nodes"][0]["prompt"],
+            "只写一个 a",
+        )
 
     def test_cycle_is_rejected(self) -> None:
         value = serial_workflow()
@@ -173,6 +214,62 @@ class WorkflowStoreTests(unittest.TestCase):
         next_step = self.store.prepare_node_dispatch("serial-demo", "b")
         self.assertIn("已跳过", next_step["prompt"])
         self.assertEqual(self.store.get_workflow("serial-demo")["nodes"][0]["status"], "skipped")
+
+
+class AsyncEventBatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_events_are_flushed_in_one_transaction_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkflowStore(Path(directory, "workflows.db"))
+            store.create_workflow(serial_workflow())
+            batcher = AsyncEventBatcher(store, batch_size=3, flush_interval=10)
+            for index in range(3):
+                await batcher.add(
+                    "serial-demo",
+                    node_id=None,
+                    source="test",
+                    event_type="test.delta",
+                    payload={"index": index},
+                )
+            await batcher.close()
+
+            events = [
+                event for event in store.list_events("serial-demo")
+                if event["type"] == "test.delta"
+            ]
+            self.assertEqual(
+                [event["payload"]["index"] for event in events], [0, 1, 2]
+            )
+
+    async def test_timer_flushes_without_duplicate_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkflowStore(Path(directory, "workflows.db"))
+            store.create_workflow(serial_workflow())
+            batcher = AsyncEventBatcher(store, batch_size=64, flush_interval=0.01)
+            await batcher.add(
+                "serial-demo",
+                node_id=None,
+                source="test",
+                event_type="test.timer",
+                payload={"index": 1},
+            )
+            await asyncio.sleep(0.03)
+            await batcher.add(
+                "serial-demo",
+                node_id=None,
+                source="test",
+                event_type="test.timer",
+                payload={"index": 2},
+            )
+            await batcher.flush()
+            await batcher.close()
+
+            events = [
+                event for event in store.list_events("serial-demo")
+                if event["type"] == "test.timer"
+            ]
+            self.assertEqual(
+                [event["payload"]["index"] for event in events], [1, 2]
+            )
 
 
 if __name__ == "__main__":

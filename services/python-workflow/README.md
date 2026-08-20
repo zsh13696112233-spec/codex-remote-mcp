@@ -50,7 +50,8 @@ MCP 进程需要运行 `src/codex_orchestrator_mcp.py`，并传入完全相同�
 
 ```powershell
 uv run --project .\services\python-workflow `
-  python -m unittest discover -s .\services\python-workflow\tests -v
+  python -m unittest discover -s .\services\python-workflow\tests `
+  -t .\services\python-workflow -v
 ```
 
 长任务 MCP 子进程验证从仓库根目录运行：

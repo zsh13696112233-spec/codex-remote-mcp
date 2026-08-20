@@ -96,7 +96,8 @@ Python（从仓库根目录）：
 
 ```sh
 uv run --project services/python-workflow \
-  python -m unittest discover -s services/python-workflow/tests -v
+  python -m unittest discover -s services/python-workflow/tests \
+  -t services/python-workflow -v
 ```
 
 长任务集成验证（需要可用的本地环境时）：

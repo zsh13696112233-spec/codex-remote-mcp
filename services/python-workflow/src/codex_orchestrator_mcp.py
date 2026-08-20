@@ -1,5 +1,7 @@
 import asyncio
+import inspect
 import json
+import logging
 import ntpath
 import os
 import time
@@ -8,7 +10,7 @@ import warnings
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlparse
 
 # MCP 1.12 与新版 pydantic-settings 在导入 FastMCP 时会对未使用的
@@ -25,7 +27,7 @@ from mcp.server.fastmcp import FastMCP
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
-from workflow_store import WorkflowStore
+from workflow_store import AsyncEventBatcher, WorkflowStore
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "agents.json"
@@ -37,6 +39,7 @@ WORKFLOW_DB_PATH = Path(
 MAX_PROMPT_LENGTH = 100_000
 DEFAULT_REQUEST_TIMEOUT_SEC = 30.0
 INTERRUPT_TIMEOUT_SEC = 10.0
+LOGGER = logging.getLogger(__name__)
 
 
 def is_absolute_remote_path(path: str) -> bool:
@@ -139,7 +142,9 @@ class Job:
     task: asyncio.Task[None] | None = field(default=None, repr=False)
     client: "AppServerClient | None" = field(default=None, repr=False)
     completed: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
-    event_callback: Callable[[dict[str, Any], str], None] | None = field(
+    event_callback: Callable[
+        [dict[str, Any], str], None | Awaitable[None]
+    ] | None = field(
         default=None, repr=False
     )
     notification_subscribers: set[asyncio.Queue[dict[str, Any]]] = field(
@@ -151,16 +156,18 @@ class Job:
         self.last_event_method = method
         self.last_event_at = received_at
 
-    def record_notification(self, message: dict[str, Any], received_at: str) -> None:
+    async def record_notification(self, message: dict[str, Any], received_at: str) -> None:
         for subscriber in tuple(self.notification_subscribers):
-            subscriber.put_nowait(message)
+            await subscriber.put(message)
         if self.event_callback is None:
             return
         try:
-            self.event_callback(message, received_at)
+            result = self.event_callback(message, received_at)
+            if inspect.isawaitable(result):
+                await result
         except Exception:
             # 监控落库失败不能中断 Codex 的协议读取循环。
-            pass
+            LOGGER.exception("记录 App Server 监控事件失败。")
 
     def record_disconnect(self, code: int | None, reason: str | None) -> None:
         self.ws_close_code = code
@@ -248,7 +255,9 @@ class AppServerClient:
         token: str | None = None,
         request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC,
         on_notification: Callable[[str, str], None] | None = None,
-        on_message: Callable[[dict[str, Any], str], None] | None = None,
+        on_message: Callable[
+            [dict[str, Any], str], None | Awaitable[None]
+        ] | None = None,
         on_disconnect: Callable[[int | None, str | None], None] | None = None,
     ) -> None:
         self.url = url
@@ -431,7 +440,9 @@ class AppServerClient:
                     if self._on_notification is not None:
                         self._on_notification(method, received_at)
                     if self._on_message is not None:
-                        self._on_message(message, received_at)
+                        result = self._on_message(message, received_at)
+                        if inspect.isawaitable(result):
+                            await result
                     await self._notifications.put(message)
         except asyncio.CancelledError:
             raise
@@ -529,17 +540,30 @@ class Orchestrator:
         config_path: Path,
         *,
         client_factory: Callable[..., AppServerClient] = AppServerClient,
+        max_retained_jobs: int = 1000,
     ) -> None:
+        if max_retained_jobs < 1:
+            raise ValueError("max_retained_jobs 必须大于 0。")
         self.config_path = config_path
         self.jobs: dict[str, Job] = {}
         self._agent_locks: dict[str, asyncio.Lock] = {}
         self._client_factory = client_factory
+        self._max_retained_jobs = max_retained_jobs
+        self._agents_cache: dict[str, AgentConfig] | None = None
+        self._agents_cache_signature: tuple[int, int] | None = None
 
     def load_agents(self) -> dict[str, AgentConfig]:
         if not self.config_path.exists():
             raise FileNotFoundError(
                 f"找不到执行机配置：{self.config_path}。请复制 config/agents.example.json 为 config/agents.json。"
             )
+        stat = self.config_path.stat()
+        signature = (stat.st_mtime_ns, stat.st_size)
+        if (
+            self._agents_cache is not None
+            and self._agents_cache_signature == signature
+        ):
+            return dict(self._agents_cache)
         try:
             raw = json.loads(self.config_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as error:
@@ -556,7 +580,9 @@ class Orchestrator:
             if not isinstance(value, dict):
                 raise ValueError(f"{agent_id} 的配置必须是对象。")
             agents[agent_id] = AgentConfig.from_dict(agent_id, value)
-        return agents
+        self._agents_cache = agents
+        self._agents_cache_signature = signature
+        return dict(agents)
 
     def list_agents(self) -> list[dict[str, Any]]:
         return [agent.public_dict() for agent in self.load_agents().values()]
@@ -573,7 +599,9 @@ class Orchestrator:
         timeout_sec: int,
         approval_policy: Literal["never", "on-request", "untrusted"] = "never",
         approvals_reviewer: Literal["user", "auto_review"] | None = None,
-        event_callback: Callable[[dict[str, Any], str], None] | None = None,
+        event_callback: Callable[
+            [dict[str, Any], str], None | Awaitable[None]
+        ] | None = None,
     ) -> Job:
         prompt = prompt.strip()
         if not prompt:
@@ -611,6 +639,7 @@ class Orchestrator:
             approvals_reviewer=approvals_reviewer,
             event_callback=event_callback,
         )
+        self._prune_completed_jobs()
         self.jobs[job.job_id] = job
         job.task = asyncio.create_task(self._run_job(job, agent), name=f"codex-job:{job.job_id}")
         return job
@@ -620,6 +649,17 @@ class Orchestrator:
             return self.jobs[job_id]
         except KeyError:
             raise ValueError(f"找不到任务：{job_id}") from None
+
+    def _prune_completed_jobs(self) -> None:
+        overflow = len(self.jobs) - self._max_retained_jobs + 1
+        if overflow <= 0:
+            return
+        for job_id, job in list(self.jobs.items()):
+            if overflow <= 0:
+                break
+            if job.completed.is_set():
+                self.jobs.pop(job_id, None)
+                overflow -= 1
 
     async def wait(self, job_id: str, timeout_sec: int) -> Job:
         if not 1 <= timeout_sec <= 600:
@@ -656,7 +696,7 @@ class Orchestrator:
             raise
 
     def subscribe(self, job_id: str) -> asyncio.Queue[dict[str, Any]]:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1024)
         self.get_job(job_id).notification_subscribers.add(queue)
         return queue
 
@@ -828,6 +868,7 @@ class Orchestrator:
             job.client = None
             job.finished_at = utc_now()
             job.completed.set()
+            job.task = None
 
     @staticmethod
     async def _request_with_deadline(
@@ -937,6 +978,7 @@ class Orchestrator:
 
 orchestrator = Orchestrator(CONFIG_PATH)
 _workflow_store: WorkflowStore | None = None
+_workflow_event_batcher: AsyncEventBatcher | None = None
 _workflow_monitors: set[asyncio.Task[None]] = set()
 
 
@@ -947,16 +989,28 @@ def get_workflow_store() -> WorkflowStore:
     return _workflow_store
 
 
+def get_workflow_event_batcher() -> AsyncEventBatcher:
+    global _workflow_event_batcher
+    store = get_workflow_store()
+    if _workflow_event_batcher is None or _workflow_event_batcher.store is not store:
+        _workflow_event_batcher = AsyncEventBatcher(store)
+    return _workflow_event_batcher
+
+
+async def flush_workflow_events() -> None:
+    try:
+        await get_workflow_event_batcher().flush()
+    except Exception:
+        LOGGER.exception("刷新 App Server 监控事件失败。")
+
+
 def _workflow_node_snapshot(workflow_id: str, node_id: str) -> dict[str, Any]:
-    workflow = get_workflow_store().get_workflow(workflow_id)
-    for node in workflow["nodes"]:
-        if node["id"] == node_id:
-            return node
-    raise ValueError(f"找不到节点：{node_id}")
+    return get_workflow_store().get_node(workflow_id, node_id)
 
 
 async def _monitor_workflow_node(workflow_id: str, node_id: str, job: Job) -> None:
     await job.completed.wait()
+    await flush_workflow_events()
     get_workflow_store().sync_node_job(workflow_id, node_id, job.snapshot())
 
 
@@ -1035,9 +1089,9 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             return orchestrator.get_job(job_id).snapshot()
         return _workflow_node_snapshot(workflow_id, node_id)
 
-    def record(message: dict[str, Any], received_at: str) -> None:
+    async def record(message: dict[str, Any], received_at: str) -> None:
         method = str(message.get("method") or "unknown")
-        store.add_event(
+        await get_workflow_event_batcher().add(
             workflow_id,
             node_id=node_id,
             source="worker",
@@ -1097,6 +1151,8 @@ async def wait_node(
         return node
     job = await orchestrator.wait(job_id, timeout_sec)
     snapshot = job.snapshot()
+    if job.completed.is_set():
+        await flush_workflow_events()
     get_workflow_store().sync_node_job(workflow_id, node_id, snapshot)
     return snapshot
 

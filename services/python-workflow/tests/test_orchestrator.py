@@ -46,7 +46,6 @@ class RemotePathTests(unittest.TestCase):
                 },
             )
 
-
 class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     def _write_config(
         self,
@@ -106,6 +105,40 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(final.last_event_method, "turn/completed")
                 self.assertIsNotNone(final.last_event_at)
                 self.assertEqual(final.events_seen, 2)
+
+    async def test_same_agent_jobs_are_strictly_serial(self) -> None:
+        async with MockAppServer(delay_sec=0.3) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                first = await self._dispatch(orchestrator)
+                second = await self._dispatch(orchestrator)
+                for _ in range(100):
+                    if first.status == "running":
+                        break
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
+
+                self.assertEqual(first.status, "running")
+                self.assertEqual(second.status, "queued")
+                await orchestrator.wait(first.job_id, 1)
+                await orchestrator.wait(second.job_id, 1)
+                self.assertEqual(second.status, "completed")
+
+    async def test_completed_jobs_are_bounded(self) -> None:
+        async with MockAppServer(delay_sec=0.01) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(directory, server.url),
+                    max_retained_jobs=2,
+                )
+                ids = []
+                for _ in range(3):
+                    job = await self._dispatch(orchestrator)
+                    ids.append(job.job_id)
+                    await orchestrator.wait(job.job_id, 1)
+
+                self.assertNotIn(ids[0], orchestrator.jobs)
+                self.assertEqual(set(orchestrator.jobs), set(ids[1:]))
 
     async def test_raw_app_server_events_reach_monitor_callback(self) -> None:
         observed: list[dict[str, object]] = []

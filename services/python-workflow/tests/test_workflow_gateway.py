@@ -35,6 +35,7 @@ class SupervisorPromptTests(unittest.TestCase):
         self.assertIn("不要直接抛出内部错误信息", prompt)
         self.assertIn("任务已全部完成", prompt)
         self.assertIn("timeout_sec 使用 10 秒", prompt)
+        self.assertIn("节点派发后必须调用 wait_node", prompt)
 
     def test_chat_prompt_enforces_latest_status_and_confirmation(self) -> None:
         prompt = WorkflowGateway._chat_prompt(

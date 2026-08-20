@@ -1,6 +1,9 @@
+import asyncio
 import json
+import logging
 import sqlite3
 import uuid
+import zlib
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,10 +17,136 @@ RESULT_LIMIT = 20_000
 DEPENDENCY_RESULTS_LIMIT = 40_000
 PROMPT_LIMIT = 100_000
 TRUNCATION_NOTICE = "\n\n【内容过长，已在此处省略】"
+EVENT_PAYLOAD_LIMIT = 262_144
+LOGGER = logging.getLogger(__name__)
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+class AsyncEventBatcher:
+    """在事件循环外批量提交高频监控事件。"""
+
+    def __init__(
+        self,
+        store: "WorkflowStore",
+        *,
+        batch_size: int = 64,
+        flush_interval: float = 0.05,
+        max_pending: int = 4096,
+    ) -> None:
+        self.store = store
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        self.max_pending = max_pending
+        self._pending: list[dict[str, Any]] = []
+        self._flush_lock = asyncio.Lock()
+        self._timer_handle: asyncio.TimerHandle | None = None
+        self._flush_task: asyncio.Task[None] | None = None
+        self._closed = False
+
+    async def add(
+        self,
+        workflow_id: str,
+        *,
+        node_id: str | None,
+        source: str,
+        event_type: str,
+        payload: dict[str, Any],
+        created_at: str | None = None,
+    ) -> None:
+        if self._closed:
+            raise RuntimeError("事件批量写入器已经关闭。")
+        if len(self._pending) >= self.max_pending:
+            await self.flush()
+        self._pending.append(
+            {
+                "workflow_id": workflow_id,
+                "node_id": node_id,
+                "source": source,
+                "event_type": event_type,
+                "payload": payload,
+                "created_at": created_at or utc_now(),
+            }
+        )
+        if len(self._pending) >= self.batch_size:
+            await self.flush()
+        else:
+            self._schedule_flush()
+
+    async def flush(self) -> None:
+        if self._timer_handle is not None:
+            self._timer_handle.cancel()
+            self._timer_handle = None
+        task = self._flush_task
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.shield(task)
+        await self._flush_batch()
+
+    async def close(self) -> None:
+        self._closed = True
+        await self.flush()
+
+    def _schedule_flush(self) -> None:
+        if (
+            self._closed
+            or not self._pending
+            or self._timer_handle is not None
+            or (self._flush_task is not None and not self._flush_task.done())
+        ):
+            return
+        self._timer_handle = asyncio.get_running_loop().call_later(
+            self.flush_interval, self._start_scheduled_flush
+        )
+
+    def _start_scheduled_flush(self) -> None:
+        self._timer_handle = None
+        if self._closed or not self._pending:
+            return
+        task = asyncio.create_task(
+            self._run_scheduled_flush(), name="workflow-event-flush"
+        )
+        self._flush_task = task
+        task.add_done_callback(self._log_background_failure)
+
+    async def _run_scheduled_flush(self) -> None:
+        current = asyncio.current_task()
+        cancelled = False
+        try:
+            await self._flush_batch()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if self._flush_task is current:
+                self._flush_task = None
+            if not cancelled:
+                self._schedule_flush()
+
+    @staticmethod
+    def _log_background_failure(task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            LOGGER.error(
+                "批量写入工作流事件失败。",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    async def _flush_batch(self) -> None:
+        async with self._flush_lock:
+            if not self._pending:
+                return
+            batch = self._pending
+            self._pending = []
+            try:
+                await asyncio.to_thread(self.store.add_events, batch)
+            except BaseException:
+                self._pending = batch + self._pending
+                raise
 
 
 class WorkflowStore:
@@ -62,7 +191,8 @@ class WorkflowStore:
                     started_at TEXT,
                     finished_at TEXT,
                     state_version INTEGER NOT NULL DEFAULT 0,
-                    spec_json TEXT NOT NULL
+                    spec_json TEXT NOT NULL,
+                    spec_zlib BLOB
                 );
 
                 CREATE TABLE IF NOT EXISTS workflow_nodes (
@@ -174,6 +304,8 @@ class WorkflowStore:
                 connection.execute(
                     "ALTER TABLE workflows ADD COLUMN state_version INTEGER NOT NULL DEFAULT 0"
                 )
+            if "spec_zlib" not in workflow_columns:
+                connection.execute("ALTER TABLE workflows ADD COLUMN spec_zlib BLOB")
             connection.execute(
                 """
                 UPDATE workflow_nodes
@@ -311,14 +443,22 @@ class WorkflowStore:
     def create_workflow(self, value: dict[str, Any]) -> dict[str, Any]:
         spec = self.normalize_spec(value)
         timestamp = utc_now()
+        encoded_spec = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
+        compressed_spec = zlib.compress(encoded_spec.encode("utf-8"), level=6)
+        compact_spec = json.dumps(
+            {"workflowId": spec["workflowId"], "compressed": True},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         with self._connect() as connection:
             try:
                 connection.execute(
                     """
                     INSERT INTO workflows (
                         workflow_id, name, status, failure_policy,
-                        supervisor_agent_id, supervisor_status, created_at, spec_json
-                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?)
+                        supervisor_agent_id, supervisor_status, created_at,
+                        spec_json, spec_zlib
+                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?)
                     """,
                     (
                         spec["workflowId"],
@@ -326,7 +466,8 @@ class WorkflowStore:
                         spec["failurePolicy"],
                         spec["supervisorAgentId"],
                         timestamp,
-                        json.dumps(spec, ensure_ascii=False),
+                        compact_spec,
+                        compressed_spec,
                     ),
                 )
             except sqlite3.IntegrityError as error:
@@ -347,7 +488,7 @@ class WorkflowStore:
                         node["position"],
                         node["agentId"],
                         node["executorType"],
-                        node["prompt"],
+                        "",
                         node["displayName"],
                         node["roleName"],
                         node["prompt"],
@@ -373,22 +514,38 @@ class WorkflowStore:
     def get_spec(self, workflow_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT spec_json FROM workflows WHERE workflow_id = ?", (workflow_id,)
+                "SELECT spec_json, spec_zlib FROM workflows WHERE workflow_id = ?",
+                (workflow_id,),
             ).fetchone()
         if row is None:
             raise ValueError(f"找不到工作流：{workflow_id}")
+        if row["spec_zlib"] is not None:
+            return json.loads(zlib.decompress(row["spec_zlib"]).decode("utf-8"))
         return json.loads(row["spec_json"])
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             workflow = connection.execute(
-                "SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,)
+                """
+                SELECT workflow_id, name, status, failure_policy,
+                       supervisor_agent_id, supervisor_job_id,
+                       supervisor_thread_id, supervisor_turn_id,
+                       supervisor_status, supervisor_last_message,
+                       response, error, created_at, started_at, finished_at,
+                       state_version
+                FROM workflows WHERE workflow_id = ?
+                """,
+                (workflow_id,),
             ).fetchone()
             if workflow is None:
                 raise ValueError(f"找不到工作流：{workflow_id}")
             node_rows = connection.execute(
                 """
-                SELECT * FROM workflow_nodes
+                SELECT workflow_id, node_id, position, agent_id, executor_type,
+                       display_name, role_name, depends_on_json, status, job_id,
+                       thread_id, turn_id, response, error, started_at,
+                       finished_at, attempt_count
+                FROM workflow_nodes
                 WHERE workflow_id = ? ORDER BY position
                 """,
                 (workflow_id,),
@@ -397,6 +554,25 @@ class WorkflowStore:
                 "SELECT COALESCE(MAX(sequence), 0) FROM workflow_events WHERE workflow_id = ?",
                 (workflow_id,),
             ).fetchone()[0]
+            pending_chat_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM workflow_chat_messages
+                    WHERE workflow_id = ? AND role = 'user'
+                      AND status IN ('accepted', 'processing')
+                    """,
+                    (workflow_id,),
+                ).fetchone()[0]
+            )
+            pending_control_row = connection.execute(
+                """
+                SELECT action_id, action_type, node_id, status, expires_at
+                FROM workflow_control_actions
+                WHERE workflow_id = ? AND status = 'pending' AND expires_at > ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (workflow_id, utc_now()),
+            ).fetchone()
 
         nodes = [self._node_snapshot(row) for row in node_rows]
         current_nodes = [node["id"] for node in nodes if node["status"] in ACTIVE_NODE_STATUSES]
@@ -423,19 +599,13 @@ class WorkflowStore:
             "finishedAt": workflow["finished_at"],
             "stateVersion": int(workflow["state_version"] or 0),
             "lastEventSequence": last_sequence,
-            "pendingChatCount": self.pending_chat_count(workflow_id),
-            "pendingControl": self.get_pending_control(workflow_id),
+            "pendingChatCount": pending_chat_count,
+            "pendingControl": self._pending_control_snapshot(pending_control_row),
             "nodes": nodes,
         }
 
     def get_workflow_spec(self, workflow_id: str) -> dict[str, Any]:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT spec_json FROM workflows WHERE workflow_id = ?", (workflow_id,)
-            ).fetchone()
-        if row is None:
-            raise ValueError(f"找不到工作流：{workflow_id}")
-        return json.loads(row[0])
+        return self.get_spec(workflow_id)
 
     def accept_chat_message(self, workflow_id: str, message_id: str, text: str) -> dict[str, Any]:
         text = text.strip()
@@ -657,19 +827,14 @@ class WorkflowStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT * FROM workflow_control_actions
+                SELECT action_id, action_type, node_id, status, expires_at
+                FROM workflow_control_actions
                 WHERE workflow_id = ? AND status = 'pending' AND expires_at > ?
                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (workflow_id, now),
             ).fetchone()
-        if row is None:
-            return None
-        return {
-            "actionId": row["action_id"], "type": row["action_type"],
-            "nodeId": row["node_id"], "status": row["status"],
-            "expiresAt": row["expires_at"],
-        }
+        return self._pending_control_snapshot(row)
 
     def cancel_pending_control(self, workflow_id: str, message_id: str) -> dict[str, Any]:
         now = utc_now()
@@ -955,6 +1120,35 @@ class WorkflowStore:
             "attemptCount": int(row["attempt_count"] or 0),
         }
 
+    @staticmethod
+    def _pending_control_snapshot(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            "actionId": row["action_id"],
+            "type": row["action_type"],
+            "nodeId": row["node_id"],
+            "status": row["status"],
+            "expiresAt": row["expires_at"],
+        }
+
+    def get_node(self, workflow_id: str, node_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT workflow_id, node_id, position, agent_id, executor_type,
+                       display_name, role_name, depends_on_json, status, job_id,
+                       thread_id, turn_id, response, error, started_at,
+                       finished_at, attempt_count
+                FROM workflow_nodes
+                WHERE workflow_id = ? AND node_id = ?
+                """,
+                (workflow_id, node_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"找不到节点：{node_id}")
+        return self._node_snapshot(row)
+
     def prepare_node_dispatch(self, workflow_id: str, node_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1133,29 +1327,39 @@ class WorkflowStore:
         with self._connect() as connection:
             old = connection.execute(
                 """
-                SELECT status FROM workflow_nodes
+                SELECT status, job_id, thread_id, turn_id, response, error, finished_at
+                FROM workflow_nodes
                 WHERE workflow_id = ? AND node_id = ?
                 """,
                 (workflow_id, node_id),
             ).fetchone()
             if old is None:
                 return
+            values = {
+                "status": status,
+                "job_id": snapshot.get("job_id") or old["job_id"],
+                "thread_id": snapshot.get("thread_id") or old["thread_id"],
+                "turn_id": snapshot.get("turn_id") or old["turn_id"],
+                "response": snapshot.get("response"),
+                "error": snapshot.get("error"),
+                "finished_at": finished_at or old["finished_at"],
+            }
+            if all(old[key] == value for key, value in values.items()):
+                return
             connection.execute(
                 """
-                UPDATE workflow_nodes
-                SET status = ?, job_id = COALESCE(?, job_id),
-                    thread_id = COALESCE(?, thread_id), turn_id = COALESCE(?, turn_id),
-                    response = ?, error = ?, finished_at = COALESCE(?, finished_at)
+                UPDATE workflow_nodes SET status = ?, job_id = ?, thread_id = ?,
+                    turn_id = ?, response = ?, error = ?, finished_at = ?
                 WHERE workflow_id = ? AND node_id = ?
                 """,
                 (
-                    status,
-                    snapshot.get("job_id"),
-                    snapshot.get("thread_id"),
-                    snapshot.get("turn_id"),
-                    snapshot.get("response"),
-                    snapshot.get("error"),
-                    finished_at,
+                    values["status"],
+                    values["job_id"],
+                    values["thread_id"],
+                    values["turn_id"],
+                    values["response"],
+                    values["error"],
+                    values["finished_at"],
                     workflow_id,
                     node_id,
                 ),
@@ -1214,8 +1418,11 @@ class WorkflowStore:
     def set_supervisor_message(self, workflow_id: str, message: str) -> None:
         with self._connect() as connection:
             connection.execute(
-                "UPDATE workflows SET supervisor_last_message = ? WHERE workflow_id = ?",
-                (message, workflow_id),
+                """
+                UPDATE workflows SET supervisor_last_message = ?
+                WHERE workflow_id = ? AND supervisor_last_message IS NOT ?
+                """,
+                (message, workflow_id, message),
             )
 
     def finish_workflow(
@@ -1277,6 +1484,23 @@ class WorkflowStore:
                 connection, workflow_id, node_id, source, event_type, payload, utc_now()
             )
 
+    def add_events(self, events: list[dict[str, Any]]) -> list[int]:
+        if not events:
+            return []
+        with self._connect() as connection:
+            return [
+                self._add_event_with_connection(
+                    connection,
+                    str(event["workflow_id"]),
+                    event.get("node_id"),
+                    str(event["source"]),
+                    str(event["event_type"]),
+                    event["payload"],
+                    str(event.get("created_at") or utc_now()),
+                )
+                for event in events
+            ]
+
     @staticmethod
     def _add_event_with_connection(
         connection: sqlite3.Connection,
@@ -1288,7 +1512,7 @@ class WorkflowStore:
         created_at: str,
     ) -> int:
         encoded = json.dumps(payload, ensure_ascii=False, default=str)
-        if len(encoded) > 262_144:
+        if len(encoded) > EVENT_PAYLOAD_LIMIT:
             encoded = json.dumps(
                 {"truncated": True, "preview": encoded[:262_000]}, ensure_ascii=False
             )

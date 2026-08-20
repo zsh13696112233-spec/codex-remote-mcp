@@ -106,7 +106,8 @@ Python：
 
 ```powershell
 uv run --project .\services\python-workflow `
-  python -m unittest discover -s .\services\python-workflow\tests -v
+  python -m unittest discover -s .\services\python-workflow\tests `
+  -t .\services\python-workflow -v
 ```
 
 Java：

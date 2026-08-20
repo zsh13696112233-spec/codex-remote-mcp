@@ -1,7 +1,9 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,17 +23,19 @@ from codex_orchestrator_mcp import (
     TurnNotActiveError,
     utc_now,
 )
-from workflow_store import WorkflowStore
+from workflow_store import AsyncEventBatcher, WorkflowStore
 
 
 DEFAULT_DB_PATH = Path(__file__).with_name("workflows.db")
 TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "cancelled"}
+LOGGER = logging.getLogger(__name__)
 
 
 class WorkflowGateway:
     def __init__(self, store: WorkflowStore, orchestrator: Orchestrator) -> None:
         self.store = store
         self.orchestrator = orchestrator
+        self.event_batcher = AsyncEventBatcher(store)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._chat_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -39,6 +43,12 @@ class WorkflowGateway:
         self.store.recover_processing_chat_messages()
         for workflow_id in self.store.list_chat_workflows():
             self._ensure_chat_worker(workflow_id)
+
+    async def flush_events(self) -> None:
+        try:
+            await self.event_batcher.flush()
+        except Exception:
+            LOGGER.exception("刷新主监督监控事件失败。")
 
     async def submit(self, raw_spec: dict[str, Any]) -> dict[str, Any]:
         spec = WorkflowStore.normalize_spec(raw_spec)
@@ -50,7 +60,7 @@ class WorkflowGateway:
         if unknown:
             raise ValueError(f"工作流引用了未知执行机：{', '.join(unknown)}")
 
-        snapshot = self.store.create_workflow(spec)
+        snapshot = await asyncio.to_thread(self.store.create_workflow, spec)
         workflow_id = spec["workflowId"]
         task = asyncio.create_task(
             self._run_supervisor(spec), name=f"workflow-supervisor:{workflow_id}"
@@ -90,12 +100,13 @@ class WorkflowGateway:
                 before = self.store.get_workflow(workflow_id)
                 before_fingerprint = self._node_progress_fingerprint(before)
                 message_buffer = ""
+                last_message_flush_at = 0.0
 
-                def record(message: dict[str, Any], received_at: str) -> None:
-                    nonlocal message_buffer
+                async def record(message: dict[str, Any], received_at: str) -> None:
+                    nonlocal message_buffer, last_message_flush_at
                     method = str(message.get("method") or "unknown")
                     params = message.get("params") or {}
-                    self.store.add_event(
+                    await self.event_batcher.add(
                         workflow_id,
                         node_id=None,
                         source="supervisor",
@@ -106,12 +117,24 @@ class WorkflowGateway:
                         delta = params.get("delta")
                         if isinstance(delta, str):
                             message_buffer = (message_buffer + delta)[-20_000:]
-                            self.store.set_supervisor_message(workflow_id, message_buffer)
+                            now = time.monotonic()
+                            if now - last_message_flush_at >= 0.25:
+                                await asyncio.to_thread(
+                                    self.store.set_supervisor_message,
+                                    workflow_id,
+                                    message_buffer,
+                                )
+                                last_message_flush_at = now
                     elif method == "item/completed":
                         item = params.get("item") or {}
                         if item.get("type") == "agentMessage" and item.get("text"):
                             message_buffer = str(item["text"])[-20_000:]
-                            self.store.set_supervisor_message(workflow_id, message_buffer)
+                            await asyncio.to_thread(
+                                self.store.set_supervisor_message,
+                                workflow_id,
+                                message_buffer,
+                            )
+                            last_message_flush_at = time.monotonic()
 
                 prompt = (
                     self._supervisor_prompt(spec)
@@ -131,6 +154,9 @@ class WorkflowGateway:
                     event_callback=record,
                 )
                 self.store.update_supervisor(workflow_id, job.snapshot())
+                last_supervisor_fingerprint = self._supervisor_job_fingerprint(
+                    job.snapshot()
+                )
                 self.store.add_event(
                     workflow_id,
                     node_id=None,
@@ -139,9 +165,23 @@ class WorkflowGateway:
                     payload={"jobId": job.job_id, "agentId": job.agent_id},
                 )
                 while not job.completed.is_set():
-                    self.store.update_supervisor(workflow_id, job.snapshot())
-                    await asyncio.sleep(0.25)
+                    current_snapshot = job.snapshot()
+                    current_fingerprint = self._supervisor_job_fingerprint(
+                        current_snapshot
+                    )
+                    if current_fingerprint != last_supervisor_fingerprint:
+                        self.store.update_supervisor(workflow_id, current_snapshot)
+                        last_supervisor_fingerprint = current_fingerprint
+                    try:
+                        await asyncio.wait_for(job.completed.wait(), timeout=0.25)
+                    except TimeoutError:
+                        pass
                 job_snapshot = job.snapshot()
+                await self.flush_events()
+                if message_buffer:
+                    await asyncio.to_thread(
+                        self.store.set_supervisor_message, workflow_id, message_buffer
+                    )
                 self.store.update_supervisor(workflow_id, job_snapshot)
 
                 latest = self.store.get_workflow(workflow_id)
@@ -213,6 +253,16 @@ class WorkflowGateway:
                 node.get("response"), node.get("error"),
             )
             for node in snapshot.get("nodes", [])
+        )
+
+    @staticmethod
+    def _supervisor_job_fingerprint(snapshot: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            snapshot.get("status"),
+            snapshot.get("thread_id"),
+            snapshot.get("turn_id"),
+            snapshot.get("response"),
+            snapshot.get("error"),
         )
 
     @staticmethod
@@ -288,7 +338,9 @@ class WorkflowGateway:
     async def accept_message(
         self, workflow_id: str, message_id: str, text: str
     ) -> dict[str, Any]:
-        accepted = self.store.accept_chat_message(workflow_id, message_id, text)
+        accepted = await asyncio.to_thread(
+            self.store.accept_chat_message, workflow_id, message_id, text
+        )
         self._ensure_chat_worker(workflow_id)
         return accepted
 
@@ -407,6 +459,26 @@ class WorkflowGateway:
         turn_completed: asyncio.Event,
     ) -> str:
         chunks: list[str] = []
+        pending_deltas: list[str] = []
+        pending_delta_size = 0
+        last_delta_flush_at = time.monotonic()
+
+        async def flush_deltas() -> None:
+            nonlocal pending_deltas, pending_delta_size, last_delta_flush_at
+            if not pending_deltas:
+                return
+            delta = "".join(pending_deltas)
+            pending_deltas = []
+            pending_delta_size = 0
+            await asyncio.to_thread(
+                self.store.add_chat_delta,
+                workflow_id,
+                message_id,
+                assistant_message_id,
+                delta,
+            )
+            last_delta_flush_at = time.monotonic()
+
         while True:
             event_task = asyncio.create_task(queue.get())
             completed_task = asyncio.create_task(turn_completed.wait())
@@ -417,8 +489,10 @@ class WorkflowGateway:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
             if not done:
+                await flush_deltas()
                 raise RuntimeError("等待任务助手回复超时，请安全重试。")
             if event_task not in done:
+                await flush_deltas()
                 return "".join(chunks)
             event = event_task.result()
             method = event.get("method")
@@ -426,9 +500,13 @@ class WorkflowGateway:
             if method == "item/agentMessage/delta" and isinstance(params.get("delta"), str):
                 delta = params["delta"]
                 chunks.append(delta)
-                self.store.add_chat_delta(
-                    workflow_id, message_id, assistant_message_id, delta
-                )
+                pending_deltas.append(delta)
+                pending_delta_size += len(delta)
+                if (
+                    pending_delta_size >= 2_048
+                    or time.monotonic() - last_delta_flush_at >= 0.05
+                ):
+                    await flush_deltas()
             elif method == "item/completed":
                 item = params.get("item") or {}
                 if (
@@ -438,11 +516,11 @@ class WorkflowGateway:
                 ):
                     final = str(item["text"])
                     if not chunks:
-                        self.store.add_chat_delta(
-                            workflow_id, message_id, assistant_message_id, final
-                        )
+                        pending_deltas.append(final)
+                    await flush_deltas()
                     return final
             elif method == "turn/completed":
+                await flush_deltas()
                 return ""
 
     @staticmethod
@@ -510,21 +588,22 @@ class WorkflowGateway:
         task.add_done_callback(lambda done: self._drop_task(workflow_id, done))
 
     async def cancel(self, workflow_id: str) -> dict[str, Any]:
-        snapshot = self.store.get_workflow(workflow_id)
+        snapshot = await asyncio.to_thread(self.store.get_workflow, workflow_id)
         task = self._tasks.get(workflow_id)
         job_id = snapshot["supervisor"].get("jobId")
         if job_id and job_id in self.orchestrator.jobs:
             await self.orchestrator.cancel(job_id)
         if task is not None and not task.done():
             task.cancel()
-        self.store.add_event(
+        await asyncio.to_thread(
+            self.store.add_event,
             workflow_id,
             node_id=None,
             source="gateway",
             event_type="workflow.cancel_requested",
             payload={"requestedAt": utc_now()},
         )
-        return self.store.get_workflow(workflow_id)
+        return await asyncio.to_thread(self.store.get_workflow, workflow_id)
 
 
 def _error_response(error: Exception, status_code: int = 400) -> JSONResponse:
@@ -547,7 +626,10 @@ async def create_workflow(request: Request) -> Response:
 async def get_workflow(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     try:
-        return JSONResponse(gateway.store.get_workflow(request.path_params["workflow_id"]))
+        snapshot = await asyncio.to_thread(
+            gateway.store.get_workflow, request.path_params["workflow_id"]
+        )
+        return JSONResponse(snapshot)
     except ValueError as error:
         return _error_response(error, 404)
 
@@ -577,8 +659,11 @@ async def get_event_history(request: Request) -> Response:
     try:
         after = int(request.query_params.get("after", "0"))
         limit = int(request.query_params.get("limit", "200"))
-        events = gateway.store.list_events(
-            request.path_params["workflow_id"], after=after, limit=limit
+        events = await asyncio.to_thread(
+            gateway.store.list_events,
+            request.path_params["workflow_id"],
+            after=after,
+            limit=limit,
         )
         return JSONResponse({"events": events})
     except ValueError as error:
@@ -589,7 +674,7 @@ async def stream_events(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     workflow_id = request.path_params["workflow_id"]
     try:
-        gateway.store.get_workflow(workflow_id)
+        await asyncio.to_thread(gateway.store.get_workflow, workflow_id)
         after = int(request.query_params.get("after", "0"))
     except ValueError as error:
         return _error_response(error, 404)
@@ -600,7 +685,9 @@ async def stream_events(request: Request) -> Response:
         while True:
             if await request.is_disconnected():
                 return
-            events = gateway.store.list_events(workflow_id, after=cursor, limit=200)
+            events = await asyncio.to_thread(
+                gateway.store.list_events, workflow_id, after=cursor, limit=200
+            )
             if events:
                 idle_cycles = 0
                 for event in events:
@@ -612,7 +699,9 @@ async def stream_events(request: Request) -> Response:
                 if idle_cycles >= 15:
                     idle_cycles = 0
                     yield ": keep-alive\n\n"
-                snapshot = gateway.store.get_workflow(workflow_id)
+                snapshot = await asyncio.to_thread(
+                    gateway.store.get_workflow, workflow_id
+                )
                 if (
                     snapshot["status"] == "completed"
                     and snapshot.get("pendingChatCount", 0) == 0
@@ -671,6 +760,10 @@ def create_app(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await gateway.event_batcher.close()
+        except Exception:
+            LOGGER.exception("关闭监控事件批量写入器失败。")
 
     app = Starlette(
         routes=[
