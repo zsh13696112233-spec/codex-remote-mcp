@@ -1,5 +1,18 @@
 {
   "agents": {
+    "local": {
+      "url": "ws://127.0.0.1:4501",
+      "cwd": "C:\\data",
+      "allow_write": false,
+      "allow_cwd_override": true
+    },
+    "remote-192-168-10-91": {
+      "url": "ws://192.168.10.91:4500",
+      "cwd": "D:\\codex",
+      "token_env": "REMOTE_CODEX_1091_TOKEN",
+      "allow_write": false,
+      "allow_cwd_override": false
+    },
     "remote-192-168-3-16": {
       "url": "ws://192.168.3.16:4500",
       "cwd": "/tmp",
@@ -9,7 +22,7 @@
     },
     "remote-192-168-3-7": {
       "url": "ws://127.0.0.1:4501",
-      "cwd": "/tmp",
+      "cwd": "C:\\data",
       "allow_write": false,
       "allow_cwd_override": true
     }

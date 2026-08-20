@@ -1,0 +1,17 @@
+{
+  "agents": {
+    "local": {
+      "url": "ws://127.0.0.1:4500",
+      "cwd": "C:\\work",
+      "allow_write": true,
+      "allow_cwd_override": true
+    },
+    "remote-build": {
+      "url": "wss://worker.example.com/codex",
+      "cwd": "/srv/work",
+      "token_env": "REMOTE_CODEX_TOKEN",
+      "allow_write": false,
+      "allow_cwd_override": false
+    }
+  }
+}

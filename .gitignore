@@ -2,4 +2,8 @@
 .uv-cache/
 __pycache__/
 *.py[cod]
+*.db
+*.db-shm
+*.db-wal
+workflow-console/target/
 .DS_Store

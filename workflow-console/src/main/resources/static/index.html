@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>任务运行监控中心</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="brand"><b>CF</b><span>任务运行监控中心<small>只读实时视图 · 8090</small></span></div>
+    <div id="gateway" class="connection">正在检查网关</div>
+  </header>
+  <main>
+    <section id="lookup" class="lookup">
+      <div>
+        <small>WORKFLOW LOOKUP</small>
+        <h1>查看一项任务</h1>
+        <p>输入任务编号后，只展示这一项任务的运行情况。</p>
+        <form id="lookupForm">
+          <input id="workflowInput" placeholder="请输入任务编号" autocomplete="off" required>
+          <button>查看任务</button>
+        </form>
+      </div>
+    </section>
+
+    <section id="monitor" hidden>
+      <div class="hero">
+        <div>
+          <small>当前任务</small>
+          <h1 id="name">—</h1>
+          <p>任务编号：<span id="id">—</span></p>
+        </div>
+        <div id="status" class="status">未开始</div>
+      </div>
+
+      <div class="overview">
+        <article><span>当前步骤</span><strong id="current">尚未开始</strong></article>
+        <article><span>步骤进度</span><strong id="progress">0 / 0</strong></article>
+        <article><span>运行时长</span><strong id="duration">—</strong></article>
+        <article><span>最后更新</span><strong id="updated">—</strong></article>
+      </div>
+
+      <div class="workspace">
+        <section class="panel progress-panel">
+          <div class="panel-head">
+            <div><small>SERIAL PROGRESS</small><h2>串行步骤进度</h2></div>
+            <div class="legend" aria-label="状态说明">
+              <span><i class="legend-dot pending"></i>未开始</span>
+              <span><i class="legend-dot running"></i>进行中</span>
+              <span><i class="legend-dot completed"></i>已完成</span>
+              <span><i class="legend-dot failed"></i>未完成</span>
+            </div>
+          </div>
+          <div id="steps" class="step-list"></div>
+        </section>
+
+        <section class="panel chat-panel">
+          <div class="panel-head chat-head">
+            <div><small>LIVE UPDATES</small><h2>任务进展消息</h2></div>
+            <span class="live-badge"><i></i>实时</span>
+          </div>
+          <div id="messages" class="messages" aria-live="polite">
+            <div class="chat-empty"><span>···</span><p>正在等待任务消息</p></div>
+          </div>
+          <form id="chatForm" class="chat-compose">
+            <label for="chatInput" class="sr-only">向任务助手发送消息</label>
+            <textarea id="chatInput" maxlength="4000" rows="3"
+              placeholder="询问任务进度，或请求停止、重试、跳过步骤…"></textarea>
+            <div class="compose-actions">
+              <span id="chatHint" role="status">任务运行期间可随时咨询</span>
+              <button id="sendMessage" type="submit">发送</button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </section>
+  </main>
+  <div id="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>
