@@ -9,6 +9,9 @@
 - Java `HttpClient`
 - 原生 HTML、CSS 和 JavaScript
 
+Java 根包为 `com.codexflow.console`，Web 控制器、异常映射和
+工作流网关客户端分别维护。
+
 ## 页面能力
 
 - 每个页面只查看 URL 指定的一项任务。
@@ -111,6 +114,8 @@ POST /api/workflows/{workflowId}/messages
 ```powershell
 mvn test
 ```
+
+构建会自动检查 Java 格式。需要修复格式时执行 `mvn fmt:format`。
 
 测试会启动 Spring 上下文，并验证 `/api` 下只有三个 GET 和一个消息 POST 路由，不存在直接提交、取消、重试、跳过或编辑接口。
 

@@ -11,6 +11,9 @@
 - Flyway
 - 原生 HTML、CSS 和 JavaScript
 
+Java 根包为 `com.codexflow.configcenter`。代码按 Web 接口、应用编排、领域与持久化、
+外部网关客户端划分；Flyway 继续作为唯一的数据库结构版本管理入口。
+
 ## 功能
 
 - 角色的新建、编辑、搜索、启停和删除。
@@ -90,7 +93,7 @@ java -jar .\target\role-task-config-center-0.1.0.jar
 | `SERVER_ADDRESS` | `127.0.0.1` | 监听地址 |
 | `MYSQL_URL` | 本机 `codex_config` JDBC 地址 | MySQL JDBC URL |
 | `MYSQL_USERNAME` | `codex` | 数据库用户名 |
-| `MYSQL_PASSWORD` | `codex` | 数据库密码，生产环境必须覆盖 |
+| `MYSQL_PASSWORD` | 无 | 数据库密码，必须显式设置 |
 | `CODEX_GATEWAY_URL` | `http://127.0.0.1:8080` | Python 网关地址 |
 | `WORKFLOW_MONITOR_URL` | `http://127.0.0.1:8090` | 监控中心地址 |
 | `DEFAULT_STEP_MODEL` | `gpt-5.6-sol` | SOP 默认步骤模型 |
@@ -135,6 +138,12 @@ GET /api/roles?q=开发
 
 ```powershell
 mvn test
+```
+
+构建会自动检查 Java 格式。需要修复格式时执行：
+
+```powershell
+mvn fmt:format
 ```
 
 自动化测试使用 H2 的 MySQL 兼容模式，并验证 Flyway 建表和默认数据。正式验收仍应连接真实 MySQL 8，验证数据持久化和服务重启后的恢复情况。
