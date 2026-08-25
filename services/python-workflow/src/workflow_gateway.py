@@ -41,6 +41,12 @@ class WorkflowGateway:
 
     async def start(self) -> None:
         self.store.recover_processing_chat_messages()
+        try:
+            imported = await asyncio.to_thread(self.store.import_legacy_generated_images)
+            if imported:
+                LOGGER.info("已回填 %s 个历史工作流图片附件。", imported)
+        except Exception:
+            LOGGER.exception("回填历史工作流图片附件失败。")
         for workflow_id in self.store.list_chat_workflows():
             self._ensure_chat_worker(workflow_id)
 
@@ -634,6 +640,27 @@ async def get_workflow(request: Request) -> Response:
         return _error_response(error, 404)
 
 
+async def get_workflow_artifact(request: Request) -> Response:
+    gateway: WorkflowGateway = request.app.state.gateway
+    try:
+        artifact = await asyncio.to_thread(
+            gateway.store.get_artifact,
+            request.path_params["workflow_id"],
+            request.path_params["artifact_id"],
+        )
+        return Response(
+            content=artifact["content"],
+            media_type=artifact["mediaType"],
+            headers={
+                "Cache-Control": "private, max-age=31536000, immutable",
+                "Content-Disposition": f'inline; filename="{artifact["filename"]}"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+    except ValueError as error:
+        return _error_response(error, 404)
+
+
 async def post_workflow_message(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     try:
@@ -771,6 +798,11 @@ def create_app(
             Route("/agents", list_agents, methods=["GET"]),
             Route("/workflows", create_workflow, methods=["POST"]),
             Route("/workflows/{workflow_id}", get_workflow, methods=["GET"]),
+            Route(
+                "/workflows/{workflow_id}/artifacts/{artifact_id}",
+                get_workflow_artifact,
+                methods=["GET"],
+            ),
             Route(
                 "/workflows/{workflow_id}/messages",
                 post_workflow_message,

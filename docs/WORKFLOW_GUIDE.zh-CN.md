@@ -321,6 +321,16 @@ GET /workflows/{workflowId}/events?after=123
 GET /workflows/{workflowId}/events/history?after=0&limit=200
 ```
 
+### 4.1 查询步骤图片附件
+
+工作流快照的 `nodes[].artifacts` 返回图片元数据，图片正文通过以下只读接口获取：
+
+```text
+GET /workflows/{workflowId}/artifacts/{artifactId}
+```
+
+图片生成成功时，MCP 在事件截断前提取图片并归属到对应步骤。接口仅返回已经持久化且属于该工作流的 PNG、JPEG、GIF 或 WebP 图片，不接受文件路径参数。单张图片最多 `20 MB`，单个工作流最多 `50` 张。
+
 ### 5. 发送任务助手消息
 
 ```text

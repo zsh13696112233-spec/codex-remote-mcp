@@ -1,6 +1,11 @@
 import asyncio
+import base64
+import binascii
+import hashlib
 import json
 import logging
+import os
+import re
 import sqlite3
 import uuid
 import zlib
@@ -18,6 +23,11 @@ DEPENDENCY_RESULTS_LIMIT = 40_000
 PROMPT_LIMIT = 100_000
 TRUNCATION_NOTICE = "\n\n【内容过长，已在此处省略】"
 EVENT_PAYLOAD_LIMIT = 262_144
+IMAGE_ARTIFACT_LIMIT = 20_000_000
+IMAGE_ARTIFACTS_PER_WORKFLOW_LIMIT = 50
+LEGACY_IMAGE_LINK_PATTERN = re.compile(
+    r"\[[^\]]*\]\((?P<path>[^)]+\.(?:png|jpe?g|gif|webp))\)", re.IGNORECASE
+)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -240,6 +250,26 @@ class WorkflowStore:
 
                 CREATE INDEX IF NOT EXISTS workflow_events_lookup
                     ON workflow_events(workflow_id, sequence);
+
+                CREATE TABLE IF NOT EXISTS workflow_artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    source_item_id TEXT,
+                    media_type TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content BLOB NOT NULL,
+                    byte_size INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (workflow_id, node_id)
+                        REFERENCES workflow_nodes(workflow_id, node_id) ON DELETE CASCADE,
+                    UNIQUE (workflow_id, node_id, source_item_id),
+                    UNIQUE (workflow_id, node_id, sha256)
+                );
+
+                CREATE INDEX IF NOT EXISTS workflow_artifacts_lookup
+                    ON workflow_artifacts(workflow_id, node_id, created_at);
 
                 CREATE TABLE IF NOT EXISTS workflow_chat_messages (
                     message_id TEXT NOT NULL,
@@ -550,6 +580,14 @@ class WorkflowStore:
                 """,
                 (workflow_id,),
             ).fetchall()
+            artifact_rows = connection.execute(
+                """
+                SELECT artifact_id, node_id, media_type, filename, byte_size, created_at
+                FROM workflow_artifacts
+                WHERE workflow_id = ? ORDER BY created_at, artifact_id
+                """,
+                (workflow_id,),
+            ).fetchall()
             last_sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) FROM workflow_events WHERE workflow_id = ?",
                 (workflow_id,),
@@ -574,7 +612,14 @@ class WorkflowStore:
                 (workflow_id, utc_now()),
             ).fetchone()
 
+        artifacts_by_node: dict[str, list[dict[str, Any]]] = {}
+        for row in artifact_rows:
+            artifacts_by_node.setdefault(str(row["node_id"]), []).append(
+                self._artifact_snapshot(row)
+            )
         nodes = [self._node_snapshot(row) for row in node_rows]
+        for node in nodes:
+            node["artifacts"] = artifacts_by_node.get(str(node["id"]), [])
         current_nodes = [node["id"] for node in nodes if node["status"] in ACTIVE_NODE_STATUSES]
         completed_count = sum(node["status"] == "completed" for node in nodes)
         return {
@@ -603,6 +648,212 @@ class WorkflowStore:
             "pendingControl": self._pending_control_snapshot(pending_control_row),
             "nodes": nodes,
         }
+
+    @staticmethod
+    def _image_type(content: bytes) -> tuple[str, str] | None:
+        if content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png", "png"
+        if content.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg", "jpg"
+        if content.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif", "gif"
+        if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+            return "image/webp", "webp"
+        return None
+
+    @staticmethod
+    def _artifact_snapshot(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["artifact_id"],
+            "mediaType": row["media_type"],
+            "filename": row["filename"],
+            "byteSize": int(row["byte_size"]),
+            "createdAt": row["created_at"],
+        }
+
+    def save_image_artifact(
+        self,
+        workflow_id: str,
+        node_id: str,
+        source_item_id: str,
+        encoded_result: str,
+    ) -> dict[str, Any]:
+        """验证并持久化图片生成结果，返回不包含图片正文的附件元数据。"""
+        source_item_id = str(source_item_id or "").strip()
+        if not source_item_id or len(source_item_id) > 200:
+            raise ValueError("图片来源编号无效。")
+        encoded_result = str(encoded_result or "").strip()
+        if encoded_result.startswith("data:"):
+            marker = encoded_result.find(",")
+            if marker < 0 or ";base64" not in encoded_result[:marker].lower():
+                raise ValueError("图片数据格式无效。")
+            encoded_result = encoded_result[marker + 1 :]
+        try:
+            content = base64.b64decode(encoded_result, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise ValueError("图片数据不是有效的 Base64。") from error
+        return self.save_image_bytes(
+            workflow_id, node_id, source_item_id, content
+        )
+
+    def save_image_bytes(
+        self,
+        workflow_id: str,
+        node_id: str,
+        source_item_id: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        """保存经过签名识别的有限大小图片，并按来源和内容保持幂等。"""
+        source_item_id = str(source_item_id or "").strip()
+        if not source_item_id or len(source_item_id) > 200:
+            raise ValueError("图片来源编号无效。")
+        if not content:
+            raise ValueError("图片内容不能为空。")
+        if len(content) > IMAGE_ARTIFACT_LIMIT:
+            raise ValueError("图片大小不能超过 20 MB。")
+        image_type = self._image_type(content)
+        if image_type is None:
+            raise ValueError("仅支持 PNG、JPEG、GIF 和 WebP 图片。")
+        media_type, extension = image_type
+        digest = hashlib.sha256(content).hexdigest()
+        artifact_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"codex-workflow-artifact:{workflow_id}:{node_id}:{source_item_id}:{digest}",
+            )
+        )
+        filename = f"generated-image-{artifact_id[:8]}.{extension}"
+        now = utc_now()
+        with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT artifact_id, node_id, media_type, filename, byte_size, created_at
+                FROM workflow_artifacts
+                WHERE workflow_id = ? AND node_id = ?
+                  AND (source_item_id = ? OR sha256 = ?)
+                LIMIT 1
+                """,
+                (workflow_id, node_id, source_item_id, digest),
+            ).fetchone()
+            if existing is not None:
+                return self._artifact_snapshot(existing)
+            count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM workflow_artifacts WHERE workflow_id = ?",
+                    (workflow_id,),
+                ).fetchone()[0]
+            )
+            if count >= IMAGE_ARTIFACTS_PER_WORKFLOW_LIMIT:
+                raise ValueError("单个工作流最多保存 50 张图片。")
+            connection.execute(
+                """
+                INSERT INTO workflow_artifacts (
+                    artifact_id, workflow_id, node_id, source_item_id,
+                    media_type, filename, content, byte_size, sha256, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id,
+                    workflow_id,
+                    node_id,
+                    source_item_id,
+                    media_type,
+                    filename,
+                    content,
+                    len(content),
+                    digest,
+                    now,
+                ),
+            )
+            self._add_event_with_connection(
+                connection,
+                workflow_id,
+                node_id,
+                "worker",
+                "artifact.created",
+                {
+                    "artifactId": artifact_id,
+                    "mediaType": media_type,
+                    "byteSize": len(content),
+                },
+                now,
+            )
+            row = connection.execute(
+                """
+                SELECT artifact_id, node_id, media_type, filename, byte_size, created_at
+                FROM workflow_artifacts WHERE artifact_id = ?
+                """,
+                (artifact_id,),
+            ).fetchone()
+        assert row is not None
+        return self._artifact_snapshot(row)
+
+    def get_artifact(self, workflow_id: str, artifact_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT artifact_id, node_id, media_type, filename, content,
+                       byte_size, created_at
+                FROM workflow_artifacts
+                WHERE workflow_id = ? AND artifact_id = ?
+                """,
+                (workflow_id, artifact_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError("找不到工作流图片。")
+        result = self._artifact_snapshot(row)
+        result["content"] = bytes(row["content"])
+        result["nodeId"] = row["node_id"]
+        return result
+
+    def import_legacy_generated_images(self, generated_images_root: Path | None = None) -> int:
+        """从历史步骤文本中回填仍位于受信生成目录内的图片。"""
+        root = generated_images_root
+        if root is None:
+            codex_home = Path(os.getenv("CODEX_HOME", Path.home() / ".codex"))
+            root = codex_home / "generated_images"
+        try:
+            trusted_root = root.expanduser().resolve(strict=True)
+        except (FileNotFoundError, OSError):
+            return 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT workflow_id, node_id, response FROM workflow_nodes
+                WHERE response IS NOT NULL AND response <> ''
+                """
+            ).fetchall()
+        imported = 0
+        for row in rows:
+            for match in LEGACY_IMAGE_LINK_PATTERN.finditer(str(row["response"])):
+                raw_path = match.group("path").replace(r"\_", "_").strip()
+                try:
+                    candidate = Path(raw_path).expanduser().resolve(strict=True)
+                    if not candidate.is_file() or not candidate.is_relative_to(trusted_root):
+                        continue
+                    if candidate.stat().st_size > IMAGE_ARTIFACT_LIMIT:
+                        continue
+                    source_item_id = "legacy:" + hashlib.sha256(
+                        str(candidate).encode("utf-8")
+                    ).hexdigest()
+                    with self._connect() as connection:
+                        exists = connection.execute(
+                            """
+                            SELECT 1 FROM workflow_artifacts
+                            WHERE workflow_id = ? AND node_id = ? AND source_item_id = ?
+                            """,
+                            (row["workflow_id"], row["node_id"], source_item_id),
+                        ).fetchone()
+                    if exists is not None:
+                        continue
+                    content = candidate.read_bytes()
+                    self.save_image_bytes(
+                        str(row["workflow_id"]), str(row["node_id"]), source_item_id, content
+                    )
+                    imported += 1
+                except (OSError, ValueError):
+                    continue
+        return imported
 
     def get_workflow_spec(self, workflow_id: str) -> dict[str, Any]:
         return self.get_spec(workflow_id)

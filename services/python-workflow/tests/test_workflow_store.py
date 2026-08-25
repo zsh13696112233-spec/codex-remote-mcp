@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import tempfile
 import unittest
@@ -140,6 +141,54 @@ class WorkflowStoreTests(unittest.TestCase):
         )
         events = self.store.list_events("serial-demo", after=first)
         self.assertEqual([event["type"] for event in events], ["custom.progress"])
+
+    def test_generated_image_is_persisted_and_exposed_as_node_artifact(self) -> None:
+        self.store.create_workflow(serial_workflow())
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        first = self.store.save_image_artifact(
+            "serial-demo", "a", "image-item-1", base64.b64encode(png).decode("ascii")
+        )
+        repeated = self.store.save_image_artifact(
+            "serial-demo", "a", "image-item-1", base64.b64encode(png).decode("ascii")
+        )
+
+        self.assertEqual(first["id"], repeated["id"])
+        self.assertEqual(first["mediaType"], "image/png")
+        node = self.store.get_workflow("serial-demo")["nodes"][0]
+        self.assertEqual(node["artifacts"], [first])
+        artifact = self.store.get_artifact("serial-demo", first["id"])
+        self.assertEqual(artifact["content"], png)
+        self.assertEqual(artifact["nodeId"], "a")
+        with self.assertRaisesRegex(ValueError, "找不到工作流图片"):
+            self.store.get_artifact("another-workflow", first["id"])
+
+    def test_historical_generated_image_link_is_imported_only_from_trusted_root(self) -> None:
+        self.store.create_workflow(serial_workflow())
+        trusted_root = Path(self.directory.name, "generated_images")
+        image_path = trusted_root / "thread-a" / "image.png"
+        image_path.parent.mkdir(parents=True)
+        image_path.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            )
+        )
+        self.store.prepare_node_dispatch("serial-demo", "a")
+        self.store.sync_node_job(
+            "serial-demo",
+            "a",
+            {
+                "status": "completed",
+                "response": f"完成。\n\n[查看生成图片]({image_path.as_posix()})",
+                "finished_at": utc_now(),
+            },
+        )
+
+        self.assertEqual(self.store.import_legacy_generated_images(trusted_root), 1)
+        self.assertEqual(self.store.import_legacy_generated_images(trusted_root), 0)
+        artifacts = self.store.get_workflow("serial-demo")["nodes"][0]["artifacts"]
+        self.assertEqual(len(artifacts), 1)
 
     def test_metadata_and_dependency_result_are_added_to_actual_prompt(self) -> None:
         value = serial_workflow()

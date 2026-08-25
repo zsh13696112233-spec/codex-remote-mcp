@@ -17,16 +17,16 @@ class WorkflowConsoleApplicationTest {
   @Qualifier("requestMappingHandlerMapping")
   RequestMappingHandlerMapping mappings;
 
-  /** 确认监控中心只暴露三个读取接口和一个聊天发送接口。 */
+  /** 确认监控中心只暴露四个读取接口和一个聊天发送接口。 */
   @Test
-  void applicationContextLoadsWithThreeReadsAndOneChatPostOnly() {
+  void applicationContextLoadsWithFourReadsAndOneChatPostOnly() {
     var apiMethods =
         mappings.getHandlerMethods().entrySet().stream()
             .filter(
                 entry ->
                     entry.getKey().getPatternValues().stream().anyMatch(p -> p.startsWith("/api/")))
             .toList();
-    assertThat(apiMethods).hasSize(4);
+    assertThat(apiMethods).hasSize(5);
     var getRoutes =
         apiMethods.stream()
             .filter(
@@ -39,7 +39,7 @@ class WorkflowConsoleApplicationTest {
                 entry ->
                     entry.getKey().getMethodsCondition().getMethods().contains(RequestMethod.POST))
             .toList();
-    assertThat(getRoutes).hasSize(3);
+    assertThat(getRoutes).hasSize(4);
     assertThat(postRoutes).hasSize(1);
     assertThat(postRoutes.get(0).getKey().getPatternValues())
         .containsOnly("/api/workflows/{workflowId}/messages");

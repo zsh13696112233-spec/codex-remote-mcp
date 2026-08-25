@@ -63,6 +63,38 @@ public class GatewayClient {
         null);
   }
 
+  /** 读取工作流生成的图片附件。 */
+  public BinaryResponse artifact(String workflowId, String artifactId) {
+    String path = "/workflows/" + pathSegment(workflowId) + "/artifacts/" + pathSegment(artifactId);
+    try {
+      HttpRequest request =
+          HttpRequest.newBuilder(gatewayBaseUri.resolve(path))
+              .timeout(Duration.ofSeconds(30))
+              .header("Accept", "image/png,image/jpeg,image/gif,image/webp")
+              .GET()
+              .build();
+      HttpResponse<byte[]> response =
+          httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+      if (response.statusCode() < 200 || response.statusCode() >= 300) {
+        throw new GatewayException(
+            response.statusCode(), new String(response.body(), StandardCharsets.UTF_8));
+      }
+      String contentType =
+          response.headers().firstValue("Content-Type").orElse("application/octet-stream");
+      if (!contentType.startsWith("image/")) {
+        throw new GatewayException(502, "Codex 网关返回了无效的图片类型。");
+      }
+      return new BinaryResponse(response.body(), contentType);
+    } catch (GatewayException error) {
+      throw error;
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      throw new GatewayException(502, "调用 Codex 网关时线程被中断。", error);
+    } catch (IOException | IllegalArgumentException error) {
+      throw new GatewayException(502, "无法连接 Codex 网关：" + error.getMessage(), error);
+    }
+  }
+
   /** 向指定工作流的主监督会话发送消息。 */
   public JsonNode sendMessage(String workflowId, JsonNode body) {
     if (body == null || !body.isObject()) {
@@ -125,4 +157,7 @@ public class GatewayClient {
     }
     return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
   }
+
+  /** 网关二进制响应，只包含经过验证的图片正文和类型。 */
+  public record BinaryResponse(byte[] body, String contentType) {}
 }

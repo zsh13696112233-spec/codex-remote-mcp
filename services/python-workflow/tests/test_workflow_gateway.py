@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import tempfile
 import unittest
@@ -6,8 +7,9 @@ import uuid
 from pathlib import Path
 
 from codex_orchestrator_mcp import Orchestrator
+from starlette.testclient import TestClient
 from tests.mock_app_server import MockAppServer
-from workflow_gateway import WorkflowGateway
+from workflow_gateway import WorkflowGateway, create_app
 from workflow_store import WorkflowStore
 
 
@@ -69,6 +71,46 @@ class SupervisorPromptTests(unittest.TestCase):
         self.assertNotIn("url", value)
         self.assertNotIn("authenticated", value)
         self.assertNotIn("token_env", value)
+
+
+class WorkflowArtifactHttpTests(unittest.TestCase):
+    def test_artifact_endpoint_returns_only_workflow_owned_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "agents.json")
+            config.write_text(
+                json.dumps({"agents": {"local": {"url": "ws://127.0.0.1:1", "cwd": "/work"}}}),
+                encoding="utf-8",
+            )
+            app = create_app(
+                db_path=Path(directory, "workflows.db"), config_path=config
+            )
+            store = app.state.gateway.store
+            store.create_workflow(
+                {
+                    "workflowId": "artifact-demo",
+                    "supervisorAgentId": "local",
+                    "nodes": [{"id": "a", "prompt": "demo", "timeoutSec": 10}],
+                }
+            )
+            png = base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            )
+            artifact = store.save_image_bytes(
+                "artifact-demo", "a", "image-item", png
+            )
+
+            with TestClient(app) as client:
+                response = client.get(
+                    f"/workflows/artifact-demo/artifacts/{artifact['id']}"
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["content-type"], "image/png")
+                self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+                self.assertEqual(response.content, png)
+                missing = client.get(
+                    f"/workflows/another-workflow/artifacts/{artifact['id']}"
+                )
+                self.assertEqual(missing.status_code, 404)
 
 
 class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):

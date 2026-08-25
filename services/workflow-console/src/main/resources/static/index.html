@@ -31,11 +31,11 @@
           <h1 id="name">—</h1>
           <p>任务编号：<span id="id">—</span></p>
         </div>
-        <div id="status" class="status">未开始</div>
+        <div id="status" class="status">正在加载</div>
       </div>
 
       <div class="overview">
-        <article><span>当前步骤</span><strong id="current">尚未开始</strong></article>
+        <article><span>当前步骤</span><strong id="current">正在加载任务信息…</strong></article>
         <article><span>步骤进度</span><strong id="progress">0 / 0</strong></article>
         <article><span>运行时长</span><strong id="duration">—</strong></article>
         <article><span>最后更新</span><strong id="updated">—</strong></article>
@@ -52,7 +52,17 @@
               <span><i class="legend-dot failed"></i>未完成</span>
             </div>
           </div>
-          <div id="steps" class="step-list"></div>
+          <div id="steps" class="step-list">
+            <article class="step running">
+              <div class="step-rail"><span class="step-marker"><i class="spinner"></i></span></div>
+              <div class="step-card">
+                <div class="step-head">
+                  <div class="step-title"><span class="step-number">准备中</span><h3>正在读取步骤信息</h3></div>
+                </div>
+                <div class="step-waiting"><i class="pulse-dot"></i><span>请稍候…</span></div>
+              </div>
+            </article>
+          </div>
         </section>
 
         <section class="panel chat-panel">
@@ -61,15 +71,15 @@
             <span class="live-badge"><i></i>实时</span>
           </div>
           <div id="messages" class="messages" aria-live="polite">
-            <div class="chat-empty"><span>···</span><p>正在等待任务消息</p></div>
+            <div class="chat-empty"><span>···</span><p>正在加载任务信息</p></div>
           </div>
           <form id="chatForm" class="chat-compose">
             <label for="chatInput" class="sr-only">向任务助手发送消息</label>
-            <textarea id="chatInput" maxlength="4000" rows="3"
+            <textarea id="chatInput" maxlength="4000" rows="3" disabled
               placeholder="询问任务进度，或请求停止、重试、跳过步骤…"></textarea>
             <div class="compose-actions">
               <span id="chatHint" role="status">任务运行期间可随时咨询</span>
-              <button id="sendMessage" type="submit">发送</button>
+              <button id="sendMessage" type="submit" disabled>发送</button>
             </div>
           </form>
         </section>

@@ -1091,6 +1091,31 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
 
     async def record(message: dict[str, Any], received_at: str) -> None:
         method = str(message.get("method") or "unknown")
+        params = message.get("params")
+        item = params.get("item") if isinstance(params, dict) else None
+        if not isinstance(item, dict):
+            item = {}
+        if (
+            method == "item/completed"
+            and item.get("type") == "imageGeneration"
+            and item.get("status") == "completed"
+            and isinstance(item.get("result"), str)
+            and item.get("result")
+        ):
+            try:
+                await asyncio.to_thread(
+                    store.save_image_artifact,
+                    workflow_id,
+                    node_id,
+                    str(item.get("id") or ""),
+                    str(item["result"]),
+                )
+            except Exception:
+                LOGGER.exception(
+                    "保存工作流生成图片失败：workflow_id=%s node_id=%s",
+                    workflow_id,
+                    node_id,
+                )
         await get_workflow_event_batcher().add(
             workflow_id,
             node_id=node_id,

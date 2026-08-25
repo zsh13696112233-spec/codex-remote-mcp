@@ -30,6 +30,10 @@ Copy-Item .\config\agents.example.json .\config\agents.json
 
 `agents.json` 是本机配置并已被 Git 忽略。令牌使用 `token_env` 引用环境变量，不要写入配置文件。
 
+图片生成步骤完成时，MCP 会在原始事件被截断前提取 PNG、JPEG、GIF 或 WebP 图片并作为工作流附件写入共享数据库。单张图片上限为 20 MB，每个工作流最多 50 张。网关通过 `GET /workflows/{workflowId}/artifacts/{artifactId}` 只读返回附件，不提供任意文件路径读取能力。
+
+网关启动时还会回填步骤结果中仍然存在、且位于 `$CODEX_HOME/generated_images` 受信目录内的历史图片链接；目录外路径不会读取。
+
 ## 启动网关
 
 在仓库根目录执行：

@@ -1,6 +1,8 @@
 package com.codexflow.console.web;
 
 import com.codexflow.console.client.GatewayClient;
+import org.springframework.http.CacheControl;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -48,6 +50,19 @@ public class WorkflowController {
       throw new IllegalArgumentException("limit 必须在 1 到 1000 之间。");
     }
     return gatewayClient.events(workflowId, after, limit);
+  }
+
+  /** 代理读取工作流图片，浏览器不直接访问 Python 网关或执行机路径。 */
+  @GetMapping("/workflows/{workflowId}/artifacts/{artifactId}")
+  public ResponseEntity<byte[]> artifact(
+      @PathVariable String workflowId, @PathVariable String artifactId) {
+    GatewayClient.BinaryResponse artifact = gatewayClient.artifact(workflowId, artifactId);
+    return ResponseEntity.ok()
+        .contentType(MediaType.parseMediaType(artifact.contentType()))
+        .cacheControl(
+            CacheControl.maxAge(java.time.Duration.ofDays(365)).cachePrivate().immutable())
+        .header("X-Content-Type-Options", "nosniff")
+        .body(artifact.body());
   }
 
   /** 向指定工作流主监督会话发送消息并返回 HTTP 202。 */

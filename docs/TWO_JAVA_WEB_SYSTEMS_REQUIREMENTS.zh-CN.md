@@ -273,6 +273,7 @@ Skill 和 MCP 在第一版只保存和展示，具体限制如下：
 - 已完成步骤数和总步骤数。
 - 串行步骤进度。
 - 每一步的角色、状态、时间和结果。
+- 每一步生成的图片，在对应步骤结果内展示并支持打开原图。
 - 主会话完整消息时间线。
 - 最终任务总结。
 - 网关连接状态。
@@ -352,7 +353,10 @@ GET /agents
 GET /api/gateway/ready
 GET /api/workflows/{workflowId}
 GET /api/workflows/{workflowId}/events
+GET /api/workflows/{workflowId}/artifacts/{artifactId}
 ```
+
+图片接口只代理 `8080` 已持久化并归属到当前工作流的图片附件，不允许浏览器传入任意本机路径。
 
 ## 七、数据库与部署
 

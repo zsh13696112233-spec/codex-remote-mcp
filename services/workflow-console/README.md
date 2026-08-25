@@ -17,6 +17,7 @@ Java 根包为 `com.codexflow.console`，Web 控制器、异常映射和
 - 每个页面只查看 URL 指定的一项任务。
 - 展示任务名称、整体状态、当前步骤和完成进度。
 - 展示每一步的名称、角色、状态、起止时间和结果。
+- 在对应步骤结果中展示工作流生成的图片，并支持打开原图。
 - 展示主监督会话的用户可读消息时间线和最终总结。
 - 在任务助手区域咨询最新进度，刷新页面后恢复完整对话。
 - 通过聊天提议停止任务、重试或跳过未成功步骤；必须另发“确认执行”才会生效。
@@ -76,12 +77,13 @@ java -jar .\target\workflow-console-0.1.0.jar
 
 ## 业务接口
 
-系统只提供三个读取接口和一个聊天消息接口：
+系统只提供四个读取接口和一个聊天消息接口：
 
 ```text
 GET /api/gateway/ready
 GET /api/workflows/{workflowId}
 GET /api/workflows/{workflowId}/events?after=0&limit=200
+GET /api/workflows/{workflowId}/artifacts/{artifactId}
 POST /api/workflows/{workflowId}/messages
 ```
 
@@ -94,6 +96,8 @@ POST /api/workflows/{workflowId}/messages
 相同 `messageId` 的失败请求应复用原 UUID 重试。`completed` 后不再接收新消息；`failed` 或 `cancelled` 后仍可咨询并重试未成功步骤。
 
 其中事件接口代理 Python 网关的历史事件查询，并支持通过 `after` 增量读取。`limit` 的允许范围为 `1` 到 `1000`。
+
+图片接口只代理 Python 网关已经归属到该工作流的图片附件，不接受本机文件路径。浏览器不会直接访问 Python 网关或执行机文件系统。
 
 ## 状态显示
 
@@ -117,7 +121,7 @@ mvn test
 
 构建会自动检查 Java 格式。需要修复格式时执行 `mvn fmt:format`。
 
-测试会启动 Spring 上下文，并验证 `/api` 下只有三个 GET 和一个消息 POST 路由，不存在直接提交、取消、重试、跳过或编辑接口。
+测试会启动 Spring 上下文，并验证 `/api` 下只有四个 GET 和一个消息 POST 路由，不存在直接提交、取消、重试、跳过或编辑接口。
 
 ## 安全说明
 

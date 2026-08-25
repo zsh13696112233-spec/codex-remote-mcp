@@ -7,7 +7,8 @@ const ACTIVE = new Set(["queued", "running", "cancelling"]);
 const FAILED = new Set(["failed", "cancelled", "interrupted"]);
 const state = {
   workflowId: new URLSearchParams(location.search).get("workflowId")?.trim() || "",
-  cursor: 0, timer: null, messages: [], snapshot: null, refreshing: false, sending: false
+  cursor: 0, timer: null, durationTimer: null, messages: [], snapshot: null,
+  refreshError: null, refreshRetrying: false, refreshing: false, sending: false
 };
 const $ = selector => document.querySelector(selector);
 const text = value => value == null ? "" : String(value);
@@ -31,6 +32,20 @@ function visualState(status) {
   if (status === "skipped") return "skipped";
   if (FAILED.has(status)) return "failed";
   return "pending";
+}
+
+function isInitializing(snapshot) {
+  if (!snapshot || !["queued", "running"].includes(snapshot.status)) return false;
+  const nodes = snapshot.nodes || [];
+  return nodes.length > 0 && nodes.every(node => node.status === "pending" && !node.startedAt);
+}
+
+function initializationMessage(snapshot) {
+  const createdAt = new Date(snapshot?.createdAt || snapshot?.startedAt || 0).getTime();
+  const waitingTooLong = Number.isFinite(createdAt) && createdAt > 0 && Date.now() - createdAt >= 30000;
+  return waitingTooLong
+    ? "准备时间较长，系统仍在尝试，请稍候…"
+    : "任务已接收，正在准备运行环境和第 1 步…";
 }
 
 async function api(path, options = {}) {
@@ -70,12 +85,22 @@ async function refresh() {
   try {
     const snapshot = await api(`/api/workflows/${encodeURIComponent(state.workflowId)}`);
     state.snapshot = snapshot;
+    state.refreshError = null;
+    state.refreshRetrying = false;
     render(snapshot);
     await events();
     if (snapshot.status === "completed" && Number(snapshot.pendingChatCount || 0) === 0 && !state.sending) stop();
   } catch (error) {
-    toast(error.message);
-    stop();
+    const firstFailure = !state.refreshError;
+    state.refreshError = error.message;
+    state.refreshRetrying = !error.status || error.status >= 500 || [408, 429].includes(error.status);
+    renderRefreshError();
+    if (state.refreshRetrying) {
+      if (firstFailure) toast("连接暂时中断，正在自动重试");
+    } else {
+      stop();
+      if (firstFailure) toast(error.message);
+    }
   } finally {
     state.refreshing = false;
   }
@@ -190,7 +215,12 @@ function renderMessages() {
   box.replaceChildren();
   if (!state.messages.length) {
     const empty = make("div", "chat-empty");
-    empty.append(make("span", "", "···"), make("p", "", "正在等待任务消息"));
+    const message = state.refreshError
+      ? state.refreshRetrying ? "连接暂时中断，正在自动重试" : "暂时无法读取任务信息"
+      : isInitializing(state.snapshot)
+        ? "系统正在准备任务，完成后将在这里显示进展"
+        : "正在等待任务消息";
+    empty.append(make("span", "", "···"), make("p", "", message));
     box.append(empty);
     return;
   }
@@ -221,11 +251,50 @@ function renderMessages() {
 
 function addDetail(grid, label, value) {
   const item = make("div", "detail-item");
-  item.append(make("span", "", label), make("strong", "", value || "—"));
+  const content = make("strong", "", value || "—");
+  item.append(make("span", "", label), content);
   grid.append(item);
+  return content;
 }
 
-function renderSteps(nodes) {
+function resultTextWithoutImageLinks(value, hasArtifacts) {
+  const valueText = text(value);
+  if (!hasArtifacts) return valueText;
+  return valueText
+    .replace(/\[[^\]]*\]\([^)]+\.(?:png|jpe?g|gif|webp)\)/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function appendStepArtifacts(result, node) {
+  const artifacts = Array.isArray(node.artifacts) ? node.artifacts : [];
+  if (!artifacts.length) return;
+  const gallery = make("div", "step-artifacts");
+  artifacts.forEach((artifact, index) => {
+    const figure = make("figure", "step-artifact");
+    const link = make("a", "step-image-link");
+    const imageUrl = `/api/workflows/${encodeURIComponent(state.workflowId)}/artifacts/${encodeURIComponent(artifact.id)}`;
+    link.href = imageUrl;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.title = "打开原图";
+    const image = make("img", "step-image");
+    image.src = imageUrl;
+    image.alt = artifacts.length === 1 ? "本步骤生成的图片" : `本步骤生成的第 ${index + 1} 张图片`;
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.addEventListener("error", () => {
+      figure.classList.add("failed");
+      link.replaceChildren(make("span", "step-image-error", "图片暂时无法加载"));
+    }, {once: true});
+    link.append(image);
+    figure.append(link, make("figcaption", "", artifacts.length === 1 ? "查看生成图片" : `查看生成图片 ${index + 1}`));
+    gallery.append(figure);
+  });
+  result.append(gallery);
+}
+
+function renderSteps(nodes, initializing = false) {
   const list = $("#steps");
   list.replaceChildren();
   nodes.forEach((node, index) => {
@@ -251,16 +320,27 @@ function renderSteps(nodes) {
     addDetail(details, "负责角色", node.roleName || "未指定角色");
     addDetail(details, "开始时间", fmt(node.startedAt));
     addDetail(details, "结束时间", fmt(node.finishedAt));
-    addDetail(details, "执行耗时", elapsed(node.startedAt, node.finishedAt));
+    const duration = addDetail(details, "执行耗时", elapsed(node.startedAt, node.finishedAt));
+    if (node.startedAt) {
+      duration.dataset.elapsedStart = node.startedAt;
+      if (node.finishedAt) duration.dataset.elapsedEnd = node.finishedAt;
+    }
     card.append(head, details);
 
     if (node.response || node.error) {
       const result = make("div", `step-result${node.error ? " error" : ""}`);
-      result.append(make("span", "", node.error ? "未完成原因" : "步骤结果"), make("p", "", node.error || node.response));
+      const hasArtifacts = Array.isArray(node.artifacts) && node.artifacts.length > 0;
+      const resultText = resultTextWithoutImageLinks(node.error || node.response, hasArtifacts);
+      result.append(make("span", "", node.error ? "未完成原因" : "步骤结果"));
+      if (resultText) result.append(make("p", "", resultText));
+      if (!node.error) appendStepArtifacts(result, node);
       card.append(result);
-    } else if (stateName === "running") {
+    } else if (stateName === "running" || (initializing && index === 0)) {
       const waiting = make("div", "step-waiting");
-      waiting.append(make("i", "pulse-dot"), make("span", "", "正在执行，请稍候…"));
+      const message = initializing && index === 0
+        ? initializationMessage(state.snapshot)
+        : "正在执行，请稍候…";
+      waiting.append(make("i", "pulse-dot"), make("span", "", message));
       card.append(waiting);
     }
     row.append(rail, card);
@@ -272,20 +352,46 @@ function render(snapshot) {
   $("#name").textContent = snapshot.name || "未命名任务";
   $("#id").textContent = snapshot.workflowId || state.workflowId;
   const status = $("#status");
-  status.textContent = zh(snapshot.status);
+  status.textContent = isInitializing(snapshot) ? "准备中" : zh(snapshot.status);
   status.className = `status ${visualState(snapshot.status)}`;
   const nodes = snapshot.nodes || [];
+  const initializing = isInitializing(snapshot);
   const active = nodes.find(node => ACTIVE.has(node.status));
   const failed = nodes.find(node => FAILED.has(node.status));
-  $("#current").textContent = active
+  $("#current").textContent = initializing
+    ? initializationMessage(snapshot)
+    : active
     ? `第 ${nodes.indexOf(active) + 1} 步：${active.displayName || "正在执行"}`
     : failed ? `第 ${nodes.indexOf(failed) + 1} 步未完成`
       : snapshot.status === "completed" ? "全部步骤已完成" : "尚未开始";
   $("#progress").textContent = `${snapshot.progress?.completed || 0} / ${snapshot.progress?.total || nodes.length}`;
-  $("#duration").textContent = elapsed(snapshot.startedAt, snapshot.finishedAt);
+  renderDuration();
   $("#updated").textContent = new Date().toLocaleString("zh-CN", {hour12: false});
-  renderSteps(nodes);
+  renderSteps(nodes, initializing);
   renderComposer();
+}
+
+function renderRefreshError() {
+  const status = $("#status");
+  status.textContent = state.refreshRetrying ? "重新连接中" : "无法加载";
+  status.className = "status failed";
+  $("#current").textContent = state.refreshRetrying
+    ? "连接暂时中断，正在自动重试…"
+    : state.refreshError;
+  $("#updated").textContent = new Date().toLocaleString("zh-CN", {hour12: false});
+  if (!state.snapshot) {
+    $("#name").textContent = "正在加载任务";
+    $("#id").textContent = state.workflowId;
+  }
+  renderMessages();
+}
+
+function renderDuration() {
+  if (!state.snapshot) return;
+  $("#duration").textContent = elapsed(state.snapshot.startedAt, state.snapshot.finishedAt);
+  document.querySelectorAll("[data-elapsed-start]").forEach(element => {
+    element.textContent = elapsed(element.dataset.elapsedStart, element.dataset.elapsedEnd);
+  });
 }
 
 function renderComposer() {
@@ -324,6 +430,7 @@ async function sendChatMessage(messageId, originalText) {
     const message = findMessage(id);
     if (message) message.status = "accepted";
     if (!state.timer) state.timer = setInterval(refresh, 2000);
+    if (!state.durationTimer) state.durationTimer = setInterval(renderDuration, 1000);
     await refresh();
   } catch (error) {
     const message = findMessage(id);
@@ -337,8 +444,18 @@ async function sendChatMessage(messageId, originalText) {
   }
 }
 
-function start() { stop(); refresh(); state.timer = setInterval(refresh, 2000); }
-function stop() { if (state.timer) clearInterval(state.timer); state.timer = null; }
+function start() {
+  stop();
+  refresh();
+  state.timer = setInterval(refresh, 2000);
+  state.durationTimer = setInterval(renderDuration, 1000);
+}
+function stop() {
+  if (state.timer) clearInterval(state.timer);
+  if (state.durationTimer) clearInterval(state.durationTimer);
+  state.timer = null;
+  state.durationTimer = null;
+}
 
 $("#lookupForm").onsubmit = event => {
   event.preventDefault();
@@ -361,6 +478,7 @@ $("#chatInput").addEventListener("keydown", event => {
 if (state.workflowId) {
   $("#lookup").hidden = true;
   $("#monitor").hidden = false;
+  $("#id").textContent = state.workflowId;
   start();
 } else {
   $("#lookup").hidden = false;
