@@ -20,11 +20,14 @@ ACTIVE_NODE_STATUSES = {"queued", "running", "cancelling"}
 CHAT_PENDING_STATUSES = {"accepted", "processing"}
 RESULT_LIMIT = 20_000
 DEPENDENCY_RESULTS_LIMIT = 40_000
+REVISION_INSTRUCTION_LIMIT = 4_000
+REVISION_CONTEXT_LIMIT = 20_000
 PROMPT_LIMIT = 100_000
 TRUNCATION_NOTICE = "\n\n【内容过长，已在此处省略】"
 EVENT_PAYLOAD_LIMIT = 262_144
 IMAGE_ARTIFACT_LIMIT = 20_000_000
 IMAGE_ARTIFACTS_PER_WORKFLOW_LIMIT = 50
+ADVANCE_TIMEOUT_SEC = 30
 LEGACY_IMAGE_LINK_PATTERN = re.compile(
     r"\[[^\]]*\]\((?P<path>[^)]+\.(?:png|jpe?g|gif|webp))\)", re.IGNORECASE
 )
@@ -199,6 +202,7 @@ class WorkflowStore:
                     assistant_thread_id TEXT,
                     assistant_turn_id TEXT,
                     assistant_status TEXT NOT NULL DEFAULT 'idle',
+                    advance_mode TEXT NOT NULL DEFAULT 'automatic',
                     max_retry_count INTEGER NOT NULL DEFAULT 10,
                     used_retry_count INTEGER NOT NULL DEFAULT 0,
                     response TEXT,
@@ -309,6 +313,7 @@ class WorkflowStore:
                     result_json TEXT,
                     error TEXT,
                     retry_ordinal INTEGER,
+                    revision_instruction TEXT,
                     created_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -317,6 +322,42 @@ class WorkflowStore:
 
                 CREATE INDEX IF NOT EXISTS workflow_control_pending
                     ON workflow_control_actions(workflow_id, status, created_at);
+
+                CREATE TABLE IF NOT EXISTS workflow_node_revision_instructions (
+                    workflow_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    retry_ordinal INTEGER NOT NULL,
+                    action_id TEXT,
+                    source_message_id TEXT,
+                    instruction TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, node_id, retry_ordinal),
+                    FOREIGN KEY (workflow_id, node_id)
+                        REFERENCES workflow_nodes(workflow_id, node_id) ON DELETE CASCADE,
+                    FOREIGN KEY (action_id)
+                        REFERENCES workflow_control_actions(action_id) ON DELETE SET NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS workflow_node_revision_action
+                    ON workflow_node_revision_instructions(action_id)
+                    WHERE action_id IS NOT NULL;
+
+                CREATE TABLE IF NOT EXISTS workflow_advance_gates (
+                    gate_id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    completed_node_id TEXT NOT NULL,
+                    next_node_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    held_at TEXT,
+                    confirmed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS workflow_advance_gate_lookup
+                    ON workflow_advance_gates(workflow_id, next_node_id, status, created_at);
 
                 CREATE TABLE IF NOT EXISTS workflow_node_attempts (
                     workflow_id TEXT NOT NULL,
@@ -386,6 +427,7 @@ class WorkflowStore:
                 "assistant_thread_id": "TEXT",
                 "assistant_turn_id": "TEXT",
                 "assistant_status": "TEXT NOT NULL DEFAULT 'idle'",
+                "advance_mode": "TEXT NOT NULL DEFAULT 'automatic'",
                 "max_retry_count": "INTEGER NOT NULL DEFAULT 10",
                 "used_retry_count": "INTEGER NOT NULL DEFAULT 0",
             }.items():
@@ -408,6 +450,20 @@ class WorkflowStore:
             if "retry_ordinal" not in control_columns:
                 connection.execute(
                     "ALTER TABLE workflow_control_actions ADD COLUMN retry_ordinal INTEGER"
+                )
+            if "revision_instruction" not in control_columns:
+                connection.execute(
+                    "ALTER TABLE workflow_control_actions ADD COLUMN revision_instruction TEXT"
+                )
+            advance_gate_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(workflow_advance_gates)"
+                ).fetchall()
+            }
+            if "held_at" not in advance_gate_columns:
+                connection.execute(
+                    "ALTER TABLE workflow_advance_gates ADD COLUMN held_at TEXT"
                 )
             connection.execute(
                 """
@@ -517,6 +573,14 @@ class WorkflowStore:
         max_retry_count = int(value.get("maxRetryCount", 10))
         if not 0 <= max_retry_count <= 100:
             raise ValueError("maxRetryCount 必须在 0 到 100 之间。")
+        advance_mode = str(value.get("advanceMode") or "automatic").strip().lower()
+        if advance_mode not in {"automatic", "semi_automatic"}:
+            raise ValueError("advanceMode 只能是 automatic 或 semi_automatic。")
+        if advance_mode == "semi_automatic":
+            for position, node in enumerate(nodes):
+                expected = [] if position == 0 else [nodes[position - 1]["id"]]
+                if node["dependsOn"] != expected:
+                    raise ValueError("semi_automatic 只支持严格串行工作流。")
 
         return {
             "workflowId": workflow_id,
@@ -528,6 +592,7 @@ class WorkflowStore:
             "supervisorModel": value.get("supervisorModel"),
             "supervisorTimeoutSec": supervisor_timeout_sec,
             "maxRetryCount": max_retry_count,
+            "advanceMode": advance_mode,
             "nodes": nodes,
         }
 
@@ -564,8 +629,8 @@ class WorkflowStore:
                     INSERT INTO workflows (
                         workflow_id, name, status, failure_policy,
                         supervisor_agent_id, supervisor_status, created_at,
-                        max_retry_count, spec_json, spec_zlib
-                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?, ?)
+                        advance_mode, max_retry_count, spec_json, spec_zlib
+                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?, ?, ?)
                     """,
                     (
                         spec["workflowId"],
@@ -573,6 +638,7 @@ class WorkflowStore:
                         spec["failurePolicy"],
                         spec["supervisorAgentId"],
                         timestamp,
+                        spec["advanceMode"],
                         spec["maxRetryCount"],
                         compact_spec,
                         compressed_spec,
@@ -641,7 +707,7 @@ class WorkflowStore:
                        supervisor_status, supervisor_last_message,
                        response, error, created_at, started_at, finished_at,
                        state_version, assistant_job_id, assistant_thread_id,
-                       assistant_turn_id, assistant_status,
+                       assistant_turn_id, assistant_status, advance_mode,
                        max_retry_count, used_retry_count
                 FROM workflows WHERE workflow_id = ?
                 """,
@@ -684,9 +750,21 @@ class WorkflowStore:
             )
             pending_control_row = connection.execute(
                 """
-                SELECT action_id, action_type, node_id, status, expires_at
+                SELECT action_id, action_type, node_id, status, expires_at,
+                       revision_instruction
                 FROM workflow_control_actions
                 WHERE workflow_id = ? AND status = 'pending' AND expires_at > ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (workflow_id, utc_now()),
+            ).fetchone()
+            pending_advance_row = connection.execute(
+                """
+                SELECT gate_id, completed_node_id, next_node_id, status,
+                       expires_at, held_at, confirmed_at
+                FROM workflow_advance_gates
+                WHERE workflow_id = ?
+                  AND ((status = 'pending' AND expires_at > ?) OR status = 'held')
                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (workflow_id, utc_now()),
@@ -707,6 +785,8 @@ class WorkflowStore:
             "name": workflow["name"],
             "status": workflow["status"],
             "failurePolicy": workflow["failure_policy"],
+            "advanceMode": workflow["advance_mode"],
+            "pendingAdvance": self._advance_gate_snapshot(pending_advance_row),
             "currentNodes": current_nodes,
             "progress": {"completed": completed_count, "total": len(nodes)},
             "supervisor": {
@@ -1187,7 +1267,8 @@ class WorkflowStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT action_id, action_type, node_id, status, expires_at
+                SELECT action_id, action_type, node_id, status, expires_at,
+                       revision_instruction
                 FROM workflow_control_actions
                 WHERE workflow_id = ? AND status = 'pending' AND expires_at > ?
                 ORDER BY created_at DESC LIMIT 1
@@ -1225,13 +1306,34 @@ class WorkflowStore:
             )
         return {"actionId": row["action_id"], "status": "cancelled"}
 
+    @staticmethod
+    def _normalize_revision_instruction(value: str | None) -> str | None:
+        if value is None:
+            return None
+        instruction = str(value).strip()
+        if not instruction:
+            return None
+        if len(instruction) > REVISION_INSTRUCTION_LIMIT:
+            raise ValueError(
+                f"返工要求不能超过 {REVISION_INSTRUCTION_LIMIT} 个字符。"
+            )
+        return instruction
+
     def propose_control(
-        self, workflow_id: str, action_type: str, node_id: str | None, message_id: str
+        self,
+        workflow_id: str,
+        action_type: str,
+        node_id: str | None,
+        message_id: str,
+        revision_instruction: str | None = None,
     ) -> dict[str, Any]:
         if action_type == "retry":
             action_type = "restart_from"
         if action_type not in {"stop", "restart_from", "skip"}:
             raise ValueError("控制类型只能是 stop、restart_from 或 skip。")
+        revision_instruction = self._normalize_revision_instruction(revision_instruction)
+        if action_type != "restart_from" and revision_instruction is not None:
+            raise ValueError("只有返工操作可以包含返工要求。")
         now_dt = datetime.now(UTC)
         now = now_dt.isoformat()
         expires = (now_dt + timedelta(minutes=10)).isoformat()
@@ -1300,19 +1402,21 @@ class WorkflowStore:
                 INSERT INTO workflow_control_actions (
                     action_id, workflow_id, action_type, node_id, status,
                     proposed_by_message_id, proposed_state_version,
-                    created_at, expires_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                    revision_instruction, created_at, expires_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
                 """,
                 (action_id, workflow_id, action_type, node_id, message_id,
-                 workflow["state_version"], now, expires, now),
+                 workflow["state_version"], revision_instruction, now, expires, now),
             )
             self._add_event_with_connection(
                 connection, workflow_id, node_id, "chat", "chat.control.proposed",
                 {"messageId": message_id, "actionId": action_id,
-                 "actionType": action_type, "nodeId": node_id}, now,
+                 "actionType": action_type, "nodeId": node_id,
+                 "revisionInstruction": revision_instruction}, now,
             )
         result = {"actionId": action_id, "actionType": action_type, "nodeId": node_id,
-                  "expiresAt": expires, "requiredConfirmation": "确认执行"}
+                  "expiresAt": expires, "requiredConfirmation": "确认执行",
+                  "revisionInstruction": revision_instruction}
         if action_type == "restart_from":
             used = int(workflow["used_retry_count"] or 0)
             maximum = int(workflow["max_retry_count"] or 0)
@@ -1380,8 +1484,13 @@ class WorkflowStore:
                 connection, workflow_id, action["node_id"], "chat", "chat.control.confirmed",
                 {"messageId": message_id, "actionId": action_id}, now,
             )
-        return {"actionId": action_id, "actionType": action["action_type"],
-                "nodeId": action["node_id"]}
+        return {
+            "actionId": action_id,
+            "actionType": action["action_type"],
+            "nodeId": action["node_id"],
+            "revisionInstruction": action["revision_instruction"],
+            "proposedByMessageId": action["proposed_by_message_id"],
+        }
 
     def start_control_execution(self, action_id: str) -> dict[str, Any]:
         now = utc_now()
@@ -1397,9 +1506,15 @@ class WorkflowStore:
                 "WHERE action_id = ?",
                 (now, action_id),
             )
-        return {"actionId": action_id, "workflowId": row["workflow_id"],
-                "actionType": row["action_type"], "nodeId": row["node_id"],
-                "confirmedByMessageId": row["confirmed_by_message_id"]}
+        return {
+            "actionId": action_id,
+            "workflowId": row["workflow_id"],
+            "actionType": row["action_type"],
+            "nodeId": row["node_id"],
+            "confirmedByMessageId": row["confirmed_by_message_id"],
+            "proposedByMessageId": row["proposed_by_message_id"],
+            "revisionInstruction": row["revision_instruction"],
+        }
 
     def finish_control_execution(
         self, action_id: str, *, result: dict[str, Any] | None = None, error: str | None = None
@@ -1425,8 +1540,15 @@ class WorkflowStore:
             )
 
     def restart_from_node(
-        self, workflow_id: str, node_id: str, *, action_id: str | None = None
+        self,
+        workflow_id: str,
+        node_id: str,
+        *,
+        action_id: str | None = None,
+        revision_instruction: str | None = None,
+        source_message_id: str | None = None,
     ) -> dict[str, Any]:
+        revision_instruction = self._normalize_revision_instruction(revision_instruction)
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1465,7 +1587,26 @@ class WorkflowStore:
                       if item["status"] in ACTIVE_NODE_STATUSES]
             if active:
                 raise RuntimeError("仍有步骤没有安全停止：" + "、".join(active))
+            self._supersede_pending_advances(connection, workflow_id, "restart", now)
             retry_ordinal = used + 1
+            if revision_instruction is not None:
+                connection.execute(
+                    """
+                    INSERT INTO workflow_node_revision_instructions (
+                        workflow_id, node_id, retry_ordinal, action_id,
+                        source_message_id, instruction, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        workflow_id,
+                        node_id,
+                        retry_ordinal,
+                        action_id,
+                        source_message_id,
+                        revision_instruction,
+                        now,
+                    ),
+                )
             for item in tail:
                 attempt_number = int(item["attempt_count"] or 0)
                 connection.execute(
@@ -1530,6 +1671,7 @@ class WorkflowStore:
                     "nodeId": node_id,
                     "affectedNodeIds": [item["node_id"] for item in tail],
                     "retryOrdinal": retry_ordinal,
+                    "revisionInstructionApplied": revision_instruction is not None,
                 }, now,
             )
             self._add_event_with_connection(
@@ -1558,6 +1700,7 @@ class WorkflowStore:
                 raise ValueError(f"找不到步骤：{node_id}")
             if row["status"] in {"completed", "skipped"}:
                 raise ValueError("已完成或已跳过的步骤不能再次跳过。")
+            self._supersede_pending_advances(connection, workflow_id, "skip", now)
             connection.execute(
                 "UPDATE workflow_nodes SET status = 'skipped', response = NULL, "
                 "error = NULL, finished_at = ? WHERE workflow_id = ? AND node_id = ?",
@@ -1583,6 +1726,7 @@ class WorkflowStore:
             ).fetchone()
             if exists is None:
                 raise ValueError(f"找不到工作流：{workflow_id}")
+            self._supersede_pending_advances(connection, workflow_id, "stop", now)
             connection.execute(
                 "UPDATE workflow_nodes SET status = 'cancelled', error = COALESCE(error, ?), "
                 "finished_at = COALESCE(finished_at, ?) WHERE workflow_id = ? "
@@ -1631,7 +1775,285 @@ class WorkflowStore:
             "nodeId": row["node_id"],
             "status": row["status"],
             "expiresAt": row["expires_at"],
+            "revisionInstruction": row["revision_instruction"],
         }
+
+    @staticmethod
+    def _advance_gate_snapshot(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            "gateId": row["gate_id"],
+            "completedNodeId": row["completed_node_id"],
+            "nextNodeId": row["next_node_id"],
+            "state": "held" if row["status"] == "held" else "countdown",
+            "expiresAt": row["expires_at"],
+            "heldAt": row["held_at"],
+        }
+
+    def pending_advance_for_node(
+        self, workflow_id: str, node_id: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT gate_id, completed_node_id, next_node_id, status,
+                       expires_at, held_at, confirmed_at
+                FROM workflow_advance_gates
+                WHERE workflow_id = ? AND next_node_id = ?
+                  AND status IN ('pending', 'held')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (workflow_id, node_id),
+            ).fetchone()
+        return self._advance_gate_snapshot(row)
+
+    def hold_advance(self, workflow_id: str, gate_id: str) -> dict[str, Any]:
+        now = utc_now()
+        expired = False
+        stale = False
+        result: dict[str, Any] | None = None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM workflow_advance_gates WHERE workflow_id = ? AND gate_id = ?",
+                (workflow_id, gate_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("找不到对应的步骤确认请求。")
+            if row["status"] == "held":
+                return {
+                    "gateId": gate_id,
+                    "status": "held",
+                    "heldAt": row["held_at"],
+                }
+            if row["status"] != "pending":
+                raise RuntimeError("这次步骤确认已经失效，请刷新页面。")
+            workflow = connection.execute(
+                "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
+            ).fetchone()
+            next_node = connection.execute(
+                "SELECT status FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+                (workflow_id, row["next_node_id"]),
+            ).fetchone()
+            if (
+                workflow is None
+                or workflow["status"] in {"completed", "failed", "cancelled"}
+                or next_node is None
+                or next_node["status"] != "pending"
+            ):
+                connection.execute(
+                    "UPDATE workflow_advance_gates SET status = 'superseded', updated_at = ? "
+                    "WHERE gate_id = ?",
+                    (now, gate_id),
+                )
+                stale = True
+            elif row["expires_at"] <= now:
+                connection.execute(
+                    "UPDATE workflow_advance_gates SET status = 'timed_out', updated_at = ? "
+                    "WHERE gate_id = ?",
+                    (now, gate_id),
+                )
+                self._add_event_with_connection(
+                    connection,
+                    workflow_id,
+                    row["completed_node_id"],
+                    "gateway",
+                    "step.advance.timed_out",
+                    {"gateId": gate_id, "nextNodeId": row["next_node_id"]},
+                    now,
+                )
+                connection.execute(
+                    "UPDATE workflows SET state_version = state_version + 1 WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                expired = True
+            else:
+                connection.execute(
+                    "UPDATE workflow_advance_gates SET status = 'held', held_at = ?, "
+                    "updated_at = ? WHERE gate_id = ?",
+                    (now, now, gate_id),
+                )
+                connection.execute(
+                    "UPDATE workflows SET state_version = state_version + 1 WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                self._add_event_with_connection(
+                    connection,
+                    workflow_id,
+                    row["completed_node_id"],
+                    "gateway",
+                    "step.advance.held",
+                    {"gateId": gate_id, "nextNodeId": row["next_node_id"]},
+                    now,
+                )
+                result = {"gateId": gate_id, "status": "held", "heldAt": now}
+        if stale:
+            raise RuntimeError("任务状态已经变化，请刷新页面。")
+        if expired:
+            raise RuntimeError("30 秒倒计时已经结束，系统正在自动进入下一步。")
+        assert result is not None
+        return result
+
+    def confirm_advance(self, workflow_id: str, gate_id: str) -> dict[str, Any]:
+        now = utc_now()
+        expired = False
+        stale = False
+        result: dict[str, Any] | None = None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM workflow_advance_gates WHERE workflow_id = ? AND gate_id = ?",
+                (workflow_id, gate_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("找不到对应的步骤确认请求。")
+            if row["status"] == "confirmed":
+                return {
+                    "gateId": gate_id,
+                    "status": "confirmed",
+                    "confirmedAt": row["confirmed_at"],
+                    "resumedFromHold": row["held_at"] is not None,
+                }
+            if row["status"] not in {"pending", "held"}:
+                raise RuntimeError("这次步骤确认已经失效，请刷新页面。")
+            was_held = row["status"] == "held"
+            workflow = connection.execute(
+                "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
+            ).fetchone()
+            next_node = connection.execute(
+                "SELECT status FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+                (workflow_id, row["next_node_id"]),
+            ).fetchone()
+            if (
+                workflow is None
+                or workflow["status"] in {"completed", "failed", "cancelled"}
+                or next_node is None
+                or next_node["status"] != "pending"
+            ):
+                connection.execute(
+                    "UPDATE workflow_advance_gates SET status = 'superseded', updated_at = ? "
+                    "WHERE gate_id = ?",
+                    (now, gate_id),
+                )
+                stale = True
+            elif not was_held and row["expires_at"] <= now:
+                connection.execute(
+                    "UPDATE workflow_advance_gates SET status = 'timed_out', updated_at = ? "
+                    "WHERE gate_id = ?",
+                    (now, gate_id),
+                )
+                self._add_event_with_connection(
+                    connection,
+                    workflow_id,
+                    row["completed_node_id"],
+                    "gateway",
+                    "step.advance.timed_out",
+                    {"gateId": gate_id, "nextNodeId": row["next_node_id"]},
+                    now,
+                )
+                connection.execute(
+                    "UPDATE workflows SET state_version = state_version + 1 WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                expired = True
+            else:
+                connection.execute(
+                    "UPDATE workflow_advance_gates SET status = 'confirmed', confirmed_at = ?, "
+                    "updated_at = ? WHERE gate_id = ?",
+                    (now, now, gate_id),
+                )
+                connection.execute(
+                    "UPDATE workflows SET state_version = state_version + 1 WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                self._add_event_with_connection(
+                    connection,
+                    workflow_id,
+                    row["completed_node_id"],
+                    "gateway",
+                    "step.advance.confirmed",
+                    {"gateId": gate_id, "nextNodeId": row["next_node_id"]},
+                    now,
+                )
+                if was_held:
+                    self._add_event_with_connection(
+                        connection,
+                        workflow_id,
+                        row["completed_node_id"],
+                        "gateway",
+                        "step.advance.resumed",
+                        {"gateId": gate_id, "nextNodeId": row["next_node_id"]},
+                        now,
+                    )
+                result = {
+                    "gateId": gate_id,
+                    "status": "confirmed",
+                    "confirmedAt": now,
+                    "resumedFromHold": was_held,
+                }
+        if stale:
+            raise RuntimeError("任务状态已经变化，请刷新页面。")
+        if expired:
+            raise RuntimeError("30 秒倒计时已经结束，系统正在自动进入下一步。")
+        assert result is not None
+        return result
+
+    def release_timed_out_advance(self, workflow_id: str, gate_id: str) -> bool:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM workflow_advance_gates WHERE workflow_id = ? AND gate_id = ?",
+                (workflow_id, gate_id),
+            ).fetchone()
+            if row is None or row["status"] != "pending" or row["expires_at"] > now:
+                return False
+            connection.execute(
+                "UPDATE workflow_advance_gates SET status = 'timed_out', updated_at = ? "
+                "WHERE gate_id = ?",
+                (now, gate_id),
+            )
+            connection.execute(
+                "UPDATE workflows SET state_version = state_version + 1 WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+            self._add_event_with_connection(
+                connection,
+                workflow_id,
+                row["completed_node_id"],
+                "gateway",
+                "step.advance.timed_out",
+                {"gateId": gate_id, "nextNodeId": row["next_node_id"]},
+                now,
+            )
+            return True
+
+    def _supersede_pending_advances(
+        self, connection: sqlite3.Connection, workflow_id: str, reason: str, now: str
+    ) -> None:
+        rows = connection.execute(
+            "SELECT * FROM workflow_advance_gates WHERE workflow_id = ? "
+            "AND status IN ('pending', 'held')",
+            (workflow_id,),
+        ).fetchall()
+        if not rows:
+            return
+        connection.execute(
+            "UPDATE workflow_advance_gates SET status = 'superseded', updated_at = ? "
+            "WHERE workflow_id = ? AND status IN ('pending', 'held')",
+            (now, workflow_id),
+        )
+        for row in rows:
+            self._add_event_with_connection(
+                connection,
+                workflow_id,
+                row["completed_node_id"],
+                "gateway",
+                "step.advance.superseded",
+                {"gateId": row["gate_id"], "reason": reason},
+                now,
+            )
 
     def get_node(self, workflow_id: str, node_id: str) -> dict[str, Any]:
         with self._connect() as connection:
@@ -1693,6 +2115,33 @@ class WorkflowStore:
             if row["status"] != "pending":
                 return self._node_dispatch_spec(row, already_dispatched=True)
 
+            advance_gate = connection.execute(
+                "SELECT * FROM workflow_advance_gates WHERE workflow_id = ? "
+                "AND next_node_id = ? AND status IN ('pending', 'held') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (workflow_id, node_id),
+            ).fetchone()
+            if advance_gate is not None:
+                timestamp = utc_now()
+                if advance_gate["status"] == "held":
+                    raise RuntimeError("任务已暂停，正在等待用户决定是否进入下一步。")
+                if advance_gate["expires_at"] > timestamp:
+                    raise RuntimeError("正在等待用户确认进入下一步。")
+                connection.execute(
+                    "UPDATE workflow_advance_gates SET status = 'timed_out', updated_at = ? "
+                    "WHERE gate_id = ?",
+                    (timestamp, advance_gate["gate_id"]),
+                )
+                self._add_event_with_connection(
+                    connection,
+                    workflow_id,
+                    advance_gate["completed_node_id"],
+                    "gateway",
+                    "step.advance.timed_out",
+                    {"gateId": advance_gate["gate_id"], "nextNodeId": node_id},
+                    timestamp,
+                )
+
             dependencies = json.loads(row["depends_on_json"])
             dependency_rows: list[sqlite3.Row] = []
             if dependencies:
@@ -1715,7 +2164,18 @@ class WorkflowStore:
                     )
 
             original_prompt = row["original_prompt"] or row["prompt"]
-            actual_prompt = self._build_actual_prompt(original_prompt, dependencies, dependency_rows)
+            revision_rows = connection.execute(
+                """
+                SELECT retry_ordinal, instruction
+                FROM workflow_node_revision_instructions
+                WHERE workflow_id = ? AND node_id = ?
+                ORDER BY retry_ordinal, created_at
+                """,
+                (workflow_id, node_id),
+            ).fetchall()
+            actual_prompt = self._build_actual_prompt(
+                original_prompt, dependencies, dependency_rows, revision_rows
+            )
 
             timestamp = utc_now()
             connection.execute(
@@ -1758,14 +2218,32 @@ class WorkflowStore:
         original_prompt: str,
         dependencies: list[str],
         dependency_rows: list[sqlite3.Row],
+        revision_rows: list[sqlite3.Row],
+    ) -> str:
+        dependency_suffix = WorkflowStore._build_dependency_suffix(
+            dependencies, dependency_rows
+        )
+        revision_suffix = WorkflowStore._build_revision_suffix(revision_rows)
+        suffix = dependency_suffix + revision_suffix
+        available = PROMPT_LIMIT - len(suffix)
+        if available < len(original_prompt):
+            base = original_prompt[: max(0, available - len(TRUNCATION_NOTICE))] + TRUNCATION_NOTICE
+        else:
+            base = original_prompt
+        return (base + suffix)[:PROMPT_LIMIT]
+
+    @staticmethod
+    def _build_dependency_suffix(
+        dependencies: list[str], dependency_rows: list[sqlite3.Row]
     ) -> str:
         if not dependencies:
-            return original_prompt[:PROMPT_LIMIT]
+            return ""
         responses = {
             row["node_id"]: (
                 int(row["position"]) + 1,
                 "该前置步骤已跳过，没有可用结果。"
-                if row["status"] == "skipped" else str(row["response"] or ""),
+                if row["status"] == "skipped"
+                else str(row["response"] or ""),
             )
             for row in dependency_rows
         }
@@ -1775,25 +2253,55 @@ class WorkflowStore:
             step_number, result = responses.get(dependency, (1, ""))
             item_limit = min(RESULT_LIMIT, remaining)
             if len(result) > item_limit:
-                result = result[: max(0, item_limit - len(TRUNCATION_NOTICE))] + TRUNCATION_NOTICE
+                result = (
+                    result[: max(0, item_limit - len(TRUNCATION_NOTICE))]
+                    + TRUNCATION_NOTICE
+                )
             block = f"【第{step_number}步结果】\n{result}"
             if len(block) > remaining:
-                block = block[: max(0, remaining - len(TRUNCATION_NOTICE))] + TRUNCATION_NOTICE
+                block = (
+                    block[: max(0, remaining - len(TRUNCATION_NOTICE))]
+                    + TRUNCATION_NOTICE
+                )
             blocks.append(block)
             remaining -= len(block)
             if remaining <= 0:
                 break
-        suffix = (
+        return (
             "\n\n前一步已经完成，下面是它提供的结果：\n\n"
             + "\n\n".join(blocks)
             + "\n\n请基于以上结果完成你当前负责的步骤。"
         )
-        available = PROMPT_LIMIT - len(suffix)
-        if available < len(original_prompt):
-            base = original_prompt[: max(0, available - len(TRUNCATION_NOTICE))] + TRUNCATION_NOTICE
-        else:
-            base = original_prompt
-        return (base + suffix)[:PROMPT_LIMIT]
+
+    @staticmethod
+    def _build_revision_suffix(revision_rows: list[sqlite3.Row]) -> str:
+        if not revision_rows:
+            return ""
+        header = (
+            "\n\n【本次及历史返工要求】\n"
+            "以下要求按确认顺序排列；较新要求与较早要求冲突时，以较新要求为准。\n\n"
+        )
+        remaining = REVISION_CONTEXT_LIMIT - len(header)
+        selected: list[str] = []
+        omitted = False
+        for row in reversed(revision_rows):
+            block = f"【第{int(row['retry_ordinal'])}次返工】\n{row['instruction']}"
+            required = len(block) + (2 if selected else 0)
+            if required > remaining:
+                omitted = True
+                break
+            selected.append(block)
+            remaining -= required
+        selected.reverse()
+        if omitted:
+            notice = "【较早返工要求因内容过长已省略】"
+            required = len(notice) + (2 if selected else 0)
+            while len(selected) > 1 and required > remaining:
+                removed = selected.pop(0)
+                remaining += len(removed) + 2
+            if required <= remaining:
+                selected.insert(0, notice)
+        return header + "\n\n".join(selected)
 
     @staticmethod
     def _node_dispatch_spec(row: sqlite3.Row, *, already_dispatched: bool) -> dict[str, Any]:
@@ -1906,6 +2414,68 @@ class WorkflowStore:
                     },
                     utc_now(),
                 )
+                if status == "completed":
+                    self._create_advance_gate_with_connection(
+                        connection, workflow_id, node_id
+                    )
+
+    def _create_advance_gate_with_connection(
+        self, connection: sqlite3.Connection, workflow_id: str, node_id: str
+    ) -> None:
+        workflow = connection.execute(
+            "SELECT status, advance_mode FROM workflows WHERE workflow_id = ?",
+            (workflow_id,),
+        ).fetchone()
+        if (
+            workflow is None
+            or workflow["status"] in {"completed", "failed", "cancelled"}
+            or workflow["advance_mode"] != "semi_automatic"
+        ):
+            return
+        completed = connection.execute(
+            "SELECT position FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+            (workflow_id, node_id),
+        ).fetchone()
+        if completed is None:
+            return
+        next_node = connection.execute(
+            "SELECT node_id, status, depends_on_json FROM workflow_nodes "
+            "WHERE workflow_id = ? AND position > ? ORDER BY position LIMIT 1",
+            (workflow_id, completed["position"]),
+        ).fetchone()
+        if (
+            next_node is None
+            or next_node["status"] != "pending"
+            or json.loads(next_node["depends_on_json"]) != [node_id]
+        ):
+            return
+        now = utc_now()
+        self._supersede_pending_advances(connection, workflow_id, "new_gate", now)
+        gate_id = uuid.uuid4().hex
+        expires_at = (datetime.now(UTC) + timedelta(seconds=ADVANCE_TIMEOUT_SEC)).isoformat()
+        connection.execute(
+            """
+            INSERT INTO workflow_advance_gates (
+                gate_id, workflow_id, completed_node_id, next_node_id, status,
+                expires_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+            """,
+            (gate_id, workflow_id, node_id, next_node["node_id"], expires_at, now, now),
+        )
+        self._add_event_with_connection(
+            connection,
+            workflow_id,
+            node_id,
+            "gateway",
+            "step.advance.waiting",
+            {
+                "gateId": gate_id,
+                "completedNodeId": node_id,
+                "nextNodeId": next_node["node_id"],
+                "expiresAt": expires_at,
+            },
+            now,
+        )
 
     def update_supervisor(self, workflow_id: str, snapshot: dict[str, Any]) -> None:
         status = str(snapshot.get("status") or "running")
@@ -1996,6 +2566,9 @@ class WorkflowStore:
                 error = f"主监督线程已结束，但节点未全部完成：{', '.join(incomplete)}"
         timestamp = utc_now()
         with self._connect() as connection:
+            self._supersede_pending_advances(
+                connection, workflow_id, "workflow_finished", timestamp
+            )
             connection.execute(
                 """
                 UPDATE workflows

@@ -20,16 +20,16 @@ class WorkflowConsoleApplicationTest {
   @Qualifier("requestMappingHandlerMapping")
   RequestMappingHandlerMapping mappings;
 
-  /** 确认监控中心只暴露四个读取接口和一个聊天发送接口。 */
+  /** 确认监控中心只暴露读取、聊天和半自动暂停/继续接口。 */
   @Test
-  void applicationContextLoadsWithFourReadsAndOneChatPostOnly() {
+  void applicationContextLoadsWithFourReadsAndThreeRestrictedPosts() {
     var apiMethods =
         mappings.getHandlerMethods().entrySet().stream()
             .filter(
                 entry ->
                     entry.getKey().getPatternValues().stream().anyMatch(p -> p.startsWith("/api/")))
             .toList();
-    assertThat(apiMethods).hasSize(5);
+    assertThat(apiMethods).hasSize(7);
     var getRoutes =
         apiMethods.stream()
             .filter(
@@ -43,9 +43,13 @@ class WorkflowConsoleApplicationTest {
                     entry.getKey().getMethodsCondition().getMethods().contains(RequestMethod.POST))
             .toList();
     assertThat(getRoutes).hasSize(4);
-    assertThat(postRoutes).hasSize(1);
-    assertThat(postRoutes.get(0).getKey().getPatternValues())
-        .containsOnly("/api/workflows/{workflowId}/messages");
+    assertThat(postRoutes).hasSize(3);
+    assertThat(postRoutes)
+        .flatExtracting(entry -> entry.getKey().getPatternValues())
+        .containsExactlyInAnyOrder(
+            "/api/workflows/{workflowId}/messages",
+            "/api/workflows/{workflowId}/advance/{gateId}/confirm",
+            "/api/workflows/{workflowId}/advance/{gateId}/hold");
     assertThat(apiMethods)
         .noneSatisfy(
             entry ->
@@ -65,7 +69,20 @@ class WorkflowConsoleApplicationTest {
     String page =
         new ClassPathResource("static/index.html").getContentAsString(StandardCharsets.UTF_8);
 
-    assertThat(app).contains("任务进度", "任务助手", "snapshot.retryPolicy", "remainingRetries");
+    assertThat(app)
+        .contains(
+            "任务进度",
+            "任务助手",
+            "snapshot.retryPolicy",
+            "remainingRetries",
+            "pendingAdvance",
+            "立即进入下一步",
+            "暂停，暂不进入下一步",
+            "继续进入下一步",
+            "暂停不会返工",
+            "请在任务助手中说明修改点",
+            "confirmAdvance",
+            "holdAdvance");
     assertThat(app).doesNotContain("state.snapshot?.status === \"completed\") return");
     assertThat(page).contains("id=\"retries\"", "剩余重跑次数");
   }

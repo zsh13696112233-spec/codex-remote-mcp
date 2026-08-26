@@ -8,7 +8,8 @@ const FAILED = new Set(["failed", "cancelled", "interrupted"]);
 const state = {
   workflowId: new URLSearchParams(location.search).get("workflowId")?.trim() || "",
   cursor: 0, timer: null, durationTimer: null, messages: [], snapshot: null,
-  refreshError: null, refreshRetrying: false, refreshing: false, sending: false
+  refreshError: null, refreshRetrying: false, refreshing: false, sending: false,
+  advanceAction: null
 };
 const $ = selector => document.querySelector(selector);
 const text = value => value == null ? "" : String(value);
@@ -343,6 +344,46 @@ function renderSteps(nodes, initializing = false) {
       waiting.append(make("i", "pulse-dot"), make("span", "", message));
       card.append(waiting);
     }
+    const advance = state.snapshot?.pendingAdvance;
+    if (advance?.completedNodeId === node.id) {
+      const next = nodes.find(item => item.id === advance.nextNodeId);
+      const held = advance.state === "held";
+      const gate = make("div", "advance-waiting");
+      const copy = make("div", "advance-copy");
+      copy.append(
+        make("strong", "", held
+          ? `已暂停：暂不进入${next?.displayName || "下一步骤"}`
+          : `等待进入下一步：${next?.displayName || "下一步骤"}`),
+        make("span", "", held
+          ? "当前只是暂停，不会自动返工。结果不符合要求时，请在任务助手中说明修改点并确认执行；也可以稍后继续下一步。"
+          : "您可以立即确认、暂停等待，或等待倒计时结束后自动继续。暂停不会返工；如需返工，请在任务助手中说明修改点。")
+      );
+      const actions = make("div", "advance-actions");
+      const confirm = make(
+        "button",
+        "advance-confirm",
+        held ? "继续进入下一步" : "立即进入下一步"
+      );
+      confirm.type = "button";
+      confirm.dataset.advanceGate = advance.gateId;
+      confirm.dataset.advanceState = advance.state || "countdown";
+      confirm.dataset.advanceExpires = advance.expiresAt;
+      confirm.dataset.advanceAction = "confirm";
+      confirm.onclick = () => confirmAdvance(advance.gateId);
+      actions.append(confirm);
+      if (!held) {
+        const hold = make("button", "advance-hold", "暂停，暂不进入下一步");
+        hold.type = "button";
+        hold.dataset.advanceGate = advance.gateId;
+        hold.dataset.advanceState = "countdown";
+        hold.dataset.advanceExpires = advance.expiresAt;
+        hold.dataset.advanceAction = "hold";
+        hold.onclick = () => holdAdvance(advance.gateId);
+        actions.append(hold);
+      }
+      gate.append(copy, actions);
+      card.append(gate);
+    }
     row.append(rail, card);
     list.append(row);
   });
@@ -360,6 +401,10 @@ function render(snapshot) {
   const failed = nodes.find(node => FAILED.has(node.status));
   $("#current").textContent = initializing
     ? initializationMessage(snapshot)
+    : snapshot.pendingAdvance?.state === "held"
+    ? `任务已暂停，暂不进入第 ${nodes.findIndex(node => node.id === snapshot.pendingAdvance.nextNodeId) + 1} 步`
+    : snapshot.pendingAdvance
+    ? `上一步已完成，等待进入第 ${nodes.findIndex(node => node.id === snapshot.pendingAdvance.nextNodeId) + 1} 步`
     : active
     ? `第 ${nodes.indexOf(active) + 1} 步：${active.displayName || "正在执行"}`
     : failed ? `第 ${nodes.indexOf(failed) + 1} 步未完成`
@@ -371,6 +416,7 @@ function render(snapshot) {
   renderDuration();
   $("#updated").textContent = new Date().toLocaleString("zh-CN", {hour12: false});
   renderSteps(nodes, initializing);
+  renderAdvanceCountdown();
   renderComposer();
 }
 
@@ -395,6 +441,60 @@ function renderDuration() {
   document.querySelectorAll("[data-elapsed-start]").forEach(element => {
     element.textContent = elapsed(element.dataset.elapsedStart, element.dataset.elapsedEnd);
   });
+  renderAdvanceCountdown();
+}
+
+function renderAdvanceCountdown() {
+  document.querySelectorAll("[data-advance-gate]").forEach(button => {
+    const action = state.advanceAction;
+    const acting = action?.gateId === button.dataset.advanceGate;
+    const held = button.dataset.advanceState === "held";
+    const remaining = Math.max(0, Math.ceil((new Date(button.dataset.advanceExpires) - Date.now()) / 1000));
+    if (acting) {
+      if (action.type === button.dataset.advanceAction) {
+        button.textContent = action.type === "hold" ? "正在暂停…" : "正在确认…";
+      }
+      button.disabled = true;
+    } else if (held) {
+      button.textContent = "继续进入下一步";
+      button.disabled = false;
+    } else if (remaining > 0) {
+      if (button.dataset.advanceAction === "confirm") {
+        button.textContent = `立即进入下一步（${remaining} 秒）`;
+      } else {
+        button.textContent = "暂停，暂不进入下一步";
+      }
+      button.disabled = false;
+    } else {
+      if (button.dataset.advanceAction === "confirm") {
+        button.textContent = "正在自动进入下一步…";
+      }
+      button.disabled = true;
+    }
+  });
+}
+
+async function confirmAdvance(gateId) {
+  await runAdvanceAction(gateId, "confirm");
+}
+
+async function holdAdvance(gateId) {
+  await runAdvanceAction(gateId, "hold");
+}
+
+async function runAdvanceAction(gateId, action) {
+  if (!gateId || state.advanceAction) return;
+  state.advanceAction = {gateId, type: action};
+  renderAdvanceCountdown();
+  try {
+    await api(`/api/workflows/${encodeURIComponent(state.workflowId)}/advance/${encodeURIComponent(gateId)}/${action}`, {method: "POST"});
+    toast(action === "hold" ? "任务已暂停；暂停不会返工，如需返工请在任务助手中说明修改点" : "已确认，正在进入下一步");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    state.advanceAction = null;
+    await refresh();
+  }
 }
 
 function renderComposer() {

@@ -71,4 +71,16 @@ public class WorkflowController {
       @PathVariable String workflowId, @RequestBody JsonNode body) {
     return ResponseEntity.accepted().body(gatewayClient.sendMessage(workflowId, body));
   }
+
+  /** 确认当前半自动等待并立即进入下一步骤。 */
+  @PostMapping("/workflows/{workflowId}/advance/{gateId}/confirm")
+  public JsonNode confirmAdvance(@PathVariable String workflowId, @PathVariable String gateId) {
+    return gatewayClient.confirmAdvance(workflowId, gateId);
+  }
+
+  /** 暂停当前半自动等待，不再按倒计时自动进入下一步骤。 */
+  @PostMapping("/workflows/{workflowId}/advance/{gateId}/hold")
+  public JsonNode holdAdvance(@PathVariable String workflowId, @PathVariable String gateId) {
+    return gatewayClient.holdAdvance(workflowId, gateId);
+  }
 }

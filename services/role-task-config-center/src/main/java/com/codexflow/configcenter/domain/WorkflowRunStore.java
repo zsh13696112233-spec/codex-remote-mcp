@@ -123,6 +123,7 @@ public class WorkflowRunStore {
     root.put("failurePolicy", "stop");
     root.put("supervisorTimeoutSec", task.sop.supervisorTimeoutSec);
     root.put("maxRetryCount", task.sop.maxRetryCount);
+    root.put("advanceMode", task.sop.advanceMode);
     var nodes = root.putArray("nodes");
     String previous = null;
     int stepNumber = 1;

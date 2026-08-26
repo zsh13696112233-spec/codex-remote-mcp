@@ -103,6 +103,22 @@ public class GatewayClient {
     return exchange("POST", "/workflows/" + pathSegment(workflowId) + "/messages", body);
   }
 
+  /** 确认半自动工作流立即进入下一步骤。 */
+  public JsonNode confirmAdvance(String workflowId, String gateId) {
+    return exchange(
+        "POST",
+        "/workflows/" + pathSegment(workflowId) + "/advance/" + pathSegment(gateId) + "/confirm",
+        null);
+  }
+
+  /** 暂停当前半自动等待，取消倒计时自动流转。 */
+  public JsonNode holdAdvance(String workflowId, String gateId) {
+    return exchange(
+        "POST",
+        "/workflows/" + pathSegment(workflowId) + "/advance/" + pathSegment(gateId) + "/hold",
+        null);
+  }
+
   /** 构建并执行 HTTP 请求，将成功响应解析为 JSON，并统一转换网络异常。 */
   private JsonNode exchange(String method, String path, JsonNode body) {
     try {

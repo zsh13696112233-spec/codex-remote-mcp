@@ -52,7 +52,7 @@
 .inspector-tabs{display:grid;grid-template-columns:1fr 1fr;padding:10px;border-bottom:1px solid var(--line);gap:5px}
 .inspector-tabs button{border:0;background:transparent;color:#7b8392;font-weight:650}.inspector-tabs button.active{background:#f0efff;color:var(--p)}
 .inspector-body{height:calc(100vh - 218px);overflow:auto;padding:18px}
-.inspector-heading{margin-bottom:18px}.inspector-body label{margin:13px 0}.inspector-body input,.inspector-body select,.inspector-body textarea{width:100%}
+.inspector-heading{margin-bottom:18px}.inspector-body label{margin:13px 0}.inspector-body input,.inspector-body select,.inspector-body textarea{width:100%}.inspector-body .check{justify-content:flex-start;gap:7px}.inspector-body .check input[type="checkbox"]{width:auto;flex:0 0 auto;margin:0;padding:0}
 .inspector-body textarea{min-height:92px}.inspector-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.inspector-grid label{min-width:0}
 .selected-role{display:flex;align-items:center;gap:10px;padding:11px;border-radius:10px;background:#f7f7fb;margin-bottom:16px}
 .selected-role>div{display:grid;gap:3px;min-width:0;flex:1}.selected-role small{color:#858d9c;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.selected-role>b{color:#946e13;background:#fff2c5;padding:3px 6px;border-radius:5px;font-size:10px}

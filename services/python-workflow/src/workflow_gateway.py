@@ -20,7 +20,11 @@ from codex_orchestrator_mcp import (
     Orchestrator,
     utc_now,
 )
-from workflow_store import AsyncEventBatcher, WorkflowStore
+from workflow_store import (
+    REVISION_INSTRUCTION_LIMIT,
+    AsyncEventBatcher,
+    WorkflowStore,
+)
 
 
 DEFAULT_DB_PATH = Path(__file__).with_name("workflows.db")
@@ -205,6 +209,8 @@ class WorkflowGateway:
                 self.store.update_supervisor(workflow_id, job_snapshot)
 
                 latest = self.store.get_workflow(workflow_id)
+                if self._advance_is_held(latest):
+                    return
                 if workflow_id in self._control_in_progress:
                     return
                 if (
@@ -245,7 +251,12 @@ class WorkflowGateway:
                 )
                 return
         except asyncio.CancelledError:
-            if workflow_id not in self._control_in_progress:
+            held = False
+            try:
+                held = self._advance_is_held(self.store.get_workflow(workflow_id))
+            except ValueError:
+                pass
+            if workflow_id not in self._control_in_progress and not held:
                 self.store.finish_workflow(
                     workflow_id,
                     supervisor_status="cancelled",
@@ -254,6 +265,11 @@ class WorkflowGateway:
                 )
             raise
         except Exception as error:
+            try:
+                if self._advance_is_held(self.store.get_workflow(workflow_id)):
+                    return
+            except ValueError:
+                pass
             self.store.add_event(
                 workflow_id,
                 node_id=None,
@@ -277,6 +293,11 @@ class WorkflowGateway:
             )
             for node in snapshot.get("nodes", [])
         )
+
+    @staticmethod
+    def _advance_is_held(snapshot: dict[str, Any]) -> bool:
+        pending = snapshot.get("pendingAdvance")
+        return isinstance(pending, dict) and pending.get("state") == "held"
 
     @staticmethod
     def _supervisor_job_fingerprint(snapshot: dict[str, Any]) -> tuple[Any, ...]:
@@ -318,6 +339,7 @@ class WorkflowGateway:
         workflow_view = {
             "workflowId": spec["workflowId"],
             "failurePolicy": spec["failurePolicy"],
+            "advanceMode": spec.get("advanceMode", "automatic"),
             "nodes": [
                 {
                     "id": node["id"],
@@ -342,6 +364,9 @@ class WorkflowGateway:
             "或 interrupted。每次调用 wait_node 时 timeout_sec 使用 10 秒，"
             "等待超时时继续调用，以便及时响应用户咨询。\n"
             "如果 failurePolicy=stop，任一节点失败后不得启动后续节点。\n"
+            "如果 advanceMode=semi_automatic，dispatch_node 会在成功步骤之间等待最多"
+            "30 秒；用户也可以选择暂停且暂不进入下一步。等待或暂停期间应告诉用户"
+            "尚未进入下一步，不得声称下一步已经开始。\n"
             "你面对的是完全不懂技术的普通用户。所有对外可见消息必须使用简单中文，"
             "像耐心的助手一样说明进度。\n"
             "对外把 node 称为“步骤”，按工作流中的顺序称为“第1步、第2步……”。\n"
@@ -366,6 +391,33 @@ class WorkflowGateway:
         )
         self._ensure_chat_worker(workflow_id)
         return accepted
+
+    async def confirm_advance(self, workflow_id: str, gate_id: str) -> dict[str, Any]:
+        if not gate_id or len(gate_id) > 128:
+            raise ValueError("gateId 必须是 1 到 128 个字符。")
+        lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
+        async with lock:
+            result = await asyncio.to_thread(
+                self.store.confirm_advance, workflow_id, gate_id
+            )
+            if result.get("resumedFromHold"):
+                await self._resume_supervisor_if_needed(workflow_id)
+            return result
+
+    async def hold_advance(self, workflow_id: str, gate_id: str) -> dict[str, Any]:
+        if not gate_id or len(gate_id) > 128:
+            raise ValueError("gateId 必须是 1 到 128 个字符。")
+        lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
+        async with lock:
+            self._control_in_progress.add(workflow_id)
+            try:
+                result = await asyncio.to_thread(
+                    self.store.hold_advance, workflow_id, gate_id
+                )
+                await self._pause_supervisor(workflow_id)
+                return result
+            finally:
+                self._control_in_progress.discard(workflow_id)
 
     def _ensure_chat_worker(self, workflow_id: str) -> None:
         current = self._chat_tasks.get(workflow_id)
@@ -474,7 +526,13 @@ class WorkflowGateway:
         return {
             "type": "object",
             "additionalProperties": False,
-            "required": ["kind", "text", "actionType", "nodeId"],
+            "required": [
+                "kind",
+                "text",
+                "actionType",
+                "nodeId",
+                "revisionInstruction",
+            ],
             "properties": {
                 "kind": {
                     "type": "string",
@@ -486,6 +544,10 @@ class WorkflowGateway:
                     "enum": ["stop", "skip", "restart_from", None],
                 },
                 "nodeId": {"type": ["string", "null"], "maxLength": 128},
+                "revisionInstruction": {
+                    "type": ["string", "null"],
+                    "maxLength": REVISION_INSTRUCTION_LIMIT,
+                },
             },
         }
 
@@ -499,10 +561,37 @@ class WorkflowGateway:
         text = str(value.get("text") or "").strip()
         action_type = value.get("actionType")
         node_id = value.get("nodeId")
+        if "revisionInstruction" not in value:
+            raise RuntimeError("任务助手返回格式无效。")
+        raw_revision_instruction = value.get("revisionInstruction")
+        if raw_revision_instruction is not None and not isinstance(
+            raw_revision_instruction, str
+        ):
+            raise RuntimeError("任务助手返回格式无效。")
+        revision_instruction = (
+            raw_revision_instruction.strip()
+            if isinstance(raw_revision_instruction, str)
+            else None
+        )
+        if revision_instruction == "":
+            revision_instruction = None
+        if (
+            revision_instruction is not None
+            and len(revision_instruction) > REVISION_INSTRUCTION_LIMIT
+        ):
+            raise RuntimeError("任务助手总结的返工要求过长，请缩短后重试。")
         if kind not in {"answer", "clarify", "propose_control"} or not text:
             raise RuntimeError("任务助手返回格式无效。")
         if kind != "propose_control":
-            return {"kind": kind, "text": text, "actionType": None, "nodeId": None}
+            if revision_instruction is not None:
+                raise RuntimeError("任务助手返回格式无效。")
+            return {
+                "kind": kind,
+                "text": text,
+                "actionType": None,
+                "nodeId": None,
+                "revisionInstruction": None,
+            }
         if action_type not in {"stop", "skip", "restart_from"}:
             raise RuntimeError("任务助手提出了不支持的操作。")
         if action_type != "stop":
@@ -511,11 +600,14 @@ class WorkflowGateway:
                 raise RuntimeError("任务助手没有识别出有效的目标步骤，请重新说明。")
         else:
             node_id = None
+        if action_type != "restart_from" and revision_instruction is not None:
+            raise RuntimeError("任务助手返回格式无效。")
         return {
             "kind": kind,
             "text": text,
             "actionType": action_type,
             "nodeId": node_id,
+            "revisionInstruction": revision_instruction,
         }
 
     def _apply_assistant_decision(
@@ -529,6 +621,7 @@ class WorkflowGateway:
                 str(decision["actionType"]),
                 decision.get("nodeId"),
                 message_id,
+                decision.get("revisionInstruction"),
             )
         except ValueError as error:
             if "重跑次数已经用完" in str(error):
@@ -540,9 +633,15 @@ class WorkflowGateway:
                 item["displayName"] for item in proposal.get("affectedNodes", [])
             )
             policy = proposal["retryPolicy"]
+            revision_instruction = proposal.get("revisionInstruction")
+            revision_copy = (
+                f"\n\n本次返工要求：\n{revision_instruction}"
+                if revision_instruction
+                else "\n\n本次没有新增返工要求，将按原有要求重新执行。"
+            )
             return (
                 f"准备重新执行：{names}。更早步骤的结果会保留，本次会消耗1次重跑额度；"
-                f"当前还剩{policy['remainingRetries']}次。"
+                f"当前还剩{policy['remainingRetries']}次。{revision_copy}\n\n"
                 "如要继续，请另发一条仅包含“确认执行”的消息；10分钟内有效。"
             )
         if action_type == "skip":
@@ -576,13 +675,23 @@ class WorkflowGateway:
                         workflow_id, self.store.get_nodes_from(workflow_id, node_id)
                     )
                     result = self.store.restart_from_node(
-                        workflow_id, node_id, action_id=action["actionId"]
+                        workflow_id,
+                        node_id,
+                        action_id=action["actionId"],
+                        revision_instruction=action.get("revisionInstruction"),
+                        source_message_id=action.get("proposedByMessageId"),
                     )
                     self.store.finish_control_execution(
                         action["actionId"], result={"retryPolicy": result["retryPolicy"]}
                     )
+                    revision_copy = (
+                        "已将确认的返工要求加入本次步骤提示词。"
+                        if action.get("revisionInstruction")
+                        else ""
+                    )
                     return (
                         "已重新打开任务，将从所选步骤继续执行。"
+                        f"{revision_copy}"
                         f"本任务还可重跑{result['retryPolicy']['remainingRetries']}次。"
                     )
                 if action_type == "skip":
@@ -691,6 +800,12 @@ class WorkflowGateway:
             "返回 propose_control/skip；要求重试、重新执行、从某一步重新开始时统一返回"
             "propose_control/restart_from，并把步骤序号或名称映射为快照里的真实 id。"
             "restart_from 表示该步到最后全部重跑，已完成任务也允许提出。"
+            "输出中的 revisionInstruction 字段始终必须存在。只有 restart_from 可以填写"
+            "该字段：如果用户说明了上一版的问题或修改要求，请将其总结为独立、完整、"
+            "可直接执行的中文返工要求，保留所有关键约束，去掉重跑步骤等控制措辞，"
+            "不得虚构品牌、颜色或其他细节；如果用户只是要求重新尝试而没有新增修改要求，"
+            "则填写 null。其他 kind 和 actionType 一律填写 null。"
+            "如果关键要求存在歧义，应返回 clarify，不得猜测。"
             "不确定目标步骤时必须澄清，不能猜测。达到重跑上限时说明不能再重跑。"
             "不要暴露会话、工具、执行机、内部英文状态或原始异常。\n"
             f"最新任务快照：{json.dumps(public_snapshot, ensure_ascii=False)}\n"
@@ -699,7 +814,7 @@ class WorkflowGateway:
 
     async def _resume_supervisor_if_needed(self, workflow_id: str) -> None:
         snapshot = self.store.get_workflow(workflow_id)
-        if snapshot["status"] != "running":
+        if snapshot["status"] != "running" or self._advance_is_held(snapshot):
             return
         job_id = snapshot["supervisor"].get("jobId")
         if job_id and job_id in self.orchestrator.jobs:
@@ -718,6 +833,7 @@ class WorkflowGateway:
 
     async def cancel(self, workflow_id: str) -> dict[str, Any]:
         snapshot = await asyncio.to_thread(self.store.get_workflow, workflow_id)
+        held = self._advance_is_held(snapshot)
         task = self._tasks.get(workflow_id)
         job_id = snapshot["supervisor"].get("jobId")
         if job_id and job_id in self.orchestrator.jobs:
@@ -732,6 +848,14 @@ class WorkflowGateway:
             event_type="workflow.cancel_requested",
             payload={"requestedAt": utc_now()},
         )
+        if held:
+            await asyncio.to_thread(
+                self.store.finish_workflow,
+                workflow_id,
+                supervisor_status="cancelled",
+                response=None,
+                error="用户已取消任务。",
+            )
         return await asyncio.to_thread(self.store.get_workflow, workflow_id)
 
 
@@ -802,6 +926,36 @@ async def post_workflow_message(request: Request) -> Response:
         return _error_response(error, 409)
     except (ValueError, json.JSONDecodeError) as error:
         return _error_response(error, 400)
+
+
+async def confirm_workflow_advance(request: Request) -> Response:
+    gateway: WorkflowGateway = request.app.state.gateway
+    try:
+        result = await gateway.confirm_advance(
+            request.path_params["workflow_id"], request.path_params["gate_id"]
+        )
+        return JSONResponse(result)
+    except LookupError as error:
+        return _error_response(error, 404)
+    except RuntimeError as error:
+        return _error_response(error, 409)
+    except ValueError as error:
+        return _error_response(error, 404 if "找不到" in str(error) else 400)
+
+
+async def hold_workflow_advance(request: Request) -> Response:
+    gateway: WorkflowGateway = request.app.state.gateway
+    try:
+        result = await gateway.hold_advance(
+            request.path_params["workflow_id"], request.path_params["gate_id"]
+        )
+        return JSONResponse(result)
+    except LookupError as error:
+        return _error_response(error, 404)
+    except RuntimeError as error:
+        return _error_response(error, 409)
+    except ValueError as error:
+        return _error_response(error, 404 if "找不到" in str(error) else 400)
 
 
 async def get_event_history(request: Request) -> Response:
@@ -928,6 +1082,16 @@ def create_app(
             Route(
                 "/workflows/{workflow_id}/messages",
                 post_workflow_message,
+                methods=["POST"],
+            ),
+            Route(
+                "/workflows/{workflow_id}/advance/{gate_id}/confirm",
+                confirm_workflow_advance,
+                methods=["POST"],
+            ),
+            Route(
+                "/workflows/{workflow_id}/advance/{gate_id}/hold",
+                hold_workflow_advance,
                 methods=["POST"],
             ),
             Route(

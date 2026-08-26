@@ -15,6 +15,7 @@ import java.util.List;
  * @param defaultStepModel 默认步骤模型
  * @param enabled 是否启用
  * @param maxRetryCount 单次运行允许的人工重跑总次数
+ * @param advanceMode 步骤成功后的流转方式
  * @param steps 按执行顺序排列的步骤列表
  */
 public record SopSaveRequest(
@@ -24,6 +25,7 @@ public record SopSaveRequest(
     @Size(max = 64) String defaultStepModel,
     Boolean enabled,
     Integer maxRetryCount,
+    @Size(max = 32) String advanceMode,
     @NotEmpty List<@Valid SopStepRequest> steps) {
 
   public SopSaveRequest(
@@ -33,6 +35,25 @@ public record SopSaveRequest(
       String defaultStepModel,
       Boolean enabled,
       List<SopStepRequest> steps) {
-    this(name, description, supervisorTimeoutSec, defaultStepModel, enabled, null, steps);
+    this(name, description, supervisorTimeoutSec, defaultStepModel, enabled, null, null, steps);
+  }
+
+  public SopSaveRequest(
+      String name,
+      String description,
+      Integer supervisorTimeoutSec,
+      String defaultStepModel,
+      Boolean enabled,
+      Integer maxRetryCount,
+      List<SopStepRequest> steps) {
+    this(
+        name,
+        description,
+        supervisorTimeoutSec,
+        defaultStepModel,
+        enabled,
+        maxRetryCount,
+        null,
+        steps);
   }
 }

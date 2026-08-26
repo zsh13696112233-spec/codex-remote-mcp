@@ -50,6 +50,7 @@ class DomainJsonMapper {
     result.put("failurePolicy", sop.failurePolicy);
     result.put("supervisorTimeoutSec", sop.supervisorTimeoutSec);
     result.put("maxRetryCount", sop.maxRetryCount);
+    result.put("advanceMode", sop.advanceMode);
     result.put("defaultStepModel", sop.defaultStepModel);
     result.put("enabled", sop.enabled);
     var steps = result.putArray("steps");

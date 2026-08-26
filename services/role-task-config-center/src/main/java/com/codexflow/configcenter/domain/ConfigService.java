@@ -20,6 +20,7 @@ public class ConfigService {
   private static final Set<String> SUPPORTED_MODELS =
       Set.of("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna");
   private static final Set<String> EXECUTOR_TYPES = Set.of("local", "remote");
+  private static final Set<String> ADVANCE_MODES = Set.of("automatic", "semi_automatic");
   private static final String DEFAULT_EXPECTED_OUTPUT = "完成本步骤，并返回清晰、完整且可验证的结果。";
 
   private final RoleRepository roles;
@@ -208,6 +209,11 @@ public class ConfigService {
     sop.supervisorTimeoutSec =
         integerInRange(body.supervisorTimeoutSec(), "supervisorTimeoutSec", 7200, 10, 7200);
     sop.maxRetryCount = integerInRange(body.maxRetryCount(), "maxRetryCount", 10, 0, 100);
+    sop.advanceMode = normalizeNullable(body.advanceMode());
+    if (sop.advanceMode == null) sop.advanceMode = "automatic";
+    if (!ADVANCE_MODES.contains(sop.advanceMode)) {
+      throw new IllegalArgumentException("advanceMode 只能是 automatic 或 semi_automatic。");
+    }
     sop.defaultStepModel = normalizeNullable(body.defaultStepModel());
     if (sop.defaultStepModel == null) sop.defaultStepModel = defaultModel;
     validateModel(sop.defaultStepModel);

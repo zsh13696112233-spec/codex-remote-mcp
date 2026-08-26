@@ -146,7 +146,7 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | `role-task-config-center`（8091） | 管理角色、严格串行 SOP、任务定义和运行记录；生成工作流 JSON；提交、取消和按快照重试 | MySQL 8 | 定义任务、生成不可变运行快照、调用 8080、生成 8090 监控地址 | 浏览器不能直连 8080；不负责实际节点调度；不读取 SQLite |
 | `python-workflow`（8080） | 对外提供工作流 HTTP/SSE 边界；校验工作流；启动主监督；处理消息；聚合运行状态 | SQLite（WAL） | 创建工作流、查询状态、保存事件/图片、取消工作流、驱动主监督 | 不保存角色和 SOP 主数据；不提供配置页面 |
-| `workflow-console`（8090） | 展示一个 `workflowId` 的进度、步骤结果、图片和任务助手消息 | 无独立业务数据库 | 代理 8080 的查询、事件、图片和消息接口 | 不连接 MySQL；不编辑或提交任务；不提供直接取消、重试、跳过接口 |
+| `workflow-console`（8090） | 展示一个 `workflowId` 的进度、步骤结果、图片和任务助手消息 | 无独立业务数据库 | 代理 8080 的查询、事件、图片、消息和半自动暂停/继续接口 | 不连接 MySQL；不编辑或提交任务；不提供直接取消、重试、跳过接口 |
 
 ## 5. Python 工作流服务的内部结构
 
@@ -229,6 +229,7 @@ MCP 在一次 `dispatch_node` 调用中具体完成以下工作：
   "name": "任务名称",
   "supervisorAgentId": "主监督执行机",
   "failurePolicy": "stop",
+  "advanceMode": "automatic 或 semi_automatic",
   "supervisorTimeoutSec": 7200,
   "nodes": [
     {
@@ -302,6 +303,7 @@ sequenceDiagram
    - 使用 `after` 游标增量查询历史事件。
    - 读取已归属当前工作流的图片附件。
    - 发送任务助手消息。
+   - 暂停半自动 SOP 当前等待，或确认并立即进入下一步。
 4. 页面默认每 2 秒刷新状态和事件。
 5. 页面把内部状态翻译为普通中文，隐藏执行机、会话编号、原始事件和内部英文状态码。
 6. 工作流完成且没有待处理消息后停止轮询。
@@ -310,7 +312,7 @@ sequenceDiagram
 
 ## 7. 任务助手和控制链路
 
-监控中心允许用户咨询进度，但不暴露直接控制 API。消息链路如下：
+监控中心允许用户咨询进度，但不暴露停止、重试或跳过的直接控制 API。半自动 SOP 当前等待只允许直接暂停或继续；其他控制仍使用消息链路：
 
 ```text
 浏览器
@@ -374,6 +376,8 @@ SQLite 由 `8080` 网关和 MCP 共享，保存实际执行状态、步骤结果
 | 8090 | 8080 | `GET /workflows/{id}/events/history` | 按游标读取事件 |
 | 8090 | 8080 | `GET /workflows/{id}/artifacts/{artifactId}` | 代理图片附件 |
 | 8090 | 8080 | `POST /workflows/{id}/messages` | 发送任务助手消息 |
+| 8090 | 8080 | `POST /workflows/{id}/advance/{gateId}/confirm` | 确认半自动等待并进入下一步骤 |
+| 8090 | 8080 | `POST /workflows/{id}/advance/{gateId}/hold` | 暂停半自动等待并取消自动放行 |
 | 主监督 app-server | MCP | MCP 工具调用 | 派发、等待、查询和控制步骤 |
 | MCP | 各执行 app-server | WebSocket RPC | 启动并跟踪独立步骤会话 |
 
@@ -400,6 +404,8 @@ pending → queued → running → completed
                          ├──→ cancelling → cancelled
                          └──→ skipped（经确认的控制操作）
 ```
+
+工作流整体在半自动等待或暂停期间仍为 `running`。状态快照通过 `advanceMode` 和 `pendingAdvance` 表达当前等待；`pendingAdvance.state` 为 `countdown` 时，30 秒到期由 Python 运行时自动放行；为 `held` 时只记录原始截止时间和 `heldAt`，不再自动放行，暂停时间也不计入主监督最长运行时间。最后一步、失败和跳过不建立等待，取消或尾部重跑会使旧等待失效。
 
 状态变化和事件写入应保持一致；`stateVersion` 用于识别用户消息接收后工作流是否已发生变化，事件 `sequence` 用于增量查询断点续传。
 

@@ -1119,6 +1119,20 @@ async def cancel(job_id: str) -> dict[str, Any]:
 async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
     """派发工作流节点；节点配置来自共享数据库，且依赖未完成时拒绝启动。"""
     store = get_workflow_store()
+    while True:
+        gate = store.pending_advance_for_node(workflow_id, node_id)
+        if gate is None:
+            break
+        if gate["state"] == "held":
+            await asyncio.sleep(0.25)
+            continue
+        remaining = (
+            datetime.fromisoformat(gate["expiresAt"]) - datetime.now(UTC)
+        ).total_seconds()
+        if remaining <= 0:
+            store.release_timed_out_advance(workflow_id, gate["gateId"])
+            break
+        await asyncio.sleep(min(0.25, remaining))
     node = store.prepare_node_dispatch(workflow_id, node_id)
     if node["alreadyDispatched"]:
         job_id = node.get("jobId")
@@ -1245,6 +1259,8 @@ def workflow_status(workflow_id: str) -> dict[str, Any]:
         "stateVersion": snapshot["stateVersion"],
         "progress": snapshot["progress"],
         "retryPolicy": snapshot["retryPolicy"],
+        "advanceMode": snapshot["advanceMode"],
+        "pendingAdvance": snapshot["pendingAdvance"],
         "currentSteps": snapshot["currentNodes"],
         "steps": [
             {

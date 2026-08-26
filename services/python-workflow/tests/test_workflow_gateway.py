@@ -11,7 +11,7 @@ from codex_orchestrator_mcp import Orchestrator
 from starlette.testclient import TestClient
 from tests.mock_app_server import MockAppServer
 from workflow_gateway import WorkflowGateway, create_app
-from workflow_store import WorkflowStore
+from workflow_store import WorkflowStore, utc_now
 
 
 class SupervisorPromptTests(unittest.TestCase):
@@ -39,6 +39,7 @@ class SupervisorPromptTests(unittest.TestCase):
         self.assertIn("任务已全部完成", prompt)
         self.assertIn("timeout_sec 使用 10 秒", prompt)
         self.assertIn("节点派发后必须调用 wait_node", prompt)
+        self.assertIn("用户也可以选择暂停", prompt)
 
     def test_chat_prompt_only_classifies_against_latest_snapshot(self) -> None:
         prompt = WorkflowGateway._chat_prompt(
@@ -55,7 +56,75 @@ class SupervisorPromptTests(unittest.TestCase):
         self.assertIn("独立的任务助手", prompt)
         self.assertIn("不调用任何工具", prompt)
         self.assertIn("propose_control/restart_from", prompt)
+        self.assertIn("revisionInstruction", prompt)
+        self.assertIn("不得虚构品牌、颜色", prompt)
         self.assertIn('"number": 1', prompt)
+
+    def test_assistant_decision_validates_revision_instruction_semantics(self) -> None:
+        snapshot = {
+            "nodes": [{"id": "a", "displayName": "图片生成", "status": "completed"}]
+        }
+        decision = WorkflowGateway._validate_assistant_decision(
+            {
+                "kind": "propose_control",
+                "text": "准备返工",
+                "actionType": "restart_from",
+                "nodeId": "a",
+                "revisionInstruction": "增加清晰的机身涂装和标识。",
+            },
+            snapshot,
+        )
+        self.assertEqual(decision["revisionInstruction"], "增加清晰的机身涂装和标识。")
+        with self.assertRaisesRegex(RuntimeError, "格式无效"):
+            WorkflowGateway._validate_assistant_decision(
+                {
+                    "kind": "answer",
+                    "text": "普通回答",
+                    "actionType": None,
+                    "nodeId": None,
+                    "revisionInstruction": "不应出现",
+                },
+                snapshot,
+            )
+        with self.assertRaisesRegex(RuntimeError, "格式无效"):
+            WorkflowGateway._validate_assistant_decision(
+                {
+                    "kind": "propose_control",
+                    "text": "准备返工",
+                    "actionType": "restart_from",
+                    "nodeId": "a",
+                },
+                snapshot,
+            )
+
+    def test_restart_confirmation_displays_summarized_instruction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkflowStore(Path(directory, "workflows.db"))
+            store.create_workflow(
+                {
+                    "workflowId": "revision-demo",
+                    "supervisorAgentId": "local",
+                    "nodes": [{"id": "a", "prompt": "生成飞机", "timeoutSec": 10}],
+                }
+            )
+            message_id = str(uuid.uuid4())
+            store.accept_chat_message(
+                "revision-demo", message_id, "没有 logo、没有涂装，重新生成"
+            )
+            gateway = WorkflowGateway(store, object())
+            answer = gateway._apply_assistant_decision(
+                "revision-demo",
+                message_id,
+                {
+                    "kind": "propose_control",
+                    "text": "准备返工",
+                    "actionType": "restart_from",
+                    "nodeId": "a",
+                    "revisionInstruction": "增加清晰、完整的机身涂装和标识。",
+                },
+            )
+            self.assertIn("本次返工要求", answer)
+            self.assertIn("增加清晰、完整的机身涂装和标识", answer)
 
     def test_public_agents_excludes_connection_and_authentication_details(self) -> None:
         class FakeOrchestrator:
@@ -112,6 +181,118 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                     f"/workflows/another-workflow/artifacts/{artifact['id']}"
                 )
                 self.assertEqual(missing.status_code, 404)
+
+    def test_semi_automatic_advance_can_be_held_and_resumed_over_http(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "agents.json")
+            config.write_text(
+                json.dumps({"agents": {"local": {"url": "ws://127.0.0.1:1", "cwd": "/work"}}}),
+                encoding="utf-8",
+            )
+            app = create_app(
+                db_path=Path(directory, "workflows.db"), config_path=config
+            )
+            store = app.state.gateway.store
+            store.create_workflow(
+                {
+                    "workflowId": "advance-demo",
+                    "supervisorAgentId": "local",
+                    "advanceMode": "semi_automatic",
+                    "nodes": [
+                        {"id": "a", "prompt": "a", "timeoutSec": 10},
+                        {
+                            "id": "b",
+                            "prompt": "b",
+                            "dependsOn": ["a"],
+                            "timeoutSec": 10,
+                        },
+                    ],
+                }
+            )
+            store.prepare_node_dispatch("advance-demo", "a")
+            store.sync_node_job(
+                "advance-demo",
+                "a",
+                {"status": "completed", "response": "A", "finished_at": utc_now()},
+            )
+            gate = store.get_workflow("advance-demo")["pendingAdvance"]
+            app.state.gateway._pause_supervisor = AsyncMock()
+            app.state.gateway._resume_supervisor_if_needed = AsyncMock()
+
+            with TestClient(app) as client:
+                held = client.post(
+                    f"/workflows/advance-demo/advance/{gate['gateId']}/hold"
+                )
+                self.assertEqual(held.status_code, 200)
+                self.assertEqual(held.json()["status"], "held")
+                repeated_hold = client.post(
+                    f"/workflows/advance-demo/advance/{gate['gateId']}/hold"
+                )
+                self.assertEqual(repeated_hold.status_code, 200)
+                self.assertEqual(
+                    store.get_workflow("advance-demo")["pendingAdvance"]["state"],
+                    "held",
+                )
+                response = client.post(
+                    f"/workflows/advance-demo/advance/{gate['gateId']}/confirm"
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["status"], "confirmed")
+                self.assertTrue(response.json()["resumedFromHold"])
+                repeated = client.post(
+                    f"/workflows/advance-demo/advance/{gate['gateId']}/confirm"
+                )
+                self.assertEqual(repeated.status_code, 200)
+            self.assertGreaterEqual(
+                app.state.gateway._pause_supervisor.await_count, 1
+            )
+            self.assertGreaterEqual(
+                app.state.gateway._resume_supervisor_if_needed.await_count, 1
+            )
+
+
+class AdvanceControlConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_confirm_waits_until_hold_has_finished_pausing(self) -> None:
+        class FakeStore:
+            confirm_calls = 0
+
+            @staticmethod
+            def hold_advance(_workflow_id: str, _gate_id: str) -> dict:
+                return {"gateId": "gate-1", "status": "held"}
+
+            def confirm_advance(self, _workflow_id: str, _gate_id: str) -> dict:
+                self.confirm_calls += 1
+                return {
+                    "gateId": "gate-1",
+                    "status": "confirmed",
+                    "resumedFromHold": True,
+                }
+
+        store = FakeStore()
+        gateway = WorkflowGateway(store, object())
+        pause_started = asyncio.Event()
+        allow_pause_to_finish = asyncio.Event()
+
+        async def pause(_workflow_id: str) -> None:
+            pause_started.set()
+            await allow_pause_to_finish.wait()
+
+        gateway._pause_supervisor = AsyncMock(side_effect=pause)
+        gateway._resume_supervisor_if_needed = AsyncMock()
+
+        hold_task = asyncio.create_task(gateway.hold_advance("demo", "gate-1"))
+        await pause_started.wait()
+        confirm_task = asyncio.create_task(
+            gateway.confirm_advance("demo", "gate-1")
+        )
+        await asyncio.sleep(0)
+        self.assertEqual(store.confirm_calls, 0)
+
+        allow_pause_to_finish.set()
+        await hold_task
+        await confirm_task
+        self.assertEqual(store.confirm_calls, 1)
+        gateway._resume_supervisor_if_needed.assert_awaited_once_with("demo")
 
 
 class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -273,12 +454,15 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
 class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
-    def _confirmed_restart(store: WorkflowStore) -> dict:
+    def _confirmed_restart(
+        store: WorkflowStore,
+        instruction: str | None = "增加清晰、完整的机身涂装和标识。",
+    ) -> dict:
         proposed_id = str(uuid.uuid4())
         confirmed_id = str(uuid.uuid4())
         store.accept_chat_message("control-demo", proposed_id, "从第2步重跑")
         proposal = store.propose_control(
-            "control-demo", "restart_from", "b", proposed_id
+            "control-demo", "restart_from", "b", proposed_id, instruction
         )
         store.accept_chat_message("control-demo", confirmed_id, "确认执行")
         return store.confirm_control(
@@ -329,11 +513,14 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             snapshot = store.get_workflow("control-demo")
             self.assertIn("重新打开", answer)
+            self.assertIn("返工要求加入", answer)
             self.assertEqual(snapshot["retryPolicy"]["usedRetries"], 1)
             self.assertEqual(
                 [node["status"] for node in snapshot["nodes"]],
                 ["completed", "pending", "pending"],
             )
+            prompt = store.prepare_node_dispatch("control-demo", "b")["prompt"]
+            self.assertTrue(prompt.endswith("增加清晰、完整的机身涂装和标识。"))
             with self.assertRaisesRegex(ValueError, "已经处理"):
                 await gateway._execute_control("control-demo", confirmed)
             self.assertEqual(
@@ -364,8 +551,14 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT status, retry_ordinal FROM workflow_control_actions "
                     "WHERE action_id = ?", (confirmed["actionId"],)
                 ).fetchone()
+                revision_count = connection.execute(
+                    "SELECT COUNT(*) FROM workflow_node_revision_instructions "
+                    "WHERE workflow_id = ?",
+                    ("control-demo",),
+                ).fetchone()[0]
             self.assertEqual(action["status"], "failed")
             self.assertIsNone(action["retry_ordinal"])
+            self.assertEqual(revision_count, 0)
 
 
 if __name__ == "__main__":

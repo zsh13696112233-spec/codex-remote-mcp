@@ -40,6 +40,12 @@ class ConfigCenterApplicationTest {
                     + "where table_name = 'codex_sop_sops' and column_name = 'max_retry_count'",
                 Integer.class))
         .isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from information_schema.columns "
+                    + "where table_name = 'codex_sop_sops' and column_name = 'advance_mode'",
+                Integer.class))
+        .isEqualTo(1);
   }
 
   /** 确认跨事务加载的 SOP、角色和任务关系可用于构建完整 API 快照。 */
@@ -100,6 +106,7 @@ class ConfigCenterApplicationTest {
 
     assertThat(first.payload().path("maxRetryCount").asInt()).isEqualTo(7);
     assertThat(retried.payload().path("maxRetryCount").asInt()).isEqualTo(7);
+    assertThat(first.payload().path("advanceMode").asText()).isEqualTo("automatic");
     assertThat(retried.workflowId()).isNotEqualTo(first.workflowId());
     assertThat(retried.payload().has("usedRetryCount")).isFalse();
     assertThatThrownBy(
@@ -107,5 +114,37 @@ class ConfigCenterApplicationTest {
                 service.createSop(
                     new SopSaveRequest("非法额度", null, null, null, true, 101, List.of(step))))
         .hasMessageContaining("maxRetryCount");
+  }
+
+  /** 确认半自动模式会保存并冻结到原快照重试。 */
+  @Test
+  void semiAutomaticAdvanceModeIsValidatedAndFrozen() {
+    String roleId =
+        jdbc.queryForObject(
+            "select id from codex_sop_roles order by created_at limit 1", String.class);
+    SopStepRequest step =
+        new SopStepRequest(
+            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, Set.of(),
+            Set.of());
+    ObjectNode sop =
+        service.createSop(
+            new SopSaveRequest(
+                "半自动快照", null, null, null, true, 10, "semi_automatic", List.of(step)));
+    ObjectNode task =
+        service.createTask(
+            new TaskDefinitionSaveRequest(
+                "半自动任务", "验证流转模式快照", sop.path("id").asText(), null, true));
+
+    PreparedRun first = runStore.prepareLatest(task.path("id").asText());
+    PreparedRun retried = runStore.prepareRetry(first.workflowId());
+    assertThat(sop.path("advanceMode").asText()).isEqualTo("semi_automatic");
+    assertThat(first.payload().path("advanceMode").asText()).isEqualTo("semi_automatic");
+    assertThat(retried.payload().path("advanceMode").asText()).isEqualTo("semi_automatic");
+    assertThatThrownBy(
+            () ->
+                service.createSop(
+                    new SopSaveRequest(
+                        "非法模式", null, null, null, true, 10, "manual", List.of(step))))
+        .hasMessageContaining("advanceMode");
   }
 }

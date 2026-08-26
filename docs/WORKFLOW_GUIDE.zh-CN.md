@@ -133,6 +133,7 @@ POST http://192.168.1.100:8080/workflows
   "name": "serial-a-b-c",
   "supervisorAgentId": "local",
   "failurePolicy": "stop",
+  "advanceMode": "semi_automatic",
   "nodes": [
     {
       "id": "node-a",
@@ -180,6 +181,7 @@ POST http://192.168.1.100:8080/workflows
 | `supervisorAgentId` | 运行主监督会话的执行机 ID |
 | `failurePolicy` | `stop` 表示节点失败后停止；`continue` 表示允许继续处理其他可运行节点 |
 | `maxRetryCount` | 单个 `workflowId` 允许成功确认的尾部重跑总次数；默认 10，范围 0–100 |
+| `advanceMode` | `automatic`（默认）或 `semi_automatic`；半自动仅支持严格串行工作流 |
 | `nodes` | 节点数组 |
 | `nodes[].id` | 工作流内唯一节点 ID |
 | `nodes[].executor.type` | `local` 或 `remote`，用于表达执行位置 |
@@ -254,6 +256,15 @@ GET http://192.168.1.100:8080/workflows/task-20260820-001
 {
   "workflowId": "task-20260820-001",
   "status": "running",
+  "advanceMode": "semi_automatic",
+  "pendingAdvance": {
+    "gateId": "...",
+    "completedNodeId": "node-a",
+    "nextNodeId": "node-b",
+    "state": "countdown",
+    "heldAt": null,
+    "expiresAt": "2026-08-26T10:00:30+00:00"
+  },
   "currentNodes": ["node-b"],
   "progress": {
     "completed": 1,
@@ -300,6 +311,22 @@ GET http://192.168.1.100:8080/workflows/task-20260820-001
 - `nodes[].response`
 - `nodes[].error`
 
+半自动模式只在成功步骤与下一步骤之间等待。等待固定 30 秒并持久化在 SQLite 中，不依赖监控页面是否打开；立即继续或恢复暂停使用：
+
+```text
+POST /workflows/{workflowId}/advance/{gateId}/confirm
+```
+
+在倒计时结束前取消自动放行使用：
+
+```text
+POST /workflows/{workflowId}/advance/{gateId}/hold
+```
+
+暂停后 `pendingAdvance.state` 为 `held`，并返回 `heldAt`；原始 `expiresAt` 仅供审计，页面和运行时不再按其自动放行。确认和暂停均为幂等操作。未暂停且到期未确认时运行时自动放行；最后一步、失败步骤和跳过步骤不等待。取消、尾部重跑或其他使当前等待失效的状态变化会关闭旧等待。
+
+“暂停，暂不进入下一步”只控制步骤流转，不代表审核不通过，也不会自动返工。需要返工时，用户应在任务助手中说明问题和修改要求。
+
 ### 3. 实时 SSE 事件
 
 ```text
@@ -320,6 +347,7 @@ GET /workflows/{workflowId}/events?after=123
 - 完整 agent message。
 - `turn/started`、`turn/completed`。
 - MCP 工具调用、命令执行和其他 app-server 原始通知。
+- 半自动等待创建、人工暂停、暂停后继续、到期自动放行和等待失效事件。
 
 ### 4. 查询历史事件
 
@@ -364,7 +392,7 @@ Content-Type: application/json
 确认执行
 ```
 
-才能执行。回复 `取消操作` 可取消待确认操作。确认十分钟后过期；任务状态在确认前发生变化时必须重新提议和确认。一次成功的尾部重跑只消耗一次全局额度，并保留目标步骤之前的结果；目标步骤及后续步骤的旧结果和图片归档后重新执行。提议、取消、重复确认、校验失败和中止失败都不消耗额度。聊天不允许修改工作流、添加或删除步骤。
+才能执行。回复 `取消操作` 可取消待确认操作。确认十分钟后过期；任务状态在确认前发生变化时必须重新提议和确认。用户提供修改意见时，助手在结构化结果的 `revisionInstruction` 中生成不超过 4000 字符的独立返工要求并在确认消息中展示；确认后，该总结与来源消息、目标步骤和重跑序号一起持久化，并追加在目标步骤实际提示词最后。用户原话和原始提示词不被改写。多轮返工要求按时间累积，较新要求优先，最多向提示词传入 20,000 字符，超限时省略最旧要求。一次成功的尾部重跑只消耗一次全局额度，并保留目标步骤之前的结果；目标步骤及后续步骤的旧结果和图片归档后重新执行。提议、取消、重复确认、校验失败和中止失败都不消耗额度。聊天不允许修改工作流、添加或删除步骤。
 
 聊天事件包括：
 

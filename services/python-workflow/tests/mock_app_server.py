@@ -40,6 +40,7 @@ class MockAppServer:
             "text": "mock chat reply",
             "actionType": None,
             "nodeId": None,
+            "revisionInstruction": None,
         }, ensure_ascii=False)
         self.url = ""
         self.authorization: str | None = None
