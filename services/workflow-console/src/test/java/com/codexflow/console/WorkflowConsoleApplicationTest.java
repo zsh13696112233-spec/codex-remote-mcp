@@ -2,10 +2,13 @@ package com.codexflow.console;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
@@ -53,5 +56,17 @@ class WorkflowConsoleApplicationTest {
                                 || path.contains("retry")
                                 || path.contains("skip")
                                 || path.contains("edit")));
+  }
+
+  /** 确认页面区分进度和助手消息、展示额度，并允许终态继续发送消息。 */
+  @Test
+  void staticUiKeepsCompletedChatAndRetryPolicyVisible() throws IOException {
+    String app = new ClassPathResource("static/app.js").getContentAsString(StandardCharsets.UTF_8);
+    String page =
+        new ClassPathResource("static/index.html").getContentAsString(StandardCharsets.UTF_8);
+
+    assertThat(app).contains("任务进度", "任务助手", "snapshot.retryPolicy", "remainingRetries");
+    assertThat(app).doesNotContain("state.snapshot?.status === \"completed\") return");
+    assertThat(page).contains("id=\"retries\"", "剩余重跑次数");
   }
 }

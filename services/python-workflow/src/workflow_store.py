@@ -195,6 +195,12 @@ class WorkflowStore:
                     supervisor_turn_id TEXT,
                     supervisor_status TEXT NOT NULL,
                     supervisor_last_message TEXT,
+                    assistant_job_id TEXT,
+                    assistant_thread_id TEXT,
+                    assistant_turn_id TEXT,
+                    assistant_status TEXT NOT NULL DEFAULT 'idle',
+                    max_retry_count INTEGER NOT NULL DEFAULT 10,
+                    used_retry_count INTEGER NOT NULL DEFAULT 0,
                     response TEXT,
                     error TEXT,
                     created_at TEXT NOT NULL,
@@ -261,6 +267,7 @@ class WorkflowStore:
                     content BLOB NOT NULL,
                     byte_size INTEGER NOT NULL,
                     sha256 TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (workflow_id, node_id)
                         REFERENCES workflow_nodes(workflow_id, node_id) ON DELETE CASCADE,
@@ -301,6 +308,7 @@ class WorkflowStore:
                     proposed_state_version INTEGER NOT NULL,
                     result_json TEXT,
                     error TEXT,
+                    retry_ordinal INTEGER,
                     created_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -309,6 +317,43 @@ class WorkflowStore:
 
                 CREATE INDEX IF NOT EXISTS workflow_control_pending
                     ON workflow_control_actions(workflow_id, status, created_at);
+
+                CREATE TABLE IF NOT EXISTS workflow_node_attempts (
+                    workflow_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    job_id TEXT,
+                    thread_id TEXT,
+                    turn_id TEXT,
+                    response TEXT,
+                    error TEXT,
+                    actual_prompt TEXT,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    archived_at TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, node_id, attempt_number),
+                    FOREIGN KEY (workflow_id, node_id)
+                        REFERENCES workflow_nodes(workflow_id, node_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS workflow_attempt_artifacts (
+                    artifact_id TEXT NOT NULL,
+                    workflow_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    source_item_id TEXT,
+                    media_type TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content BLOB NOT NULL,
+                    byte_size INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    archived_at TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, node_id, attempt_number, artifact_id),
+                    FOREIGN KEY (workflow_id, node_id)
+                        REFERENCES workflow_nodes(workflow_id, node_id) ON DELETE CASCADE
+                );
                 """
             )
             columns = {
@@ -336,6 +381,34 @@ class WorkflowStore:
                 )
             if "spec_zlib" not in workflow_columns:
                 connection.execute("ALTER TABLE workflows ADD COLUMN spec_zlib BLOB")
+            for name, definition in {
+                "assistant_job_id": "TEXT",
+                "assistant_thread_id": "TEXT",
+                "assistant_turn_id": "TEXT",
+                "assistant_status": "TEXT NOT NULL DEFAULT 'idle'",
+                "max_retry_count": "INTEGER NOT NULL DEFAULT 10",
+                "used_retry_count": "INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                if name not in workflow_columns:
+                    connection.execute(f"ALTER TABLE workflows ADD COLUMN {name} {definition}")
+            artifact_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(workflow_artifacts)").fetchall()
+            }
+            if "attempt_number" not in artifact_columns:
+                connection.execute(
+                    "ALTER TABLE workflow_artifacts ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 0"
+                )
+            control_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(workflow_control_actions)"
+                ).fetchall()
+            }
+            if "retry_ordinal" not in control_columns:
+                connection.execute(
+                    "ALTER TABLE workflow_control_actions ADD COLUMN retry_ordinal INTEGER"
+                )
             connection.execute(
                 """
                 UPDATE workflow_nodes
@@ -441,6 +514,9 @@ class WorkflowStore:
         supervisor_timeout_sec = int(value.get("supervisorTimeoutSec", 7200))
         if not 10 <= supervisor_timeout_sec <= 7200:
             raise ValueError("supervisorTimeoutSec 必须在 10 到 7200 之间。")
+        max_retry_count = int(value.get("maxRetryCount", 10))
+        if not 0 <= max_retry_count <= 100:
+            raise ValueError("maxRetryCount 必须在 0 到 100 之间。")
 
         return {
             "workflowId": workflow_id,
@@ -451,6 +527,7 @@ class WorkflowStore:
             "supervisorWrite": bool(value.get("supervisorWrite", False)),
             "supervisorModel": value.get("supervisorModel"),
             "supervisorTimeoutSec": supervisor_timeout_sec,
+            "maxRetryCount": max_retry_count,
             "nodes": nodes,
         }
 
@@ -487,8 +564,8 @@ class WorkflowStore:
                     INSERT INTO workflows (
                         workflow_id, name, status, failure_policy,
                         supervisor_agent_id, supervisor_status, created_at,
-                        spec_json, spec_zlib
-                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?)
+                        max_retry_count, spec_json, spec_zlib
+                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?, ?)
                     """,
                     (
                         spec["workflowId"],
@@ -496,6 +573,7 @@ class WorkflowStore:
                         spec["failurePolicy"],
                         spec["supervisorAgentId"],
                         timestamp,
+                        spec["maxRetryCount"],
                         compact_spec,
                         compressed_spec,
                     ),
@@ -562,7 +640,9 @@ class WorkflowStore:
                        supervisor_thread_id, supervisor_turn_id,
                        supervisor_status, supervisor_last_message,
                        response, error, created_at, started_at, finished_at,
-                       state_version
+                       state_version, assistant_job_id, assistant_thread_id,
+                       assistant_turn_id, assistant_status,
+                       max_retry_count, used_retry_count
                 FROM workflows WHERE workflow_id = ?
                 """,
                 (workflow_id,),
@@ -636,6 +716,21 @@ class WorkflowStore:
                 "turnId": workflow["supervisor_turn_id"],
                 "status": workflow["supervisor_status"],
                 "lastMessage": workflow["supervisor_last_message"],
+            },
+            "assistant": {
+                "jobId": workflow["assistant_job_id"],
+                "threadId": workflow["assistant_thread_id"],
+                "turnId": workflow["assistant_turn_id"],
+                "status": workflow["assistant_status"],
+            },
+            "retryPolicy": {
+                "maxRetries": int(workflow["max_retry_count"] or 0),
+                "usedRetries": int(workflow["used_retry_count"] or 0),
+                "remainingRetries": max(
+                    0,
+                    int(workflow["max_retry_count"] or 0)
+                    - int(workflow["used_retry_count"] or 0),
+                ),
             },
             "response": workflow["response"],
             "error": workflow["error"],
@@ -716,15 +811,23 @@ class WorkflowStore:
             raise ValueError("仅支持 PNG、JPEG、GIF 和 WebP 图片。")
         media_type, extension = image_type
         digest = hashlib.sha256(content).hexdigest()
-        artifact_id = str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"codex-workflow-artifact:{workflow_id}:{node_id}:{source_item_id}:{digest}",
-            )
-        )
-        filename = f"generated-image-{artifact_id[:8]}.{extension}"
         now = utc_now()
         with self._connect() as connection:
+            node = connection.execute(
+                "SELECT attempt_count FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+                (workflow_id, node_id),
+            ).fetchone()
+            if node is None:
+                raise ValueError(f"找不到步骤：{node_id}")
+            attempt_number = int(node["attempt_count"] or 0)
+            artifact_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    "codex-workflow-artifact:"
+                    f"{workflow_id}:{node_id}:{attempt_number}:{source_item_id}:{digest}",
+                )
+            )
+            filename = f"generated-image-{artifact_id[:8]}.{extension}"
             existing = connection.execute(
                 """
                 SELECT artifact_id, node_id, media_type, filename, byte_size, created_at
@@ -739,8 +842,9 @@ class WorkflowStore:
                 return self._artifact_snapshot(existing)
             count = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM workflow_artifacts WHERE workflow_id = ?",
-                    (workflow_id,),
+                    "SELECT (SELECT COUNT(*) FROM workflow_artifacts WHERE workflow_id = ?) "
+                    "+ (SELECT COUNT(*) FROM workflow_attempt_artifacts WHERE workflow_id = ?)",
+                    (workflow_id, workflow_id),
                 ).fetchone()[0]
             )
             if count >= IMAGE_ARTIFACTS_PER_WORKFLOW_LIMIT:
@@ -749,8 +853,9 @@ class WorkflowStore:
                 """
                 INSERT INTO workflow_artifacts (
                     artifact_id, workflow_id, node_id, source_item_id,
-                    media_type, filename, content, byte_size, sha256, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    media_type, filename, content, byte_size, sha256,
+                    attempt_number, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     artifact_id,
@@ -762,6 +867,7 @@ class WorkflowStore:
                     content,
                     len(content),
                     digest,
+                    attempt_number,
                     now,
                 ),
             )
@@ -902,8 +1008,6 @@ class WorkflowStore:
             ).fetchone()
             if workflow is None:
                 raise LookupError(f"找不到工作流：{workflow_id}")
-            if workflow["status"] == "completed":
-                raise RuntimeError("任务已结束，不能再发送新消息。")
             connection.execute(
                 """
                 INSERT INTO workflow_chat_messages (
@@ -1067,10 +1171,15 @@ class WorkflowStore:
 
     def recover_processing_chat_messages(self) -> None:
         with self._connect() as connection:
+            now = utc_now()
             connection.execute(
                 "UPDATE workflow_chat_messages SET status = 'accepted', updated_at = ? "
                 "WHERE role = 'user' AND status = 'processing'",
-                (utc_now(),),
+                (now,),
+            )
+            connection.execute(
+                "UPDATE workflows SET assistant_status = 'idle' "
+                "WHERE assistant_status = 'running'"
             )
 
     def get_pending_control(self, workflow_id: str) -> dict[str, Any] | None:
@@ -1119,8 +1228,10 @@ class WorkflowStore:
     def propose_control(
         self, workflow_id: str, action_type: str, node_id: str | None, message_id: str
     ) -> dict[str, Any]:
-        if action_type not in {"stop", "retry", "skip"}:
-            raise ValueError("控制类型只能是 stop、retry 或 skip。")
+        if action_type == "retry":
+            action_type = "restart_from"
+        if action_type not in {"stop", "restart_from", "skip"}:
+            raise ValueError("控制类型只能是 stop、restart_from 或 skip。")
         now_dt = datetime.now(UTC)
         now = now_dt.isoformat()
         expires = (now_dt + timedelta(minutes=10)).isoformat()
@@ -1128,10 +1239,46 @@ class WorkflowStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             workflow = connection.execute(
-                "SELECT state_version FROM workflows WHERE workflow_id = ?", (workflow_id,)
+                "SELECT state_version, max_retry_count, used_retry_count "
+                "FROM workflows WHERE workflow_id = ?", (workflow_id,)
             ).fetchone()
             if workflow is None:
                 raise ValueError(f"找不到工作流：{workflow_id}")
+            if action_type == "stop":
+                status = connection.execute(
+                    "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
+                ).fetchone()["status"]
+                if status in {"completed", "cancelled"}:
+                    raise ValueError("当前任务已经结束，不能停止。")
+            affected_nodes: list[dict[str, Any]] = []
+            if action_type in {"restart_from", "skip"}:
+                node = connection.execute(
+                    "SELECT node_id, position, display_name FROM workflow_nodes "
+                    "WHERE workflow_id = ? AND node_id = ?",
+                    (workflow_id, node_id),
+                ).fetchone()
+                if node is None:
+                    raise ValueError(f"找不到步骤：{node_id}")
+                if action_type == "skip":
+                    node_status = connection.execute(
+                        "SELECT status FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+                        (workflow_id, node_id),
+                    ).fetchone()["status"]
+                    if node_status in {"completed", "skipped"}:
+                        raise ValueError("已完成或已跳过的步骤不能再次跳过。")
+                if action_type == "restart_from":
+                    if int(workflow["used_retry_count"] or 0) >= int(
+                        workflow["max_retry_count"] or 0
+                    ):
+                        raise ValueError("本任务的重跑次数已经用完。")
+                    affected_nodes = [
+                        {"id": row["node_id"], "displayName": row["display_name"] or row["node_id"]}
+                        for row in connection.execute(
+                            "SELECT node_id, display_name FROM workflow_nodes "
+                            "WHERE workflow_id = ? AND position >= ? ORDER BY position",
+                            (workflow_id, node["position"]),
+                        ).fetchall()
+                    ]
             old_pending = connection.execute(
                 "SELECT action_id, node_id, proposed_by_message_id FROM workflow_control_actions "
                 "WHERE workflow_id = ? AND status = 'pending'",
@@ -1164,8 +1311,21 @@ class WorkflowStore:
                 {"messageId": message_id, "actionId": action_id,
                  "actionType": action_type, "nodeId": node_id}, now,
             )
-        return {"actionId": action_id, "actionType": action_type, "nodeId": node_id,
-                "expiresAt": expires, "requiredConfirmation": "确认执行"}
+        result = {"actionId": action_id, "actionType": action_type, "nodeId": node_id,
+                  "expiresAt": expires, "requiredConfirmation": "确认执行"}
+        if action_type == "restart_from":
+            used = int(workflow["used_retry_count"] or 0)
+            maximum = int(workflow["max_retry_count"] or 0)
+            result.update({
+                "affectedNodes": affected_nodes,
+                "retryCost": 1,
+                "retryPolicy": {
+                    "maxRetries": maximum,
+                    "usedRetries": used,
+                    "remainingRetries": max(0, maximum - used),
+                },
+            })
+        return result
 
     def confirm_control(self, workflow_id: str, action_id: str, message_id: str) -> dict[str, Any]:
         now = utc_now()
@@ -1264,7 +1424,9 @@ class WorkflowStore:
                  "result": result, "error": error}, now,
             )
 
-    def reset_node_for_retry(self, workflow_id: str, node_id: str) -> dict[str, Any]:
+    def restart_from_node(
+        self, workflow_id: str, node_id: str, *, action_id: str | None = None
+    ) -> dict[str, Any]:
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1274,27 +1436,115 @@ class WorkflowStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f"找不到步骤：{node_id}")
-            if row["status"] in {"completed", "skipped", "pending"}:
-                raise ValueError("只能重试正在执行或未成功的步骤。")
+            workflow = connection.execute(
+                "SELECT max_retry_count, used_retry_count FROM workflows WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+            maximum = int(workflow["max_retry_count"] or 0)
+            used = int(workflow["used_retry_count"] or 0)
+            if used >= maximum:
+                raise ValueError("本任务的重跑次数已经用完。")
+            predecessors = connection.execute(
+                "SELECT display_name, node_id, status FROM workflow_nodes "
+                "WHERE workflow_id = ? AND position < ? ORDER BY position",
+                (workflow_id, row["position"]),
+            ).fetchall()
+            unfinished = [
+                item["display_name"] or item["node_id"]
+                for item in predecessors
+                if item["status"] not in {"completed", "skipped"}
+            ]
+            if unfinished:
+                raise ValueError("选中步骤之前仍有未完成步骤：" + "、".join(unfinished))
+            tail = connection.execute(
+                "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND position >= ? "
+                "ORDER BY position",
+                (workflow_id, row["position"]),
+            ).fetchall()
+            active = [item["display_name"] or item["node_id"] for item in tail
+                      if item["status"] in ACTIVE_NODE_STATUSES]
+            if active:
+                raise RuntimeError("仍有步骤没有安全停止：" + "、".join(active))
+            retry_ordinal = used + 1
+            for item in tail:
+                attempt_number = int(item["attempt_count"] or 0)
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO workflow_node_attempts (
+                        workflow_id, node_id, attempt_number, status, job_id,
+                        thread_id, turn_id, response, error, actual_prompt,
+                        started_at, finished_at, archived_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        workflow_id, item["node_id"], attempt_number, item["status"],
+                        item["job_id"], item["thread_id"], item["turn_id"],
+                        item["response"], item["error"], item["actual_prompt"],
+                        item["started_at"], item["finished_at"], now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO workflow_attempt_artifacts (
+                        artifact_id, workflow_id, node_id, attempt_number,
+                        source_item_id, media_type, filename, content, byte_size,
+                        sha256, created_at, archived_at
+                    )
+                    SELECT artifact_id, workflow_id, node_id, ?, source_item_id,
+                           media_type, filename, content, byte_size, sha256,
+                           created_at, ?
+                    FROM workflow_artifacts
+                    WHERE workflow_id = ? AND node_id = ?
+                    """,
+                    (attempt_number, now, workflow_id, item["node_id"]),
+                )
+                connection.execute(
+                    "DELETE FROM workflow_artifacts WHERE workflow_id = ? AND node_id = ?",
+                    (workflow_id, item["node_id"]),
+                )
             connection.execute(
                 """
                 UPDATE workflow_nodes SET status = 'pending', job_id = NULL, thread_id = NULL,
                     turn_id = NULL, response = NULL, error = NULL, started_at = NULL,
-                    finished_at = NULL, attempt_count = attempt_count + 1
-                WHERE workflow_id = ? AND node_id = ?
+                    finished_at = NULL, actual_prompt = NULL,
+                    attempt_count = attempt_count + 1
+                WHERE workflow_id = ? AND position >= ?
                 """,
-                (workflow_id, node_id),
+                (workflow_id, row["position"]),
             )
             connection.execute(
                 "UPDATE workflows SET status = 'running', finished_at = NULL, response = NULL, "
-                "error = NULL, state_version = state_version + 1 WHERE workflow_id = ?",
+                "error = NULL, used_retry_count = used_retry_count + 1, "
+                "state_version = state_version + 1 WHERE workflow_id = ?",
                 (workflow_id,),
             )
+            if action_id is not None:
+                connection.execute(
+                    "UPDATE workflow_control_actions SET retry_ordinal = ?, updated_at = ? "
+                    "WHERE action_id = ?",
+                    (retry_ordinal, now, action_id),
+                )
             self._add_event_with_connection(
-                connection, workflow_id, node_id, "chat", "node.retry_requested",
-                {"nodeId": node_id, "attemptCount": int(row["attempt_count"] or 0) + 1}, now,
+                connection, workflow_id, node_id, "chat", "node.restart_from_requested",
+                {
+                    "nodeId": node_id,
+                    "affectedNodeIds": [item["node_id"] for item in tail],
+                    "retryOrdinal": retry_ordinal,
+                }, now,
+            )
+            self._add_event_with_connection(
+                connection, workflow_id, node_id, "gateway", "workflow.retry_budget.updated",
+                {
+                    "maxRetries": maximum,
+                    "usedRetries": retry_ordinal,
+                    "remainingRetries": max(0, maximum - retry_ordinal),
+                }, now,
             )
         return self.get_workflow(workflow_id)
+
+    def reset_node_for_retry(self, workflow_id: str, node_id: str) -> dict[str, Any]:
+        """兼容旧调用；新语义统一为从所选步骤重跑到末尾。"""
+        return self.restart_from_node(workflow_id, node_id)
 
     def skip_node(self, workflow_id: str, node_id: str) -> dict[str, Any]:
         now = utc_now()
@@ -1399,6 +1649,27 @@ class WorkflowStore:
         if row is None:
             raise ValueError(f"找不到节点：{node_id}")
         return self._node_snapshot(row)
+
+    def get_nodes_from(self, workflow_id: str, node_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            target = connection.execute(
+                "SELECT position FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+                (workflow_id, node_id),
+            ).fetchone()
+            if target is None:
+                raise ValueError(f"找不到步骤：{node_id}")
+            rows = connection.execute(
+                """
+                SELECT workflow_id, node_id, position, agent_id, executor_type,
+                       display_name, role_name, depends_on_json, status, job_id,
+                       thread_id, turn_id, response, error, started_at,
+                       finished_at, attempt_count
+                FROM workflow_nodes
+                WHERE workflow_id = ? AND position >= ? ORDER BY position
+                """,
+                (workflow_id, target["position"]),
+            ).fetchall()
+        return [self._node_snapshot(row) for row in rows]
 
     def prepare_node_dispatch(self, workflow_id: str, node_id: str) -> dict[str, Any]:
         with self._connect() as connection:
@@ -1661,6 +1932,29 @@ class WorkflowStore:
                     snapshot.get("started_at") or utc_now(),
                     snapshot.get("response"),
                     snapshot.get("error"),
+                    status,
+                    workflow_id,
+                ),
+            )
+
+    def update_assistant(self, workflow_id: str, snapshot: dict[str, Any]) -> None:
+        status = str(snapshot.get("status") or "idle")
+        if status in {"completed", "failed", "cancelled", "interrupted"}:
+            status = "idle"
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE workflows
+                SET assistant_job_id = COALESCE(?, assistant_job_id),
+                    assistant_thread_id = COALESCE(?, assistant_thread_id),
+                    assistant_turn_id = COALESCE(?, assistant_turn_id),
+                    assistant_status = ?
+                WHERE workflow_id = ?
+                """,
+                (
+                    snapshot.get("job_id"),
+                    snapshot.get("thread_id"),
+                    snapshot.get("turn_id"),
                     status,
                     workflow_id,
                 ),

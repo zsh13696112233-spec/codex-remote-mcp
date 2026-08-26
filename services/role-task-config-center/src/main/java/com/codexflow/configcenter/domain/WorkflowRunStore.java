@@ -122,6 +122,7 @@ public class WorkflowRunStore {
     root.put("supervisorAgentId", task.sop.supervisorAgentId);
     root.put("failurePolicy", "stop");
     root.put("supervisorTimeoutSec", task.sop.supervisorTimeoutSec);
+    root.put("maxRetryCount", task.sop.maxRetryCount);
     var nodes = root.putArray("nodes");
     String previous = null;
     int stepNumber = 1;

@@ -17,10 +17,7 @@ from starlette.routing import Route
 
 from codex_orchestrator_mcp import (
     CONFIG_PATH,
-    AppServerDisconnected,
-    AppServerRpcError,
     Orchestrator,
-    TurnNotActiveError,
     utc_now,
 )
 from workflow_store import AsyncEventBatcher, WorkflowStore
@@ -32,12 +29,29 @@ LOGGER = logging.getLogger(__name__)
 
 
 class WorkflowGateway:
-    def __init__(self, store: WorkflowStore, orchestrator: Orchestrator) -> None:
+    def __init__(
+        self,
+        store: WorkflowStore,
+        orchestrator: Orchestrator,
+        assistant_orchestrator: Orchestrator | None = None,
+    ) -> None:
         self.store = store
         self.orchestrator = orchestrator
+        if assistant_orchestrator is not None:
+            self.assistant_orchestrator = assistant_orchestrator
+        elif isinstance(orchestrator, Orchestrator):
+            self.assistant_orchestrator = Orchestrator(
+                orchestrator.config_path,
+                client_factory=orchestrator._client_factory,
+                serialize_agent_jobs=False,
+            )
+        else:
+            self.assistant_orchestrator = orchestrator
         self.event_batcher = AsyncEventBatcher(store)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._chat_tasks: dict[str, asyncio.Task[None]] = {}
+        self._control_locks: dict[str, asyncio.Lock] = {}
+        self._control_in_progress: set[str] = set()
 
     async def start(self) -> None:
         self.store.recover_processing_chat_messages()
@@ -191,6 +205,8 @@ class WorkflowGateway:
                 self.store.update_supervisor(workflow_id, job_snapshot)
 
                 latest = self.store.get_workflow(workflow_id)
+                if workflow_id in self._control_in_progress:
+                    return
                 if (
                     job.status == "completed"
                     and self._workflow_can_continue(spec, latest)
@@ -229,12 +245,13 @@ class WorkflowGateway:
                 )
                 return
         except asyncio.CancelledError:
-            self.store.finish_workflow(
-                workflow_id,
-                supervisor_status="cancelled",
-                response=None,
-                error="工作流监督任务被取消。",
-            )
+            if workflow_id not in self._control_in_progress:
+                self.store.finish_workflow(
+                    workflow_id,
+                    supervisor_status="cancelled",
+                    response=None,
+                    error="工作流监督任务被取消。",
+                )
             raise
         except Exception as error:
             self.store.add_event(
@@ -380,14 +397,32 @@ class WorkflowGateway:
     ) -> None:
         message_id = message["messageId"]
         assistant_message_id = str(uuid.uuid4())
-        snapshot = self.store.get_workflow(workflow_id)
-        prompt = self._chat_prompt(snapshot, message)
-        answer = (
-            await self._deliver_chat_prompt(
-                workflow_id, message_id, assistant_message_id, prompt
+        text = message["text"].strip()
+        pending = self.store.get_pending_control(workflow_id)
+        if text == "确认执行":
+            if pending is None:
+                answer = "当前没有等待确认的操作。"
+            else:
+                try:
+                    confirmed = self.store.confirm_control(
+                        workflow_id, pending["actionId"], message_id
+                    )
+                    answer = await self._execute_control(workflow_id, confirmed)
+                except (RuntimeError, ValueError) as error:
+                    answer = f"操作未执行：{error}任务状态和重跑额度均未改变。"
+        elif text == "取消操作":
+            if pending is None:
+                answer = "当前没有等待取消的操作。"
+            else:
+                self.store.cancel_pending_control(workflow_id, message_id)
+                answer = "已取消刚才提出的操作，任务状态没有改变。"
+        else:
+            snapshot = self.store.get_workflow(workflow_id)
+            decision = await self._run_assistant_turn(
+                workflow_id, message_id, snapshot, message
             )
-        ).strip()
-
+            answer = self._apply_assistant_decision(workflow_id, message_id, decision)
+        answer = answer.strip()
         if not answer:
             raise RuntimeError("任务助手没有生成可显示的回复。")
         self.store.complete_chat_message(
@@ -395,182 +430,270 @@ class WorkflowGateway:
         )
         await self._resume_supervisor_if_needed(workflow_id)
 
-    async def _deliver_chat_prompt(
+    async def _run_assistant_turn(
         self,
         workflow_id: str,
         message_id: str,
-        assistant_message_id: str,
-        prompt: str,
-    ) -> str:
-        snapshot = self.store.get_workflow(workflow_id)
-        job_id = snapshot["supervisor"].get("jobId")
-        if job_id and job_id in self.orchestrator.jobs:
-            job = self.orchestrator.get_job(job_id)
-            if job.status == "running" and job.client is not None:
-                queue = self.orchestrator.subscribe(job_id)
-                try:
-                    await self.orchestrator.steer(job_id, prompt, message_id)
-                    self.store.mark_chat_forwarded(workflow_id, message_id)
-                    reply = await self._collect_chat_reply(
-                        queue, workflow_id, message_id, assistant_message_id, job.completed
-                    )
-                    if reply:
-                        return reply
-                    if job.completed.is_set() and job.response:
-                        return job.response
-                except TurnNotActiveError:
-                    pass
-                finally:
-                    self.orchestrator.unsubscribe(job_id, queue)
-
-        thread_id = self.store.get_workflow(workflow_id)["supervisor"].get("threadId")
-        if not thread_id:
-            raise RuntimeError("主监督会话尚未建立，请稍后安全重试。")
-        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
-        def record(event: dict[str, Any], _: str) -> None:
-            event_queue.put_nowait(event)
-
+        snapshot: dict[str, Any],
+        message: dict[str, Any],
+    ) -> dict[str, Any]:
+        prompt = self._chat_prompt(snapshot, message)
         spec = self.store.get_workflow_spec(workflow_id)
-        job = await self.orchestrator.dispatch(
+        thread_id = snapshot.get("assistant", {}).get("threadId")
+        job = await self.assistant_orchestrator.dispatch(
             agent_id=spec["supervisorAgentId"],
             prompt=prompt,
             thread_id=thread_id,
             cwd=spec.get("supervisorCwd"),
-            write=bool(spec.get("supervisorWrite", False)),
+            write=False,
             model=spec.get("supervisorModel"),
-            timeout_sec=int(spec.get("supervisorTimeoutSec", 7200)),
-            approval_policy="on-request",
-            approvals_reviewer="auto_review",
-            event_callback=record,
+            timeout_sec=min(600, int(spec.get("supervisorTimeoutSec", 7200))),
+            approval_policy="never",
+            output_schema=self._assistant_output_schema(),
         )
+        self.store.update_assistant(workflow_id, job.snapshot())
         self.store.mark_chat_forwarded(workflow_id, message_id)
-        reply = await self._collect_chat_reply(
-            event_queue, workflow_id, message_id, assistant_message_id, job.completed
-        )
-        if not job.completed.is_set():
-            await self.orchestrator.wait(job.job_id, min(600, job.timeout_sec))
-        if not reply:
-            reply = job.response or ""
-        if job.status == "failed":
+        while not job.completed.is_set():
+            self.store.update_assistant(workflow_id, job.snapshot())
+            try:
+                await asyncio.wait_for(job.completed.wait(), timeout=0.25)
+            except TimeoutError:
+                pass
+        self.store.update_assistant(workflow_id, job.snapshot())
+        if job.status != "completed":
             raise RuntimeError(job.error or "任务助手连接失败。")
-        return reply
+        raw = (job.response or "").strip()
+        try:
+            decision = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("任务助手返回了无法识别的结果，请安全重试。") from error
+        return self._validate_assistant_decision(decision, snapshot)
 
-    async def _collect_chat_reply(
-        self,
-        queue: asyncio.Queue[dict[str, Any]],
-        workflow_id: str,
-        message_id: str,
-        assistant_message_id: str,
-        turn_completed: asyncio.Event,
+    @staticmethod
+    def _assistant_output_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "text", "actionType", "nodeId"],
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["answer", "clarify", "propose_control"],
+                },
+                "text": {"type": "string", "maxLength": 20_000},
+                "actionType": {
+                    "type": ["string", "null"],
+                    "enum": ["stop", "skip", "restart_from", None],
+                },
+                "nodeId": {"type": ["string", "null"], "maxLength": 128},
+            },
+        }
+
+    @staticmethod
+    def _validate_assistant_decision(
+        value: Any, snapshot: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise RuntimeError("任务助手返回格式无效。")
+        kind = value.get("kind")
+        text = str(value.get("text") or "").strip()
+        action_type = value.get("actionType")
+        node_id = value.get("nodeId")
+        if kind not in {"answer", "clarify", "propose_control"} or not text:
+            raise RuntimeError("任务助手返回格式无效。")
+        if kind != "propose_control":
+            return {"kind": kind, "text": text, "actionType": None, "nodeId": None}
+        if action_type not in {"stop", "skip", "restart_from"}:
+            raise RuntimeError("任务助手提出了不支持的操作。")
+        if action_type != "stop":
+            valid_ids = {node["id"] for node in snapshot.get("nodes", [])}
+            if node_id not in valid_ids:
+                raise RuntimeError("任务助手没有识别出有效的目标步骤，请重新说明。")
+        else:
+            node_id = None
+        return {
+            "kind": kind,
+            "text": text,
+            "actionType": action_type,
+            "nodeId": node_id,
+        }
+
+    def _apply_assistant_decision(
+        self, workflow_id: str, message_id: str, decision: dict[str, Any]
     ) -> str:
-        chunks: list[str] = []
-        pending_deltas: list[str] = []
-        pending_delta_size = 0
-        last_delta_flush_at = time.monotonic()
-
-        async def flush_deltas() -> None:
-            nonlocal pending_deltas, pending_delta_size, last_delta_flush_at
-            if not pending_deltas:
-                return
-            delta = "".join(pending_deltas)
-            pending_deltas = []
-            pending_delta_size = 0
-            await asyncio.to_thread(
-                self.store.add_chat_delta,
+        if decision["kind"] != "propose_control":
+            return str(decision["text"])
+        try:
+            proposal = self.store.propose_control(
                 workflow_id,
+                str(decision["actionType"]),
+                decision.get("nodeId"),
                 message_id,
-                assistant_message_id,
-                delta,
             )
-            last_delta_flush_at = time.monotonic()
+        except ValueError as error:
+            if "重跑次数已经用完" in str(error):
+                return "本任务的重跑额度已经用完，仍可以继续咨询任务状态和结果。"
+            raise
+        action_type = proposal["actionType"]
+        if action_type == "restart_from":
+            names = "、".join(
+                item["displayName"] for item in proposal.get("affectedNodes", [])
+            )
+            policy = proposal["retryPolicy"]
+            return (
+                f"准备重新执行：{names}。更早步骤的结果会保留，本次会消耗1次重跑额度；"
+                f"当前还剩{policy['remainingRetries']}次。"
+                "如要继续，请另发一条仅包含“确认执行”的消息；10分钟内有效。"
+            )
+        if action_type == "skip":
+            node = next(
+                item for item in self.store.get_workflow(workflow_id)["nodes"]
+                if item["id"] == proposal["nodeId"]
+            )
+            return (
+                f"准备跳过{node['displayName']}。如要继续，请另发一条仅包含“确认执行”"
+                "的消息；10分钟内有效。"
+            )
+        return (
+            "准备停止整个任务。已完成的结果会保留，未完成步骤不会继续。"
+            "如要继续，请另发一条仅包含“确认执行”的消息；10分钟内有效。"
+        )
 
-        while True:
-            event_task = asyncio.create_task(queue.get())
-            completed_task = asyncio.create_task(turn_completed.wait())
-            done, pending = await asyncio.wait(
-                {event_task, completed_task}, timeout=180, return_when=asyncio.FIRST_COMPLETED
+    async def _execute_control(
+        self, workflow_id: str, confirmed: dict[str, Any]
+    ) -> str:
+        lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
+        async with lock:
+            action = self.store.start_control_execution(confirmed["actionId"])
+            self._control_in_progress.add(workflow_id)
+            try:
+                await self._pause_supervisor(workflow_id)
+                action_type = action["actionType"]
+                node_id = action.get("nodeId")
+                if action_type == "restart_from":
+                    assert node_id is not None
+                    await self._interrupt_nodes(
+                        workflow_id, self.store.get_nodes_from(workflow_id, node_id)
+                    )
+                    result = self.store.restart_from_node(
+                        workflow_id, node_id, action_id=action["actionId"]
+                    )
+                    self.store.finish_control_execution(
+                        action["actionId"], result={"retryPolicy": result["retryPolicy"]}
+                    )
+                    return (
+                        "已重新打开任务，将从所选步骤继续执行。"
+                        f"本任务还可重跑{result['retryPolicy']['remainingRetries']}次。"
+                    )
+                if action_type == "skip":
+                    assert node_id is not None
+                    await self._interrupt_nodes(
+                        workflow_id, [self.store.get_node(workflow_id, node_id)]
+                    )
+                    result = self.store.skip_node(workflow_id, node_id)
+                    self.store.finish_control_execution(
+                        action["actionId"], result={"status": result["status"]}
+                    )
+                    return "已跳过所选步骤，任务会继续执行后续步骤。"
+                await self._interrupt_nodes(
+                    workflow_id,
+                    [
+                        node for node in self.store.get_workflow(workflow_id)["nodes"]
+                        if node["status"] in {"queued", "running", "cancelling"}
+                    ]
+                )
+                result = self.store.stop_workflow(workflow_id)
+                self.store.finish_control_execution(
+                    action["actionId"], result={"status": result["status"]}
+                )
+                return "任务已停止，已经完成的步骤结果会保留。"
+            except Exception as error:
+                self.store.finish_control_execution(
+                    action["actionId"], error=str(error)
+                )
+                self._control_in_progress.discard(workflow_id)
+                await self._resume_supervisor_if_needed(workflow_id)
+                raise
+            finally:
+                self._control_in_progress.discard(workflow_id)
+
+    async def _pause_supervisor(self, workflow_id: str) -> None:
+        snapshot = self.store.get_workflow(workflow_id)
+        job_id = snapshot["supervisor"].get("jobId")
+        if job_id and job_id in self.orchestrator.jobs:
+            job = self.orchestrator.get_job(job_id)
+            if not job.completed.is_set():
+                await self.orchestrator.cancel(job_id)
+                await asyncio.wait_for(job.completed.wait(), timeout=15)
+        task = self._tasks.get(workflow_id)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _interrupt_nodes(
+        self, workflow_id: str, nodes: list[dict[str, Any]]
+    ) -> None:
+        active = [
+            node for node in nodes
+            if node["status"] in {"queued", "running", "cancelling"}
+        ]
+        for node in active:
+            if not node.get("threadId") or not node.get("turnId"):
+                raise RuntimeError(f"{node['displayName']}尚未建立可安全停止的执行会话。")
+            await self.orchestrator.interrupt_turn(
+                agent_id=node["agentId"],
+                thread_id=node["threadId"],
+                turn_id=node["turnId"],
             )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            if not done:
-                await flush_deltas()
-                raise RuntimeError("等待任务助手回复超时，请安全重试。")
-            if event_task not in done:
-                await flush_deltas()
-                return "".join(chunks)
-            event = event_task.result()
-            method = event.get("method")
-            params = event.get("params") or {}
-            if method == "item/agentMessage/delta" and isinstance(params.get("delta"), str):
-                delta = params["delta"]
-                chunks.append(delta)
-                pending_deltas.append(delta)
-                pending_delta_size += len(delta)
-                if (
-                    pending_delta_size >= 2_048
-                    or time.monotonic() - last_delta_flush_at >= 0.05
-                ):
-                    await flush_deltas()
-            elif method == "item/completed":
-                item = params.get("item") or {}
-                if (
-                    item.get("type") == "agentMessage"
-                    and item.get("phase") == "final_answer"
-                    and item.get("text")
-                ):
-                    final = str(item["text"])
-                    if not chunks:
-                        pending_deltas.append(final)
-                    await flush_deltas()
-                    return final
-            elif method == "turn/completed":
-                await flush_deltas()
-                return ""
+        deadline = time.monotonic() + 10
+        while active and time.monotonic() < deadline:
+            refreshed = [self.store.get_node(workflow_id, node["id"]) for node in active]
+            active = [
+                node for node in refreshed
+                if node["status"] in {"queued", "running", "cancelling"}
+            ]
+            if active:
+                await asyncio.sleep(0.1)
+        if active:
+            raise RuntimeError("等待运行中的步骤安全停止超时，任务没有被重置。")
 
     @staticmethod
     def _chat_prompt(snapshot: dict[str, Any], message: dict[str, Any]) -> str:
-        workflow_id = snapshot["workflowId"]
-        pending = snapshot.get("pendingControl")
-        text = message["text"].strip()
-        control_instruction = ""
-        if text == "确认执行" and pending:
-            control_instruction = (
-                "这是对待确认操作的独立确认消息。调用 execute_workflow_control，参数为："
-                f"workflow_id={workflow_id}, action_id={pending['actionId']}, "
-                f"confirmation_message_id={message['messageId']}。执行后用简单中文说明结果。"
-            )
-        elif text == "取消操作" and pending:
-            control_instruction = (
-                "调用 cancel_workflow_control 取消当前待确认操作，然后说明已经取消。"
-            )
-        else:
-            control_instruction = (
-                "如果用户只是咨询，先调用 workflow_status 再回答。"
-                "如果用户要求停止任务、重试步骤或跳过步骤，只调用 "
-                "propose_workflow_control 创建提议，不得直接执行；说明影响并要求用户另发一条"
-                "内容完全为“确认执行”的消息。步骤序号必须按下方快照转换成真实步骤 id。"
-                "修改工作流、增加或删除步骤、重新执行已完成步骤必须拒绝。"
-            )
+        remaining = 40_000
+        steps = []
+        for index, node in enumerate(snapshot["nodes"]):
+            result = str(node.get("response") or "")
+            item_limit = min(20_000, remaining)
+            if len(result) > item_limit:
+                result = result[: max(0, item_limit - 16)] + "【内容过长，已省略】"
+            remaining -= len(result)
+            steps.append({
+                "number": index + 1,
+                "id": node["id"],
+                "name": node["displayName"],
+                "status": node["status"],
+                "result": result,
+            })
         public_snapshot = {
             "statusAtAcceptance": message.get("workflowStatusAtAcceptance"),
             "stateVersionAtAcceptance": message.get("stateVersionAtAcceptance"),
             "currentStatus": snapshot["status"],
             "stateVersion": snapshot["stateVersion"],
-            "steps": [
-                {"number": index + 1, "id": node["id"], "name": node["displayName"],
-                 "status": node["status"]}
-                for index, node in enumerate(snapshot["nodes"])
-            ],
+            "retryPolicy": snapshot.get("retryPolicy"),
+            "pendingControl": snapshot.get("pendingControl"),
+            "steps": steps,
         }
         return (
-            "这是用户在任务运行监控页面发送的消息。回答前读取当前工作流的最新状态。"
-            "如果发送后状态发生变化，明确说明发送时和现在的差异。"
-            "除经过两条消息二次确认的停止、重试、跳过外，不得改变执行状态。"
-            "不要展示 thread、turn、job、MCP、agent、工具调用等内部术语。\n"
-            f"{control_instruction}\n工作流：{workflow_id}\n"
-            f"接收快照：{json.dumps(public_snapshot, ensure_ascii=False)}\n"
+            "你是独立的任务助手，只回答咨询或识别用户的控制意图，不执行任务、"
+            "不调用任何工具，也不直接改变状态。必须按输出结构返回。\n"
+            "普通咨询返回 kind=answer；信息不足返回 kind=clarify。"
+            "用户明确要求停止整个任务时返回 propose_control/stop；要求跳过某一步时"
+            "返回 propose_control/skip；要求重试、重新执行、从某一步重新开始时统一返回"
+            "propose_control/restart_from，并把步骤序号或名称映射为快照里的真实 id。"
+            "restart_from 表示该步到最后全部重跑，已完成任务也允许提出。"
+            "不确定目标步骤时必须澄清，不能猜测。达到重跑上限时说明不能再重跑。"
+            "不要暴露会话、工具、执行机、内部英文状态或原始异常。\n"
+            f"最新任务快照：{json.dumps(public_snapshot, ensure_ascii=False)}\n"
             f"用户消息：{message['text']}"
         )
 
@@ -730,7 +853,7 @@ async def stream_events(request: Request) -> Response:
                     gateway.store.get_workflow, workflow_id
                 )
                 if (
-                    snapshot["status"] == "completed"
+                    snapshot["status"] in TERMINAL_WORKFLOW_STATUSES
                     and snapshot.get("pendingChatCount", 0) == 0
                 ):
                     return
@@ -774,10 +897,9 @@ def create_app(
         db_path or os.getenv("CODEX_WORKFLOW_DB", DEFAULT_DB_PATH)
     ).expanduser()
     store = WorkflowStore(selected_db_path)
-    gateway = WorkflowGateway(
-        store,
-        orchestrator or Orchestrator(Path(config_path).expanduser()),
-    )
+    selected_config_path = Path(config_path).expanduser()
+    supervisor_orchestrator = orchestrator or Orchestrator(selected_config_path)
+    gateway = WorkflowGateway(store, supervisor_orchestrator)
 
     @asynccontextmanager
     async def lifespan(_: Starlette):

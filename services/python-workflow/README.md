@@ -7,7 +7,7 @@
 ```text
 python-workflow/
 ├── src/
-│   ├── workflow_gateway.py        HTTP、SSE 和主监督会话
+│   ├── workflow_gateway.py        HTTP、SSE、主监督和独立任务助手会话
 │   ├── codex_orchestrator_mcp.py  MCP 工具及 app-server 客户端
 │   └── workflow_store.py          SQLite 状态与事件存储
 ├── tests/                         Python 自动化测试

@@ -14,6 +14,7 @@ import java.util.List;
  * @param supervisorTimeoutSec 主监督超时秒数
  * @param defaultStepModel 默认步骤模型
  * @param enabled 是否启用
+ * @param maxRetryCount 单次运行允许的人工重跑总次数
  * @param steps 按执行顺序排列的步骤列表
  */
 public record SopSaveRequest(
@@ -22,4 +23,16 @@ public record SopSaveRequest(
     Integer supervisorTimeoutSec,
     @Size(max = 64) String defaultStepModel,
     Boolean enabled,
-    @NotEmpty List<@Valid SopStepRequest> steps) {}
+    Integer maxRetryCount,
+    @NotEmpty List<@Valid SopStepRequest> steps) {
+
+  public SopSaveRequest(
+      String name,
+      String description,
+      Integer supervisorTimeoutSec,
+      String defaultStepModel,
+      Boolean enabled,
+      List<SopStepRequest> steps) {
+    this(name, description, supervisorTimeoutSec, defaultStepModel, enabled, null, steps);
+  }
+}

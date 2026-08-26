@@ -179,6 +179,7 @@ POST http://192.168.1.100:8080/workflows
 | `name` | 可选的任务名称 |
 | `supervisorAgentId` | 运行主监督会话的执行机 ID |
 | `failurePolicy` | `stop` 表示节点失败后停止；`continue` 表示允许继续处理其他可运行节点 |
+| `maxRetryCount` | 单个 `workflowId` 允许成功确认的尾部重跑总次数；默认 10，范围 0–100 |
 | `nodes` | 节点数组 |
 | `nodes[].id` | 工作流内唯一节点 ID |
 | `nodes[].executor.type` | `local` 或 `remote`，用于表达执行位置 |
@@ -257,6 +258,11 @@ GET http://192.168.1.100:8080/workflows/task-20260820-001
   "progress": {
     "completed": 1,
     "total": 3
+  },
+  "retryPolicy": {
+    "maxRetries": 10,
+    "usedRetries": 3,
+    "remainingRetries": 7
   },
   "supervisor": {
     "agentId": "local",
@@ -347,17 +353,18 @@ Content-Type: application/json
 
 - `messageId` 由前端生成 UUID。同一 ID 和相同文本重复提交只处理一次；失败重试必须复用原 ID。
 - 文本去除首尾空格后不能为空，最长 4000 字符。
-- 用户消息先写入 SQLite，再追加到当前主监督 turn；当前 turn 已结束时恢复原 thread 创建答疑 turn。
-- `completed` 后的新消息返回 `409`；在结束前已接收的消息仍会完成答复。
-- `failed`、`cancelled` 后仍可咨询，并可请求重试或跳过未成功步骤。
+- 用户消息先写入 SQLite，再由独立任务助手处理；助手首次咨询创建专用 thread，后续咨询恢复同一 thread，每条消息单独启动 turn，回答后回到空闲状态。
+- 助手使用只读沙箱、`approvalPolicy=never` 和结构化输出，只能回答、澄清或产生受限控制意图，不再向主监督 `turn/steer`。
+- `completed`、`failed`、`cancelled` 后仍可咨询，也可在额度允许时提出尾部重跑。
+- 内容完全为 `确认执行` 或 `取消操作` 的消息由网关直接处理，不调用模型。
 
-聊天允许提议停止任务、重试步骤和跳过步骤，但第一次请求只产生待确认操作。助手说明影响后，用户必须另发一条内容完全为：
+聊天允许提议停止任务、跳过步骤，或通过 `restart_from` 从指定步骤重新执行到最后一步。第一次请求只产生待确认操作，助手说明影响后，用户必须另发一条内容完全为：
 
 ```text
 确认执行
 ```
 
-才能执行。回复 `取消操作` 可取消待确认操作。确认十分钟后过期；任务状态在确认前发生变化时必须重新提议和确认。聊天不允许修改工作流、添加或删除步骤，也不允许重新执行已完成步骤。
+才能执行。回复 `取消操作` 可取消待确认操作。确认十分钟后过期；任务状态在确认前发生变化时必须重新提议和确认。一次成功的尾部重跑只消耗一次全局额度，并保留目标步骤之前的结果；目标步骤及后续步骤的旧结果和图片归档后重新执行。提议、取消、重复确认、校验失败和中止失败都不消耗额度。聊天不允许修改工作流、添加或删除步骤。
 
 聊天事件包括：
 
@@ -372,6 +379,8 @@ chat.control.confirmed
 chat.control.completed
 chat.control.failed
 chat.control.cancelled
+node.restart_from_requested
+workflow.retry_budget.updated
 ```
 
 每个聊天事件都包含 `messageId`，回复事件还包含 `assistantMessageId`，控制事件包含 `actionId`。工作流快照中的 `pendingChatCount` 用于判断终态后是否仍需轮询，`stateVersion` 用于发现生成回复期间的状态变化。

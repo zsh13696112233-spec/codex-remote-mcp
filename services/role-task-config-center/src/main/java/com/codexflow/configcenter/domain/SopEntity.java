@@ -38,6 +38,10 @@ class SopEntity extends Timestamped {
   @Column(name = "supervisor_timeout_sec", nullable = false)
   int supervisorTimeoutSec = 7200;
 
+  /** 每次工作流运行允许成功确认的尾部重跑总次数。 */
+  @Column(name = "max_retry_count", nullable = false)
+  int maxRetryCount = 10;
+
   /** 步骤未单独指定模型时使用的默认模型。 */
   @Column(name = "default_step_model", nullable = false)
   String defaultStepModel = "gpt-5.6-sol";

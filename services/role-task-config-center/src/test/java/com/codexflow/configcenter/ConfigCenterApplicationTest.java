@@ -1,8 +1,11 @@
 package com.codexflow.configcenter;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.codexflow.configcenter.domain.ConfigService;
+import com.codexflow.configcenter.domain.PreparedRun;
+import com.codexflow.configcenter.domain.WorkflowRunStore;
 import com.codexflow.configcenter.dto.RoleSaveRequest;
 import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
@@ -21,6 +24,7 @@ import tools.jackson.databind.node.ObjectNode;
 class ConfigCenterApplicationTest {
   @Autowired JdbcTemplate jdbc;
   @Autowired ConfigService service;
+  @Autowired WorkflowRunStore runStore;
   @Autowired Validator validator;
 
   /** 确认 Flyway 建表成功、默认角色已初始化且运行记录表初始为空。 */
@@ -30,6 +34,12 @@ class ConfigCenterApplicationTest {
         .isEqualTo(3);
     assertThat(jdbc.queryForObject("select count(*) from codex_sop_task_runs", Integer.class))
         .isZero();
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from information_schema.columns "
+                    + "where table_name = 'codex_sop_sops' and column_name = 'max_retry_count'",
+                Integer.class))
+        .isEqualTo(1);
   }
 
   /** 确认跨事务加载的 SOP、角色和任务关系可用于构建完整 API 快照。 */
@@ -66,5 +76,36 @@ class ConfigCenterApplicationTest {
     assertThat(validator.validate(request))
         .extracting(violation -> violation.getPropertyPath().toString())
         .containsExactlyInAnyOrder("name", "duty");
+  }
+
+  /** 确认重跑额度会冻结到网关载荷，整项任务重试沿用上限但不会携带已使用次数。 */
+  @Test
+  void retryLimitIsValidatedAndFrozenIntoFreshRunPayloads() {
+    String roleId =
+        jdbc.queryForObject(
+            "select id from codex_sop_roles order by created_at limit 1", String.class);
+    SopStepRequest step =
+        new SopStepRequest(
+            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, Set.of(),
+            Set.of());
+    SopSaveRequest sopBody = new SopSaveRequest("额度快照测试", null, null, null, true, 7, List.of(step));
+    ObjectNode createdSop = service.createSop(sopBody);
+    ObjectNode createdTask =
+        service.createTask(
+            new TaskDefinitionSaveRequest(
+                "额度任务", "验证运行额度快照", createdSop.path("id").asText(), null, true));
+
+    PreparedRun first = runStore.prepareLatest(createdTask.path("id").asText());
+    PreparedRun retried = runStore.prepareRetry(first.workflowId());
+
+    assertThat(first.payload().path("maxRetryCount").asInt()).isEqualTo(7);
+    assertThat(retried.payload().path("maxRetryCount").asInt()).isEqualTo(7);
+    assertThat(retried.workflowId()).isNotEqualTo(first.workflowId());
+    assertThat(retried.payload().has("usedRetryCount")).isFalse();
+    assertThatThrownBy(
+            () ->
+                service.createSop(
+                    new SopSaveRequest("非法额度", null, null, null, true, 101, List.of(step))))
+        .hasMessageContaining("maxRetryCount");
   }
 }

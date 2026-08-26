@@ -23,6 +23,7 @@ class MockAppServer:
         steer_error: str | None = None,
         steer_commentary: bool = False,
         steer_completes_turn: bool = False,
+        structured_reply: str | None = None,
     ) -> None:
         self.delay_sec = delay_sec
         self.turn_status = turn_status
@@ -34,6 +35,12 @@ class MockAppServer:
         self.steer_error = steer_error
         self.steer_commentary = steer_commentary
         self.steer_completes_turn = steer_completes_turn
+        self.structured_reply = structured_reply or json.dumps({
+            "kind": "answer",
+            "text": "mock chat reply",
+            "actionType": None,
+            "nodeId": None,
+        }, ensure_ascii=False)
         self.url = ""
         self.authorization: str | None = None
         self.requests: list[dict[str, Any]] = []
@@ -80,7 +87,12 @@ class MockAppServer:
                         code, reason = self.close_after_turn_start
                         await connection.close(code=code, reason=reason)
                     else:
-                        task = asyncio.create_task(self._complete_turn(connection))
+                        reply = (
+                            self.structured_reply
+                            if "outputSchema" in (message.get("params") or {})
+                            else "mock final reply"
+                        )
+                        task = asyncio.create_task(self._complete_turn(connection, reply))
                         self._completion_tasks.add(task)
                         task.add_done_callback(self._completion_tasks.discard)
                 elif method == "turn/interrupt":
@@ -110,7 +122,7 @@ class MockAppServer:
         except ConnectionClosed:
             pass
 
-    async def _complete_turn(self, connection: ServerConnection) -> None:
+    async def _complete_turn(self, connection: ServerConnection, reply: str) -> None:
         await asyncio.sleep(self.delay_sec)
         try:
             if self.send_message_delta:
@@ -130,7 +142,7 @@ class MockAppServer:
                             "item": {
                                 "type": "agentMessage",
                                 "phase": "final_answer",
-                                "text": "mock final reply",
+                                "text": reply,
                             }
                         },
                     }

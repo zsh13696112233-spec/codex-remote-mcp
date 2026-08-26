@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from codex_orchestrator_mcp import Orchestrator
 from starlette.testclient import TestClient
@@ -39,7 +40,7 @@ class SupervisorPromptTests(unittest.TestCase):
         self.assertIn("timeout_sec 使用 10 秒", prompt)
         self.assertIn("节点派发后必须调用 wait_node", prompt)
 
-    def test_chat_prompt_enforces_latest_status_and_confirmation(self) -> None:
+    def test_chat_prompt_only_classifies_against_latest_snapshot(self) -> None:
         prompt = WorkflowGateway._chat_prompt(
             {
                 "workflowId": "demo", "status": "running", "stateVersion": 3,
@@ -51,9 +52,9 @@ class SupervisorPromptTests(unittest.TestCase):
                 "workflowStatusAtAcceptance": "running", "stateVersionAtAcceptance": 2,
             },
         )
-        self.assertIn("workflow_status", prompt)
-        self.assertIn("propose_workflow_control", prompt)
-        self.assertIn("确认执行", prompt)
+        self.assertIn("独立的任务助手", prompt)
+        self.assertIn("不调用任何工具", prompt)
+        self.assertIn("propose_control/restart_from", prompt)
         self.assertIn('"number": 1', prompt)
 
     def test_public_agents_excludes_connection_and_authentication_details(self) -> None:
@@ -114,8 +115,8 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
 
 
 class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_commentary_is_not_saved_as_the_final_chat_answer(self) -> None:
-        async with MockAppServer(delay_sec=2, steer_commentary=True) as server:
+    async def test_assistant_reply_uses_separate_structured_turn(self) -> None:
+        async with MockAppServer(delay_sec=2) as server:
             with tempfile.TemporaryDirectory() as directory:
                 config = Path(directory, "agents.json")
                 config.write_text(json.dumps({"agents": {"local": {
@@ -145,15 +146,36 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     if event["type"] == "chat.assistant.completed"
                 ]
                 self.assertEqual(completed[-1]["payload"]["text"], "mock chat reply")
-                self.assertNotIn("我先查询", completed[-1]["payload"]["text"])
+                self.assertFalse(any(
+                    item["method"] == "turn/steer" for item in server.requests
+                ))
+                assistant_turns = [
+                    item for item in server.requests
+                    if item["method"] == "turn/start"
+                    and "outputSchema" in item["params"]
+                ]
+                self.assertEqual(len(assistant_turns), 1)
+                self.assertEqual(assistant_turns[0]["params"]["approvalPolicy"], "never")
+                second_id = str(uuid.uuid4())
+                await gateway.accept_message("commentary-demo", second_id, "再说明一次")
+                for _ in range(300):
+                    if store.pending_chat_count("commentary-demo") == 0:
+                        break
+                    await asyncio.sleep(0.01)
+                assistant_resumes = [
+                    item for item in server.requests
+                    if item["method"] == "thread/resume"
+                    and item["params"].get("approvalPolicy") == "never"
+                ]
+                self.assertEqual(len(assistant_resumes), 1)
 
                 tasks = list(gateway._tasks.values())
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def test_chat_ending_supervisor_turn_requests_resume_instead_of_immediate_failure(self) -> None:
-        async with MockAppServer(delay_sec=2, steer_completes_turn=True) as server:
+    async def test_assistant_turn_does_not_end_or_resume_supervisor_turn(self) -> None:
+        async with MockAppServer(delay_sec=2) as server:
             with tempfile.TemporaryDirectory() as directory:
                 config = Path(directory, "agents.json")
                 config.write_text(json.dumps({"agents": {"local": {
@@ -176,24 +198,20 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     await gateway.accept_message(
                         "resume-demo", str(uuid.uuid4()), "为什么等了这么久才开始？"
                     )
-                    resume_events = []
                     for _ in range(300):
-                        resume_events = [
-                            event for event in store.list_events("resume-demo", limit=1000)
-                            if event["type"] == "supervisor.resume_requested"
-                        ]
-                        resumed = any(
-                            item["method"] == "thread/resume" for item in server.requests
-                        )
-                        if resume_events and resumed:
+                        if store.pending_chat_count("resume-demo") == 0:
                             break
                         await asyncio.sleep(0.01)
 
-                    self.assertTrue(resume_events)
                     self.assertEqual(store.get_workflow("resume-demo")["status"], "running")
-                    self.assertTrue(any(
-                        item["method"] == "thread/resume" for item in server.requests
+                    self.assertFalse(any(
+                        item["method"] == "turn/steer" for item in server.requests
                     ))
+                    self.assertEqual(len([
+                        item for item in server.requests
+                        if item["method"] == "turn/start"
+                        and "outputSchema" in item["params"]
+                    ]), 1)
                 finally:
                     tasks = list(gateway._tasks.values())
                     for task in tasks:
@@ -232,12 +250,16 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(completed[-1]["payload"]["messageId"], message_id)
 
                 before_duplicate = len([
-                    item for item in server.requests if item["method"] == "turn/steer"
+                    item for item in server.requests if item["method"] == "turn/start"
+                    and "outputSchema" in item["params"]
                 ])
                 await gateway.accept_message("chat-demo", message_id, "现在到哪里了？")
                 await asyncio.sleep(0.05)
-                steer_requests = [item for item in server.requests if item["method"] == "turn/steer"]
-                self.assertEqual(len(steer_requests), before_duplicate)
+                assistant_requests = [
+                    item for item in server.requests if item["method"] == "turn/start"
+                    and "outputSchema" in item["params"]
+                ]
+                self.assertEqual(len(assistant_requests), before_duplicate)
                 self.assertEqual(before_duplicate, 1)
                 completed_after = [event for event in store.list_events("chat-demo", limit=1000)
                                    if event["type"] == "chat.assistant.completed"]
@@ -247,6 +269,103 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 for task in running_tasks:
                     task.cancel()
                 await asyncio.gather(*running_tasks, return_exceptions=True)
+
+
+class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _confirmed_restart(store: WorkflowStore) -> dict:
+        proposed_id = str(uuid.uuid4())
+        confirmed_id = str(uuid.uuid4())
+        store.accept_chat_message("control-demo", proposed_id, "从第2步重跑")
+        proposal = store.propose_control(
+            "control-demo", "restart_from", "b", proposed_id
+        )
+        store.accept_chat_message("control-demo", confirmed_id, "确认执行")
+        return store.confirm_control(
+            "control-demo", proposal["actionId"], confirmed_id
+        )
+
+    @staticmethod
+    def _running_store(path: Path) -> WorkflowStore:
+        store = WorkflowStore(path)
+        store.create_workflow({
+            "workflowId": "control-demo",
+            "supervisorAgentId": "local",
+            "maxRetryCount": 2,
+            "nodes": [
+                {"id": "a", "prompt": "a", "timeoutSec": 10},
+                {"id": "b", "prompt": "b", "dependsOn": ["a"], "timeoutSec": 10},
+                {"id": "c", "prompt": "c", "dependsOn": ["b"], "timeoutSec": 10},
+            ],
+        })
+        store.prepare_node_dispatch("control-demo", "a")
+        store.sync_node_job(
+            "control-demo", "a",
+            {"status": "completed", "response": "A", "finished_at": "now"},
+        )
+        store.prepare_node_dispatch("control-demo", "b")
+        store.attach_node_job("control-demo", "b", {
+            "job_id": "remote-job", "thread_id": "remote-thread",
+            "turn_id": "remote-turn", "status": "running",
+        })
+        return store
+
+    async def test_cross_connection_interrupt_allows_atomic_tail_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._running_store(Path(directory, "workflows.db"))
+
+            class InterruptingOrchestrator:
+                jobs = {}
+
+                async def interrupt_turn(self, **_: object) -> None:
+                    store.sync_node_job(
+                        "control-demo", "b",
+                        {"status": "interrupted", "error": "已安全停止", "finished_at": "now"},
+                    )
+
+            gateway = WorkflowGateway(store, InterruptingOrchestrator())
+            confirmed = self._confirmed_restart(store)
+            answer = await gateway._execute_control("control-demo", confirmed)
+
+            snapshot = store.get_workflow("control-demo")
+            self.assertIn("重新打开", answer)
+            self.assertEqual(snapshot["retryPolicy"]["usedRetries"], 1)
+            self.assertEqual(
+                [node["status"] for node in snapshot["nodes"]],
+                ["completed", "pending", "pending"],
+            )
+            with self.assertRaisesRegex(ValueError, "已经处理"):
+                await gateway._execute_control("control-demo", confirmed)
+            self.assertEqual(
+                store.get_workflow("control-demo")["retryPolicy"]["usedRetries"], 1
+            )
+
+    async def test_interrupt_failure_does_not_consume_or_partially_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._running_store(Path(directory, "workflows.db"))
+
+            class FailingOrchestrator:
+                jobs = {}
+
+                async def interrupt_turn(self, **_: object) -> None:
+                    raise RuntimeError("远端拒绝中止")
+
+            gateway = WorkflowGateway(store, FailingOrchestrator())
+            gateway._resume_supervisor_if_needed = AsyncMock()
+            confirmed = self._confirmed_restart(store)
+            with self.assertRaisesRegex(RuntimeError, "远端拒绝中止"):
+                await gateway._execute_control("control-demo", confirmed)
+
+            snapshot = store.get_workflow("control-demo")
+            self.assertEqual(snapshot["retryPolicy"]["usedRetries"], 0)
+            self.assertEqual(snapshot["nodes"][1]["status"], "running")
+            with store._connect() as connection:
+                action = connection.execute(
+                    "SELECT status, retry_ordinal FROM workflow_control_actions "
+                    "WHERE action_id = ?", (confirmed["actionId"],)
+                ).fetchone()
+            self.assertEqual(action["status"], "failed")
+            self.assertIsNone(action["retry_ordinal"])
 
 
 if __name__ == "__main__":

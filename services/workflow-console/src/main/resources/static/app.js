@@ -89,7 +89,7 @@ async function refresh() {
     state.refreshRetrying = false;
     render(snapshot);
     await events();
-    if (snapshot.status === "completed" && Number(snapshot.pendingChatCount || 0) === 0 && !state.sending) stop();
+    if (TERMINAL.has(snapshot.status) && Number(snapshot.pendingChatCount || 0) === 0 && !state.sending) stop();
   } catch (error) {
     const firstFailure = !state.refreshError;
     state.refreshError = error.message;
@@ -166,7 +166,6 @@ function consume(event) {
     return;
   }
   if (event.source !== "supervisor") return;
-  if (state.messages.some(item => item.role === "user" && item.status === "processing")) return;
   const message = payload.message;
   const method = message?.method;
   const params = message?.params || {};
@@ -231,7 +230,8 @@ function renderMessages() {
     const content = make("div", "chat-content");
     const meta = make("div", "chat-meta");
     const isFinal = message.role === "progress" && index === state.messages.length - 1 && TERMINAL.has(state.snapshot?.status);
-    meta.append(make("strong", "", isUser ? "我" : isFinal ? "任务结果" : "任务助手"), make("time", "", fmt(message.time)));
+    const sourceLabel = message.role === "progress" ? (isFinal ? "任务结果" : "任务进度") : "任务助手";
+    meta.append(make("strong", "", isUser ? "我" : sourceLabel), make("time", "", fmt(message.time)));
     const bubble = make("div", "bubble");
     bubble.append(make("p", "", message.text));
     if (message.streaming) bubble.append(make("i", "typing-caret"));
@@ -365,6 +365,9 @@ function render(snapshot) {
     : failed ? `第 ${nodes.indexOf(failed) + 1} 步未完成`
       : snapshot.status === "completed" ? "全部步骤已完成" : "尚未开始";
   $("#progress").textContent = `${snapshot.progress?.completed || 0} / ${snapshot.progress?.total || nodes.length}`;
+  $("#retries").textContent = snapshot.retryPolicy
+    ? `${snapshot.retryPolicy.remainingRetries} / ${snapshot.retryPolicy.maxRetries}`
+    : "—";
   renderDuration();
   $("#updated").textContent = new Date().toLocaleString("zh-CN", {hour12: false});
   renderSteps(nodes, initializing);
@@ -395,21 +398,19 @@ function renderDuration() {
 }
 
 function renderComposer() {
-  const ended = state.snapshot?.status === "completed";
   const input = $("#chatInput");
   const button = $("#sendMessage");
-  input.disabled = ended || state.sending;
-  button.disabled = ended || state.sending || !input.value.trim();
+  input.disabled = state.sending;
+  button.disabled = state.sending || !input.value.trim();
   button.textContent = state.sending ? "发送中…" : "发送";
-  $("#chatHint").textContent = ended
-    ? (Number(state.snapshot?.pendingChatCount || 0) ? "任务已结束，正在等待已接收消息的回复" : "任务已结束")
-    : state.snapshot && ["failed", "cancelled"].includes(state.snapshot.status)
-      ? "可继续咨询，或请求重试、跳过未成功步骤"
-      : "控制操作需要再次回复“确认执行”";
+  const retries = state.snapshot?.retryPolicy?.remainingRetries;
+  $("#chatHint").textContent = TERMINAL.has(state.snapshot?.status)
+    ? `任务已结束，仍可咨询或请求从某一步重跑${retries == null ? "" : `（剩余 ${retries} 次）`}`
+    : "控制操作需要再次回复“确认执行”";
 }
 
 async function sendChatMessage(messageId, originalText) {
-  if (state.sending || state.snapshot?.status === "completed") return;
+  if (state.sending) return;
   const input = $("#chatInput");
   const value = text(originalText ?? input.value).trim();
   if (!value) return;

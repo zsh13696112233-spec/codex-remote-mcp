@@ -7,20 +7,18 @@ import os
 import time
 import uuid
 import warnings
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlparse
 
-# MCP 1.12 与新版 pydantic-settings 在导入 FastMCP 时会对未使用的
+# MCP 与部分 pydantic-settings 版本组合在导入 FastMCP 时会对未使用的
 # lifespan 字段产生兼容性警告；它不影响 stdio Server，但会污染 MCP stderr。
-from pydantic_settings.exceptions import IncompleteFieldDefinitionWarning
-
 warnings.filterwarnings(
     "ignore",
     message="Field 'lifespan' has an incomplete definition.*",
-    category=IncompleteFieldDefinitionWarning,
 )
 
 from mcp.server.fastmcp import FastMCP
@@ -112,6 +110,7 @@ class Job:
     write: bool
     model: str | None
     timeout_sec: int
+    output_schema: dict[str, Any] | None = None
     approval_policy: Literal["never", "on-request", "untrusted"] = "never"
     approvals_reviewer: Literal["user", "auto_review"] | None = None
     status: Literal[
@@ -541,6 +540,7 @@ class Orchestrator:
         *,
         client_factory: Callable[..., AppServerClient] = AppServerClient,
         max_retained_jobs: int = 1000,
+        serialize_agent_jobs: bool = True,
     ) -> None:
         if max_retained_jobs < 1:
             raise ValueError("max_retained_jobs 必须大于 0。")
@@ -549,6 +549,7 @@ class Orchestrator:
         self._agent_locks: dict[str, asyncio.Lock] = {}
         self._client_factory = client_factory
         self._max_retained_jobs = max_retained_jobs
+        self._serialize_agent_jobs = serialize_agent_jobs
         self._agents_cache: dict[str, AgentConfig] | None = None
         self._agents_cache_signature: tuple[int, int] | None = None
 
@@ -599,6 +600,7 @@ class Orchestrator:
         timeout_sec: int,
         approval_policy: Literal["never", "on-request", "untrusted"] = "never",
         approvals_reviewer: Literal["user", "auto_review"] | None = None,
+        output_schema: dict[str, Any] | None = None,
         event_callback: Callable[
             [dict[str, Any], str], None | Awaitable[None]
         ] | None = None,
@@ -635,6 +637,7 @@ class Orchestrator:
             write=write,
             model=model or agent.model,
             timeout_sec=timeout_sec,
+            output_schema=output_schema,
             approval_policy=approval_policy,
             approvals_reviewer=approvals_reviewer,
             event_callback=event_callback,
@@ -725,11 +728,43 @@ class Orchestrator:
             )
         return job
 
+    async def interrupt_turn(
+        self,
+        *,
+        agent_id: str,
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
+        """通过持久化标识中止不一定由当前进程持有的活动 turn。"""
+        agents = self.load_agents()
+        if agent_id not in agents:
+            raise ValueError(f"未知执行机 {agent_id}，可用值：{', '.join(agents)}")
+        if not thread_id.strip() or not turn_id.strip():
+            raise ValueError("thread_id 和 turn_id 不能为空。")
+        agent = agents[agent_id]
+        token = None
+        if agent.token_env:
+            token = os.getenv(agent.token_env)
+            if not token:
+                raise RuntimeError(f"环境变量 {agent.token_env} 未设置。")
+        client = self._client_factory(agent.url, token=token)
+        try:
+            await client.open()
+            await client.request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+                timeout_sec=INTERRUPT_TIMEOUT_SEC,
+            )
+        finally:
+            await client.close()
+
     async def _run_job(self, job: Job, agent: AgentConfig) -> None:
-        lock = self._agent_locks.setdefault(agent.agent_id, asyncio.Lock())
         stage = "queued"
         try:
-            async with lock:
+            async with AsyncExitStack() as stack:
+                if self._serialize_agent_jobs:
+                    lock = self._agent_locks.setdefault(agent.agent_id, asyncio.Lock())
+                    await stack.enter_async_context(lock)
                 job.status = "running"
                 job.started_at = utc_now()
                 stage = "configuration"
@@ -789,6 +824,8 @@ class Orchestrator:
                         }
                         if job.approvals_reviewer:
                             turn_params["approvalsReviewer"] = job.approvals_reviewer
+                        if job.output_schema is not None:
+                            turn_params["outputSchema"] = job.output_schema
                         turn_result = await self._request_with_deadline(
                             client,
                             "turn/start",
@@ -1207,6 +1244,7 @@ def workflow_status(workflow_id: str) -> dict[str, Any]:
         "status": snapshot["status"],
         "stateVersion": snapshot["stateVersion"],
         "progress": snapshot["progress"],
+        "retryPolicy": snapshot["retryPolicy"],
         "currentSteps": snapshot["currentNodes"],
         "steps": [
             {
@@ -1222,24 +1260,19 @@ def workflow_status(workflow_id: str) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
 def propose_workflow_control(
     workflow_id: str, action_type: str, message_id: str, node_id: str | None = None
 ) -> dict[str, Any]:
-    """仅提议停止、重试或跳过操作；不会改变任务，用户必须另发“确认执行”。"""
+    """网关内部兼容入口；不会暴露为主监督可调用的 MCP 工具。"""
     snapshot = get_workflow_store().get_workflow(workflow_id)
     if action_type == "stop":
         if snapshot["status"] in {"completed", "cancelled"}:
             raise ValueError("当前任务已经结束，不能停止。")
         node_id = None
-    elif action_type in {"retry", "skip"}:
+    elif action_type in {"retry", "restart_from", "skip"}:
         node = next((item for item in snapshot["nodes"] if item["id"] == node_id), None)
         if node is None:
             raise ValueError("必须指定存在的步骤。")
-        if action_type == "retry" and node["status"] not in {
-            "queued", "running", "cancelling", "failed", "cancelled", "interrupted"
-        }:
-            raise ValueError("只能重试正在执行或未成功的步骤。")
         if action_type == "skip" and node["status"] in {"completed", "skipped"}:
             raise ValueError("已完成或已跳过的步骤不能跳过。")
     else:
@@ -1249,13 +1282,11 @@ def propose_workflow_control(
     )
 
 
-@mcp.tool()
 def cancel_workflow_control(workflow_id: str, message_id: str) -> dict[str, Any]:
     """取消当前等待确认的聊天控制操作。"""
     return get_workflow_store().cancel_pending_control(workflow_id, message_id)
 
 
-@mcp.tool()
 async def execute_workflow_control(
     workflow_id: str, action_id: str, confirmation_message_id: str
 ) -> dict[str, Any]:
@@ -1265,26 +1296,41 @@ async def execute_workflow_control(
     action = store.start_control_execution(action_id)
     try:
         snapshot = store.get_workflow(workflow_id)
-        targets = snapshot["nodes"] if action["actionType"] == "stop" else [
-            next(item for item in snapshot["nodes"] if item["id"] == action["nodeId"])
-        ]
+        if action["actionType"] in {"retry", "restart_from"}:
+            targets = store.get_nodes_from(workflow_id, str(action["nodeId"]))
+        elif action["actionType"] == "stop":
+            targets = snapshot["nodes"]
+        else:
+            targets = [
+                next(item for item in snapshot["nodes"] if item["id"] == action["nodeId"])
+            ]
         for node in targets:
             job_id = node.get("jobId")
             is_active = node["status"] in {"queued", "running", "cancelling"}
-            if is_active and (not job_id or job_id not in orchestrator.jobs):
-                raise RuntimeError("当前无法安全中止正在执行的步骤，请稍后重试控制操作。")
+            if is_active and job_id not in orchestrator.jobs:
+                if not node.get("threadId") or not node.get("turnId"):
+                    raise RuntimeError("当前无法安全中止正在执行的步骤，请稍后重试控制操作。")
+                await orchestrator.interrupt_turn(
+                    agent_id=node["agentId"],
+                    thread_id=node["threadId"],
+                    turn_id=node["turnId"],
+                )
             if job_id and job_id in orchestrator.jobs:
                 job = await orchestrator.cancel(job_id)
                 if not job.completed.is_set():
                     job = await orchestrator.wait(job_id, 10)
-                if not job.completed.is_set() and action["actionType"] in {"retry", "skip"}:
+                if not job.completed.is_set() and action["actionType"] in {
+                    "retry", "restart_from", "skip"
+                }:
                     raise RuntimeError("步骤尚未完全停止，暂不能重试或跳过，请稍后再试。")
                 store.sync_node_job(workflow_id, node["id"], job.snapshot())
 
         if action["actionType"] == "stop":
             result = store.stop_workflow(workflow_id)
-        elif action["actionType"] == "retry":
-            result = store.reset_node_for_retry(workflow_id, str(action["nodeId"]))
+        elif action["actionType"] in {"retry", "restart_from"}:
+            result = store.restart_from_node(
+                workflow_id, str(action["nodeId"]), action_id=action_id
+            )
         else:
             result = store.skip_node(workflow_id, str(action["nodeId"]))
         public_result = {

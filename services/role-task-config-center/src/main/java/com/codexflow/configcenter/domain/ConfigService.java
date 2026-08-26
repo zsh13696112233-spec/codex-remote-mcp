@@ -207,6 +207,7 @@ public class ConfigService {
     sop.failurePolicy = "stop";
     sop.supervisorTimeoutSec =
         integerInRange(body.supervisorTimeoutSec(), "supervisorTimeoutSec", 7200, 10, 7200);
+    sop.maxRetryCount = integerInRange(body.maxRetryCount(), "maxRetryCount", 10, 0, 100);
     sop.defaultStepModel = normalizeNullable(body.defaultStepModel());
     if (sop.defaultStepModel == null) sop.defaultStepModel = defaultModel;
     validateModel(sop.defaultStepModel);

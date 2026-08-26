@@ -124,6 +124,37 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 await orchestrator.wait(second.job_id, 1)
                 self.assertEqual(second.status, "completed")
 
+    async def test_assistant_jobs_can_run_concurrently_and_forward_output_schema(self) -> None:
+        schema = {"type": "object", "properties": {"text": {"type": "string"}}}
+        async with MockAppServer(delay_sec=0.3) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(directory, server.url),
+                    serialize_agent_jobs=False,
+                )
+                first = await self._dispatch(orchestrator, output_schema=schema)
+                second = await self._dispatch(orchestrator, output_schema=schema)
+                for _ in range(100):
+                    if first.status == second.status == "running":
+                        break
+                    await asyncio.sleep(0.01)
+
+                self.assertEqual(first.status, "running")
+                self.assertEqual(second.status, "running")
+                await asyncio.gather(
+                    orchestrator.wait(first.job_id, 1),
+                    orchestrator.wait(second.job_id, 1),
+                )
+                turn_starts = [
+                    request for request in server.requests
+                    if request.get("method") == "turn/start"
+                ]
+                self.assertEqual(len(turn_starts), 2)
+                self.assertTrue(all(
+                    request["params"]["outputSchema"] == schema
+                    for request in turn_starts
+                ))
+
     async def test_completed_jobs_are_bounded(self) -> None:
         async with MockAppServer(delay_sec=0.01) as server:
             with tempfile.TemporaryDirectory() as directory:

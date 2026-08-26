@@ -1,9 +1,11 @@
 import asyncio
 import base64
 import json
+import sqlite3
 import tempfile
 import unittest
 import uuid
+from contextlib import closing
 from pathlib import Path
 
 from workflow_store import AsyncEventBatcher, WorkflowStore, utc_now
@@ -46,6 +48,9 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["currentNodes"], [])
         self.assertEqual(snapshot["progress"], {"completed": 0, "total": 3})
         self.assertEqual([node["status"] for node in snapshot["nodes"]], ["pending"] * 3)
+        self.assertEqual(snapshot["retryPolicy"], {
+            "maxRetries": 10, "usedRetries": 0, "remainingRetries": 10,
+        })
         events = self.store.list_events("serial-demo")
         self.assertEqual(events[0]["type"], "workflow.created")
 
@@ -87,6 +92,58 @@ class WorkflowStoreTests(unittest.TestCase):
             self.store.get_spec("serial-demo")["nodes"][0]["prompt"],
             "只写一个 a",
         )
+
+    def test_legacy_database_is_upgraded_with_default_retry_policy(self) -> None:
+        legacy_path = Path(self.directory.name, "legacy.db")
+        spec = serial_workflow()
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE workflows (
+                    workflow_id TEXT PRIMARY KEY, name TEXT, status TEXT NOT NULL,
+                    failure_policy TEXT NOT NULL, supervisor_agent_id TEXT NOT NULL,
+                    supervisor_job_id TEXT, supervisor_thread_id TEXT,
+                    supervisor_turn_id TEXT, supervisor_status TEXT NOT NULL,
+                    supervisor_last_message TEXT, response TEXT, error TEXT,
+                    created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+                    spec_json TEXT NOT NULL
+                );
+                CREATE TABLE workflow_nodes (
+                    workflow_id TEXT NOT NULL, node_id TEXT NOT NULL,
+                    position INTEGER NOT NULL, agent_id TEXT NOT NULL,
+                    executor_type TEXT NOT NULL, prompt TEXT NOT NULL,
+                    depends_on_json TEXT NOT NULL, cwd TEXT,
+                    write_enabled INTEGER NOT NULL, model TEXT,
+                    timeout_sec INTEGER NOT NULL, status TEXT NOT NULL,
+                    job_id TEXT, thread_id TEXT, turn_id TEXT, response TEXT,
+                    error TEXT, created_at TEXT NOT NULL, started_at TEXT,
+                    finished_at TEXT, PRIMARY KEY (workflow_id, node_id),
+                    FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
+                );
+                """
+            )
+            connection.execute(
+                "INSERT INTO workflows (workflow_id, name, status, failure_policy, "
+                "supervisor_agent_id, supervisor_status, created_at, spec_json) "
+                "VALUES (?, ?, 'queued', 'stop', 'local', 'queued', ?, ?)",
+                ("legacy", "旧任务", utc_now(), json.dumps(spec, ensure_ascii=False)),
+            )
+            connection.execute(
+                "INSERT INTO workflow_nodes (workflow_id, node_id, position, agent_id, "
+                "executor_type, prompt, depends_on_json, write_enabled, timeout_sec, "
+                "status, created_at) VALUES "
+                "('legacy', 'a', 0, 'local', 'local', '旧提示', '[]', 0, 10, "
+                "'pending', ?)",
+                (utc_now(),),
+            )
+            connection.commit()
+
+        upgraded = WorkflowStore(legacy_path).get_workflow("legacy")
+
+        self.assertEqual(upgraded["retryPolicy"], {
+            "maxRetries": 10, "usedRetries": 0, "remainingRetries": 10,
+        })
+        self.assertEqual(upgraded["assistant"]["status"], "idle")
 
     def test_cycle_is_rejected(self) -> None:
         value = serial_workflow()
@@ -243,6 +300,18 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertEqual(retried["status"], "accepted")
         self.assertEqual(self.store.pending_chat_count("serial-demo"), 1)
 
+    def test_completed_workflow_still_accepts_chat(self) -> None:
+        self.store.create_workflow(serial_workflow())
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE workflows SET status = 'completed' WHERE workflow_id = ?",
+                ("serial-demo",),
+            )
+        accepted = self.store.accept_chat_message(
+            "serial-demo", str(uuid.uuid4()), "请总结一下"
+        )
+        self.assertEqual(accepted["workflowStatusAtAcceptance"], "completed")
+
     def test_control_requires_separate_exact_confirmation(self) -> None:
         self.store.create_workflow(serial_workflow())
         proposed_message = str(uuid.uuid4())
@@ -262,7 +331,105 @@ class WorkflowStoreTests(unittest.TestCase):
         self.store.skip_node("serial-demo", "a")
         next_step = self.store.prepare_node_dispatch("serial-demo", "b")
         self.assertIn("已跳过", next_step["prompt"])
-        self.assertEqual(self.store.get_workflow("serial-demo")["nodes"][0]["status"], "skipped")
+        snapshot = self.store.get_workflow("serial-demo")
+        self.assertEqual(snapshot["nodes"][0]["status"], "skipped")
+        self.assertEqual(snapshot["retryPolicy"]["usedRetries"], 0)
+        stopped = self.store.stop_workflow("serial-demo")
+        self.assertEqual(stopped["retryPolicy"]["usedRetries"], 0)
+
+    def test_restart_from_archives_tail_and_consumes_one_shared_retry(self) -> None:
+        value = serial_workflow()
+        value["maxRetryCount"] = 2
+        self.store.create_workflow(value)
+        for node_id, response in (("a", "结果A"), ("b", "结果B"), ("c", "结果C")):
+            self.store.prepare_node_dispatch("serial-demo", node_id)
+            self.store.sync_node_job(
+                "serial-demo",
+                node_id,
+                {"status": "completed", "response": response, "finished_at": utc_now()},
+            )
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        old_artifact = self.store.save_image_bytes(
+            "serial-demo", "b", "same-source", png
+        )
+        self.store.finish_workflow(
+            "serial-demo", supervisor_status="completed", response="完成", error=None
+        )
+
+        restarted = self.store.restart_from_node("serial-demo", "b")
+
+        self.assertEqual(restarted["status"], "running")
+        self.assertEqual(restarted["retryPolicy"], {
+            "maxRetries": 2, "usedRetries": 1, "remainingRetries": 1,
+        })
+        self.assertEqual(restarted["nodes"][0]["response"], "结果A")
+        self.assertEqual(
+            [node["status"] for node in restarted["nodes"]],
+            ["completed", "pending", "pending"],
+        )
+        self.assertEqual(
+            [node["attemptCount"] for node in restarted["nodes"]], [0, 1, 1]
+        )
+        self.assertEqual(restarted["nodes"][1]["artifacts"], [])
+        with self.assertRaisesRegex(ValueError, "找不到工作流图片"):
+            self.store.get_artifact("serial-demo", old_artifact["id"])
+        new_artifact = self.store.save_image_bytes(
+            "serial-demo", "b", "same-source", png
+        )
+        self.assertNotEqual(new_artifact["id"], old_artifact["id"])
+        prompt = self.store.prepare_node_dispatch("serial-demo", "b")["prompt"]
+        self.assertIn("结果A", prompt)
+        with self.store._connect() as connection:
+            archived_nodes = connection.execute(
+                "SELECT node_id, attempt_number FROM workflow_node_attempts "
+                "WHERE workflow_id = ? ORDER BY node_id",
+                ("serial-demo",),
+            ).fetchall()
+            archived_images = connection.execute(
+                "SELECT node_id, attempt_number FROM workflow_attempt_artifacts "
+                "WHERE workflow_id = ?",
+                ("serial-demo",),
+            ).fetchall()
+        self.assertEqual(
+            [(row["node_id"], row["attempt_number"]) for row in archived_nodes],
+            [("b", 0), ("c", 0)],
+        )
+        self.assertEqual(
+            [(row["node_id"], row["attempt_number"]) for row in archived_images],
+            [("b", 0)],
+        )
+
+    def test_retry_budget_rejects_next_restart_and_proposals_do_not_consume(self) -> None:
+        value = serial_workflow()
+        value["maxRetryCount"] = 10
+        self.store.create_workflow(value)
+        self.store.prepare_node_dispatch("serial-demo", "a")
+        self.store.sync_node_job(
+            "serial-demo", "a",
+            {"status": "completed", "response": "A", "finished_at": utc_now()},
+        )
+        proposal_message = str(uuid.uuid4())
+        self.store.accept_chat_message("serial-demo", proposal_message, "从第2步重跑")
+        proposal = self.store.propose_control(
+            "serial-demo", "restart_from", "b", proposal_message
+        )
+        self.assertEqual(proposal["retryCost"], 1)
+        self.assertEqual(
+            self.store.get_workflow("serial-demo")["retryPolicy"]["usedRetries"], 0
+        )
+        for _ in range(10):
+            self.store.restart_from_node("serial-demo", "b")
+        self.assertEqual(
+            self.store.get_workflow("serial-demo")["retryPolicy"]["usedRetries"], 10
+        )
+        with self.assertRaisesRegex(ValueError, "次数已经用完"):
+            self.store.restart_from_node("serial-demo", "b")
+        with self.assertRaisesRegex(ValueError, "次数已经用完"):
+            self.store.propose_control(
+                "serial-demo", "restart_from", "b", str(uuid.uuid4())
+            )
 
 
 class AsyncEventBatcherTests(unittest.IsolatedAsyncioTestCase):
