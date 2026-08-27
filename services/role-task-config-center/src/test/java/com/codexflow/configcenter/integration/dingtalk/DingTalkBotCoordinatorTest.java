@@ -1,4 +1,4 @@
-package com.codexflow.configcenter.integration.feishu;
+package com.codexflow.configcenter.integration.dingtalk;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -21,8 +21,8 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
-/** 不连接真实飞书，验证消息、卡片动作、发送失败和长连接生命周期。 */
-class FeishuBotCoordinatorTest {
+/** 不连接真实钉钉，验证消息、卡片动作、发送失败和长连接生命周期。 */
+class DingTalkBotCoordinatorTest {
 
   private static final String TASK_ID = "00000000-0000-4000-8000-000000000001";
   private static final String WORKFLOW_1 = "00000000-0000-4000-8000-000000000101";
@@ -30,32 +30,33 @@ class FeishuBotCoordinatorTest {
   private static final String WORKFLOW_3 = "00000000-0000-4000-8000-000000000103";
   private static final String GATE_1 = "00000000-0000-4000-8000-000000000201";
   private final ObjectMapper objectMapper = new ObjectMapper();
-  private FeishuProperties properties;
+  private DingTalkProperties properties;
   private TestTransport transport;
-  private FeishuSettingsStore settings;
-  private FeishuStore store;
+  private DingTalkSettingsStore settings;
+  private DingTalkStore store;
   private WorkflowRunService workflowRuns;
   private WorkflowRunStore runStore;
   private GatewayClient gateway;
-  private FeishuProgressCard cards;
-  private FeishuBotCoordinator coordinator;
+  private DingTalkProgressCard cards;
+  private DingTalkBotCoordinator coordinator;
 
   @BeforeEach
   void setUp() {
-    properties = new FeishuProperties();
+    properties = new DingTalkProperties();
     properties.setEnabled(true);
-    properties.setAppId("cli_test");
-    properties.setAppSecret("test-secret");
+    properties.setClientId("cli_test");
+    properties.setClientSecret("test-secret");
     properties.setTaskDefinitionId(TASK_ID);
+    properties.setCardTemplateId("test.schema");
     transport = new TestTransport();
-    settings = mock(FeishuSettingsStore.class);
-    store = mock(FeishuStore.class);
+    settings = mock(DingTalkSettingsStore.class);
+    store = mock(DingTalkStore.class);
     workflowRuns = mock(WorkflowRunService.class);
     runStore = mock(WorkflowRunStore.class);
     gateway = mock(GatewayClient.class);
-    cards = mock(FeishuProgressCard.class);
+    cards = mock(DingTalkProgressCard.class);
     coordinator =
-        new FeishuBotCoordinator(
+        new DingTalkBotCoordinator(
             properties,
             settings,
             transport,
@@ -73,7 +74,7 @@ class FeishuBotCoordinatorTest {
     ObjectNode payload = objectMapper.createObjectNode().put("workflowId", WORKFLOW_1);
     when(store.conversation(eq("cli_test"), any())).thenReturn(Optional.empty());
     when(store.reserveStart(eq("cli_test"), eq(TASK_ID), any()))
-        .thenReturn(new FeishuModels.StartReservation("started", WORKFLOW_1, payload));
+        .thenReturn(new DingTalkModels.StartReservation("started", WORKFLOW_1, payload));
     when(gateway.get("/workflows/" + WORKFLOW_1)).thenReturn(snapshot("running"));
     when(cards.render(any(), any())).thenReturn(Map.of("schema", "2.0"));
 
@@ -91,12 +92,12 @@ class FeishuBotCoordinatorTest {
   @Test
   void topLevelMentionWithBlankSdkReplyContextStillStarts() {
     ObjectNode payload = objectMapper.createObjectNode().put("workflowId", WORKFLOW_1);
-    FeishuModels.Message message =
-        new FeishuModels.Message(
-            "start-blank-context", "chat-1", "group", "user-1", "运行", true, false, "", "", "");
+    DingTalkModels.Message message =
+        new DingTalkModels.Message(
+            "start-blank-context", "chat-1", "2", "user-1", "运行", true, false, "");
     when(store.conversation("cli_test", message)).thenReturn(Optional.empty());
     when(store.reserveStart("cli_test", TASK_ID, message))
-        .thenReturn(new FeishuModels.StartReservation("started", WORKFLOW_1, payload));
+        .thenReturn(new DingTalkModels.StartReservation("started", WORKFLOW_1, payload));
     when(gateway.get("/workflows/" + WORKFLOW_1)).thenReturn(snapshot("running"));
     when(cards.render(any(), any())).thenReturn(Map.of("schema", "2.0"));
 
@@ -108,15 +109,14 @@ class FeishuBotCoordinatorTest {
   }
 
   @Test
-  void threadMessageUsesStoredDeterministicAssistantMessageId() {
-    FeishuModels.Binding binding =
-        new FeishuModels.Binding(
-            WORKFLOW_2, "chat-1", "root-1", "thread-1", "active", 0, null, false);
-    FeishuModels.Message message = message("question-1", "现在进度如何", false, "root-1");
+  void quotedMessageUsesStoredDeterministicAssistantMessageId() {
+    DingTalkModels.Binding binding =
+        new DingTalkModels.Binding(WORKFLOW_2, "chat-1", "root-1", "active", 0, null, false);
+    DingTalkModels.Message message = message("question-1", "现在进度如何", false, "root-1");
     when(store.conversation("cli_test", message)).thenReturn(Optional.of(binding));
     when(store.registerInbound("cli_test", binding, message))
         .thenReturn(
-            new FeishuModels.Inbound(
+            new DingTalkModels.Inbound(
                 "question-1", WORKFLOW_2, "11111111-1111-5111-8111-111111111111", "accepted"));
 
     coordinator.safelyHandleMessage(message);
@@ -131,9 +131,8 @@ class FeishuBotCoordinatorTest {
 
   @Test
   void repeatedOrExpiredCardActionRefreshesInsteadOfFailing() {
-    FeishuModels.Binding binding =
-        new FeishuModels.Binding(
-            WORKFLOW_3, "chat-1", "root-1", "thread-1", "active", 0, "card-1", false);
+    DingTalkModels.Binding binding =
+        new DingTalkModels.Binding(WORKFLOW_3, "chat-1", "root-1", "active", 0, "card-1", false);
     when(store.binding(WORKFLOW_3)).thenReturn(Optional.of(binding));
     when(gateway.post("/workflows/" + WORKFLOW_3 + "/advance/" + GATE_1 + "/confirm", null))
         .thenReturn(objectMapper.createObjectNode());
@@ -141,7 +140,7 @@ class FeishuBotCoordinatorTest {
     when(cards.render(any(), any())).thenReturn(Map.of("schema", "2.0"));
 
     coordinator.safelyHandleAction(
-        new FeishuModels.CardAction(
+        new DingTalkModels.CardAction(
             "card-1",
             "chat-1",
             "user-2",
@@ -169,8 +168,8 @@ class FeishuBotCoordinatorTest {
     org.assertj.core.api.Assertions.assertThat(coordinator.isRunning()).isTrue();
 
     transport.sendFailure = new IllegalStateException("offline");
-    FeishuModels.Outbox item =
-        new FeishuModels.Outbox(
+    DingTalkModels.Outbox item =
+        new DingTalkModels.Outbox(
             "outbox-1",
             null,
             "chat-1",
@@ -193,29 +192,20 @@ class FeishuBotCoordinatorTest {
     return snapshot;
   }
 
-  private static FeishuModels.Message message(
+  private static DingTalkModels.Message message(
       String messageId, String content, boolean mentioned, String rootId) {
-    return new FeishuModels.Message(
-        messageId,
-        "chat-1",
-        "group",
-        "user-1",
-        content,
-        mentioned,
-        false,
-        rootId,
-        rootId == null ? null : "thread-1",
-        rootId);
+    return new DingTalkModels.Message(
+        messageId, "chat-1", "2", "user-1", content, mentioned, false, rootId);
   }
 
-  private static final class TestTransport implements FeishuTransport {
+  private static final class TestTransport implements DingTalkTransport {
     boolean connected;
     RuntimeException sendFailure;
 
     @Override
     public void start(
-        Consumer<FeishuModels.Message> messageHandler,
-        Consumer<FeishuModels.CardAction> actionHandler) {
+        Consumer<DingTalkModels.Message> messageHandler,
+        Consumer<DingTalkModels.CardAction> actionHandler) {
       connected = true;
     }
 
@@ -230,23 +220,24 @@ class FeishuBotCoordinatorTest {
     }
 
     @Override
-    public void testConnection(String appId, String appSecret) {
+    public void testConnection(String clientId, String clientSecret) {
       if (sendFailure != null) throw sendFailure;
     }
 
     @Override
-    public FeishuModels.SendResult sendText(String chatId, String replyToMessageId, String text) {
+    public DingTalkModels.SendResult sendText(
+        String conversationId, String replyToMessageId, String text) {
       if (sendFailure != null) throw sendFailure;
-      return new FeishuModels.SendResult("sent-1");
+      return new DingTalkModels.SendResult("sent-1");
     }
 
     @Override
-    public FeishuModels.SendResult sendCard(
-        String chatId, String replyToMessageId, Map<String, Object> card) {
-      return new FeishuModels.SendResult("sent-card-1");
+    public DingTalkModels.SendResult sendCard(
+        String conversationId, String replyToMessageId, Map<String, Object> card) {
+      return new DingTalkModels.SendResult("sent-card-1");
     }
 
     @Override
-    public void updateCard(String messageId, Map<String, Object> card) {}
+    public void updateCard(String cardInstanceId, Map<String, Object> card) {}
   }
 }

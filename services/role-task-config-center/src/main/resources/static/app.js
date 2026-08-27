@@ -1,4 +1,4 @@
-const state={page:"roles",roles:[],sops:[],tasks:[],agents:[],feishu:null,gatewayOnline:false,sop:{draft:null,baseline:"",selectedNodeId:null,tab:"workflow",drag:null}};
+const state={page:"roles",roles:[],sops:[],tasks:[],agents:[],feishu:null,dingtalk:null,gatewayOnline:false,sop:{draft:null,baseline:"",selectedNodeId:null,tab:"workflow",drag:null}};
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uid=()=>`node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
@@ -57,12 +57,41 @@ function feishuPayload(){
   return {enabled:f.enabled.checked,appId:f.appId.value.trim(),appSecret:f.appSecret.value.trim(),taskDefinitionId:f.taskDefinitionId.value,eventPollIntervalMs:Number(f.eventPollIntervalMs.value)};
 }
 
+function renderDingTalkConfig(){
+  const x=state.dingtalk||{enabled:false,clientId:"",secretConfigured:false,taskDefinitionId:"",cardTemplateId:"",eventPollIntervalMs:1000,connectionStatus:"disabled"};
+  const tasks=state.tasks.filter(t=>t.enabled&&!t.deleted);
+  $("#content").className="content";
+  $("#content").innerHTML=`<section class="settings-panel">
+    <div class="settings-heading"><div><h2>钉钉机器人配置</h2><p>通过官方 Stream SDK 接收群聊和卡片回调，无需开放公网地址。</p></div>${feishuStatus(x.connectionStatus)}</div>
+    <form id="dingtalkForm">
+      <label class="check"><input name="enabled" type="checkbox" ${x.enabled?"checked":""}> 启用钉钉机器人 Stream 长连接</label>
+      <div class="grid"><label>Client ID<input name="clientId" maxlength="128" required value="${esc(x.clientId)}" placeholder="dingxxxxxxxxxxxxxxxx"></label>
+      <label>Client Secret<input name="clientSecret" type="password" maxlength="512" placeholder="${x.secretConfigured?"已保存；留空表示不修改":"请输入 Client Secret"}"></label></div>
+      <label>固定任务定义<select name="taskDefinitionId" required><option value="">请选择任务</option>${tasks.map(t=>`<option value="${t.id}" ${t.id===x.taskDefinitionId?"selected":""}>${esc(t.name)}</option>`).join("")}</select></label>
+      <label>互动进度卡模板 ID<input name="cardTemplateId" maxlength="256" required value="${esc(x.cardTemplateId)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.schema"></label>
+      <label>事件轮询间隔（毫秒）<input name="eventPollIntervalMs" type="number" min="250" max="60000" required value="${Number(x.eventPollIntervalMs)||1000}"></label>
+      <p class="hint">Client Secret 只保存在服务端且不会回显。飞书和钉钉只能启用一个；任务运行期间不能停用或修改关键配置。后续咨询需回复或引用启动消息或进度卡。</p>
+      <div id="dingtalkTestResult" class="test-result"></div>
+      <footer><button type="button" data-dingtalk-test>测试连接</button><button class="primary" type="submit">保存配置</button></footer>
+    </form>
+  </section>`;
+}
+function dingtalkPayload(){
+  const f=$("#dingtalkForm");
+  return {enabled:f.enabled.checked,clientId:f.clientId.value.trim(),clientSecret:f.clientSecret.value.trim(),taskDefinitionId:f.taskDefinitionId.value,cardTemplateId:f.cardTemplateId.value.trim(),eventPollIntervalMs:Number(f.eventPollIntervalMs.value)};
+}
+
 async function render({reload=true}={}){
   if(reload)await loadBase();
   if(state.page==="feishu"){
     $("#search").closest(".toolbar").classList.add("hidden");
     state.feishu=await api("/api/feishu/config");
     renderFeishuConfig();return;
+  }
+  if(state.page==="dingtalk"){
+    $("#search").closest(".toolbar").classList.add("hidden");
+    state.dingtalk=await api("/api/dingtalk/config");
+    renderDingTalkConfig();return;
   }
   if(state.page==="sops"){
     $("#search").closest(".toolbar").classList.add("hidden");
@@ -226,10 +255,12 @@ $("#roleForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.
 $("#taskForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.currentTarget,b={name:f.name.value,objective:f.objective.value,sopId:f.sopId.value,additionalNotes:f.additionalNotes.value,enabled:f.enabled.checked};try{await api(f.id.value?`/api/task-definitions/${f.id.value}`:"/api/task-definitions",{method:f.id.value?"PUT":"POST",body:JSON.stringify(b)});$("#taskDialog").close();toast("任务定义已保存");render()}catch(x){toast(x.message)}});
 
 $("#content").addEventListener("click",async e=>{
-  let feishuTestButton=null;
+  let botTestButton=null;
   try{
     const test=e.target.closest("[data-feishu-test]");
-    if(test){feishuTestButton=test;test.disabled=true;const result=await api("/api/feishu/config/test",{method:"POST",body:JSON.stringify(feishuPayload())});const output=$("#feishuTestResult");output.className=`test-result ${result.success?"success":"error"}`;output.textContent=result.message;test.disabled=false;return}
+    if(test){botTestButton=test;test.disabled=true;const result=await api("/api/feishu/config/test",{method:"POST",body:JSON.stringify(feishuPayload())});const output=$("#feishuTestResult");output.className=`test-result ${result.success?"success":"error"}`;output.textContent=result.message;test.disabled=false;return}
+    const dingtalkTest=e.target.closest("[data-dingtalk-test]");
+    if(dingtalkTest){botTestButton=dingtalkTest;dingtalkTest.disabled=true;const result=await api("/api/dingtalk/config/test",{method:"POST",body:JSON.stringify(dingtalkPayload())});const output=$("#dingtalkTestResult");output.className=`test-result ${result.success?"success":"error"}`;output.textContent=result.message;dingtalkTest.disabled=false;return}
     const action=e.target.closest("button[data-action]");
     if(action){
       const id=action.dataset.id,a=action.dataset.action;
@@ -252,12 +283,15 @@ $("#content").addEventListener("click",async e=>{
     const remove=e.target.closest("[data-node-remove]");
     if(remove){const id=remove.dataset.nodeRemove;state.sop.draft.steps=state.sop.draft.steps.filter(s=>s._clientId!==id);if(state.sop.selectedNodeId===id){state.sop.selectedNodeId=state.sop.draft.steps[0]?._clientId||null;state.sop.tab=state.sop.selectedNodeId?"node":"workflow"}renderSopWorkspace();return}
     const node=e.target.closest("[data-node-id]");if(node){state.sop.selectedNodeId=node.dataset.nodeId;state.sop.tab="node";renderSopWorkspace()}
-  }catch(x){if(feishuTestButton)feishuTestButton.disabled=false;toast(x.message)}
+  }catch(x){if(botTestButton)botTestButton.disabled=false;toast(x.message)}
 });
 $("#content").addEventListener("submit",async e=>{
-  if(e.target.id!=="feishuForm")return;e.preventDefault();
+  if(!["feishuForm","dingtalkForm"].includes(e.target.id))return;e.preventDefault();
   const submit=e.target.querySelector('button[type="submit"]');submit.disabled=true;
-  try{state.feishu=await api("/api/feishu/config",{method:"PUT",body:JSON.stringify(feishuPayload())});toast(state.feishu.message||"飞书配置已保存");renderFeishuConfig()}catch(x){toast(x.message);submit.disabled=false}
+  try{
+    if(e.target.id==="feishuForm"){state.feishu=await api("/api/feishu/config",{method:"PUT",body:JSON.stringify(feishuPayload())});toast(state.feishu.message||"飞书配置已保存");renderFeishuConfig()}
+    else{state.dingtalk=await api("/api/dingtalk/config",{method:"PUT",body:JSON.stringify(dingtalkPayload())});toast(state.dingtalk.message||"钉钉配置已保存");renderDingTalkConfig()}
+  }catch(x){toast(x.message);submit.disabled=false}
 });
 $("#content").addEventListener("input",e=>{
   if(e.target.id==="sopSearch"){const q=e.target.value.trim().toLowerCase();document.querySelectorAll(".sop-list-item").forEach(item=>item.hidden=!item.dataset.name.includes(q));return}
@@ -332,9 +366,9 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   if(b.dataset.page===state.page)return;
   if(state.page==="sops"){const dirty=isSopDirty();if(!confirmDiscard())return;if(dirty)discardSopChanges()}
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
-  const map={roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、运行并追溯不可变快照。","＋ 新建任务"],feishu:["飞书机器人","配置长连接、固定任务和运行状态。",""]};
+  const map={roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、运行并追溯不可变快照。","＋ 新建任务"],feishu:["飞书机器人","配置长连接、固定任务和运行状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接、互动卡和固定任务。",""]};
   [$("#title").textContent,$("#subtitle").textContent,$("#create").textContent]=map[state.page];
-  $("#create").classList.toggle("hidden",state.page==="feishu");
+  $("#create").classList.toggle("hidden",["feishu","dingtalk"].includes(state.page));
   try{await render()}catch(e){toast(e.message)}
 });
 $("#create").onclick=()=>state.page==="roles"?openRole():state.page==="sops"?startNewSop():state.page==="tasks"?openTask():null;

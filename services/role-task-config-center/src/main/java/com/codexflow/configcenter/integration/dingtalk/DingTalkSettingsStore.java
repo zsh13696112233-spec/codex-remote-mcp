@@ -1,28 +1,28 @@
-package com.codexflow.configcenter.integration.feishu;
+package com.codexflow.configcenter.integration.dingtalk;
 
 import com.codexflow.configcenter.domain.ConfigService;
 import com.codexflow.configcenter.domain.ConflictFailure;
-import com.codexflow.configcenter.dto.FeishuConfigSaveRequest;
+import com.codexflow.configcenter.dto.DingTalkConfigSaveRequest;
 import com.codexflow.configcenter.integration.bot.BotPlatformGuard;
 import java.time.Instant;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.node.ObjectNode;
 
-/** 保存页面配置，并把数据库配置应用到运行中的飞书属性对象。 */
+/** 保存页面配置，并把数据库配置应用到运行中的钉钉属性对象。 */
 @Service
-class FeishuSettingsStore {
+class DingTalkSettingsStore {
 
   private static final byte SETTINGS_ID = 1;
 
-  private final FeishuSettingsRepository repository;
-  private final FeishuProperties properties;
+  private final DingTalkSettingsRepository repository;
+  private final DingTalkProperties properties;
   private final ConfigService configService;
   private final BotPlatformGuard platformGuard;
 
-  FeishuSettingsStore(
-      FeishuSettingsRepository repository,
-      FeishuProperties properties,
+  DingTalkSettingsStore(
+      DingTalkSettingsRepository repository,
+      DingTalkProperties properties,
       ConfigService configService,
       BotPlatformGuard platformGuard) {
     this.repository = repository;
@@ -35,7 +35,7 @@ class FeishuSettingsStore {
   public Settings current() {
     return repository
         .findById(SETTINGS_ID)
-        .map(FeishuSettingsStore::toSettings)
+        .map(DingTalkSettingsStore::toSettings)
         .orElseGet(this::environmentSettings);
   }
 
@@ -45,24 +45,25 @@ class FeishuSettingsStore {
   }
 
   @Transactional
-  public Settings save(FeishuConfigSaveRequest request) {
-    platformGuard.assertCanEnable("feishu", request.enabled());
+  public Settings save(DingTalkConfigSaveRequest request) {
+    platformGuard.assertCanEnable("dingtalk", request.enabled());
     ObjectNode task = configService.getTask(request.taskDefinitionId().trim());
     if (!task.path("enabled").asBoolean() || task.path("deleted").asBoolean()) {
       throw new ConflictFailure("机器人只能绑定已启用且未删除的任务定义。");
     }
     Settings previous = current();
-    String secret = normalized(request.appSecret());
-    if (secret.isBlank()) secret = previous.appSecret();
-    if (secret.isBlank()) throw new IllegalArgumentException("请填写飞书 App Secret。");
+    String secret = normalized(request.clientSecret());
+    if (secret.isBlank()) secret = previous.clientSecret();
+    if (secret.isBlank()) throw new IllegalArgumentException("请填写钉钉 Client Secret。");
 
-    FeishuSettingsEntity entity =
-        repository.findById(SETTINGS_ID).orElseGet(FeishuSettingsEntity::new);
+    DingTalkSettingsEntity entity =
+        repository.findById(SETTINGS_ID).orElseGet(DingTalkSettingsEntity::new);
     entity.id = SETTINGS_ID;
     entity.enabled = request.enabled();
-    entity.appId = request.appId().trim();
-    entity.appSecret = secret;
+    entity.clientId = request.clientId().trim();
+    entity.clientSecret = secret;
     entity.taskDefinitionId = request.taskDefinitionId().trim();
+    entity.cardTemplateId = request.cardTemplateId().trim();
     entity.eventPollIntervalMs = request.eventPollIntervalMs();
     entity.updatedAt = Instant.now();
     repository.saveAndFlush(entity);
@@ -72,15 +73,16 @@ class FeishuSettingsStore {
   }
 
   @Transactional(readOnly = true)
-  public Settings forTest(FeishuConfigSaveRequest request) {
-    String secret = normalized(request.appSecret());
-    if (secret.isBlank()) secret = current().appSecret();
-    if (secret.isBlank()) throw new IllegalArgumentException("请填写飞书 App Secret。");
+  public Settings forTest(DingTalkConfigSaveRequest request) {
+    String secret = normalized(request.clientSecret());
+    if (secret.isBlank()) secret = current().clientSecret();
+    if (secret.isBlank()) throw new IllegalArgumentException("请填写钉钉 Client Secret。");
     return new Settings(
         request.enabled(),
-        request.appId().trim(),
+        request.clientId().trim(),
         secret,
         request.taskDefinitionId().trim(),
+        request.cardTemplateId().trim(),
         request.eventPollIntervalMs(),
         repository.existsById(SETTINGS_ID));
   }
@@ -88,27 +90,30 @@ class FeishuSettingsStore {
   private Settings environmentSettings() {
     return new Settings(
         properties.isEnabled(),
-        properties.getAppId(),
-        properties.getAppSecret(),
+        properties.getClientId(),
+        properties.getClientSecret(),
         properties.getTaskDefinitionId(),
+        properties.getCardTemplateId(),
         properties.getEventPollIntervalMs(),
         false);
   }
 
   private void apply(Settings settings) {
     properties.setEnabled(settings.enabled());
-    properties.setAppId(settings.appId());
-    properties.setAppSecret(settings.appSecret());
+    properties.setClientId(settings.clientId());
+    properties.setClientSecret(settings.clientSecret());
     properties.setTaskDefinitionId(settings.taskDefinitionId());
+    properties.setCardTemplateId(settings.cardTemplateId());
     properties.setEventPollIntervalMs(settings.eventPollIntervalMs());
   }
 
-  private static Settings toSettings(FeishuSettingsEntity entity) {
+  private static Settings toSettings(DingTalkSettingsEntity entity) {
     return new Settings(
         entity.enabled,
-        entity.appId,
-        entity.appSecret,
+        entity.clientId,
+        entity.clientSecret,
         entity.taskDefinitionId,
+        entity.cardTemplateId,
         entity.eventPollIntervalMs,
         true);
   }
@@ -119,9 +124,10 @@ class FeishuSettingsStore {
 
   record Settings(
       boolean enabled,
-      String appId,
-      String appSecret,
+      String clientId,
+      String clientSecret,
       String taskDefinitionId,
+      String cardTemplateId,
       long eventPollIntervalMs,
       boolean persisted) {}
 }

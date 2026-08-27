@@ -28,7 +28,7 @@ Java 根包为 `com.codexflow.configcenter`。代码按 Web 接口、应用编�
 - 任务定义的新建、编辑、复制、搜索、软删除和重复运行。
 - 保存每次运行的不可变配置快照和完整提交 JSON。
 - 使用最新配置运行、按原运行快照重试、取消运行和查看历史记录。
-- 可选的飞书长连接机器人：固定绑定一个任务定义，在群聊中启动、查看进度、控制半自动流转并与任务助手对话。
+- 可选的飞书或钉钉长连接机器人：固定绑定一个任务定义，在群聊中启动、查看进度、控制半自动流转并与任务助手对话；两个平台互斥启用。
 
 按原运行快照重试整项任务会生成新的 `workflowId`，沿用快照中的最大重跑额度和流转方式，并从已使用 `0` 次开始计算。半自动模式在成功步骤与下一步骤之间等待确认，固定 30 秒后自动继续。
 
@@ -98,6 +98,35 @@ mvn spring-boot:run
 - 群内所有成员都能咨询并操作按钮。任务终态会释放执行槽，但旧话题会保留，以便继续咨询或在空闲时确认返工。
 - 飞书断线不会中止工作流。事件游标与待发送消息保存在 MySQL，连接恢复后继续补发。
 
+### 启用钉钉机器人
+
+1. 在钉钉开放平台创建企业内部应用并启用机器人，把应用发布到测试范围并将机器人加入目标群。
+2. 在机器人配置中将消息接收模式设为 Stream 模式，并开通机器人接收群消息、应用凭证发送群消息以及互动卡片创建和更新所需权限。Stream 模式由官方 SDK 主动连接钉钉，无需配置公网回调地址；运行环境只需允许访问钉钉 HTTPS/WSS `443`。
+3. 在钉钉互动卡片平台创建并发布一个模板，记录模板 ID。模板需提供下表中的变量，并将按钮回调类型设为 Stream。
+4. 先在配置中心创建并启用固定任务及其 SOP；需要卡片出现 30 秒确认按钮时，将 SOP 流转方式设为 `semi_automatic`。
+5. 进入 8091 的“钉钉机器人”页面，填写 Client ID、Client Secret、固定任务、互动卡片模板 ID和轮询间隔。先测试连接，成功后再启用并保存。
+
+钉钉卡片模板变量约定：
+
+| 变量 | 用途 |
+| --- | --- |
+| `title`、`markdown`、`status` | 标题、进度正文和当前状态 |
+| `workflowId`、`gateId` | 工作流和半自动等待标识，按钮回调时必须原样带回 |
+| `showConfirm`、`showHold` | 控制“立即进入下一步”和“暂停”按钮是否显示 |
+| `confirmText`、`holdText` | 两个按钮的动态文案 |
+| `confirmAction`、`holdAction` | 回调动作值，分别为 `advance_confirm` 和 `advance_hold` |
+
+按钮回调参数必须包含 `action`、`workflowId` 和 `gateId`；`action` 使用对应的 `confirmAction` 或 `holdAction`。应用使用 Client ID 作为机器人编码，并通过应用访问令牌创建和更新卡片，因此长期进度补发不依赖会过期的临时会话 Webhook。
+
+钉钉群聊使用规则：
+
+- 顶层发送纯 `@机器人` 或 `@机器人 运行` 启动固定任务；不响应 `@所有人`，不支持单聊。
+- 后续问题必须回复或引用该任务的启动指令、机器人进度消息或进度卡。系统会持久化钉钉返回的消息标识并映射到对应工作流；未回复、未引用的普通群消息不会进入任务助手。
+- 半自动确认、暂停、继续、30 秒自动放行、二次确认、终态释放和可靠 Outbox 补发语义与飞书版本一致。
+- 同一部署只能启用飞书或钉钉其中一个。保存启用配置时若另一平台仍启用，系统会拒绝并提示先停用，不会自动切换连接。
+
+页面配置保存在 MySQL 中并立即应用。Client Secret 只写不回显，后续留空保存表示继续使用已保存密钥。首次尚未保存页面配置时，可用 `DINGTALK_*` 环境变量作为启动默认值。
+
 启动后访问：
 
 ```text
@@ -130,6 +159,12 @@ java -jar .\target\role-task-config-center-0.1.0.jar
 | `FEISHU_APP_SECRET` | 空 | 页面尚未保存配置时的 App Secret 默认值 |
 | `FEISHU_TASK_DEFINITION_ID` | 空 | 页面尚未保存配置时的固定任务默认值 |
 | `FEISHU_EVENT_POLL_INTERVAL_MS` | `1000` | 页面尚未保存配置时的轮询间隔默认值，范围 250–60000 毫秒 |
+| `DINGTALK_ENABLED` | `false` | 页面尚未保存配置时的钉钉长连接开关默认值 |
+| `DINGTALK_CLIENT_ID` | 空 | 页面尚未保存配置时的钉钉 Client ID 默认值 |
+| `DINGTALK_CLIENT_SECRET` | 空 | 页面尚未保存配置时的钉钉 Client Secret 默认值 |
+| `DINGTALK_TASK_DEFINITION_ID` | 空 | 页面尚未保存配置时的钉钉固定任务默认值 |
+| `DINGTALK_CARD_TEMPLATE_ID` | 空 | 页面尚未保存配置时的互动卡片模板 ID 默认值 |
+| `DINGTALK_EVENT_POLL_INTERVAL_MS` | `1000` | 页面尚未保存配置时的钉钉轮询间隔默认值，范围 250–60000 毫秒 |
 
 ## REST 接口
 
@@ -163,9 +198,13 @@ GET    /api/gateway/ready
 GET    /api/feishu/config
 PUT    /api/feishu/config
 POST   /api/feishu/config/test
+
+GET    /api/dingtalk/config
+PUT    /api/dingtalk/config
+POST   /api/dingtalk/config/test
 ```
 
-飞书配置接口只服务于受保护的 8091 内网页面。GET 和 PUT 的响应只返回 `secretConfigured`，不会返回 App Secret；测试接口也只返回成功状态和普通中文提示。
+飞书和钉钉配置接口只服务于受保护的 8091 内网页面。GET 和 PUT 的响应只返回 `secretConfigured`，不会返回 App Secret 或 Client Secret；测试接口也只返回成功状态和普通中文提示。两个平台的启用状态互斥。
 
 角色、SOP 和任务定义列表接口支持 `q` 查询参数，例如：
 

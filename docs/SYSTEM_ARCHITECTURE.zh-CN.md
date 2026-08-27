@@ -13,7 +13,7 @@
 
 ## 2. 一句话架构
 
-`8091` 定义任务并向 `8080` 提交，也可通过飞书 SDK 长连接接收群聊启动和控制消息；`8080` 调度主监督和各执行步骤，`8090` 从 `8080` 查询并展示指定工作流；MySQL 保存配置、运行快照和飞书可靠投递状态，SQLite 保存实际运行状态。
+`8091` 定义任务并向 `8080` 提交，也可通过飞书或钉钉官方 SDK 长连接接收群聊启动和控制消息；两个机器人平台互斥启用。`8080` 调度主监督和各执行步骤，`8090` 从 `8080` 查询并展示指定工作流；MySQL 保存配置、运行快照和机器人可靠投递状态，SQLite 保存实际运行状态。
 
 ## 3. 总体架构
 
@@ -23,6 +23,7 @@ flowchart LR
     C -->|角色、SOP、任务、运行快照| MYSQL[(MySQL 8)]
     C -->|POST /workflows<br/>取消、查询执行机| G[Python 工作流网关<br/>Starlette :8080]
     C -->|打开带 workflowId 的页面| U2[运行监控浏览器]
+    BOT[飞书或钉钉群聊] -->|官方 SDK 主动长连接<br/>HTTPS/WSS 443| C
 
     U2 -->|HTTP /api| V[任务运行监控中心<br/>Spring Boot :8090]
     V -->|状态、事件、图片、消息| G
@@ -346,7 +347,7 @@ MySQL 由 `8091` 独占，保存：
 - 任务定义。
 - 每次运行的不可变配置快照。
 - 提交给网关的完整 JSON、提交结果和最近一次已知运行状态。
-- 飞书机器人页面配置、全局执行槽、话题绑定、入站消息幂等映射、事件游标和发送 Outbox。
+- 飞书或钉钉机器人页面配置、平台互斥状态、全局执行槽、会话绑定、入站消息幂等映射、事件游标和发送 Outbox。两个平台使用独立表，运行时只允许启用一个平台。
 
 按原快照重试时，配置中心复制历史提交 JSON，仅生成新的 `workflowId`；后续配置修改不会改变旧运行。
 
@@ -373,10 +374,10 @@ SQLite 由 `8080` 网关和 MCP 共享，保存实际执行状态、步骤结果
 | 8091 | 8080 | `GET /readyz` | 检查网关就绪状态 |
 | 8091 | 8080 | `GET /workflows/{id}` | 刷新活动运行的实际状态 |
 | 8091 | 8080 | `POST /workflows/{id}/cancel` | 管理端取消运行 |
-| 8091 飞书适配层 | 8080 | `GET /workflows/{id}/events/history` | 按持久化游标同步高层进度和助手完成事件 |
-| 8091 飞书适配层 | 8080 | `POST /workflows/{id}/messages` | 把话题消息发送给任务助手 |
-| 8091 飞书适配层 | 8080 | `POST /workflows/{id}/advance/{gateId}/confirm` | 处理卡片的立即继续或暂停后继续 |
-| 8091 飞书适配层 | 8080 | `POST /workflows/{id}/advance/{gateId}/hold` | 处理卡片暂停 |
+| 8091 飞书/钉钉适配层 | 8080 | `GET /workflows/{id}/events/history` | 按持久化游标同步高层进度和助手完成事件 |
+| 8091 飞书/钉钉适配层 | 8080 | `POST /workflows/{id}/messages` | 把话题消息或钉钉回复消息发送给任务助手 |
+| 8091 飞书/钉钉适配层 | 8080 | `POST /workflows/{id}/advance/{gateId}/confirm` | 处理卡片的立即继续或暂停后继续 |
+| 8091 飞书/钉钉适配层 | 8080 | `POST /workflows/{id}/advance/{gateId}/hold` | 处理卡片暂停 |
 | 8090 | 8080 | `GET /workflows/{id}` | 查询工作流聚合状态 |
 | 8090 | 8080 | `GET /workflows/{id}/events/history` | 按游标读取事件 |
 | 8090 | 8080 | `GET /workflows/{id}/artifacts/{artifactId}` | 代理图片附件 |
@@ -439,14 +440,17 @@ pending → queued → running → completed
 | 8091 | `FEISHU_ENABLED`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET` | MySQL 尚无页面配置时的飞书开关与应用凭据默认值 |
 | 8091 | `FEISHU_TASK_DEFINITION_ID` | MySQL 尚无页面配置时的固定任务默认值 |
 | 8091 | `FEISHU_EVENT_POLL_INTERVAL_MS` | MySQL 尚无页面配置时的轮询间隔默认值，默认 1000 毫秒 |
+| 8091 | `DINGTALK_ENABLED`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET` | MySQL 尚无页面配置时的钉钉开关与应用凭据默认值 |
+| 8091 | `DINGTALK_TASK_DEFINITION_ID`、`DINGTALK_CARD_TEMPLATE_ID` | MySQL 尚无页面配置时的钉钉固定任务和互动卡片模板默认值 |
+| 8091 | `DINGTALK_EVENT_POLL_INTERVAL_MS` | MySQL 尚无页面配置时的钉钉轮询间隔默认值，默认 1000 毫秒 |
 | 8090 | `CODEX_GATEWAY_URL` | 8080 地址 |
 
 ## 12. 安全边界
 
 - 三个 HTTP 服务默认监听 `127.0.0.1`，不得直接暴露到公网。
-- 飞书 SDK 由 `8091` 主动访问飞书 HTTPS/WSS `443`，不新增公网入站接口，也不改变三个服务的回环或内网部署边界。
-- 飞书 App Secret 可由 8091 内网页面写入 MySQL；查询接口、页面和日志不回显原值。数据库账号与备份必须按密钥级别保护，密钥不得写入仓库。
-- 第一版机器人加入的所有群都可触发，群内所有成员都可咨询和控制；必须使用飞书应用可见范围与群成员管理限制授权人群。
+- 飞书和钉钉 SDK 均由 `8091` 主动访问平台 HTTPS/WSS `443`，不新增公网入站接口，也不改变三个服务的回环或内网部署边界。
+- App Secret 或 Client Secret 可由 8091 内网页面写入 MySQL；查询接口、页面和日志不回显原值。数据库账号与备份必须按密钥级别保护，密钥不得写入仓库。
+- 飞书与钉钉启用状态互斥，切换平台必须先手动停用当前机器人。机器人加入的所有群都可触发，群内所有成员都可咨询和控制；必须使用应用可见范围与群成员管理限制授权人群。
 - 第一版没有登录和多用户授权，应只在本机或受保护的可信内网使用。
 - `config/agents.json`、数据库文件、令牌和密码不得提交到 Git。
 - 执行机配置只能通过 `token_env` 引用环境变量，不能在 JSON 中直接保存 token。
@@ -462,6 +466,7 @@ pending → queued → running → completed
 | 8090 暂时离线 | 不影响 8080 中的工作流执行；恢复后可按 `workflowId` 继续查看 |
 | 8091 暂时离线 | 已提交工作流可继续执行；配置和运行快照仍在 MySQL |
 | 飞书长连接暂时断开 | 工作流继续执行；事件游标和待发送 Outbox 保留在 MySQL，重连后补发 |
+| 钉钉 Stream 长连接暂时断开 | 工作流继续执行；事件游标和待发送 Outbox 保留在 MySQL，重连后补发 |
 | 8080 暂时不可用 | 8091 不能提交或刷新状态，8090 不能查询；已有 SQLite 数据不丢失 |
 | 网关或 MCP 在步骤执行中崩溃 | 最后状态仍在 SQLite，但当前版本不会自动重新附着原活动作业 |
 | 某个执行机不可达 | 对应步骤派发失败；在 `stop` 策略下后续步骤不再启动 |

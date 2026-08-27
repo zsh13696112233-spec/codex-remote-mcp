@@ -52,9 +52,12 @@ class ConfigCenterApplicationTest {
                     + "where table_name in ('codex_sop_feishu_bot_state', "
                     + "'codex_sop_feishu_workflow_bindings', "
                     + "'codex_sop_feishu_inbound_messages', 'codex_sop_feishu_outbox', "
-                    + "'codex_sop_feishu_bot_settings')",
+                    + "'codex_sop_feishu_bot_settings', 'codex_sop_dingtalk_bot_state', "
+                    + "'codex_sop_dingtalk_workflow_bindings', "
+                    + "'codex_sop_dingtalk_inbound_messages', 'codex_sop_dingtalk_outbox', "
+                    + "'codex_sop_dingtalk_bot_settings')",
                 Integer.class))
-        .isEqualTo(5);
+        .isEqualTo(10);
   }
 
   /** 确认跨事务加载的 SOP、角色和任务关系可用于构建完整 API 快照。 */
