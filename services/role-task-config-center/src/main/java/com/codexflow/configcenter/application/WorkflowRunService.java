@@ -28,12 +28,12 @@ public class WorkflowRunService {
 
   /** 使用任务定义的最新配置创建并提交一次运行。 */
   public ObjectNode runLatest(String taskId) {
-    return submit(store.prepareLatest(taskId));
+    return submitPrepared(store.prepareLatest(taskId));
   }
 
   /** 使用历史运行的冻结快照创建并提交一次重试。 */
   public ObjectNode retry(String workflowId) {
-    return submit(store.prepareRetry(workflowId));
+    return submitPrepared(store.prepareRetry(workflowId));
   }
 
   /** 请求网关取消运行，并持久化网关返回的最新状态。 */
@@ -64,7 +64,7 @@ public class WorkflowRunService {
   }
 
   /** 向网关提交已持久化的运行，并记录成功响应或失败原因。 */
-  private ObjectNode submit(PreparedRun prepared) {
+  public ObjectNode submitPrepared(PreparedRun prepared) {
     try {
       JsonNode response = gateway.post("/workflows", prepared.payload());
       ObjectNode result = store.recordGatewayStatus(prepared.workflowId(), response, "queued");

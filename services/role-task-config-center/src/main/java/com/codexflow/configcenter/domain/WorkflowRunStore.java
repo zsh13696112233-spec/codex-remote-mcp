@@ -49,6 +49,13 @@ public class WorkflowRunStore {
     return persistPrepared(source.taskDefinition, sourceWorkflowId, payload, snapshot);
   }
 
+  /** 读取已经持久化的提交载荷，用于提交响应丢失后的幂等恢复。 */
+  @Transactional(readOnly = true)
+  public PreparedRun getPrepared(String workflowId) {
+    TaskRunEntity run = findRun(workflowId);
+    return new PreparedRun(workflowId, (ObjectNode) json.read(run.submittedJson));
+  }
+
   /** 查询指定任务的历史运行列表。 */
   @Transactional(readOnly = true)
   public List<ObjectNode> listRuns(String taskId) {

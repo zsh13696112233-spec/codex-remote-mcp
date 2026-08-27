@@ -46,6 +46,15 @@ class ConfigCenterApplicationTest {
                     + "where table_name = 'codex_sop_sops' and column_name = 'advance_mode'",
                 Integer.class))
         .isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from information_schema.tables "
+                    + "where table_name in ('codex_sop_feishu_bot_state', "
+                    + "'codex_sop_feishu_workflow_bindings', "
+                    + "'codex_sop_feishu_inbound_messages', 'codex_sop_feishu_outbox', "
+                    + "'codex_sop_feishu_bot_settings')",
+                Integer.class))
+        .isEqualTo(5);
   }
 
   /** 确认跨事务加载的 SOP、角色和任务关系可用于构建完整 API 快照。 */
