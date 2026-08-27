@@ -4,6 +4,7 @@ import binascii
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import sqlite3
@@ -24,9 +25,23 @@ REVISION_INSTRUCTION_LIMIT = 4_000
 REVISION_CONTEXT_LIMIT = 20_000
 PROMPT_LIMIT = 100_000
 TRUNCATION_NOTICE = "\n\n【内容过长，已在此处省略】"
+SINGLE_OUTPUT_CONSTRAINT = """
+
+【系统单次产物约束】
+
+本步骤每次执行只允许生成或修改一个面向用户交付的产物版本。
+
+首次生成完成后必须立即停止生成，不得自行重绘、重写、修正、优化、覆盖原文件、生成备选版本或再次调用生成工具。
+
+允许对首次产物进行只读检查；如果发现问题，只能在步骤结果中如实说明，禁止自行修复。
+
+首次产物无论质量如何，都必须交由人工审核。只有用户确认返工并开始新一轮步骤执行后，才允许重新生成一次。
+"""
 EVENT_PAYLOAD_LIMIT = 262_144
-IMAGE_ARTIFACT_LIMIT = 20_000_000
-IMAGE_ARTIFACTS_PER_WORKFLOW_LIMIT = 50
+ARTIFACT_LIMIT = 20_000_000
+ARTIFACTS_PER_WORKFLOW_LIMIT = 50
+IMAGE_ARTIFACT_LIMIT = ARTIFACT_LIMIT
+IMAGE_ARTIFACTS_PER_WORKFLOW_LIMIT = ARTIFACTS_PER_WORKFLOW_LIMIT
 ADVANCE_TIMEOUT_SEC = 30
 LEGACY_IMAGE_LINK_PATTERN = re.compile(
     r"\[[^\]]*\]\((?P<path>[^)]+\.(?:png|jpe?g|gif|webp))\)", re.IGNORECASE
@@ -205,6 +220,7 @@ class WorkflowStore:
                     advance_mode TEXT NOT NULL DEFAULT 'automatic',
                     max_retry_count INTEGER NOT NULL DEFAULT 10,
                     used_retry_count INTEGER NOT NULL DEFAULT 0,
+                    handoff_mode TEXT NOT NULL DEFAULT 'legacy_text',
                     response TEXT,
                     error TEXT,
                     created_at TEXT NOT NULL,
@@ -430,6 +446,7 @@ class WorkflowStore:
                 "advance_mode": "TEXT NOT NULL DEFAULT 'automatic'",
                 "max_retry_count": "INTEGER NOT NULL DEFAULT 10",
                 "used_retry_count": "INTEGER NOT NULL DEFAULT 0",
+                "handoff_mode": "TEXT NOT NULL DEFAULT 'legacy_text'",
             }.items():
                 if name not in workflow_columns:
                     connection.execute(f"ALTER TABLE workflows ADD COLUMN {name} {definition}")
@@ -581,6 +598,9 @@ class WorkflowStore:
                 expected = [] if position == 0 else [nodes[position - 1]["id"]]
                 if node["dependsOn"] != expected:
                     raise ValueError("semi_automatic 只支持严格串行工作流。")
+        handoff_mode = str(value.get("handoffMode") or "legacy_text").strip().lower()
+        if handoff_mode not in {"legacy_text", "cumulative_files"}:
+            raise ValueError("handoffMode 只能是 legacy_text 或 cumulative_files。")
 
         return {
             "workflowId": workflow_id,
@@ -593,6 +613,7 @@ class WorkflowStore:
             "supervisorTimeoutSec": supervisor_timeout_sec,
             "maxRetryCount": max_retry_count,
             "advanceMode": advance_mode,
+            "handoffMode": handoff_mode,
             "nodes": nodes,
         }
 
@@ -629,8 +650,9 @@ class WorkflowStore:
                     INSERT INTO workflows (
                         workflow_id, name, status, failure_policy,
                         supervisor_agent_id, supervisor_status, created_at,
-                        advance_mode, max_retry_count, spec_json, spec_zlib
-                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?, ?, ?)
+                        advance_mode, max_retry_count, handoff_mode,
+                        spec_json, spec_zlib
+                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         spec["workflowId"],
@@ -640,6 +662,7 @@ class WorkflowStore:
                         timestamp,
                         spec["advanceMode"],
                         spec["maxRetryCount"],
+                        spec["handoffMode"],
                         compact_spec,
                         compressed_spec,
                     ),
@@ -708,7 +731,7 @@ class WorkflowStore:
                        response, error, created_at, started_at, finished_at,
                        state_version, assistant_job_id, assistant_thread_id,
                        assistant_turn_id, assistant_status, advance_mode,
-                       max_retry_count, used_retry_count
+                       max_retry_count, used_retry_count, handoff_mode
                 FROM workflows WHERE workflow_id = ?
                 """,
                 (workflow_id,),
@@ -786,6 +809,7 @@ class WorkflowStore:
             "status": workflow["status"],
             "failurePolicy": workflow["failure_policy"],
             "advanceMode": workflow["advance_mode"],
+            "handoffMode": workflow["handoff_mode"],
             "pendingAdvance": self._advance_gate_snapshot(pending_advance_row),
             "currentNodes": current_nodes,
             "progress": {"completed": completed_count, "total": len(nodes)},
@@ -879,17 +903,55 @@ class WorkflowStore:
         content: bytes,
     ) -> dict[str, Any]:
         """保存经过签名识别的有限大小图片，并按来源和内容保持幂等。"""
-        source_item_id = str(source_item_id or "").strip()
-        if not source_item_id or len(source_item_id) > 200:
-            raise ValueError("图片来源编号无效。")
-        if not content:
-            raise ValueError("图片内容不能为空。")
-        if len(content) > IMAGE_ARTIFACT_LIMIT:
-            raise ValueError("图片大小不能超过 20 MB。")
         image_type = self._image_type(content)
         if image_type is None:
             raise ValueError("仅支持 PNG、JPEG、GIF 和 WebP 图片。")
         media_type, extension = image_type
+        source_item_id = str(source_item_id or "").strip()
+        filename_seed = hashlib.sha256(
+            f"{workflow_id}:{node_id}:{source_item_id}".encode("utf-8")
+        ).hexdigest()[:8]
+        return self.save_artifact_bytes(
+            workflow_id,
+            node_id,
+            source_item_id,
+            f"generated-image-{filename_seed}.{extension}",
+            content,
+            media_type,
+        )
+
+    @staticmethod
+    def _safe_artifact_filename(filename: str) -> str:
+        normalized = str(filename or "").replace("\\", "/").split("/")[-1].strip()
+        normalized = "".join(
+            "_" if ord(character) < 32 or character in '<>:"|?*' else character
+            for character in normalized
+        )
+        if normalized in {"", ".", ".."}:
+            normalized = "artifact.bin"
+        return normalized[:240]
+
+    def save_artifact_bytes(
+        self,
+        workflow_id: str,
+        node_id: str,
+        source_item_id: str,
+        filename: str,
+        content: bytes,
+        media_type: str | None = None,
+    ) -> dict[str, Any]:
+        """保存任意格式的托管文件，并按来源和 SHA-256 保持幂等。"""
+        source_item_id = str(source_item_id or "").strip()
+        if not source_item_id or len(source_item_id) > 200:
+            raise ValueError("文件来源编号无效。")
+        if not isinstance(content, bytes) or not content:
+            raise ValueError("文件内容不能为空。")
+        if len(content) > ARTIFACT_LIMIT:
+            raise ValueError("单个文件大小不能超过 20 MB。")
+        filename = self._safe_artifact_filename(filename)
+        media_type = str(media_type or "").strip().lower()
+        if not re.fullmatch(r"[\w!#$&^_.+-]+/[\w!#$&^_.+-]+", media_type):
+            media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         digest = hashlib.sha256(content).hexdigest()
         now = utc_now()
         with self._connect() as connection:
@@ -907,7 +969,6 @@ class WorkflowStore:
                     f"{workflow_id}:{node_id}:{attempt_number}:{source_item_id}:{digest}",
                 )
             )
-            filename = f"generated-image-{artifact_id[:8]}.{extension}"
             existing = connection.execute(
                 """
                 SELECT artifact_id, node_id, media_type, filename, byte_size, created_at
@@ -927,8 +988,8 @@ class WorkflowStore:
                     (workflow_id, workflow_id),
                 ).fetchone()[0]
             )
-            if count >= IMAGE_ARTIFACTS_PER_WORKFLOW_LIMIT:
-                raise ValueError("单个工作流最多保存 50 张图片。")
+            if count >= ARTIFACTS_PER_WORKFLOW_LIMIT:
+                raise ValueError("单个工作流最多保存 50 个文件。")
             connection.execute(
                 """
                 INSERT INTO workflow_artifacts (
@@ -986,11 +1047,89 @@ class WorkflowStore:
                 (workflow_id, artifact_id),
             ).fetchone()
         if row is None:
-            raise ValueError("找不到工作流图片。")
+            raise ValueError("找不到工作流图片或文件。")
         result = self._artifact_snapshot(row)
         result["content"] = bytes(row["content"])
         result["nodeId"] = row["node_id"]
         return result
+
+    def get_cumulative_artifact_inputs(
+        self, workflow_id: str, node_id: str
+    ) -> list[dict[str, Any]]:
+        """返回当前步骤之前所有步骤的当前有效文件，包含无文件步骤。"""
+        with self._connect() as connection:
+            target = connection.execute(
+                "SELECT position FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+                (workflow_id, node_id),
+            ).fetchone()
+            if target is None:
+                raise ValueError(f"找不到步骤：{node_id}")
+            rows = connection.execute(
+                """
+                SELECT n.node_id, n.position, n.display_name, n.status,
+                       a.artifact_id, a.media_type, a.filename, a.content,
+                       a.byte_size, a.sha256, a.created_at
+                FROM workflow_nodes n
+                LEFT JOIN workflow_artifacts a
+                  ON a.workflow_id = n.workflow_id AND a.node_id = n.node_id
+                WHERE n.workflow_id = ? AND n.position < ?
+                ORDER BY n.position, a.created_at, a.artifact_id
+                """,
+                (workflow_id, target["position"]),
+            ).fetchall()
+        steps: list[dict[str, Any]] = []
+        by_node: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            source_node_id = str(row["node_id"])
+            step = by_node.get(source_node_id)
+            if step is None:
+                step = {
+                    "nodeId": source_node_id,
+                    "stepNumber": int(row["position"]) + 1,
+                    "displayName": row["display_name"],
+                    "status": row["status"],
+                    "artifacts": [],
+                }
+                by_node[source_node_id] = step
+                steps.append(step)
+            if row["artifact_id"] is not None:
+                step["artifacts"].append(
+                    {
+                        "id": row["artifact_id"],
+                        "mediaType": row["media_type"],
+                        "filename": row["filename"],
+                        "byteSize": int(row["byte_size"]),
+                        "sha256": row["sha256"],
+                        "createdAt": row["created_at"],
+                        "content": bytes(row["content"]),
+                    }
+                )
+        return steps
+
+    def update_node_actual_prompt(
+        self, workflow_id: str, node_id: str, actual_prompt: str
+    ) -> None:
+        """在远程文件路径已确定后保存本次真正派发的提示词。"""
+        if len(actual_prompt) > PROMPT_LIMIT:
+            raise ValueError("实际提示词不能超过 100000 个字符。")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE workflow_nodes SET actual_prompt = ? "
+                "WHERE workflow_id = ? AND node_id = ?",
+                (actual_prompt, workflow_id, node_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"找不到步骤：{node_id}")
+
+    def count_current_artifacts(self, workflow_id: str, node_id: str) -> int:
+        with self._connect() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM workflow_artifacts "
+                    "WHERE workflow_id = ? AND node_id = ?",
+                    (workflow_id, node_id),
+                ).fetchone()[0]
+            )
 
     def import_legacy_generated_images(self, generated_images_root: Path | None = None) -> int:
         """从历史步骤文本中回填仍位于受信生成目录内的图片。"""
@@ -2097,7 +2236,7 @@ class WorkflowStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             workflow = connection.execute(
-                "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
+                "SELECT status, handoff_mode FROM workflows WHERE workflow_id = ?", (workflow_id,)
             ).fetchone()
             if workflow is None:
                 raise ValueError(f"找不到工作流：{workflow_id}")
@@ -2113,7 +2252,9 @@ class WorkflowStore:
             if row is None:
                 raise ValueError(f"找不到节点：{node_id}")
             if row["status"] != "pending":
-                return self._node_dispatch_spec(row, already_dispatched=True)
+                result = self._node_dispatch_spec(row, already_dispatched=True)
+                result["handoffMode"] = workflow["handoff_mode"]
+                return result
 
             advance_gate = connection.execute(
                 "SELECT * FROM workflow_advance_gates WHERE workflow_id = ? "
@@ -2174,7 +2315,11 @@ class WorkflowStore:
                 (workflow_id, node_id),
             ).fetchall()
             actual_prompt = self._build_actual_prompt(
-                original_prompt, dependencies, dependency_rows, revision_rows
+                original_prompt,
+                dependencies,
+                dependency_rows,
+                revision_rows,
+                str(workflow["handoff_mode"]),
             )
 
             timestamp = utc_now()
@@ -2211,7 +2356,9 @@ class WorkflowStore:
                 """,
                 (workflow_id, node_id),
             ).fetchone()
-            return self._node_dispatch_spec(refreshed, already_dispatched=False)
+            result = self._node_dispatch_spec(refreshed, already_dispatched=False)
+            result["handoffMode"] = workflow["handoff_mode"]
+            return result
 
     @staticmethod
     def _build_actual_prompt(
@@ -2219,12 +2366,15 @@ class WorkflowStore:
         dependencies: list[str],
         dependency_rows: list[sqlite3.Row],
         revision_rows: list[sqlite3.Row],
+        handoff_mode: str = "legacy_text",
     ) -> str:
-        dependency_suffix = WorkflowStore._build_dependency_suffix(
-            dependencies, dependency_rows
+        dependency_suffix = (
+            WorkflowStore._build_dependency_suffix(dependencies, dependency_rows)
+            if handoff_mode == "legacy_text"
+            else ""
         )
         revision_suffix = WorkflowStore._build_revision_suffix(revision_rows)
-        suffix = dependency_suffix + revision_suffix
+        suffix = dependency_suffix + revision_suffix + SINGLE_OUTPUT_CONSTRAINT
         available = PROMPT_LIMIT - len(suffix)
         if available < len(original_prompt):
             base = original_prompt[: max(0, available - len(TRUNCATION_NOTICE))] + TRUNCATION_NOTICE
@@ -2308,6 +2458,7 @@ class WorkflowStore:
         return {
             "workflowId": row["workflow_id"],
             "nodeId": row["node_id"],
+            "stepNumber": int(row["position"]) + 1,
             "agentId": row["agent_id"],
             "prompt": row["actual_prompt"] or row["original_prompt"] or row["prompt"],
             "cwd": row["cwd"],

@@ -8,6 +8,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -17,6 +19,9 @@ import tools.jackson.databind.ObjectMapper;
 /** 监控中心查询工作流状态、事件和发送对话消息的网关客户端。 */
 @Service
 public class GatewayClient {
+
+  private static final Pattern FILENAME_PATTERN =
+      Pattern.compile("filename=\\\"([^\\\"]*)\\\"", Pattern.CASE_INSENSITIVE);
 
   private final HttpClient httpClient;
   private final ObjectMapper objectMapper;
@@ -63,14 +68,14 @@ public class GatewayClient {
         null);
   }
 
-  /** 读取工作流生成的图片附件。 */
+  /** 读取工作流发布的任意文件附件。 */
   public BinaryResponse artifact(String workflowId, String artifactId) {
     String path = "/workflows/" + pathSegment(workflowId) + "/artifacts/" + pathSegment(artifactId);
     try {
       HttpRequest request =
           HttpRequest.newBuilder(gatewayBaseUri.resolve(path))
               .timeout(Duration.ofSeconds(30))
-              .header("Accept", "image/png,image/jpeg,image/gif,image/webp")
+              .header("Accept", "*/*")
               .GET()
               .build();
       HttpResponse<byte[]> response =
@@ -81,10 +86,8 @@ public class GatewayClient {
       }
       String contentType =
           response.headers().firstValue("Content-Type").orElse("application/octet-stream");
-      if (!contentType.startsWith("image/")) {
-        throw new GatewayException(502, "Codex 网关返回了无效的图片类型。");
-      }
-      return new BinaryResponse(response.body(), contentType);
+      String disposition = response.headers().firstValue("Content-Disposition").orElse("");
+      return new BinaryResponse(response.body(), contentType, safeFilename(disposition));
     } catch (GatewayException error) {
       throw error;
     } catch (InterruptedException error) {
@@ -174,6 +177,14 @@ public class GatewayClient {
     return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
   }
 
-  /** 网关二进制响应，只包含经过验证的图片正文和类型。 */
-  public record BinaryResponse(byte[] body, String contentType) {}
+  private static String safeFilename(String contentDisposition) {
+    Matcher matcher =
+        FILENAME_PATTERN.matcher(contentDisposition == null ? "" : contentDisposition);
+    String filename = matcher.find() ? matcher.group(1) : "artifact.bin";
+    filename = filename.replaceAll("[\\r\\n\\\\/\\\"]", "_").trim();
+    return filename.isBlank() ? "artifact.bin" : filename;
+  }
+
+  /** 网关二进制响应，包含文件正文、类型和安全文件名。 */
+  public record BinaryResponse(byte[] body, String contentType, String filename) {}
 }

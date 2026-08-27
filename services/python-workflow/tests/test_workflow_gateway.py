@@ -11,7 +11,7 @@ from codex_orchestrator_mcp import Orchestrator
 from starlette.testclient import TestClient
 from tests.mock_app_server import MockAppServer
 from workflow_gateway import WorkflowGateway, create_app
-from workflow_store import WorkflowStore, utc_now
+from workflow_store import SINGLE_OUTPUT_CONSTRAINT, WorkflowStore, utc_now
 
 
 class SupervisorPromptTests(unittest.TestCase):
@@ -168,6 +168,9 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
             artifact = store.save_image_bytes(
                 "artifact-demo", "a", "image-item", png
             )
+            document = store.save_artifact_bytes(
+                "artifact-demo", "a", "document-item", "report.html", b"<html>", "text/html"
+            )
 
             with TestClient(app) as client:
                 response = client.get(
@@ -176,7 +179,16 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.headers["content-type"], "image/png")
                 self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+                self.assertTrue(response.headers["content-disposition"].startswith("inline;"))
                 self.assertEqual(response.content, png)
+                download = client.get(
+                    f"/workflows/artifact-demo/artifacts/{document['id']}"
+                )
+                self.assertEqual(download.headers["content-type"], "text/html; charset=utf-8")
+                self.assertTrue(
+                    download.headers["content-disposition"].startswith("attachment;")
+                )
+                self.assertEqual(download.headers["x-content-type-options"], "nosniff")
                 missing = client.get(
                     f"/workflows/another-workflow/artifacts/{artifact['id']}"
                 )
@@ -520,7 +532,8 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ["completed", "pending", "pending"],
             )
             prompt = store.prepare_node_dispatch("control-demo", "b")["prompt"]
-            self.assertTrue(prompt.endswith("增加清晰、完整的机身涂装和标识。"))
+            self.assertIn("增加清晰、完整的机身涂装和标识。", prompt)
+            self.assertTrue(prompt.endswith(SINGLE_OUTPUT_CONSTRAINT))
             with self.assertRaisesRegex(ValueError, "已经处理"):
                 await gateway._execute_control("control-demo", confirmed)
             self.assertEqual(

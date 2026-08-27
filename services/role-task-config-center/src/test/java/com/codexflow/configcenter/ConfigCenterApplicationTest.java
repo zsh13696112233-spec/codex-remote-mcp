@@ -107,8 +107,18 @@ class ConfigCenterApplicationTest {
     assertThat(first.payload().path("maxRetryCount").asInt()).isEqualTo(7);
     assertThat(retried.payload().path("maxRetryCount").asInt()).isEqualTo(7);
     assertThat(first.payload().path("advanceMode").asText()).isEqualTo("automatic");
+    assertThat(first.payload().path("handoffMode").asText()).isEqualTo("cumulative_files");
+    assertThat(retried.payload().path("handoffMode").asText()).isEqualTo("cumulative_files");
     assertThat(retried.workflowId()).isNotEqualTo(first.workflowId());
     assertThat(retried.payload().has("usedRetryCount")).isFalse();
+    ObjectNode legacyPayload = first.payload().deepCopy();
+    legacyPayload.remove("handoffMode");
+    jdbc.update(
+        "update codex_sop_task_runs set submitted_json = ? where workflow_id = ?",
+        legacyPayload.toString(),
+        first.workflowId());
+    PreparedRun legacyRetry = runStore.prepareRetry(first.workflowId());
+    assertThat(legacyRetry.payload().has("handoffMode")).isFalse();
     assertThatThrownBy(
             () ->
                 service.createSop(

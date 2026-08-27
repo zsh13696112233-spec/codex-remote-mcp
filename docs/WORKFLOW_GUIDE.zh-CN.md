@@ -133,6 +133,7 @@ POST http://192.168.1.100:8080/workflows
   "name": "serial-a-b-c",
   "supervisorAgentId": "local",
   "failurePolicy": "stop",
+  "handoffMode": "cumulative_files",
   "advanceMode": "semi_automatic",
   "nodes": [
     {
@@ -182,6 +183,7 @@ POST http://192.168.1.100:8080/workflows
 | `failurePolicy` | `stop` 表示节点失败后停止；`continue` 表示允许继续处理其他可运行节点 |
 | `maxRetryCount` | 单个 `workflowId` 允许成功确认的尾部重跑总次数；默认 10，范围 0–100 |
 | `advanceMode` | `automatic`（默认）或 `semi_automatic`；半自动仅支持严格串行工作流 |
+| `handoffMode` | `cumulative_files` 累计交接前序当前文件；`legacy_text` 传递直接依赖的文字结果。字段缺失按 `legacy_text` 处理 |
 | `nodes` | 节点数组 |
 | `nodes[].id` | 工作流内唯一节点 ID |
 | `nodes[].executor.type` | `local` 或 `remote`，用于表达执行位置 |
@@ -355,15 +357,17 @@ GET /workflows/{workflowId}/events?after=123
 GET /workflows/{workflowId}/events/history?after=0&limit=200
 ```
 
-### 4.1 查询步骤图片附件
+### 4.1 查询步骤文件附件
 
-工作流快照的 `nodes[].artifacts` 返回图片元数据，图片正文通过以下只读接口获取：
+工作流快照的 `nodes[].artifacts` 返回文件名、MIME 类型、大小等元数据，二进制正文通过以下只读接口获取：
 
 ```text
 GET /workflows/{workflowId}/artifacts/{artifactId}
 ```
 
-图片生成成功时，MCP 在事件截断前提取图片并归属到对应步骤。接口仅返回已经持久化且属于该工作流的 PNG、JPEG、GIF 或 WebP 图片，不接受文件路径参数。单张图片最多 `20 MB`，单个工作流最多 `50` 张。
+接口仅返回已持久化且属于该工作流的文件，不接受文件路径参数。单文件最多 `20 MB`，单个工作流的当前和历史文件合计最多 `50` 个。图片生成事件产物与 `output/` 文件按 SHA-256 合并去重。图片可内嵌预览，其他类型强制附件下载并设置 `nosniff`。
+
+`cumulative_files` 下，第 N 步的每次尝试会在本机 `artifact_root` 下获得独立目录，其 `inputs/step-01/` 至 `inputs/step-(N-1)/` 保存前序步骤的当前有效文件，`output/` 在开始时为空。编排器直接读写本机文件，提示词只包含步骤来源、文件名、大小、MIME 和绝对路径，不传递 Base64 文件内容；没有文件的历史步骤明确标记“无文件”。前序文件只是可用输入，当前要求未明确要求使用时不得打开或合并。当前文件流水线要求编排器与 app-server 同机，远程固定目录上传协议不在本版本范围内。
 
 ### 5. 发送任务助手消息
 
@@ -489,12 +493,14 @@ Java 可以每隔一到数秒轮询一次。需要实时界面时，再使用 SS
     "local": {
       "url": "ws://127.0.0.1:4500",
       "cwd": "C:\\work",
+      "artifact_root": "C:\\codex-workflow-artifacts",
       "allow_write": true,
       "allow_cwd_override": true
     },
     "remote-build": {
       "url": "wss://worker.example.com/codex",
       "cwd": "/srv/work",
+      "artifact_root": "/srv/codex-workflow-artifacts",
       "token_env": "REMOTE_CODEX_TOKEN",
       "allow_write": false,
       "allow_cwd_override": false
@@ -506,6 +512,9 @@ Java 可以每隔一到数秒轮询一次。需要实时界面时，再使用 SS
 注意事项：
 
 - JSON 中的 `agentId` 必须存在于 `agents.json`。
+- 文件流水线的本机执行机必须配置绝对路径 `artifact_root`；该配置只授权编排器在此目录内暂存工作流文件。
+- 当前编排器直接用该路径读写文件，不通过 app-server 传输文件内容；远程文件流水线暂不支持。
+- `allow_write` 仍只决定 Agent 是否能写业务工作区，不代替 `artifact_root` 授权。
 - 当前项目实际配置中还需要确认是否存在名为 `local` 的执行机。
 - token 不要直接写进 JSON，只写环境变量名称。
 - 明文 `ws://` 建议只用于回环地址、可信内网或 SSH 隧道。

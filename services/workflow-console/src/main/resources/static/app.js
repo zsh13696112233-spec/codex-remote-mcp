@@ -272,15 +272,29 @@ function appendStepArtifacts(result, node) {
   if (!artifacts.length) return;
   const gallery = make("div", "step-artifacts");
   artifacts.forEach((artifact, index) => {
+    const artifactUrl = `/api/workflows/${encodeURIComponent(state.workflowId)}/artifacts/${encodeURIComponent(artifact.id)}`;
+    const isImage = String(artifact.mediaType || "").toLowerCase().startsWith("image/");
+    if (!isImage) {
+      const file = make("a", "step-file-link");
+      file.href = artifactUrl;
+      file.download = artifact.filename || "artifact.bin";
+      const description = make("span", "step-file-copy");
+      description.append(
+        make("strong", "", artifact.filename || `步骤文件 ${index + 1}`),
+        make("small", "", `${formatBytes(artifact.byteSize)} · ${artifact.mediaType || "application/octet-stream"}`)
+      );
+      file.append(make("b", "step-file-icon", "↓"), description, make("em", "", "下载"));
+      gallery.append(file);
+      return;
+    }
     const figure = make("figure", "step-artifact");
     const link = make("a", "step-image-link");
-    const imageUrl = `/api/workflows/${encodeURIComponent(state.workflowId)}/artifacts/${encodeURIComponent(artifact.id)}`;
-    link.href = imageUrl;
+    link.href = artifactUrl;
     link.target = "_blank";
     link.rel = "noopener";
     link.title = "打开原图";
     const image = make("img", "step-image");
-    image.src = imageUrl;
+    image.src = artifactUrl;
     image.alt = artifacts.length === 1 ? "本步骤生成的图片" : `本步骤生成的第 ${index + 1} 张图片`;
     image.loading = "lazy";
     image.decoding = "async";
@@ -293,6 +307,13 @@ function appendStepArtifacts(result, node) {
     gallery.append(figure);
   });
   result.append(gallery);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function renderSteps(nodes, initializing = false) {
@@ -328,9 +349,9 @@ function renderSteps(nodes, initializing = false) {
     }
     card.append(head, details);
 
-    if (node.response || node.error) {
+    const hasArtifacts = Array.isArray(node.artifacts) && node.artifacts.length > 0;
+    if (node.response || node.error || hasArtifacts) {
       const result = make("div", `step-result${node.error ? " error" : ""}`);
-      const hasArtifacts = Array.isArray(node.artifacts) && node.artifacts.length > 0;
       const resultText = resultTextWithoutImageLinks(node.error || node.response, hasArtifacts);
       result.append(make("span", "", node.error ? "未完成原因" : "步骤结果"));
       if (resultText) result.append(make("p", "", resultText));

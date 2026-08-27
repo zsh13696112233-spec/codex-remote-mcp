@@ -82,7 +82,10 @@ class WorkflowConsoleApplicationTest {
             "暂停不会返工",
             "请在任务助手中说明修改点",
             "confirmAdvance",
-            "holdAdvance");
+            "holdAdvance",
+            "step-file-link",
+            "artifact.mediaType",
+            "file.download");
     assertThat(app).doesNotContain("state.snapshot?.status === \"completed\") return");
     assertThat(page).contains("id=\"retries\"", "剩余重跑次数");
   }

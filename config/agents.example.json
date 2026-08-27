@@ -3,6 +3,7 @@
     "local": {
       "url": "ws://127.0.0.1:4500",
       "cwd": "C:\\work",
+      "artifact_root": "C:\\codex-workflow-artifacts",
       "allow_write": true,
       "allow_cwd_override": true
     },

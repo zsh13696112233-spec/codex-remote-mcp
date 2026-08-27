@@ -1,9 +1,12 @@
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
 import ntpath
 import os
+import posixpath
+import shutil
 import time
 import uuid
 import warnings
@@ -25,7 +28,7 @@ from mcp.server.fastmcp import FastMCP
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
-from workflow_store import AsyncEventBatcher, WorkflowStore
+from workflow_store import ARTIFACT_LIMIT, AsyncEventBatcher, WorkflowStore
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "agents.json"
@@ -45,6 +48,18 @@ def is_absolute_remote_path(path: str) -> bool:
     return path.startswith("/") or ntpath.isabs(path)
 
 
+def remote_path_join(root: str, *parts: str) -> str:
+    """使用执行机路径风格拼接受控目录，不依赖编排器所在系统。"""
+    path_module = ntpath if ntpath.isabs(root) and not root.startswith("/") else posixpath
+    safe_parts: list[str] = []
+    for part in parts:
+        value = str(part)
+        if not value or value in {".", ".."} or "/" in value or "\\" in value:
+            raise ValueError("托管目录名称无效。")
+        safe_parts.append(value)
+    return path_module.join(root, *safe_parts)
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -58,6 +73,7 @@ class AgentConfig:
     allow_write: bool = False
     allow_cwd_override: bool = False
     model: str | None = None
+    artifact_root: str | None = None
 
     @classmethod
     def from_dict(cls, agent_id: str, value: dict[str, Any]) -> "AgentConfig":
@@ -77,6 +93,18 @@ class AgentConfig:
         token_env = value.get("token_env")
         if token_env is not None and not str(token_env).strip():
             token_env = None
+        artifact_root_value = value.get("artifact_root")
+        artifact_root = None
+        if artifact_root_value is not None:
+            artifact_root = str(artifact_root_value).strip()
+            if not is_absolute_remote_path(artifact_root):
+                raise ValueError(f"{agent_id}.artifact_root 必须是执行机上的绝对路径。")
+            path_module = (
+                ntpath
+                if ntpath.isabs(artifact_root) and not artifact_root.startswith("/")
+                else posixpath
+            )
+            artifact_root = path_module.normpath(artifact_root)
 
         return cls(
             agent_id=agent_id,
@@ -86,6 +114,7 @@ class AgentConfig:
             allow_write=bool(value.get("allow_write", False)),
             allow_cwd_override=bool(value.get("allow_cwd_override", False)),
             model=str(value["model"]) if value.get("model") else None,
+            artifact_root=artifact_root,
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -97,6 +126,7 @@ class AgentConfig:
             "allow_write": self.allow_write,
             "allow_cwd_override": self.allow_cwd_override,
             "model": self.model,
+            "artifact_transfer_enabled": self.artifact_root is not None,
         }
 
 
@@ -149,6 +179,11 @@ class Job:
     notification_subscribers: set[asyncio.Queue[dict[str, Any]]] = field(
         default_factory=set, repr=False
     )
+    managed_attempt_dir: str | None = field(default=None, repr=False)
+    managed_output_dir: str | None = field(default=None, repr=False)
+    staged_artifacts: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    captured_files: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    artifact_contract: bool = field(default=False, repr=False)
 
     def record_event(self, method: str, received_at: str) -> None:
         self.events_seen += 1
@@ -285,7 +320,7 @@ class AppServerClient:
                 self.url,
                 additional_headers=headers,
                 open_timeout=self.request_timeout_sec,
-                max_size=16 * 1024 * 1024,
+                max_size=64 * 1024 * 1024,
                 ping_interval=20,
                 ping_timeout=20,
             )
@@ -604,6 +639,7 @@ class Orchestrator:
         event_callback: Callable[
             [dict[str, Any], str], None | Awaitable[None]
         ] | None = None,
+        artifact_handoff: dict[str, Any] | None = None,
     ) -> Job:
         prompt = prompt.strip()
         if not prompt:
@@ -628,8 +664,74 @@ class Orchestrator:
         if write and not agent.allow_write:
             raise PermissionError(f"{agent_id} 未启用写权限。")
 
+        job_id = uuid.uuid4().hex
+        managed_attempt_dir = None
+        managed_output_dir = None
+        staged_artifacts: list[dict[str, Any]] = []
+        if artifact_handoff is not None:
+            if agent.artifact_root is None:
+                raise ValueError(
+                    f"{agent_id} 未配置 artifact_root，无法执行文件流水线。"
+                )
+            workflow_key = hashlib.sha256(
+                str(artifact_handoff["workflowId"]).encode("utf-8")
+            ).hexdigest()[:20]
+            step_number = int(artifact_handoff["stepNumber"])
+            managed_attempt_dir = remote_path_join(
+                agent.artifact_root,
+                "workflows",
+                workflow_key,
+                f"step-{step_number:02d}",
+                job_id,
+            )
+            inputs_dir = remote_path_join(managed_attempt_dir, "inputs")
+            managed_output_dir = remote_path_join(managed_attempt_dir, "output")
+            manifest_lines = ["【系统托管文件清单】"]
+            for step in artifact_handoff.get("steps", []):
+                source_number = int(step["stepNumber"])
+                artifacts = step.get("artifacts") or []
+                if not artifacts:
+                    manifest_lines.append(
+                        f"-第{source_number}步 {step.get('displayName') or ''}：无文件"
+                    )
+                    continue
+                step_dir = remote_path_join(inputs_dir, f"step-{source_number:02d}")
+                used_names: set[str] = set()
+                for artifact in artifacts:
+                    filename = WorkflowStore._safe_artifact_filename(
+                        str(artifact.get("filename") or "artifact.bin")
+                    )
+                    if filename.casefold() in used_names:
+                        filename = f"{str(artifact['id'])[:8]}-{filename}"
+                    used_names.add(filename.casefold())
+                    local_path = remote_path_join(step_dir, filename)
+                    staged_artifacts.append(
+                        {**artifact, "localPath": local_path, "stepDir": step_dir}
+                    )
+                    manifest_lines.append(
+                        f"-第{source_number}步 {step.get('displayName') or ''}："
+                        f"{filename}，{int(artifact['byteSize'])} 字节，"
+                        f"{artifact.get('mediaType') or 'application/octet-stream'}，"
+                        f"绝对路径 {local_path}"
+                    )
+            output_rule = (
+                "本步骤必须将恰好一个交付文件写入"
+                if write
+                else "本步骤可以只返回文字；如果发布文件，最多只能写入一个文件到"
+            )
+            handoff_suffix = (
+                "\n\n"
+                + "\n".join(manifest_lines)
+                + "\n\n上述历史文件只是可用输入。只有当本步骤执行要求明确要求使用、处理、引用或整合前序产物时，才允许打开它们；否则不得打开、引用或合并。"
+                + f"\n{output_rule}空目录 {managed_output_dir}。"
+                + "\n只允许在 output/ 的直接子项中发布交付文件；不得创建子目录、符号链接或多个版本。"
+            )
+            if len(prompt) + len(handoff_suffix) > MAX_PROMPT_LENGTH:
+                raise ValueError("文件清单加入后提示词超过 100000 个字符。")
+            prompt += handoff_suffix
+
         job = Job(
-            job_id=uuid.uuid4().hex,
+            job_id=job_id,
             agent_id=agent_id,
             prompt=prompt,
             requested_thread_id=thread_id,
@@ -641,6 +743,10 @@ class Orchestrator:
             approval_policy=approval_policy,
             approvals_reviewer=approvals_reviewer,
             event_callback=event_callback,
+            managed_attempt_dir=managed_attempt_dir,
+            managed_output_dir=managed_output_dir,
+            staged_artifacts=staged_artifacts,
+            artifact_contract=artifact_handoff is not None,
         )
         self._prune_completed_jobs()
         self.jobs[job.job_id] = job
@@ -758,6 +864,23 @@ class Orchestrator:
         finally:
             await client.close()
 
+    async def cleanup_managed_artifacts(self, job: Job) -> None:
+        """尽力删除已落库的单次托管目录。"""
+        if not job.managed_attempt_dir:
+            return
+        agent = self.load_agents().get(job.agent_id)
+        if agent is None:
+            raise ValueError(f"未知执行机 {job.agent_id}。")
+        if not agent.artifact_root:
+            raise ValueError(f"{job.agent_id} 未配置 artifact_root。")
+        root = Path(agent.artifact_root).resolve()
+        attempt = Path(job.managed_attempt_dir).resolve()
+        if attempt == root or root not in attempt.parents:
+            raise ValueError("托管临时目录超出 artifact_root，拒绝清理。")
+        if attempt.exists():
+            await asyncio.to_thread(shutil.rmtree, attempt)
+        job.managed_attempt_dir = None
+
     async def _run_job(self, job: Job, agent: AgentConfig) -> None:
         stage = "queued"
         try:
@@ -796,6 +919,10 @@ class Orchestrator:
                         except TimeoutError:
                             raise JobTotalTimeout(job.timeout_sec) from None
 
+                        if job.artifact_contract:
+                            stage = "artifact/stage"
+                            await self._stage_artifacts(job)
+
                         thread_params: dict[str, Any] = {
                             "cwd": job.cwd,
                             "approvalPolicy": job.approval_policy,
@@ -822,6 +949,15 @@ class Orchestrator:
                             "input": [{"type": "text", "text": job.prompt}],
                             "approvalPolicy": job.approval_policy,
                         }
+                        if job.artifact_contract and job.managed_output_dir:
+                            writable_roots = [job.managed_output_dir]
+                            if job.write:
+                                writable_roots.insert(0, job.cwd)
+                            turn_params["sandboxPolicy"] = {
+                                "type": "workspaceWrite",
+                                "writableRoots": writable_roots,
+                                "networkAccess": False,
+                            }
                         if job.approvals_reviewer:
                             turn_params["approvalsReviewer"] = job.approvals_reviewer
                         if job.output_schema is not None:
@@ -836,6 +972,9 @@ class Orchestrator:
                         job.turn_id = self._extract_id(turn_result, "turn")
                         stage = "turn/completed"
                         await self._consume_turn(job, client, deadline)
+                        if job.status == "completed" and job.artifact_contract:
+                            stage = "artifact/capture"
+                            await self._capture_artifacts(job)
                     except JobTotalTimeout as error:
                         error.details["interrupt"] = await self._interrupt_after_timeout(
                             job, client
@@ -906,6 +1045,83 @@ class Orchestrator:
             job.finished_at = utc_now()
             job.completed.set()
             job.task = None
+
+    async def _stage_artifacts(self, job: Job) -> None:
+        await asyncio.to_thread(self._stage_artifacts_sync, job)
+
+    @staticmethod
+    def _stage_artifacts_sync(job: Job) -> None:
+        assert job.managed_attempt_dir is not None
+        assert job.managed_output_dir is not None
+        attempt_dir = Path(job.managed_attempt_dir)
+        inputs_dir = attempt_dir / "inputs"
+        output_dir = Path(job.managed_output_dir)
+        try:
+            attempt_dir.mkdir(parents=True, exist_ok=False)
+            inputs_dir.mkdir()
+            output_dir.mkdir()
+            for artifact in job.staged_artifacts:
+                step_dir = Path(str(artifact["stepDir"]))
+                step_dir.mkdir(parents=True, exist_ok=True)
+                local_path = Path(str(artifact["localPath"]))
+                content = artifact["content"]
+                if not isinstance(content, bytes):
+                    raise RuntimeError("前序步骤文件内容无效。")
+                local_path.write_bytes(content)
+        except FileExistsError as error:
+            raise RuntimeError("本步骤的托管临时目录已存在，拒绝覆盖。") from error
+        except OSError as error:
+            raise RuntimeError("无法在 artifact_root 中准备本步骤文件。") from error
+
+    async def _capture_artifacts(self, job: Job) -> None:
+        await asyncio.to_thread(self._capture_artifacts_sync, job)
+
+    @staticmethod
+    def _capture_artifacts_sync(job: Job) -> None:
+        assert job.managed_output_dir is not None
+        output_dir = Path(job.managed_output_dir)
+        try:
+            entries = sorted(output_dir.iterdir(), key=lambda item: item.name.casefold())
+        except OSError as error:
+            raise RuntimeError("无法读取本步骤的托管输出目录。") from error
+        if len(entries) > 1:
+            raise RuntimeError("本步骤发布了多个不同文件，要求最多一个。")
+        if not entries:
+            return
+        entry = entries[0]
+        filename = entry.name
+        if (
+            not filename
+            or filename in {".", ".."}
+            or "/" in filename
+            or "\\" in filename
+        ):
+            raise RuntimeError("本步骤的输出文件名无效。")
+        if entry.is_symlink():
+            raise RuntimeError("本步骤输出不允许符号链接。")
+        try:
+            if not entry.is_file():
+                raise RuntimeError("本步骤输出只允许包含直接文件，不允许目录。")
+            size = entry.stat().st_size
+            if size > ARTIFACT_LIMIT:
+                raise RuntimeError("本步骤输出文件超过 20 MB。")
+            content = entry.read_bytes()
+        except RuntimeError:
+            raise
+        except OSError as error:
+            raise RuntimeError("无法读取本步骤输出文件。") from error
+        if not content:
+            raise RuntimeError("本步骤输出文件为空。")
+        if len(content) > ARTIFACT_LIMIT:
+            raise RuntimeError("本步骤输出文件超过 20 MB。")
+        digest = hashlib.sha256(content).hexdigest()
+        job.captured_files = [
+            {
+                "sourceItemId": f"output:{digest}",
+                "filename": filename,
+                "content": content,
+            }
+        ]
 
     @staticmethod
     async def _request_with_deadline(
@@ -1045,10 +1261,60 @@ def _workflow_node_snapshot(workflow_id: str, node_id: str) -> dict[str, Any]:
     return get_workflow_store().get_node(workflow_id, node_id)
 
 
+def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, Any]:
+    store = get_workflow_store()
+    snapshot = job.snapshot()
+    current_node = store.get_node(workflow_id, node_id)
+    if current_node.get("jobId") not in {None, job.job_id}:
+        return snapshot
+    if job.status == "completed" and job.artifact_contract:
+        try:
+            for captured in job.captured_files:
+                store.save_artifact_bytes(
+                    workflow_id,
+                    node_id,
+                    str(captured["sourceItemId"]),
+                    str(captured["filename"]),
+                    captured["content"],
+                )
+            artifact_count = store.count_current_artifacts(workflow_id, node_id)
+            if job.write and artifact_count != 1:
+                raise RuntimeError(
+                    f"本步骤要求发布恰好一个文件，实际为 {artifact_count} 个。"
+                )
+            if not job.write and artifact_count > 1:
+                raise RuntimeError(
+                    f"本步骤最多发布一个文件，实际为 {artifact_count} 个。"
+                )
+        except Exception as error:
+            snapshot["status"] = "failed"
+            snapshot["error"] = str(error)
+            snapshot["finished_at"] = snapshot.get("finished_at") or utc_now()
+    store.sync_node_job(workflow_id, node_id, snapshot)
+    return snapshot
+
+
 async def _monitor_workflow_node(workflow_id: str, node_id: str, job: Job) -> None:
     await job.completed.wait()
     await flush_workflow_events()
-    get_workflow_store().sync_node_job(workflow_id, node_id, job.snapshot())
+    _sync_workflow_job(workflow_id, node_id, job)
+    if job.artifact_contract and job.managed_attempt_dir:
+        try:
+            await orchestrator.cleanup_managed_artifacts(job)
+        except Exception as error:
+            LOGGER.warning(
+                "清理执行机托管目录失败：workflow_id=%s node_id=%s error=%s",
+                workflow_id,
+                node_id,
+                error,
+            )
+            get_workflow_store().add_event(
+                workflow_id,
+                node_id=node_id,
+                source="worker",
+                event_type="artifact.cleanup_failed",
+                payload={"message": "执行机托管目录清理失败。"},
+            )
 
 
 def _track_workflow_node(workflow_id: str, node_id: str, job: Job) -> None:
@@ -1176,6 +1442,14 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         )
 
     try:
+        artifact_handoff = None
+        if node.get("handoffMode") == "cumulative_files":
+            artifact_handoff = {
+                "workflowId": workflow_id,
+                "nodeId": node_id,
+                "stepNumber": node["stepNumber"],
+                "steps": store.get_cumulative_artifact_inputs(workflow_id, node_id),
+            }
         job = await orchestrator.dispatch(
             agent_id=node["agentId"],
             prompt=node["prompt"],
@@ -1185,7 +1459,10 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             model=node["model"],
             timeout_sec=node["timeoutSec"],
             event_callback=record,
+            artifact_handoff=artifact_handoff,
         )
+        if artifact_handoff is not None:
+            store.update_node_actual_prompt(workflow_id, node_id, job.prompt)
     except Exception as error:
         store.sync_node_job(
             workflow_id,
@@ -1208,8 +1485,8 @@ def node_status(workflow_id: str, node_id: str) -> dict[str, Any]:
     node = _workflow_node_snapshot(workflow_id, node_id)
     job_id = node.get("jobId")
     if job_id and job_id in orchestrator.jobs:
-        snapshot = orchestrator.get_job(job_id).snapshot()
-        get_workflow_store().sync_node_job(workflow_id, node_id, snapshot)
+        job = orchestrator.get_job(job_id)
+        snapshot = _sync_workflow_job(workflow_id, node_id, job)
         return snapshot
     return node
 
@@ -1229,8 +1506,7 @@ async def wait_node(
     snapshot = job.snapshot()
     if job.completed.is_set():
         await flush_workflow_events()
-    get_workflow_store().sync_node_job(workflow_id, node_id, snapshot)
-    return snapshot
+    return _sync_workflow_job(workflow_id, node_id, job)
 
 
 @mcp.tool()
@@ -1243,9 +1519,7 @@ async def cancel_node(workflow_id: str, node_id: str) -> dict[str, Any]:
     if job_id not in orchestrator.jobs:
         raise ValueError("节点由另一个编排器进程持有，当前进程无法直接取消。")
     job = await orchestrator.cancel(job_id)
-    snapshot = job.snapshot()
-    get_workflow_store().sync_node_job(workflow_id, node_id, snapshot)
-    return snapshot
+    return _sync_workflow_job(workflow_id, node_id, job)
 
 
 @mcp.tool()
@@ -1260,6 +1534,7 @@ def workflow_status(workflow_id: str) -> dict[str, Any]:
         "progress": snapshot["progress"],
         "retryPolicy": snapshot["retryPolicy"],
         "advanceMode": snapshot["advanceMode"],
+        "handoffMode": snapshot["handoffMode"],
         "pendingAdvance": snapshot["pendingAdvance"],
         "currentSteps": snapshot["currentNodes"],
         "steps": [
@@ -1339,7 +1614,7 @@ async def execute_workflow_control(
                     "retry", "restart_from", "skip"
                 }:
                     raise RuntimeError("步骤尚未完全停止，暂不能重试或跳过，请稍后再试。")
-                store.sync_node_job(workflow_id, node["id"], job.snapshot())
+                _sync_workflow_job(workflow_id, node["id"], job)
 
         if action["actionType"] == "stop":
             result = store.stop_workflow(workflow_id)

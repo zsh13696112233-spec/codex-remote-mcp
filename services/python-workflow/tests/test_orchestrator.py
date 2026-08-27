@@ -14,6 +14,7 @@ from codex_orchestrator_mcp import (
     Orchestrator,
     TurnNotActiveError,
     is_absolute_remote_path,
+    remote_path_join,
 )
 from tests.mock_app_server import MockAppServer
 
@@ -46,6 +47,35 @@ class RemotePathTests(unittest.TestCase):
                 },
             )
 
+    def test_artifact_root_must_be_absolute_and_is_not_exposed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "artifact_root.*绝对路径"):
+            AgentConfig.from_dict(
+                "remote",
+                {"url": "ws://127.0.0.1:4500", "cwd": "/srv/work", "artifact_root": "tmp"},
+            )
+        config = AgentConfig.from_dict(
+            "remote",
+            {
+                "url": "ws://127.0.0.1:4500",
+                "cwd": "/srv/work",
+                "artifact_root": "/srv/artifacts",
+            },
+        )
+        self.assertTrue(config.public_dict()["artifact_transfer_enabled"])
+        self.assertNotIn("artifact_root", config.public_dict())
+
+    def test_managed_remote_paths_cannot_accept_escape_components(self) -> None:
+        self.assertEqual(
+            remote_path_join(r"D:\artifacts", "workflows", "abc"),
+            r"D:\artifacts\workflows\abc",
+        )
+        self.assertEqual(
+            remote_path_join("/srv/artifacts", "workflows", "abc"),
+            "/srv/artifacts/workflows/abc",
+        )
+        with self.assertRaisesRegex(ValueError, "目录名称无效"):
+            remote_path_join("/srv/artifacts", "..")
+
 class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     def _write_config(
         self,
@@ -54,14 +84,19 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         *,
         cwd: str = "/srv/codex",
         token_env: str | None = None,
+        artifact_root: str | None = None,
+        allow_write: bool = False,
     ) -> Path:
         agent: dict[str, object] = {
             "url": url,
             "cwd": cwd,
             "allow_cwd_override": True,
+            "allow_write": allow_write,
         }
         if token_env:
             agent["token_env"] = token_env
+        if artifact_root:
+            agent["artifact_root"] = artifact_root
         path = Path(directory, "agents.json")
         path.write_text(json.dumps({"agents": {"remote": agent}}), encoding="utf-8")
         return path
@@ -78,6 +113,23 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         }
         values.update(kwargs)
         return await orchestrator.dispatch(**values)
+
+    async def _publish_outputs(
+        self,
+        job: object,
+        files: dict[str, bytes] | None = None,
+        directories: list[str] | None = None,
+    ) -> None:
+        output_dir = Path(str(getattr(job, "managed_output_dir")))
+        for _ in range(200):
+            if output_dir.is_dir():
+                break
+            await asyncio.sleep(0.005)
+        self.assertTrue(output_dir.is_dir(), "托管输出目录未及时创建")
+        for filename, content in (files or {}).items():
+            output_dir.joinpath(filename).write_bytes(content)
+        for name in directories or []:
+            output_dir.joinpath(name).mkdir()
 
     async def test_local_close_wakes_notification_waiter(self) -> None:
         client = AppServerClient("ws://127.0.0.1:1")
@@ -105,6 +157,145 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(final.last_event_method, "turn/completed")
                 self.assertIsNotNone(final.last_event_at)
                 self.assertEqual(final.events_seen, 2)
+
+    async def test_cumulative_files_are_staged_and_one_output_is_captured(self) -> None:
+        async with MockAppServer() as server:
+            with tempfile.TemporaryDirectory() as directory:
+                artifact_root = Path(directory, "workflow-artifacts")
+                orchestrator = Orchestrator(
+                    self._write_config(
+                        directory, server.url, artifact_root=str(artifact_root)
+                    )
+                )
+                job = await self._dispatch(
+                    orchestrator,
+                    artifact_handoff={
+                        "workflowId": "workflow-1",
+                        "nodeId": "step-2",
+                        "stepNumber": 2,
+                        "steps": [
+                            {
+                                "stepNumber": 1,
+                                "displayName": "生成飞机",
+                                "artifacts": [{
+                                    "id": "artifact-1",
+                                    "filename": "plane.txt",
+                                    "byteSize": 5,
+                                    "mediaType": "text/plain",
+                                    "content": b"plane",
+                                }],
+                            }
+                        ],
+                    },
+                )
+                await self._publish_outputs(job, {"merged.txt": b"merged"})
+                await orchestrator.wait(job.job_id, 2)
+
+                self.assertEqual(job.status, "completed")
+                self.assertEqual(job.captured_files[0]["content"], b"merged")
+                input_file = Path(str(job.managed_attempt_dir)).joinpath(
+                    "inputs", "step-01", "plane.txt"
+                )
+                self.assertEqual(input_file.read_bytes(), b"plane")
+                self.assertFalse(any(
+                    str(request.get("method", "")).startswith("fs/")
+                    for request in server.requests
+                ))
+                turn = next(
+                    request for request in server.requests
+                    if request.get("method") == "turn/start"
+                )
+                roots = turn["params"]["sandboxPolicy"]["writableRoots"]
+                self.assertEqual(roots, [job.managed_output_dir])
+                self.assertIn("第1步 生成飞机", job.prompt)
+                self.assertIn("否则不得打开、引用或合并", job.prompt)
+
+    async def test_multiple_output_files_fail_validation(self) -> None:
+        async with MockAppServer() as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(
+                        directory,
+                        server.url,
+                        artifact_root=str(Path(directory, "artifacts")),
+                    )
+                )
+                job = await self._dispatch(
+                    orchestrator,
+                    artifact_handoff={
+                        "workflowId": "workflow-1",
+                        "nodeId": "step-1",
+                        "stepNumber": 1,
+                        "steps": [],
+                    },
+                )
+                await self._publish_outputs(job, {"a.txt": b"a", "b.txt": b"b"})
+                await orchestrator.wait(job.job_id, 2)
+                self.assertEqual(job.status, "failed")
+                self.assertIn("多个不同文件", job.error)
+
+    async def test_output_directory_fails_validation(self) -> None:
+        async with MockAppServer() as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(
+                        directory,
+                        server.url,
+                        artifact_root=str(Path(directory, "artifacts")),
+                    )
+                )
+                job = await self._dispatch(
+                    orchestrator,
+                    artifact_handoff={
+                        "workflowId": "workflow-1",
+                        "nodeId": "step-1",
+                        "stepNumber": 1,
+                        "steps": [],
+                    },
+                )
+                await self._publish_outputs(job, directories=["nested"])
+                await orchestrator.wait(job.job_id, 2)
+                self.assertEqual(job.status, "failed")
+                self.assertIn("不允许目录", job.error)
+
+    async def test_oversized_output_fails_validation(self) -> None:
+        async with MockAppServer(delay_sec=0.2) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(
+                        directory,
+                        server.url,
+                        artifact_root=str(Path(directory, "artifacts")),
+                    )
+                )
+                job = await self._dispatch(
+                    orchestrator,
+                    artifact_handoff={
+                        "workflowId": "workflow-1",
+                        "nodeId": "step-1",
+                        "stepNumber": 1,
+                        "steps": [],
+                    },
+                )
+                await self._publish_outputs(job, {"large.bin": b"x" * 20_000_001})
+                await orchestrator.wait(job.job_id, 5)
+                self.assertEqual(job.status, "failed")
+                self.assertIn("20 MB", job.error)
+
+    async def test_cumulative_mode_requires_artifact_root(self) -> None:
+        async with MockAppServer() as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                with self.assertRaisesRegex(ValueError, "artifact_root"):
+                    await self._dispatch(
+                        orchestrator,
+                        artifact_handoff={
+                            "workflowId": "workflow-1",
+                            "nodeId": "step-1",
+                            "stepNumber": 1,
+                            "steps": [],
+                        },
+                    )
 
     async def test_same_agent_jobs_are_strictly_serial(self) -> None:
         async with MockAppServer(delay_sec=0.3) as server:

@@ -121,6 +121,7 @@ public class WorkflowRunStore {
     root.put("name", task.name);
     root.put("supervisorAgentId", task.sop.supervisorAgentId);
     root.put("failurePolicy", "stop");
+    root.put("handoffMode", "cumulative_files");
     root.put("supervisorTimeoutSec", task.sop.supervisorTimeoutSec);
     root.put("maxRetryCount", task.sop.maxRetryCount);
     root.put("advanceMode", task.sop.advanceMode);

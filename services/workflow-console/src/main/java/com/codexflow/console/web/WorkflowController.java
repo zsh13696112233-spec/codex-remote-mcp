@@ -1,7 +1,10 @@
 package com.codexflow.console.web;
 
 import com.codexflow.console.client.GatewayClient;
+import java.nio.charset.StandardCharsets;
 import org.springframework.http.CacheControl;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -52,16 +55,22 @@ public class WorkflowController {
     return gatewayClient.events(workflowId, after, limit);
   }
 
-  /** 代理读取工作流图片，浏览器不直接访问 Python 网关或执行机路径。 */
+  /** 代理读取工作流文件，浏览器不直接访问 Python 网关或执行机路径。 */
   @GetMapping("/workflows/{workflowId}/artifacts/{artifactId}")
   public ResponseEntity<byte[]> artifact(
       @PathVariable String workflowId, @PathVariable String artifactId) {
     GatewayClient.BinaryResponse artifact = gatewayClient.artifact(workflowId, artifactId);
+    boolean image = artifact.contentType().toLowerCase().startsWith("image/");
+    ContentDisposition disposition =
+        (image ? ContentDisposition.inline() : ContentDisposition.attachment())
+            .filename(artifact.filename(), StandardCharsets.UTF_8)
+            .build();
     return ResponseEntity.ok()
         .contentType(MediaType.parseMediaType(artifact.contentType()))
         .cacheControl(
             CacheControl.maxAge(java.time.Duration.ofDays(365)).cachePrivate().immutable())
         .header("X-Content-Type-Options", "nosniff")
+        .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
         .body(artifact.body());
   }
 

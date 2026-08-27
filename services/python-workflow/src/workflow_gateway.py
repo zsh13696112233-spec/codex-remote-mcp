@@ -895,12 +895,15 @@ async def get_workflow_artifact(request: Request) -> Response:
             request.path_params["workflow_id"],
             request.path_params["artifact_id"],
         )
+        disposition = (
+            "inline" if str(artifact["mediaType"]).startswith("image/") else "attachment"
+        )
         return Response(
             content=artifact["content"],
             media_type=artifact["mediaType"],
             headers={
                 "Cache-Control": "private, max-age=31536000, immutable",
-                "Content-Disposition": f'inline; filename="{artifact["filename"]}"',
+                "Content-Disposition": f'{disposition}; filename="{artifact["filename"]}"',
                 "X-Content-Type-Options": "nosniff",
             },
         )

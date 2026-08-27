@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -67,6 +68,55 @@ class WorkflowMcpTests(unittest.IsolatedAsyncioTestCase):
                 event_types = [event["type"] for event in store.list_events("mcp-demo")]
                 self.assertIn("appserver.item/agentMessage/delta", event_types)
                 self.assertIn("appserver.turn/completed", event_types)
+
+    async def test_file_contract_requires_output_only_for_write_steps(self) -> None:
+        async with MockAppServer(delay_sec=0.01) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                config = Path(directory, "agents.json")
+                config.write_text(
+                    json.dumps({
+                        "agents": {
+                            "local": {
+                                "url": server.url,
+                                "cwd": "/srv/work",
+                                "artifact_root": str(Path(directory, "artifacts")),
+                                "allow_write": True,
+                            }
+                        }
+                    }),
+                    encoding="utf-8",
+                )
+                store = WorkflowStore(Path(directory, "workflows.db"))
+                for workflow_id, write in (("write-demo", True), ("read-demo", False)):
+                    store.create_workflow({
+                        "workflowId": workflow_id,
+                        "handoffMode": "cumulative_files",
+                        "supervisorAgentId": "local",
+                        "nodes": [{
+                            "id": "a",
+                            "prompt": "完成步骤",
+                            "write": write,
+                            "timeoutSec": 10,
+                        }],
+                    })
+                orchestrator = service.Orchestrator(config)
+                with (
+                    patch.object(service, "orchestrator", orchestrator),
+                    patch.object(service, "_workflow_store", store),
+                ):
+                    await service.dispatch_node("write-demo", "a")
+                    write_result = await service.wait_node(
+                        "write-demo", "a", timeout_sec=1
+                    )
+                    self.assertEqual(write_result["status"], "failed")
+                    self.assertIn("恰好一个文件", write_result["error"])
+
+                    await service.dispatch_node("read-demo", "a")
+                    read_result = await service.wait_node(
+                        "read-demo", "a", timeout_sec=1
+                    )
+                    self.assertEqual(read_result["status"], "completed")
+                    await asyncio.gather(*tuple(service._workflow_monitors))
 
 
 if __name__ == "__main__":

@@ -8,7 +8,12 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-from workflow_store import AsyncEventBatcher, WorkflowStore, utc_now
+from workflow_store import (
+    SINGLE_OUTPUT_CONSTRAINT,
+    AsyncEventBatcher,
+    WorkflowStore,
+    utc_now,
+)
 
 
 def serial_workflow() -> dict:
@@ -46,6 +51,7 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["workflowId"], "serial-demo")
         self.assertEqual(snapshot["status"], "queued")
         self.assertEqual(snapshot["advanceMode"], "automatic")
+        self.assertEqual(snapshot["handoffMode"], "legacy_text")
         self.assertIsNone(snapshot["pendingAdvance"])
         self.assertEqual(snapshot["currentNodes"], [])
         self.assertEqual(snapshot["progress"], {"completed": 0, "total": 3})
@@ -437,7 +443,8 @@ class WorkflowStoreTests(unittest.TestCase):
         value["nodes"][1].update(displayName="复核结果", roleName="质量审查员")
         self.store.create_workflow(value)
         first = self.store.prepare_node_dispatch("serial-demo", "a")
-        self.assertEqual(first["prompt"], "只写一个 a")
+        self.assertTrue(first["prompt"].startswith("只写一个 a"))
+        self.assertTrue(first["prompt"].endswith(SINGLE_OUTPUT_CONSTRAINT))
         self.store.sync_node_job(
             "serial-demo",
             "a",
@@ -445,6 +452,7 @@ class WorkflowStoreTests(unittest.TestCase):
         )
         second = self.store.prepare_node_dispatch("serial-demo", "b")
         self.assertIn("【第1步结果】\n前序成果", second["prompt"])
+        self.assertTrue(second["prompt"].endswith(SINGLE_OUTPUT_CONSTRAINT))
         node = self.store.get_workflow("serial-demo")["nodes"][1]
         self.assertEqual(node["displayName"], "复核结果")
         self.assertEqual(node["roleName"], "质量审查员")
@@ -460,6 +468,7 @@ class WorkflowStoreTests(unittest.TestCase):
         prompt = self.store.prepare_node_dispatch("serial-demo", "b")["prompt"]
         self.assertLessEqual(len(prompt), 100_000)
         self.assertIn("内容过长，已在此处省略", prompt)
+        self.assertTrue(prompt.endswith(SINGLE_OUTPUT_CONSTRAINT))
 
     def test_chat_message_is_persisted_and_idempotent(self) -> None:
         self.store.create_workflow(serial_workflow())
@@ -586,7 +595,7 @@ class WorkflowStoreTests(unittest.TestCase):
             [("b", 0)],
         )
 
-    def test_confirmed_revision_instruction_is_audited_and_appended_last(self) -> None:
+    def test_confirmed_revision_instruction_is_audited_before_hidden_constraint(self) -> None:
         value = serial_workflow()
         value["maxRetryCount"] = 3
         self.store.create_workflow(value)
@@ -633,8 +642,9 @@ class WorkflowStoreTests(unittest.TestCase):
         prompt = self.store.prepare_node_dispatch("serial-demo", "b")["prompt"]
         self.assertIn("结果A", prompt)
         self.assertIn("【本次及历史返工要求】", prompt)
-        self.assertTrue(prompt.endswith(instruction))
+        self.assertTrue(prompt.endswith(SINGLE_OUTPUT_CONSTRAINT))
         self.assertLess(prompt.index("结果A"), prompt.index("【本次及历史返工要求】"))
+        self.assertLess(prompt.index(instruction), prompt.index("【系统单次产物约束】"))
         with self.store._connect() as connection:
             node = connection.execute(
                 "SELECT original_prompt FROM workflow_nodes "
@@ -699,6 +709,7 @@ class WorkflowStoreTests(unittest.TestCase):
 
         prompt = self.store.prepare_node_dispatch("serial-demo", "b")["prompt"]
         self.assertNotIn("本次及历史返工要求", prompt)
+        self.assertTrue(prompt.endswith(SINGLE_OUTPUT_CONSTRAINT))
 
     def test_retry_budget_rejects_next_restart_and_proposals_do_not_consume(self) -> None:
         value = serial_workflow()
@@ -728,6 +739,70 @@ class WorkflowStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "次数已经用完"):
             self.store.propose_control(
                 "serial-demo", "restart_from", "b", str(uuid.uuid4())
+            )
+
+    def test_cumulative_files_omits_predecessor_text_and_keeps_revision_local(self) -> None:
+        value = serial_workflow()
+        value["handoffMode"] = "cumulative_files"
+        self.store.create_workflow(value)
+        self.store.prepare_node_dispatch("serial-demo", "a")
+        self.store.sync_node_job(
+            "serial-demo",
+            "a",
+            {"status": "completed", "response": "机密的第一步文字", "finished_at": utc_now()},
+        )
+        self.store.restart_from_node(
+            "serial-demo", "b", revision_instruction="只属于第二步的返工要求"
+        )
+
+        second = self.store.prepare_node_dispatch("serial-demo", "b")
+        self.assertEqual(second["handoffMode"], "cumulative_files")
+        self.assertNotIn("机密的第一步文字", second["prompt"])
+        self.assertIn("只属于第二步的返工要求", second["prompt"])
+        self.store.sync_node_job(
+            "serial-demo",
+            "b",
+            {"status": "completed", "response": "第二步文字", "finished_at": utc_now()},
+        )
+        third = self.store.prepare_node_dispatch("serial-demo", "c")
+        self.assertNotIn("第二步文字", third["prompt"])
+        self.assertNotIn("只属于第二步的返工要求", third["prompt"])
+
+    def test_generic_artifacts_are_cumulative_and_restart_uses_only_current_files(self) -> None:
+        value = serial_workflow()
+        value["handoffMode"] = "cumulative_files"
+        self.store.create_workflow(value)
+        first = self.store.save_artifact_bytes(
+            "serial-demo", "a", "first", "plane.svg", b"<svg>plane</svg>", "image/svg+xml"
+        )
+        second = self.store.save_artifact_bytes(
+            "serial-demo", "b", "second", "airport.txt", b"airport", "text/plain"
+        )
+        duplicate = self.store.save_artifact_bytes(
+            "serial-demo", "b", "other-source", "copy.txt", b"airport", "text/plain"
+        )
+        self.assertEqual(second["id"], duplicate["id"])
+        inputs = self.store.get_cumulative_artifact_inputs("serial-demo", "c")
+        self.assertEqual([step["stepNumber"] for step in inputs], [1, 2])
+        self.assertEqual(inputs[0]["artifacts"][0]["id"], first["id"])
+        self.assertEqual(inputs[1]["artifacts"][0]["content"], b"airport")
+
+        self.store.prepare_node_dispatch("serial-demo", "a")
+        self.store.sync_node_job(
+            "serial-demo",
+            "a",
+            {"status": "completed", "response": "done", "finished_at": utc_now()},
+        )
+        self.store.restart_from_node("serial-demo", "b")
+        restarted = self.store.get_cumulative_artifact_inputs("serial-demo", "c")
+        self.assertEqual(len(restarted[0]["artifacts"]), 1)
+        self.assertEqual(restarted[1]["artifacts"], [])
+
+    def test_generic_artifact_rejects_oversized_content(self) -> None:
+        self.store.create_workflow(serial_workflow())
+        with self.assertRaisesRegex(ValueError, "20 MB"):
+            self.store.save_artifact_bytes(
+                "serial-demo", "a", "large", "large.bin", b"x" * 20_000_001
             )
 
 
