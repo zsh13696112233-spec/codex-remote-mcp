@@ -28,7 +28,7 @@ class FeishuBotCoordinatorTest {
   private static final String WORKFLOW_1 = "00000000-0000-4000-8000-000000000101";
   private static final String WORKFLOW_2 = "00000000-0000-4000-8000-000000000102";
   private static final String WORKFLOW_3 = "00000000-0000-4000-8000-000000000103";
-  private static final String GATE_1 = "00000000-0000-4000-8000-000000000201";
+  private static final String GATE_1 = "00000000000040008000000000000201";
   private final ObjectMapper objectMapper = new ObjectMapper();
   private FeishuProperties properties;
   private TestTransport transport;

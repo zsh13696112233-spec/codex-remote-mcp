@@ -18,6 +18,9 @@ interface DingTalkTransport {
 
   DingTalkModels.SendResult sendText(String conversationId, String replyToMessageId, String text);
 
+  DingTalkModels.SendResult sendMarkdown(
+      String conversationId, String replyToMessageId, String title, String markdown);
+
   DingTalkModels.SendResult sendCard(
       String conversationId, String replyToMessageId, Map<String, Object> cardData);
 

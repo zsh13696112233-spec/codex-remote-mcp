@@ -54,8 +54,8 @@ class DingTalkStoreIntegrationTest {
         .isEqualTo("secret-value");
 
     DingTalkBotAdminService.ConfigView updated =
-        adminService.save(
-            new DingTalkConfigSaveRequest(false, clientId, "", taskId, "progress.schema", 2000L));
+        adminService.save(new DingTalkConfigSaveRequest(false, clientId, "", taskId, "", 2000L));
+    assertThat(updated.cardTemplateId()).isEmpty();
     assertThat(updated.eventPollIntervalMs()).isEqualTo(2000L);
     assertThat(
             jdbc.queryForObject(
@@ -108,6 +108,29 @@ class DingTalkStoreIntegrationTest {
     } finally {
       executor.shutdownNow();
     }
+  }
+
+  @Test
+  void markdownProgressOutboxPersistsBuiltInMessagePayload() {
+    String taskId = createTask();
+    String clientId = "app-" + UUID.randomUUID();
+    store.initialize(clientId);
+    DingTalkModels.StartReservation reservation =
+        store.reserveStart(clientId, taskId, message("markdown-trigger"));
+    store.markSubmitted(reservation.workflowId());
+
+    store.enqueueProgressMarkdown(
+        "markdown-progress-" + reservation.workflowId(),
+        reservation.workflowId(),
+        "任务进度",
+        "**状态：** 运行中");
+
+    DingTalkModels.Outbox item = store.claimDue().get(0);
+    assertThat(item.messageKind()).isEqualTo("markdown");
+    assertThat(item.replyToMessageId()).isEqualTo("markdown-trigger");
+    assertThat(item.payload().path("title").asText()).isEqualTo("任务进度");
+    assertThat(item.payload().path("text").asText()).isEqualTo("**状态：** 运行中");
+    store.markOutboxSent(item.id(), "markdown-message-1");
   }
 
   @Test
@@ -179,6 +202,60 @@ class DingTalkStoreIntegrationTest {
         .extracting(DingTalkModels.Binding::status)
         .isEqualTo("terminal");
     assertThat(store.conversation(clientId, question)).isPresent();
+  }
+
+  @Test
+  void assistantReplyAndItsCardRefreshArePersistedAtomically() {
+    String taskId = createTask();
+    String clientId = "app-" + UUID.randomUUID();
+    store.initialize(clientId);
+    DingTalkModels.StartReservation reservation =
+        store.reserveStart(clientId, taskId, message("assistant-card-trigger"));
+    store.markSubmitted(reservation.workflowId());
+
+    ObjectNode text = objectMapper.createObjectNode().put("text", "质量审查正在执行。");
+    ObjectNode card = objectMapper.createObjectNode().put("markdown", "**最新助手回复**\n质量审查正在执行。");
+    assertThat(
+            store.recordAssistantCompleted(
+                reservation.workflowId(),
+                8,
+                "assistant-text-" + reservation.workflowId(),
+                "question-1",
+                text,
+                "质量审查正在执行。",
+                "assistant-card-" + reservation.workflowId(),
+                card))
+        .isTrue();
+    assertThat(
+            store.recordAssistantCompleted(
+                reservation.workflowId(),
+                8,
+                "assistant-text-" + reservation.workflowId(),
+                "question-1",
+                text,
+                "重复回复",
+                "assistant-card-" + reservation.workflowId(),
+                card))
+        .isFalse();
+
+    assertThat(store.latestAssistantReply(reservation.workflowId())).contains("质量审查正在执行。");
+    assertThat(store.binding(reservation.workflowId()))
+        .get()
+        .extracting(DingTalkModels.Binding::eventCursor)
+        .isEqualTo(8L);
+    List<DingTalkModels.Outbox> messages =
+        store.claimDue().stream()
+            .filter(item -> reservation.workflowId().equals(item.workflowId()))
+            .toList();
+    assertThat(messages)
+        .extracting(DingTalkModels.Outbox::messageKind)
+        .containsExactlyInAnyOrder("text", "card");
+    assertThat(messages.stream().filter(item -> "card".equals(item.messageKind())).findFirst())
+        .get()
+        .satisfies(
+            item ->
+                assertThat(item.payload().path("card").path("markdown").asText())
+                    .contains("最新助手回复"));
   }
 
   private String createTask() {

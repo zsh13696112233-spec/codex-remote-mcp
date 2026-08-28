@@ -233,6 +233,11 @@ class DingTalkStore {
         .map(DingTalkStore::toInbound);
   }
 
+  @Transactional(readOnly = true)
+  public Optional<String> latestAssistantReply(String workflowId) {
+    return bindings.findById(workflowId).map(binding -> binding.latestAssistantReply);
+  }
+
   @Transactional
   public boolean recordEvent(
       String clientId,
@@ -254,6 +259,35 @@ class DingTalkStore {
       binding.status = "terminal";
       releaseSlot(clientId, workflowId);
     }
+    return true;
+  }
+
+  @Transactional
+  public boolean recordAssistantCompleted(
+      String workflowId,
+      long sequence,
+      String textDedupKey,
+      String replyTo,
+      JsonNode textPayload,
+      String assistantReply,
+      String cardDedupKey,
+      JsonNode cardPayload) {
+    DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
+    if (sequence <= binding.eventCursor) return false;
+    enqueue(textDedupKey, workflowId, binding.conversationId, replyTo, "text", textPayload);
+    binding.latestAssistantReply = abbreviate(assistantReply, 20_000);
+    binding.latestAssistantReplyAt = Instant.now();
+    if (cardPayload != null) {
+      enqueue(
+          cardDedupKey,
+          workflowId,
+          binding.conversationId,
+          binding.rootMessageId,
+          binding.progressCardInstanceId == null ? "card" : "card_update",
+          objectMapper.createObjectNode().set("card", cardPayload));
+    }
+    binding.eventCursor = sequence;
+    binding.updatedAt = Instant.now();
     return true;
   }
 
@@ -298,6 +332,19 @@ class DingTalkStore {
   }
 
   @Transactional
+  public void enqueueProgressMarkdown(
+      String dedupKey, String workflowId, String title, String markdown) {
+    DingTalkWorkflowBindingEntity binding = requiredBinding(workflowId);
+    enqueue(
+        dedupKey,
+        workflowId,
+        binding.conversationId,
+        binding.rootMessageId,
+        "markdown",
+        objectMapper.createObjectNode().put("title", title).put("text", markdown));
+  }
+
+  @Transactional
   public List<DingTalkModels.Outbox> claimDue() {
     List<DingTalkModels.Outbox> claimed = new ArrayList<>();
     for (DingTalkOutboxEntity item :
@@ -322,6 +369,20 @@ class DingTalkStore {
       binding.progressCardInstanceId = sentMessageId;
       binding.updatedAt = Instant.now();
     }
+  }
+
+  @Transactional(readOnly = true)
+  public boolean isLatestCardOutbox(String id, String workflowId) {
+    if (workflowId == null) return true;
+    return outbox.findLatestCard(workflowId).map(item -> item.id.equals(id)).orElse(true);
+  }
+
+  @Transactional
+  public void markOutboxSuperseded(String id) {
+    DingTalkOutboxEntity item = outbox.findById(id).orElseThrow();
+    item.status = "sent";
+    item.lastError = null;
+    item.updatedAt = Instant.now();
   }
 
   @Transactional

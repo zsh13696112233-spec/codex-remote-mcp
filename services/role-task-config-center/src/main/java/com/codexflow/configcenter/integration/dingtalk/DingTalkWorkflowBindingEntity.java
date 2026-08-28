@@ -45,6 +45,12 @@ class DingTalkWorkflowBindingEntity {
   @Column(name = "waiting_assistant", nullable = false)
   boolean waitingAssistant;
 
+  @Column(name = "latest_assistant_reply", columnDefinition = "LONGTEXT")
+  String latestAssistantReply;
+
+  @Column(name = "latest_assistant_reply_at")
+  Instant latestAssistantReplyAt;
+
   @Column(name = "created_at", nullable = false)
   Instant createdAt;
 

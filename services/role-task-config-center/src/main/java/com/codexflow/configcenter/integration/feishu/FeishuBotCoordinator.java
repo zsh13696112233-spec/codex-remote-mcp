@@ -340,7 +340,7 @@ class FeishuBotCoordinator implements SmartLifecycle {
     String action = stringValue(event.value(), "action", event.actionId());
     String workflowId = stringValue(event.value(), "workflowId", null);
     String gateId = stringValue(event.value(), "gateId", null);
-    if (!isUuid(workflowId) || !isUuid(gateId)) return;
+    if (!isUuid(workflowId) || !isGateId(gateId)) return;
     Optional<FeishuModels.Binding> binding = store.binding(workflowId);
     if (binding.isEmpty() || !binding.get().chatId().equals(event.chatId())) return;
     String notice;
@@ -535,6 +535,10 @@ class FeishuBotCoordinator implements SmartLifecycle {
     } catch (IllegalArgumentException error) {
       return false;
     }
+  }
+
+  private static boolean isGateId(String value) {
+    return value != null && (value.matches("[0-9a-fA-F]{32}") || isUuid(value));
   }
 
   private static String stringValue(Map<String, Object> values, String key, String fallback) {

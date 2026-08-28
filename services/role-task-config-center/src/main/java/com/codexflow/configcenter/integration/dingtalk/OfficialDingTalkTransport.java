@@ -87,21 +87,45 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   @Override
   public DingTalkModels.SendResult sendText(
       String conversationId, String replyToMessageId, String text) {
-    ObjectNode body = objectMapper.createObjectNode();
-    body.put("robotCode", properties.getClientId());
-    body.put("openConversationId", conversationId);
-    body.put("msgKey", "sampleText");
+    return sendGroupMessage(
+        conversationId,
+        "sampleText",
+        objectMapper.createObjectNode().put("content", text),
+        "无法生成钉钉文本消息。");
+  }
+
+  @Override
+  public DingTalkModels.SendResult sendMarkdown(
+      String conversationId, String replyToMessageId, String title, String markdown) {
+    return sendGroupMessage(
+        conversationId,
+        "sampleMarkdown",
+        objectMapper.createObjectNode().put("title", title).put("text", markdown),
+        "无法生成钉钉 Markdown 消息。");
+  }
+
+  private DingTalkModels.SendResult sendGroupMessage(
+      String conversationId, String msgKey, ObjectNode msgParam, String serializationError) {
+    ObjectNode body;
     try {
-      body.put(
-          "msgParam",
-          objectMapper.writeValueAsString(objectMapper.createObjectNode().put("content", text)));
+      body = groupMessageBody(conversationId, msgKey, msgParam);
     } catch (Exception error) {
-      throw new IllegalStateException("无法生成钉钉文本消息。", error);
+      throw new IllegalStateException(serializationError, error);
     }
     JsonNode response = authorized("POST", "/v1.0/robot/groupMessages/send", body);
     String messageId = response.path("processQueryKey").asText();
     if (messageId.isBlank()) messageId = UUID.randomUUID().toString();
     return new DingTalkModels.SendResult(messageId);
+  }
+
+  ObjectNode groupMessageBody(String conversationId, String msgKey, ObjectNode msgParam)
+      throws Exception {
+    ObjectNode body = objectMapper.createObjectNode();
+    body.put("robotCode", properties.getClientId());
+    body.put("openConversationId", conversationId);
+    body.put("msgKey", msgKey);
+    body.put("msgParam", objectMapper.writeValueAsString(msgParam));
+    return body;
   }
 
   @Override

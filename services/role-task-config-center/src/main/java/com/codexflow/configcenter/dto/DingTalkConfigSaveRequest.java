@@ -17,5 +17,5 @@ public record DingTalkConfigSaveRequest(
             regexp =
                 "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
         String taskDefinitionId,
-    @NotBlank @Size(max = 256) String cardTemplateId,
+    @NotNull @Size(max = 256) String cardTemplateId,
     @NotNull @Min(250) @Max(60000) Long eventPollIntervalMs) {}

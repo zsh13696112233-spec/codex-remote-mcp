@@ -11,6 +11,7 @@ import com.codexflow.configcenter.application.WorkflowRunService;
 import com.codexflow.configcenter.client.GatewayClient;
 import com.codexflow.configcenter.domain.WorkflowRunStore;
 import com.codexflow.configcenter.integration.bot.BotPlatformGuard;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -28,7 +29,7 @@ class DingTalkBotCoordinatorTest {
   private static final String WORKFLOW_1 = "00000000-0000-4000-8000-000000000101";
   private static final String WORKFLOW_2 = "00000000-0000-4000-8000-000000000102";
   private static final String WORKFLOW_3 = "00000000-0000-4000-8000-000000000103";
-  private static final String GATE_1 = "00000000-0000-4000-8000-000000000201";
+  private static final String GATE_1 = "00000000000040008000000000000201";
   private final ObjectMapper objectMapper = new ObjectMapper();
   private DingTalkProperties properties;
   private TestTransport transport;
@@ -76,7 +77,7 @@ class DingTalkBotCoordinatorTest {
     when(store.reserveStart(eq("cli_test"), eq(TASK_ID), any()))
         .thenReturn(new DingTalkModels.StartReservation("started", WORKFLOW_1, payload));
     when(gateway.get("/workflows/" + WORKFLOW_1)).thenReturn(snapshot("running"));
-    when(cards.render(any(), any())).thenReturn(Map.of("schema", "2.0"));
+    when(cards.render(any(), any(), any())).thenReturn(Map.of("schema", "2.0"));
 
     coordinator.safelyHandleMessage(message("start-1", "运行", true, null));
 
@@ -99,13 +100,152 @@ class DingTalkBotCoordinatorTest {
     when(store.reserveStart("cli_test", TASK_ID, message))
         .thenReturn(new DingTalkModels.StartReservation("started", WORKFLOW_1, payload));
     when(gateway.get("/workflows/" + WORKFLOW_1)).thenReturn(snapshot("running"));
-    when(cards.render(any(), any())).thenReturn(Map.of("schema", "2.0"));
+    when(cards.render(any(), any(), any())).thenReturn(Map.of("schema", "2.0"));
 
     coordinator.safelyHandleMessage(message);
 
     verify(workflowRuns).submitPrepared(any());
     verify(store).markSubmitted(WORKFLOW_1);
     verify(store).enqueueCard(eq("start-card:" + WORKFLOW_1), eq(WORKFLOW_1), any());
+  }
+
+  @Test
+  void blankTemplateStartsWithMarkdownProgressAndConnectsNormally() {
+    properties.setCardTemplateId("");
+    ObjectNode payload = objectMapper.createObjectNode().put("workflowId", WORKFLOW_1);
+    DingTalkModels.Message message = message("text-start", "运行", true, null);
+    when(store.conversation("cli_test", message)).thenReturn(Optional.empty());
+    when(store.reserveStart("cli_test", TASK_ID, message))
+        .thenReturn(new DingTalkModels.StartReservation("started", WORKFLOW_1, payload));
+    when(gateway.get("/workflows/" + WORKFLOW_1)).thenReturn(snapshot("running"));
+    when(cards.renderMarkdown(any(), any())).thenReturn("**任务：** 测试任务");
+
+    coordinator.start();
+    coordinator.safelyHandleMessage(message);
+
+    org.assertj.core.api.Assertions.assertThat(coordinator.isRunning()).isTrue();
+    verify(store)
+        .enqueueProgressMarkdown("start-card:" + WORKFLOW_1, WORKFLOW_1, "任务进度", "**任务：** 测试任务");
+    verify(store, never()).enqueueCard(any(), any(), any());
+    coordinator.stop();
+  }
+
+  @Test
+  void textModePauseAndContinueCallAdvanceEndpointsWithoutAssistant() {
+    properties.setCardTemplateId("");
+    DingTalkModels.Binding binding =
+        new DingTalkModels.Binding(WORKFLOW_2, "chat-1", "root-1", "active", 0, null, false);
+    DingTalkModels.Message pause = message("pause-1", "暂停", false, "root-1");
+    DingTalkModels.Message resume = message("resume-1", "继续", false, "root-1");
+    ObjectNode waiting = snapshot("running");
+    waiting.put("workflowId", WORKFLOW_2);
+    waiting.putObject("pendingAdvance").put("gateId", GATE_1).put("state", "countdown");
+    when(store.conversation("cli_test", pause)).thenReturn(Optional.of(binding));
+    when(store.conversation("cli_test", resume)).thenReturn(Optional.of(binding));
+    when(gateway.get("/workflows/" + WORKFLOW_2)).thenReturn(waiting);
+    when(cards.renderMarkdown(any(), any())).thenReturn("**任务：** 测试任务");
+
+    coordinator.safelyHandleMessage(pause);
+    coordinator.safelyHandleMessage(resume);
+
+    verify(gateway).post("/workflows/" + WORKFLOW_2 + "/advance/" + GATE_1 + "/hold", null);
+    verify(gateway).post("/workflows/" + WORKFLOW_2 + "/advance/" + GATE_1 + "/confirm", null);
+    verify(store, never()).registerInbound(eq("cli_test"), any(), any());
+    verify(store)
+        .enqueueProgressMarkdown("advance-text-result:pause-1", WORKFLOW_2, "任务进度", "**任务：** 测试任务");
+    verify(store)
+        .enqueueProgressMarkdown(
+            "advance-text-result:resume-1", WORKFLOW_2, "任务进度", "**任务：** 测试任务");
+  }
+
+  @Test
+  void blankTemplatePersistsHighLevelProgressEventAsMarkdownOutbox() {
+    properties.setCardTemplateId("");
+    DingTalkModels.Binding binding =
+        new DingTalkModels.Binding(WORKFLOW_2, "chat-1", "root-1", "active", 0, null, false);
+    ObjectNode history = objectMapper.createObjectNode();
+    history
+        .putArray("events")
+        .addObject()
+        .put("sequence", 1)
+        .put("type", "node.started")
+        .putObject("payload");
+    when(store.pollable("cli_test")).thenReturn(List.of(binding));
+    when(gateway.get("/workflows/" + WORKFLOW_2 + "/events/history?after=0&limit=200"))
+        .thenReturn(history);
+    when(gateway.get("/workflows/" + WORKFLOW_2)).thenReturn(snapshot("running"));
+    when(cards.renderMarkdown(any(), any())).thenReturn("**任务：** 测试任务");
+
+    coordinator.start();
+    coordinator.pollEvents();
+
+    ArgumentCaptor<JsonNode> payload = ArgumentCaptor.forClass(JsonNode.class);
+    verify(store)
+        .recordEvent(
+            eq("cli_test"),
+            eq(WORKFLOW_2),
+            eq(1L),
+            eq("workflow-event:" + WORKFLOW_2 + ":1"),
+            eq("markdown"),
+            eq("root-1"),
+            payload.capture(),
+            eq(false));
+    org.assertj.core.api.Assertions.assertThat(payload.getValue().path("title").asText())
+        .isEqualTo("任务进度");
+    org.assertj.core.api.Assertions.assertThat(payload.getValue().path("text").asText())
+        .isEqualTo("**任务：** 测试任务");
+    coordinator.stop();
+  }
+
+  @Test
+  void completedAssistantReplyIsSentAndReflectedInTheSameProgressCard() {
+    String workflowMessageId = "11111111-1111-5111-8111-111111111111";
+    DingTalkModels.Binding binding =
+        new DingTalkModels.Binding(WORKFLOW_2, "chat-1", "root-1", "active", 0, "card-1", true);
+    ObjectNode history = objectMapper.createObjectNode();
+    history
+        .putArray("events")
+        .addObject()
+        .put("sequence", 2)
+        .put("type", "chat.assistant.completed")
+        .putObject("payload")
+        .put("messageId", workflowMessageId)
+        .put("text", "当前正在执行质量审查步骤。");
+    when(store.pollable("cli_test")).thenReturn(List.of(binding));
+    when(store.inbound(WORKFLOW_2, workflowMessageId))
+        .thenReturn(
+            Optional.of(
+                new DingTalkModels.Inbound(
+                    "question-1", WORKFLOW_2, workflowMessageId, "accepted")));
+    when(gateway.get("/workflows/" + WORKFLOW_2 + "/events/history?after=0&limit=200"))
+        .thenReturn(history);
+    ObjectNode snapshot = snapshot("running");
+    snapshot.put("workflowId", WORKFLOW_2);
+    when(gateway.get("/workflows/" + WORKFLOW_2)).thenReturn(snapshot);
+    when(cards.render(any(), eq("任务助手已回复。"), eq("当前正在执行质量审查步骤。")))
+        .thenReturn(Map.of("markdown", "含最新回复的卡片"));
+
+    coordinator.start();
+    coordinator.pollEvents();
+
+    ArgumentCaptor<JsonNode> textPayload = ArgumentCaptor.forClass(JsonNode.class);
+    ArgumentCaptor<JsonNode> cardPayload = ArgumentCaptor.forClass(JsonNode.class);
+    verify(store)
+        .recordAssistantCompleted(
+            eq(WORKFLOW_2),
+            eq(2L),
+            eq("workflow-event:" + WORKFLOW_2 + ":2"),
+            eq("question-1"),
+            textPayload.capture(),
+            eq("当前正在执行质量审查步骤。"),
+            eq("assistant-card:" + WORKFLOW_2 + ":2"),
+            cardPayload.capture());
+    org.assertj.core.api.Assertions.assertThat(textPayload.getValue().path("text").asText())
+        .isEqualTo("当前正在执行质量审查步骤。");
+    org.assertj.core.api.Assertions.assertThat(cardPayload.getValue().path("markdown").asText())
+        .isEqualTo("含最新回复的卡片");
+    verify(store).markInboundFinished(WORKFLOW_2, workflowMessageId, false);
+    coordinator.stop();
   }
 
   @Test
@@ -130,6 +270,49 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void topLevelMentionDuringActiveTaskForwardsToAssistantInSameConversation() {
+    DingTalkModels.Binding binding =
+        new DingTalkModels.Binding(WORKFLOW_2, "chat-1", "root-1", "active", 0, null, false);
+    DingTalkModels.Message message = message("question-top-1", "在吗", true, null);
+    when(store.conversation("cli_test", message)).thenReturn(Optional.empty());
+    when(store.active("cli_test")).thenReturn(Optional.of(binding));
+    when(store.registerInbound("cli_test", binding, message))
+        .thenReturn(
+            new DingTalkModels.Inbound(
+                "question-top-1", WORKFLOW_2, "22222222-2222-5222-8222-222222222222", "accepted"));
+
+    coordinator.safelyHandleMessage(message);
+
+    ArgumentCaptor<JsonNode> body = ArgumentCaptor.forClass(JsonNode.class);
+    verify(gateway).post(eq("/workflows/" + WORKFLOW_2 + "/messages"), body.capture());
+    org.assertj.core.api.Assertions.assertThat(body.getValue().path("text").asText())
+        .isEqualTo("在吗");
+    verify(store, never()).enqueueText(eq("top-help:question-top-1"), any(), any(), any(), any());
+    verify(store, never()).reserveStart(eq("cli_test"), eq(TASK_ID), any());
+  }
+
+  @Test
+  void topLevelMentionDoesNotAttachToActiveTaskInAnotherConversation() {
+    DingTalkModels.Binding binding =
+        new DingTalkModels.Binding(WORKFLOW_2, "chat-2", "root-2", "active", 0, null, false);
+    DingTalkModels.Message message = message("question-top-other", "在吗", true, null);
+    when(store.conversation("cli_test", message)).thenReturn(Optional.empty());
+    when(store.active("cli_test")).thenReturn(Optional.of(binding));
+
+    coordinator.safelyHandleMessage(message);
+
+    verify(store)
+        .enqueueText(
+            "top-help:question-top-other",
+            null,
+            "chat-1",
+            "question-top-other",
+            "请发送“@机器人 运行”启动任务；运行期间可直接 @机器人 提问，也可回复或引用任务消息咨询或控制。");
+    verify(store, never()).registerInbound(eq("cli_test"), any(), any());
+    verify(gateway, never()).post(eq("/workflows/" + WORKFLOW_2 + "/messages"), any());
+  }
+
+  @Test
   void repeatedOrExpiredCardActionRefreshesInsteadOfFailing() {
     DingTalkModels.Binding binding =
         new DingTalkModels.Binding(WORKFLOW_3, "chat-1", "root-1", "active", 0, "card-1", false);
@@ -137,7 +320,7 @@ class DingTalkBotCoordinatorTest {
     when(gateway.post("/workflows/" + WORKFLOW_3 + "/advance/" + GATE_1 + "/confirm", null))
         .thenReturn(objectMapper.createObjectNode());
     when(gateway.get("/workflows/" + WORKFLOW_3)).thenReturn(snapshot("running"));
-    when(cards.render(any(), any())).thenReturn(Map.of("schema", "2.0"));
+    when(cards.render(any(), any(), any())).thenReturn(Map.of("schema", "2.0"));
 
     coordinator.safelyHandleAction(
         new DingTalkModels.CardAction(
@@ -182,6 +365,43 @@ class DingTalkBotCoordinatorTest {
     coordinator.stop();
   }
 
+  @Test
+  void markdownOutboxUsesBuiltInMarkdownMessageType() {
+    DingTalkModels.Outbox item =
+        new DingTalkModels.Outbox(
+            "outbox-markdown-1",
+            WORKFLOW_1,
+            "chat-1",
+            "message-1",
+            "markdown",
+            objectMapper.createObjectNode().put("title", "任务进度").put("text", "**状态：** 运行中"));
+
+    coordinator.deliver(item);
+
+    org.assertj.core.api.Assertions.assertThat(transport.lastMarkdownTitle).isEqualTo("任务进度");
+    org.assertj.core.api.Assertions.assertThat(transport.lastMarkdown).isEqualTo("**状态：** 运行中");
+    verify(store).markOutboxSent("outbox-markdown-1", "sent-markdown-1");
+  }
+
+  @Test
+  void staleCardUpdateIsDiscardedBeforeItCanOverwriteNewerProgress() {
+    DingTalkModels.Outbox item =
+        new DingTalkModels.Outbox(
+            "old-card-update",
+            WORKFLOW_1,
+            "chat-1",
+            "root-1",
+            "card_update",
+            objectMapper.createObjectNode().putObject("card").put("markdown", "旧进度"));
+    when(store.isLatestCardOutbox("old-card-update", WORKFLOW_1)).thenReturn(false);
+
+    coordinator.deliver(item);
+
+    verify(store).markOutboxSuperseded("old-card-update");
+    verify(store, never()).markOutboxSent(eq("old-card-update"), any());
+    verify(store, never()).markOutboxFailed(eq("old-card-update"), any());
+  }
+
   private ObjectNode snapshot(String status) {
     ObjectNode snapshot = objectMapper.createObjectNode();
     snapshot.put("workflowId", WORKFLOW_1);
@@ -201,6 +421,8 @@ class DingTalkBotCoordinatorTest {
   private static final class TestTransport implements DingTalkTransport {
     boolean connected;
     RuntimeException sendFailure;
+    String lastMarkdownTitle;
+    String lastMarkdown;
 
     @Override
     public void start(
@@ -229,6 +451,15 @@ class DingTalkBotCoordinatorTest {
         String conversationId, String replyToMessageId, String text) {
       if (sendFailure != null) throw sendFailure;
       return new DingTalkModels.SendResult("sent-1");
+    }
+
+    @Override
+    public DingTalkModels.SendResult sendMarkdown(
+        String conversationId, String replyToMessageId, String title, String markdown) {
+      if (sendFailure != null) throw sendFailure;
+      lastMarkdownTitle = title;
+      lastMarkdown = markdown;
+      return new DingTalkModels.SendResult("sent-markdown-1");
     }
 
     @Override

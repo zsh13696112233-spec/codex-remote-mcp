@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 /** 验证钉钉 Stream 原始消息和卡片回调到内部模型的映射。 */
 class DingTalkTransportParsingTest {
@@ -79,5 +80,19 @@ class DingTalkTransportParsingTest {
     assertThat(action.operatorUserId()).isEqualTo("user-2");
     assertThat(action.actionId()).isEqualTo("advance_confirm");
     assertThat(action.value()).containsEntry("workflowId", "workflow-1");
+  }
+
+  @Test
+  void buildsBuiltInMarkdownMessageWithoutCardTemplate() throws Exception {
+    ObjectNode body =
+        transport.groupMessageBody(
+            "conversation-1",
+            "sampleMarkdown",
+            objectMapper.createObjectNode().put("title", "任务进度").put("text", "**状态：** 运行中"));
+
+    assertThat(body.path("msgKey").asText()).isEqualTo("sampleMarkdown");
+    assertThat(body.has("cardTemplateId")).isFalse();
+    assertThat(objectMapper.readTree(body.path("msgParam").asText()))
+        .isEqualTo(objectMapper.createObjectNode().put("title", "任务进度").put("text", "**状态：** 运行中"));
   }
 }

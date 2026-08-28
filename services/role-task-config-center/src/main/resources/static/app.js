@@ -68,9 +68,9 @@ function renderDingTalkConfig(){
       <div class="grid"><label>Client ID<input name="clientId" maxlength="128" required value="${esc(x.clientId)}" placeholder="dingxxxxxxxxxxxxxxxx"></label>
       <label>Client Secret<input name="clientSecret" type="password" maxlength="512" placeholder="${x.secretConfigured?"已保存；留空表示不修改":"请输入 Client Secret"}"></label></div>
       <label>固定任务定义<select name="taskDefinitionId" required><option value="">请选择任务</option>${tasks.map(t=>`<option value="${t.id}" ${t.id===x.taskDefinitionId?"selected":""}>${esc(t.name)}</option>`).join("")}</select></label>
-      <label>互动进度卡模板 ID<input name="cardTemplateId" maxlength="256" required value="${esc(x.cardTemplateId)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.schema"></label>
+      <label>互动进度卡模板 ID（可选）<input name="cardTemplateId" maxlength="256" value="${esc(x.cardTemplateId)}" placeholder="留空时使用内置 Markdown 进度；填写已发布的 .schema 模板 ID"></label>
       <label>事件轮询间隔（毫秒）<input name="eventPollIntervalMs" type="number" min="250" max="60000" required value="${Number(x.eventPollIntervalMs)||1000}"></label>
-      <p class="hint">Client Secret 只保存在服务端且不会回显。飞书和钉钉只能启用一个；任务运行期间不能停用或修改关键配置。后续咨询需回复或引用启动消息或进度卡。</p>
+      <p class="hint">Client Secret 只保存在服务端且不会回显。模板 ID 留空时使用钉钉内置 Markdown 进度消息，可回复“暂停”“继续”或“立即进入下一步”；填写模板后使用可更新、带按钮的互动进度卡。飞书和钉钉只能启用一个，任务运行期间不能切换模式或修改关键配置。后续咨询需回复或引用启动消息、进度消息或进度卡。</p>
       <div id="dingtalkTestResult" class="test-result"></div>
       <footer><button type="button" data-dingtalk-test>测试连接</button><button class="primary" type="submit">保存配置</button></footer>
     </form>

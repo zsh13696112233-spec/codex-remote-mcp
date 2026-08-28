@@ -6,7 +6,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.time.Instant;
 
-/** 等待可靠发送到钉钉的文本或卡片消息。 */
+/** 等待可靠发送到钉钉的文本、Markdown 或互动卡片消息。 */
 @Entity
 @Table(name = "codex_sop_dingtalk_outbox")
 class DingTalkOutboxEntity {

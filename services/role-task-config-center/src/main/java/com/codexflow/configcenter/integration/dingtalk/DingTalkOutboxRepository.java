@@ -19,6 +19,18 @@ interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, S
           """
           SELECT *
           FROM codex_sop_dingtalk_outbox
+          WHERE workflow_id = :workflowId AND message_kind IN ('card', 'card_update')
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1
+          """,
+      nativeQuery = true)
+  Optional<DingTalkOutboxEntity> findLatestCard(@Param("workflowId") String workflowId);
+
+  @Query(
+      value =
+          """
+          SELECT *
+          FROM codex_sop_dingtalk_outbox
           WHERE status IN (:statuses) AND next_attempt_at <= :nextAttemptAt
           ORDER BY created_at
           LIMIT 50

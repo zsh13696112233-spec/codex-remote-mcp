@@ -79,8 +79,8 @@ public class DingTalkProperties {
     if (clientId.length() > 128) {
       throw new IllegalStateException("DINGTALK_CLIENT_ID 长度不能超过 128 个字符。");
     }
-    if (cardTemplateId.isBlank() || cardTemplateId.length() > 256) {
-      throw new IllegalStateException("DINGTALK_CARD_TEMPLATE_ID 必须填写且不能超过 256 个字符。");
+    if (cardTemplateId.length() > 256) {
+      throw new IllegalStateException("DINGTALK_CARD_TEMPLATE_ID 不能超过 256 个字符。");
     }
     try {
       UUID.fromString(taskDefinitionId);

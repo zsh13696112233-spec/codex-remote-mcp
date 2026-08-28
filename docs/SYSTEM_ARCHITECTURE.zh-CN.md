@@ -375,9 +375,9 @@ SQLite 由 `8080` 网关和 MCP 共享，保存实际执行状态、步骤结果
 | 8091 | 8080 | `GET /workflows/{id}` | 刷新活动运行的实际状态 |
 | 8091 | 8080 | `POST /workflows/{id}/cancel` | 管理端取消运行 |
 | 8091 飞书/钉钉适配层 | 8080 | `GET /workflows/{id}/events/history` | 按持久化游标同步高层进度和助手完成事件 |
-| 8091 飞书/钉钉适配层 | 8080 | `POST /workflows/{id}/messages` | 把话题消息或钉钉回复消息发送给任务助手 |
-| 8091 飞书/钉钉适配层 | 8080 | `POST /workflows/{id}/advance/{gateId}/confirm` | 处理卡片的立即继续或暂停后继续 |
-| 8091 飞书/钉钉适配层 | 8080 | `POST /workflows/{id}/advance/{gateId}/hold` | 处理卡片暂停 |
+| 8091 飞书/钉钉适配层 | 8080 | `POST /workflows/{id}/messages` | 把话题消息、钉钉活动任务的同群 @ 消息或回复消息发送给任务助手 |
+| 8091 飞书/钉钉适配层 | 8080 | `POST /workflows/{id}/advance/{gateId}/confirm` | 处理卡片按钮或钉钉无模板模式文字命令的立即继续、暂停后继续 |
+| 8091 飞书/钉钉适配层 | 8080 | `POST /workflows/{id}/advance/{gateId}/hold` | 处理卡片按钮或钉钉无模板模式文字命令的暂停 |
 | 8090 | 8080 | `GET /workflows/{id}` | 查询工作流聚合状态 |
 | 8090 | 8080 | `GET /workflows/{id}/events/history` | 按游标读取事件 |
 | 8090 | 8080 | `GET /workflows/{id}/artifacts/{artifactId}` | 代理图片附件 |
@@ -441,7 +441,7 @@ pending → queued → running → completed
 | 8091 | `FEISHU_TASK_DEFINITION_ID` | MySQL 尚无页面配置时的固定任务默认值 |
 | 8091 | `FEISHU_EVENT_POLL_INTERVAL_MS` | MySQL 尚无页面配置时的轮询间隔默认值，默认 1000 毫秒 |
 | 8091 | `DINGTALK_ENABLED`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET` | MySQL 尚无页面配置时的钉钉开关与应用凭据默认值 |
-| 8091 | `DINGTALK_TASK_DEFINITION_ID`、`DINGTALK_CARD_TEMPLATE_ID` | MySQL 尚无页面配置时的钉钉固定任务和互动卡片模板默认值 |
+| 8091 | `DINGTALK_TASK_DEFINITION_ID`、`DINGTALK_CARD_TEMPLATE_ID` | MySQL 尚无页面配置时的钉钉固定任务和可选互动卡片模板默认值；模板留空时使用内置 Markdown 进度消息 |
 | 8091 | `DINGTALK_EVENT_POLL_INTERVAL_MS` | MySQL 尚无页面配置时的钉钉轮询间隔默认值，默认 1000 毫秒 |
 | 8090 | `CODEX_GATEWAY_URL` | 8080 地址 |
 
