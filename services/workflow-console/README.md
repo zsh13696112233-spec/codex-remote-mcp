@@ -46,7 +46,7 @@ Java 根包为 `com.codexflow.console`，Web 控制器、异常映射和
 Set-Location .\services\workflow-console
 
 $env:CODEX_GATEWAY_URL = "http://127.0.0.1:8080"
-$env:SERVER_ADDRESS = "127.0.0.1"
+$env:SERVER_ADDRESS = "0.0.0.0"
 $env:SERVER_PORT = "8090"
 
 mvn spring-boot:run
@@ -74,7 +74,7 @@ java -jar .\target\workflow-console-0.1.0.jar
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `SERVER_PORT` | `8090` | 服务端口 |
-| `SERVER_ADDRESS` | `127.0.0.1` | 监听地址 |
+| `SERVER_ADDRESS` | `0.0.0.0` | 监听地址 |
 | `CODEX_GATEWAY_URL` | `http://127.0.0.1:8080` | Python 网关地址 |
 
 ## 业务接口
@@ -129,4 +129,4 @@ mvn test
 
 ## 安全说明
 
-系统没有登录功能。默认只监听 `127.0.0.1`；如需通过可信内网访问，可以设置 `SERVER_ADDRESS=0.0.0.0`，但不得将本系统或 Python 网关直接暴露到公网。
+系统没有登录功能，默认监听 `0.0.0.0` 以支持可信内网访问；应通过主机防火墙限制来源，不得将本系统或 Python 网关直接暴露到公网。如只需本机访问，可设置 `SERVER_ADDRESS=127.0.0.1`。

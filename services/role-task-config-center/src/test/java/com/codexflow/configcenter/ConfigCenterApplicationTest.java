@@ -48,6 +48,12 @@ class ConfigCenterApplicationTest {
         .isEqualTo(1);
     assertThat(
             jdbc.queryForObject(
+                "select count(*) from information_schema.columns "
+                    + "where table_name = 'codex_sop_sops' and column_name = 'handoff_mode'",
+                Integer.class))
+        .isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
                 "select count(*) from information_schema.tables "
                     + "where table_name in ('codex_sop_feishu_bot_state', "
                     + "'codex_sop_feishu_workflow_bindings', "
@@ -119,6 +125,7 @@ class ConfigCenterApplicationTest {
     assertThat(first.payload().path("maxRetryCount").asInt()).isEqualTo(7);
     assertThat(retried.payload().path("maxRetryCount").asInt()).isEqualTo(7);
     assertThat(first.payload().path("advanceMode").asText()).isEqualTo("automatic");
+    assertThat(createdSop.path("handoffMode").asText()).isEqualTo("cumulative_files");
     assertThat(first.payload().path("handoffMode").asText()).isEqualTo("cumulative_files");
     assertThat(retried.payload().path("handoffMode").asText()).isEqualTo("cumulative_files");
     assertThat(retried.workflowId()).isNotEqualTo(first.workflowId());
@@ -168,5 +175,45 @@ class ConfigCenterApplicationTest {
                     new SopSaveRequest(
                         "非法模式", null, null, null, true, 10, "manual", List.of(step))))
         .hasMessageContaining("advanceMode");
+  }
+
+  /** 确认 SOP 可选择文字或文件交接，并将选择冻结到新运行和原快照重试。 */
+  @Test
+  void handoffModeIsValidatedAndFrozen() {
+    String roleId =
+        jdbc.queryForObject(
+            "select id from codex_sop_roles order by created_at limit 1", String.class);
+    SopStepRequest step =
+        new SopStepRequest(
+            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, Set.of(),
+            Set.of());
+    ObjectNode sop =
+        service.createSop(
+            new SopSaveRequest(
+                "文字交接快照", null, null, null, true, 10, "automatic", "legacy_text", List.of(step)));
+    ObjectNode task =
+        service.createTask(
+            new TaskDefinitionSaveRequest(
+                "文字交接任务", "验证文字交接模式快照", sop.path("id").asText(), null, true));
+
+    PreparedRun first = runStore.prepareLatest(task.path("id").asText());
+    PreparedRun retried = runStore.prepareRetry(first.workflowId());
+    assertThat(sop.path("handoffMode").asText()).isEqualTo("legacy_text");
+    assertThat(first.payload().path("handoffMode").asText()).isEqualTo("legacy_text");
+    assertThat(retried.payload().path("handoffMode").asText()).isEqualTo("legacy_text");
+    assertThatThrownBy(
+            () ->
+                service.createSop(
+                    new SopSaveRequest(
+                        "非法交接模式",
+                        null,
+                        null,
+                        null,
+                        true,
+                        10,
+                        "automatic",
+                        "unsupported",
+                        List.of(step))))
+        .hasMessageContaining("handoffMode");
   }
 }

@@ -21,6 +21,7 @@ public class ConfigService {
       Set.of("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna");
   private static final Set<String> EXECUTOR_TYPES = Set.of("local", "remote");
   private static final Set<String> ADVANCE_MODES = Set.of("automatic", "semi_automatic");
+  private static final Set<String> HANDOFF_MODES = Set.of("legacy_text", "cumulative_files");
   private static final String DEFAULT_EXPECTED_OUTPUT = "完成本步骤，并返回清晰、完整且可验证的结果。";
 
   private final RoleRepository roles;
@@ -49,7 +50,9 @@ public class ConfigService {
   /** 按可选关键字查询角色列表。 */
   @Transactional(readOnly = true)
   public List<ObjectNode> listRoles(String query) {
-    return roles.findByNameContainingIgnoreCaseOrderByCreatedAtDesc(normalize(query)).stream()
+    return roles
+        .findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(normalize(query))
+        .stream()
         .map(json::role)
         .toList();
   }
@@ -82,20 +85,24 @@ public class ConfigService {
     }
   }
 
-  /** 删除未被 SOP 步骤引用的角色。 */
+  /** 软删除未被有效 SOP 步骤引用的角色，同时保留历史 SOP 步骤的外键关系。 */
   @Transactional
   public void deleteRole(String id) {
-    findRole(id);
-    if (steps.existsByRoleId(id)) {
+    RoleEntity role = findRole(id);
+    if (steps.existsByRoleIdAndSopDeletedFalse(id)) {
       throw new ConflictFailure("角色已被 SOP 引用，只能停用。");
     }
-    roles.deleteById(id);
+    role.deleted = true;
+    role.enabled = false;
+    roles.save(role);
   }
 
   /** 按可选关键字查询 SOP 列表。 */
   @Transactional(readOnly = true)
   public List<ObjectNode> listSops(String query) {
-    return sops.findByNameContainingIgnoreCaseOrderByCreatedAtDesc(normalize(query)).stream()
+    return sops
+        .findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(normalize(query))
+        .stream()
         .map(json::sop)
         .toList();
   }
@@ -123,14 +130,16 @@ public class ConfigService {
     return json.sop(sops.save(sop));
   }
 
-  /** 删除未被有效任务定义引用的 SOP。 */
+  /** 软删除未被有效任务定义引用的 SOP，同时保留历史任务的外键关系。 */
   @Transactional
   public void deleteSop(String id) {
-    findSop(id);
+    SopEntity sop = findSop(id);
     if (tasks.existsBySopIdAndDeletedFalse(id)) {
       throw new ConflictFailure("SOP 已被任务定义引用，只能停用。");
     }
-    sops.deleteById(id);
+    sop.deleted = true;
+    sop.enabled = false;
+    sops.save(sop);
   }
 
   /** 查询未软删除且名称匹配的任务定义。 */
@@ -214,6 +223,11 @@ public class ConfigService {
     if (!ADVANCE_MODES.contains(sop.advanceMode)) {
       throw new IllegalArgumentException("advanceMode 只能是 automatic 或 semi_automatic。");
     }
+    sop.handoffMode = normalizeNullable(body.handoffMode());
+    if (sop.handoffMode == null) sop.handoffMode = "cumulative_files";
+    if (!HANDOFF_MODES.contains(sop.handoffMode)) {
+      throw new IllegalArgumentException("handoffMode 只能是 legacy_text 或 cumulative_files。");
+    }
     sop.defaultStepModel = normalizeNullable(body.defaultStepModel());
     if (sop.defaultStepModel == null) sop.defaultStepModel = defaultModel;
     validateModel(sop.defaultStepModel);
@@ -264,12 +278,20 @@ public class ConfigService {
 
   /** 根据 ID 查询角色，不存在时抛出领域未找到异常。 */
   private RoleEntity findRole(String id) {
-    return roles.findById(id).orElseThrow(() -> new NotFoundFailure("找不到角色：" + id));
+    RoleEntity role = roles.findById(id).orElseThrow(() -> new NotFoundFailure("找不到角色：" + id));
+    if (role.deleted) {
+      throw new NotFoundFailure("找不到角色：" + id);
+    }
+    return role;
   }
 
   /** 根据 ID 查询 SOP，不存在时抛出领域未找到异常。 */
   private SopEntity findSop(String id) {
-    return sops.findById(id).orElseThrow(() -> new NotFoundFailure("找不到 SOP：" + id));
+    SopEntity sop = sops.findById(id).orElseThrow(() -> new NotFoundFailure("找不到 SOP：" + id));
+    if (sop.deleted) {
+      throw new NotFoundFailure("找不到 SOP：" + id);
+    }
+    return sop;
   }
 
   /** 根据 ID 查询任务定义，并按调用场景决定是否接受软删除记录。 */

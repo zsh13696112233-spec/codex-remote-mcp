@@ -26,6 +26,10 @@ class RoleEntity extends Timestamped {
   @Column(nullable = false)
   boolean enabled = true;
 
+  /** 软删除标记；删除后的角色不再出现在配置列表中，但历史 SOP 步骤仍可保留外键引用。 */
+  @Column(nullable = false)
+  boolean deleted = false;
+
   /** JPA 乐观锁版本号，更新角色时用于检测并发覆盖。 */
   @Version long version;
 }

@@ -46,6 +46,10 @@ class SopEntity extends Timestamped {
   @Column(name = "advance_mode", nullable = false)
   String advanceMode = "automatic";
 
+  /** 步骤之间传递文字结果或累计文件的交接方式。 */
+  @Column(name = "handoff_mode", nullable = false)
+  String handoffMode = "cumulative_files";
+
   /** 步骤未单独指定模型时使用的默认模型。 */
   @Column(name = "default_step_model", nullable = false)
   String defaultStepModel = "gpt-5.6-sol";
@@ -53,6 +57,10 @@ class SopEntity extends Timestamped {
   /** SOP 是否可用于创建新的任务运行。 */
   @Column(nullable = false)
   boolean enabled = true;
+
+  /** 软删除标记；删除后的 SOP 不再出现在配置列表中，但历史任务仍可保留外键引用。 */
+  @Column(nullable = false)
+  boolean deleted = false;
 
   /** SOP 包含的有序步骤。保存 SOP 时级联保存步骤，移除集合元素时删除对应步骤；读取时按 {@code positionNo} 升序排列。 */
   @OneToMany(mappedBy = "sop", cascade = CascadeType.ALL, orphanRemoval = true)

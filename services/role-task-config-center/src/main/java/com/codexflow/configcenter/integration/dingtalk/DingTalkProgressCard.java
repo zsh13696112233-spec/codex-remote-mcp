@@ -15,6 +15,7 @@ import tools.jackson.databind.JsonNode;
 class DingTalkProgressCard {
 
   private static final int MAX_VISIBLE_NODES = 12;
+  private static final int MAX_STYLED_NODES = 6;
 
   Map<String, Object> render(JsonNode snapshot, String notice) {
     return render(snapshot, notice, null);
@@ -28,6 +29,14 @@ class DingTalkProgressCard {
     values.put("title", abbreviate(plain(snapshot.path("name").asText("未命名任务")), 40));
     values.put("markdown", summary(snapshot, notice, true, latestAssistantReply));
     values.put("status", cardStatus(snapshot));
+    values.put("progressText", styledProgress(snapshot));
+    values.put("currentStep", styledCurrentStep(snapshot));
+    values.put("stepTimeline", styledStepTimeline(snapshot.path("nodes")));
+    values.put("latestOutput", styledLatestOutput(snapshot.path("nodes")));
+    values.put("latestReply", styledLatestReply(latestAssistantReply));
+    values.put("result", styledResult(snapshot));
+    values.put("notice", styledNotice(snapshot, notice));
+    values.put("cardBody", compactBody(snapshot));
     values.put("flowStatus", flowStatus(snapshot));
     values.put("workflowId", snapshot.path("workflowId").asText());
     values.put("gateId", waiting ? gate.path("gateId").asText() : "");
@@ -38,6 +47,168 @@ class DingTalkProgressCard {
     values.put("confirmAction", "advance_confirm");
     values.put("holdAction", "advance_hold");
     return values;
+  }
+
+  private static String compactBody(JsonNode snapshot) {
+    JsonNode progress = snapshot.path("progress");
+    StringBuilder value =
+        new StringBuilder("**")
+            .append(cardStatus(snapshot))
+            .append(" · ")
+            .append(progress.path("completed").asInt())
+            .append(" / ")
+            .append(progress.path("total").asInt())
+            .append(" 步**");
+
+    String steps = compactSteps(snapshot.path("nodes"));
+    if (!steps.isBlank()) value.append("\n\n**📋 步骤状态**\n\n").append(steps);
+
+    JsonNode gate = snapshot.path("pendingAdvance");
+    if (hasGate(gate)) {
+      JsonNode next = findNode(snapshot.path("nodes"), gate.path("nextNodeId").asText());
+      if (next != null) value.append("\n\n**下一步：** ").append(nodeLabel(next));
+      value
+          .append("\n\n")
+          .append(
+              "held".equals(gate.path("state").asText())
+                  ? "自动流转已暂停，请选择继续。"
+                  : "30 秒后自动继续，也可以直接选择操作。");
+      return value.toString();
+    }
+
+    String status = snapshot.path("status").asText();
+    String result = snapshot.path("response").asText().trim();
+    if (isTerminal(status) && !result.isBlank()) {
+      value
+          .append("\n\n---\n\n**")
+          .append("completed".equals(status) ? "✅ 最终结果" : "执行结果")
+          .append("**\n\n")
+          .append(plain(abbreviate(result, 600)));
+    } else if (!isTerminal(status)) {
+      JsonNode latest = latestCompletedNode(snapshot.path("nodes"));
+      if (latest != null) {
+        value
+            .append("\n\n**最近产出**\n\n")
+            .append(plain(abbreviate(latest.path("response").asText().trim(), 240)));
+      }
+    }
+    if (!snapshot.path("error").asText().isBlank()) {
+      value.append("\n\n任务执行未完成，请在监控中心查看详情。");
+    }
+    return value.toString();
+  }
+
+  private static String compactSteps(JsonNode nodes) {
+    if (!nodes.isArray() || nodes.isEmpty()) return "";
+    StringBuilder value = new StringBuilder();
+    int visible = Math.min(nodes.size(), MAX_STYLED_NODES);
+    for (int index = 0; index < visible; index++) {
+      JsonNode node = nodes.get(index);
+      if (!value.isEmpty()) value.append('\n');
+      value
+          .append(statusIcon(node.path("status").asText()))
+          .append(' ')
+          .append(nodeLabel(node))
+          .append(" · ")
+          .append(statusText(node.path("status").asText()));
+    }
+    if (nodes.size() > visible)
+      value.append("\n… 还有 ").append(nodes.size() - visible).append(" 个步骤");
+    return value.toString();
+  }
+
+  private static String styledProgress(JsonNode snapshot) {
+    JsonNode progress = snapshot.path("progress");
+    int completed = progress.path("completed").asInt();
+    int total = progress.path("total").asInt();
+    int percent = total <= 0 ? 0 : Math.min(100, completed * 100 / total);
+    return percent + "% · " + completed + " / " + total + " 步";
+  }
+
+  private static String styledCurrentStep(JsonNode snapshot) {
+    JsonNode current = currentNode(snapshot);
+    if (current == null) {
+      return "queued".equals(snapshot.path("status").asText()) ? "### 🎯 当前步骤\n\n等待调度" : "";
+    }
+    String displayName = plain(current.path("displayName").asText("步骤"));
+    String roleName = plain(current.path("roleName").asText("未指定角色"));
+    String detail = nodeDetail(current);
+    StringBuilder value =
+        new StringBuilder("### 🎯 当前步骤\n\n**")
+            .append(displayName)
+            .append("**\n\n")
+            .append(roleName)
+            .append(" · ")
+            .append(statusText(current.path("status").asText()));
+    if (!detail.isBlank()) value.append(" · ").append(detail);
+    return value.toString();
+  }
+
+  private static String styledStepTimeline(JsonNode nodes) {
+    if (!nodes.isArray() || nodes.isEmpty()) return "";
+    StringBuilder value = new StringBuilder("### 📋 步骤状态\n\n");
+    int visible = Math.min(nodes.size(), MAX_STYLED_NODES);
+    for (int index = 0; index < visible; index++) {
+      JsonNode node = nodes.get(index);
+      value
+          .append(statusIcon(node.path("status").asText()))
+          .append(" **")
+          .append(plain(node.path("displayName").asText("步骤")))
+          .append("** · ")
+          .append(statusText(node.path("status").asText()))
+          .append('\n');
+    }
+    if (nodes.size() > visible) value.append("\n还有 ").append(nodes.size() - visible).append(" 个步骤");
+    return value.toString().trim();
+  }
+
+  private static String styledLatestOutput(JsonNode nodes) {
+    JsonNode latest = latestCompletedNode(nodes);
+    if (latest == null) return "";
+    return "> **📄 最近产出 · "
+        + nodeLabel(latest)
+        + "**\n>\n> "
+        + quote(plain(abbreviate(latest.path("response").asText().trim(), 360)));
+  }
+
+  private static String styledLatestReply(String latestAssistantReply) {
+    if (latestAssistantReply == null || latestAssistantReply.isBlank()) return "";
+    return "> **💬 最新助手回复**\n>\n> " + quote(plain(abbreviate(latestAssistantReply.trim(), 800)));
+  }
+
+  private static String styledResult(JsonNode snapshot) {
+    String status = snapshot.path("status").asText();
+    String result = snapshot.path("response").asText();
+    if (!result.isBlank() && isTerminal(status)) {
+      return "### 🟢 最终结果\n\n" + plain(abbreviate(result.trim(), 1200));
+    }
+    if (!snapshot.path("error").asText().isBlank()) {
+      return "> **任务执行未完成**\n>\n> 请在监控中心查看详细信息。";
+    }
+    return "";
+  }
+
+  private static String styledNotice(JsonNode snapshot, String notice) {
+    StringBuilder value = new StringBuilder();
+    JsonNode gate = snapshot.path("pendingAdvance");
+    if (hasGate(gate)) {
+      JsonNode next = findNode(snapshot.path("nodes"), gate.path("nextNodeId").asText());
+      value.append("### 🟡 等待确认\n\n");
+      if (next != null) value.append("下一步：**").append(nodeLabel(next)).append("**\n\n");
+      value.append(
+          "held".equals(gate.path("state").asText())
+              ? "自动流转已暂停，请点击“继续进入下一步”。"
+              : "可选择暂停或立即继续；未操作时将在 30 秒后自动进入下一步。");
+    }
+    if (notice != null && !notice.isBlank()) {
+      if (!value.isEmpty()) value.append("\n\n---\n\n");
+      value.append("ℹ️ ").append(plain(notice));
+    }
+    return value.toString();
+  }
+
+  private static String quote(String value) {
+    return value.replace("\r", "").replace("\n", "\n> ");
   }
 
   String renderText(JsonNode snapshot, String notice) {
@@ -144,18 +315,23 @@ class DingTalkProgressCard {
   }
 
   private static void appendLatestOutput(StringBuilder value, JsonNode nodes, boolean markdown) {
-    if (!nodes.isArray()) return;
-    JsonNode latest = null;
-    for (JsonNode node : nodes) {
-      if ("completed".equals(node.path("status").asText())
-          && !node.path("response").asText().isBlank()) latest = node;
-    }
+    JsonNode latest = latestCompletedNode(nodes);
     if (latest == null) return;
     value
         .append(markdown ? "\n**最近产出 · " : "\n最近产出 · ")
         .append(nodeLabel(latest))
         .append(markdown ? "**\n" : "\n")
         .append(plain(abbreviate(latest.path("response").asText().trim(), 360)));
+  }
+
+  private static JsonNode latestCompletedNode(JsonNode nodes) {
+    if (!nodes.isArray()) return null;
+    JsonNode latest = null;
+    for (JsonNode node : nodes) {
+      if ("completed".equals(node.path("status").asText())
+          && !node.path("response").asText().isBlank()) latest = node;
+    }
+    return latest;
   }
 
   private static JsonNode currentNode(JsonNode snapshot) {
@@ -240,17 +416,17 @@ class DingTalkProgressCard {
   private static String cardStatus(JsonNode snapshot) {
     if (hasGate(snapshot.path("pendingAdvance"))) {
       return "held".equals(snapshot.path("pendingAdvance").path("state").asText())
-          ? "⏸️ 已暂停"
-          : "⏳ 等待确认";
+          ? "🟡 已暂停"
+          : "🟡 等待确认";
     }
     return switch (snapshot.path("status").asText()) {
-      case "queued" -> "⏳ 排队中";
-      case "running" -> "🔵 执行中";
-      case "completed" -> "✅ 已完成";
-      case "failed" -> "❌ 执行失败";
-      case "cancelled" -> "⏹️ 已停止";
-      case "cancelling" -> "⏹️ 停止中";
-      default -> "▫️ 准备中";
+      case "queued" -> "🟡 排队中";
+      case "running" -> "🟡 执行中";
+      case "completed" -> "🟢 已完成";
+      case "failed" -> "🔴 执行失败";
+      case "cancelled" -> "🔴 已停止";
+      case "cancelling" -> "🟡 停止中";
+      default -> "🟡 准备中";
     };
   }
 
@@ -282,10 +458,8 @@ class DingTalkProgressCard {
   private static String statusIcon(String status) {
     return switch (status) {
       case "completed" -> "✅";
-      case "running", "starting" -> "🔄";
       case "failed", "cancelled", "timed_out" -> "❌";
-      case "skipped" -> "⏭️";
-      default -> "▫️";
+      default -> "•";
     };
   }
 
