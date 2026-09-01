@@ -10,8 +10,15 @@ from unittest.mock import AsyncMock
 from codex_orchestrator_mcp import Orchestrator
 from starlette.testclient import TestClient
 from tests.mock_app_server import MockAppServer
-from workflow_gateway import WorkflowGateway, create_app
+from workflow_gateway import WorkflowGateway, build_argument_parser, create_app
 from workflow_store import SINGLE_OUTPUT_CONSTRAINT, WorkflowStore, utc_now
+
+
+class GatewayCommandLineTests(unittest.TestCase):
+    def test_default_host_listens_on_all_interfaces(self) -> None:
+        args = build_argument_parser().parse_args([])
+
+        self.assertEqual(args.host, "0.0.0.0")
 
 
 class SupervisorPromptTests(unittest.TestCase):

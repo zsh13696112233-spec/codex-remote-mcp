@@ -1134,9 +1134,9 @@ def create_app(
 app = create_app()
 
 
-def main() -> None:
+def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Codex 工作流 HTTP/SSE 网关")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument(
         "--db", default=os.getenv("CODEX_WORKFLOW_DB", str(DEFAULT_DB_PATH))
@@ -1144,7 +1144,11 @@ def main() -> None:
     parser.add_argument(
         "--agents", default=os.getenv("CODEX_AGENTS_FILE", str(CONFIG_PATH))
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_argument_parser().parse_args()
     uvicorn.run(
         create_app(db_path=args.db, config_path=args.agents),
         host=args.host,

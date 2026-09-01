@@ -600,7 +600,7 @@ uv run --project .\services\python-workflow `
   --agents $env:CODEX_AGENTS_FILE
 ```
 
-如果 Java 和 Codex 服务位于同一台机器，优先监听 `127.0.0.1`。只有跨机器访问时才监听 `0.0.0.0`。
+网关默认监听 `0.0.0.0`，以便可信内网中的 Java 服务跨机器访问。必须通过主机防火墙只允许受信任的 Java 主机访问 `8080`；如果 Java 和 Codex 服务位于同一台机器，可显式改为 `127.0.0.1`。
 
 ## 十一、安全要求
 

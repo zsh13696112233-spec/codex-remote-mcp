@@ -77,6 +77,7 @@ SOP 还可选择全自动或半自动流转。全自动保持步骤成功后立�
 - [任务运行监控中心](services/workflow-console/README.md)
 - [角色任务配置中心](services/role-task-config-center/README.md)
 - [完整工作流指南](docs/WORKFLOW_GUIDE.zh-CN.md)
+- [多主监督机工作流设计](docs/MULTI_SUPERVISOR_WORKFLOW_DESIGN.zh-CN.md)
 
 ## 快速启动
 
@@ -99,7 +100,7 @@ $env:CODEX_WORKFLOW_DB = Join-Path $ProjectRoot "workflows.db"
 
 uv run --project .\services\python-workflow `
   python .\services\python-workflow\src\workflow_gateway.py `
-  --host 127.0.0.1 --port 8080 `
+  --host 0.0.0.0 --port 8080 `
   --db $env:CODEX_WORKFLOW_DB --agents $env:CODEX_AGENTS_FILE
 ```
 
@@ -161,7 +162,7 @@ mvn -f .\services\role-task-config-center\pom.xml test
 
 ## 运行与安全边界
 
-- 两个 Java Web 服务（8090、8091）默认监听 `0.0.0.0` 以支持可信内网访问，Python 网关（8080）默认仍只监听本机回环地址；三者都不能直接暴露到公网。
+- 三个服务（8080、8090、8091）默认监听 `0.0.0.0` 以支持可信内网访问；必须通过主机防火墙限制来源，三者都不能直接暴露到公网。只需本机访问时应显式改为 `127.0.0.1`。
 - 飞书和钉钉机器人都只需要服务端主动访问平台 HTTPS/WSS `443`；无需给本系统开放公网入站接口，且同一部署只能启用其中一个平台。
 - `config/agents.json`、SQLite 数据库、IDE 配置及构建产物均不提交 Git。
 - 当前任务运行中的异步作业仍保存在 Python 进程内存；进程重启后历史状态仍在，但不会自动重新附着到运行中的 Codex turn。

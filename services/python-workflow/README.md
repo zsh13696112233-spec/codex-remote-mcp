@@ -72,11 +72,13 @@ $env:CODEX_WORKFLOW_DB = "$PWD\workflows.db"
 
 uv run --project .\services\python-workflow `
   python .\services\python-workflow\src\workflow_gateway.py `
-  --host 127.0.0.1 --port 8080 `
+  --host 0.0.0.0 --port 8080 `
   --db $env:CODEX_WORKFLOW_DB --agents $env:CODEX_AGENTS_FILE
 ```
 
 MCP 进程需要运行 `src/codex_orchestrator_mcp.py`，并传入完全相同的 `CODEX_AGENTS_FILE` 和 `CODEX_WORKFLOW_DB`。
+
+网关默认监听所有网络接口以支持可信内网中的 Java 服务访问，但没有内置用户认证。必须通过主机防火墙限制 `8080` 的访问来源，不得直接暴露到公网；只需本机访问时可显式传入 `--host 127.0.0.1`。
 
 ## 测试
 
