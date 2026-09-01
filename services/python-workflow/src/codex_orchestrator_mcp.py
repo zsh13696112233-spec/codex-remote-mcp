@@ -745,11 +745,7 @@ class Orchestrator:
                         f"{artifact.get('mediaType') or 'application/octet-stream'}，"
                         f"绝对路径 {local_path}"
                     )
-            output_rule = (
-                "本步骤必须将恰好一个交付文件写入"
-                if write
-                else "本步骤可以只返回文字；如果发布文件，最多只能写入一个文件到"
-            )
+            output_rule = "本步骤可以只返回文字；如果任务本身需要发布文件，最多只能写入一个文件到"
             handoff_suffix = (
                 "\n\n"
                 + "\n".join(manifest_lines)
@@ -1369,15 +1365,6 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
                     str(captured["sourceItemId"]),
                     str(captured["filename"]),
                     captured["content"],
-                )
-            artifact_count = store.count_current_artifacts(workflow_id, node_id)
-            if job.write and artifact_count != 1:
-                raise RuntimeError(
-                    f"本步骤要求发布恰好一个文件，实际为 {artifact_count} 个。"
-                )
-            if not job.write and artifact_count > 1:
-                raise RuntimeError(
-                    f"本步骤最多发布一个文件，实际为 {artifact_count} 个。"
                 )
         except Exception as error:
             snapshot["status"] = "failed"

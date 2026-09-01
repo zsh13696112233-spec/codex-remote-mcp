@@ -56,7 +56,7 @@ Copy-Item .\config\agents.example.json .\config\agents.json
 - `handoffMode: "legacy_text"`：保留历史行为，把直接依赖步骤的文字结果追加到下一步。字段缺失时使用此模式。
 - `handoffMode: "cumulative_files"`：不传递任何前序文字结果，返工要求也只属于目标步骤。第 N 步获得第 1 至 N-1 步的全部当前有效文件。
 
-当前文件流水线要求编排器与 app-server 位于同一台机器，并在 `config/agents.json` 配置本机绝对路径 `artifact_root`。编排器直接在该根目录内为每次尝试创建 `inputs/step-N/` 和空 `output/`，提示词只交付绝对路径，不使用 Base64 传输，也不扫描业务工作区。`write=true` 必须发布恰好一个文件；`write=false` 允许只返回文字，如果发布文件则最多一个。`allow_write` 是执行机权限上限：为 `false` 时节点只能使用 `read_only`；为 `true` 时可使用 `read_only`、`workspace_write`、`auto_review`。文件交接始终只开放受控写入根目录并关闭网络。前序文件仅作为可用输入；当前要求未明确要求使用时，Agent 不得打开或合并它们。远程文件上传将在远程固定目录协议完成后另行接入。
+当前文件流水线要求编排器与 app-server 位于同一台机器，并在 `config/agents.json` 配置本机绝对路径 `artifact_root`。编排器直接在该根目录内为每次尝试创建 `inputs/step-N/` 和空 `output/`，提示词只交付绝对路径，不使用 Base64 传输，也不扫描业务工作区。所有步骤都允许只返回文字；任务本身需要发布文件时最多发布一个。步骤是否完成只取决于节点执行结果，不因没有附件而失败，后续步骤自行检查所需业务文件。`write` 只表示是否允许写入，不代表必须生成文件。`allow_write` 是执行机权限上限：为 `false` 时节点只能使用 `read_only`；为 `true` 时可使用 `read_only`、`workspace_write`、`auto_review`。文件交接始终只开放受控写入根目录并关闭网络。前序文件仅作为可用输入；当前要求未明确要求使用时，Agent 不得打开或合并它们。远程文件上传将在远程固定目录协议完成后另行接入。
 
 节点权限映射遵循 OpenAI 的 [Sandboxing](https://learn.chatgpt.com/docs/sandboxing) 与 [Agent approvals & security](https://learn.chatgpt.com/docs/agent-approvals-security) 语义：`read_only = read-only + never`，`workspace_write = workspace-write + never`，`auto_review = workspace-write + on-request + auto_review`。启动节点前会读取 `configRequirements/read`；执行机管理策略明确不允许时不会启动 thread。旧网关不支持该方法时保持兼容。
 
