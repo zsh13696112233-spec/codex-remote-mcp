@@ -69,6 +69,7 @@ class DomainJsonMapper {
       item.put("agentId", step.agentId);
       putNullable(item, "workingDirectory", step.workingDirectory);
       item.put("writeEnabled", step.writeEnabled);
+      item.put("permissionProfile", step.permissionProfile);
       putNullable(item, "modelOverride", step.modelOverride);
       item.put(
           "effectiveModel", step.modelOverride == null ? sop.defaultStepModel : step.modelOverride);

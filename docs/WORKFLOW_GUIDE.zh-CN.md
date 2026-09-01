@@ -145,7 +145,8 @@ POST http://192.168.1.100:8080/workflows
       "prompt": "只输出一个小写字母 a，不要输出其他内容",
       "dependsOn": [],
       "timeoutSec": 1800,
-      "write": false
+      "write": false,
+      "permissionProfile": "read_only"
     },
     {
       "id": "node-b",
@@ -156,7 +157,8 @@ POST http://192.168.1.100:8080/workflows
       "prompt": "只输出一个小写字母 b，不要输出其他内容",
       "dependsOn": ["node-a"],
       "timeoutSec": 1800,
-      "write": false
+      "write": false,
+      "permissionProfile": "read_only"
     },
     {
       "id": "node-c",
@@ -167,7 +169,8 @@ POST http://192.168.1.100:8080/workflows
       "prompt": "只输出一个小写字母 c，不要输出其他内容",
       "dependsOn": ["node-b"],
       "timeoutSec": 1800,
-      "write": false
+      "write": false,
+      "permissionProfile": "read_only"
     }
   ]
 }
@@ -192,6 +195,7 @@ POST http://192.168.1.100:8080/workflows
 | `nodes[].dependsOn` | 本节点依赖的节点 ID 数组；必须全部 `completed` 才允许启动 |
 | `nodes[].timeoutSec` | 节点总超时，范围 10–7200 秒 |
 | `nodes[].write` | 是否需要写权限；执行机配置也必须允许写入 |
+| `nodes[].permissionProfile` | `read_only`、`workspace_write` 或 `auto_review`；旧请求缺省时由 `write` 派生 |
 | `nodes[].cwd` | 可选的远程绝对工作目录；执行机必须允许覆盖 cwd |
 | `nodes[].model` | 可选的模型覆盖值 |
 
@@ -515,6 +519,8 @@ Java 可以每隔一到数秒轮询一次。需要实时界面时，再使用 SS
 - 文件流水线的本机执行机必须配置绝对路径 `artifact_root`；该配置只授权编排器在此目录内暂存工作流文件。
 - 当前编排器直接用该路径读写文件，不通过 app-server 传输文件内容；远程文件流水线暂不支持。
 - `allow_write` 仍只决定 Agent 是否能写业务工作区，不代替 `artifact_root` 授权。
+- `allow_write=false` 时只允许 `read_only`；为 `true` 时三档均可用。`read_only = read-only + never`，`workspace_write = workspace-write + never`，`auto_review = workspace-write + on-request + auto_review`。
+- 节点启动前调用 `configRequirements/read` 检查执行机管理策略；明确禁止所需审批策略或沙箱时直接失败，旧 app-server 不支持该方法时兼容继续。
 - 当前项目实际配置中还需要确认是否存在名为 `local` 的执行机。
 - token 不要直接写进 JSON，只写环境变量名称。
 - 明文 `ws://` 建议只用于回环地址、可信内网或 SSH 隧道。

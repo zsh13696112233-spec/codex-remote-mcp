@@ -26,7 +26,7 @@ Java 根包为 `com.codexflow.configcenter`。代码按 Web 接口、应用编�
 - SOP 可选择 `automatic` 全自动或 `semi_automatic` 半自动流转；默认全自动。
 - SOP 可选择 `legacy_text` 文字交接或 `cumulative_files` 文件交接；默认文件交接。
 - 未被有效任务引用的 SOP 支持软删除；历史任务仍保留原 SOP 外键，删除后的 SOP 不再出现在配置列表中。
-- 工作目录、执行机、写权限、超时和 Skill/MCP 标签配置。
+- 工作目录、执行机、节点权限档位、超时和 Skill/MCP 标签配置。
 - 任务定义的新建、编辑、复制、搜索、软删除和重复运行。
 - 保存每次运行的不可变配置快照和完整提交 JSON。
 - 使用最新配置运行、按原运行快照重试、取消运行和查看历史记录。
@@ -37,6 +37,8 @@ Java 根包为 `com.codexflow.configcenter`。代码按 Web 接口、应用编�
 使用最新配置创建的新运行会把 SOP 的结果交接方式写入提交 JSON。`legacy_text` 把直接上一步的文字结果追加给下一步，适合纯文本串行任务；`cumulative_files` 累计交接前序当前有效文件且不传递前序文字结果，适合文件流水线。按历史快照重试保留原字段；旧快照如果缺失字段，仍使用兼容的 `legacy_text` 行为。
 
 第一版失败策略固定为 `stop`。Skill 和 MCP 仅作为配置标签保存和展示，不影响真实执行权限。
+
+新节点默认使用 `read_only`。权限档位固定为 `read_only`（只读、不审批）、`workspace_write`（工作区写入、不审批）和 `auto_review`（工作区写入、越界请求交给 Auto-review）；不提供完全访问和人工审批。页面从 `/api/agents` 的 `permissionProfiles` 限制选项；旧网关未返回该字段时仅保留原有只读/写入两种能力。
 
 ## 启动依赖
 

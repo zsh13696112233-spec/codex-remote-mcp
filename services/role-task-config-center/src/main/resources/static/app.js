@@ -4,6 +4,7 @@ const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 const uid=()=>`node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
 const DEFAULT_EXPECTED_OUTPUT="完成本步骤，并返回清晰、完整且可验证的结果。";
 const MODELS=["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"];
+const PERMISSION_LABELS={read_only:"只读",workspace_write:"工作区写入",auto_review:"自动审核"};
 
 async function api(path,options={}){
   const r=await fetch(path,{headers:{"Content-Type":"application/json"},...options});
@@ -108,12 +109,12 @@ function openRole(x={enabled:true}){const f=$("#roleForm");f.reset();f.id.value=
 function openTask(x={enabled:true}){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=x.objective||"";f.additionalNotes.value=x.additionalNotes||"";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");f.enabled.checked=x.enabled!==false;$("#taskDialog").showModal()}
 
 function blankSop(){return{id:"",name:"",description:"",supervisorAgentId:"local",supervisorTimeoutSec:7200,maxRetryCount:10,advanceMode:"automatic",handoffMode:"cumulative_files",defaultStepModel:"gpt-5.6-sol",enabled:true,steps:[]}}
-function normalizeStep(s){return{...s,_clientId:s._clientId||uid(),displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",writeEnabled:s.writeEnabled===true,modelOverride:s.modelOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
+function normalizeStep(s){const permissionProfile=s.permissionProfile||(s.writeEnabled===true?"workspace_write":"read_only");return{...s,_clientId:s._clientId||uid(),displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",permissionProfile,writeEnabled:permissionProfile!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
 function setDraft(sop){
   const copy={...blankSop(),...sop,steps:(sop.steps||[]).map(normalizeStep)};
   state.sop.draft=copy;state.sop.selectedNodeId=copy.steps[0]?._clientId||null;state.sop.tab="workflow";state.sop.baseline=draftFingerprint(copy);
 }
-function sopPayload(d=state.sop.draft){return{name:d.name.trim(),description:(d.description||"").trim(),supervisorAgentId:"local",supervisorTimeoutSec:Number(d.supervisorTimeoutSec),maxRetryCount:Number(d.maxRetryCount),advanceMode:d.advanceMode||"automatic",handoffMode:d.handoffMode||"cumulative_files",defaultStepModel:d.defaultStepModel,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:(s.workingDirectory||"").trim(),writeEnabled:s.writeEnabled===true,modelOverride:s.modelOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
+function sopPayload(d=state.sop.draft){return{name:d.name.trim(),description:(d.description||"").trim(),supervisorAgentId:"local",supervisorTimeoutSec:Number(d.supervisorTimeoutSec),maxRetryCount:Number(d.maxRetryCount),advanceMode:d.advanceMode||"automatic",handoffMode:d.handoffMode||"cumulative_files",defaultStepModel:d.defaultStepModel,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:(s.workingDirectory||"").trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
 function draftFingerprint(d=state.sop.draft){return d?JSON.stringify(sopPayload(d)):""}
 function isSopDirty(){return !!state.sop.draft&&draftFingerprint()!==state.sop.baseline}
 function confirmDiscard(){return !isSopDirty()||confirm("当前工作流有未保存的修改，确定放弃吗？")}
@@ -192,6 +193,15 @@ function agentOptions(selected){
   const empty=!selected&&!state.agents.length?`<option value="" selected>暂无可用执行机</option>`:"";
   return empty+keep+state.agents.map(a=>`<option value="${esc(a.agentId)}" ${a.agentId===selected?"selected":""}>${esc(a.agentId)}${a.defaultModel?` · ${esc(a.defaultModel)}`:""}</option>`).join("");
 }
+function agentPermissionProfiles(agentId){
+  const agent=state.agents.find(a=>a.agentId===agentId);if(!agent)return["read_only"];
+  if(Array.isArray(agent.permissionProfiles)&&agent.permissionProfiles.length)return agent.permissionProfiles;
+  return agent.allowWrite?["read_only","workspace_write"]:["read_only"];
+}
+function permissionOptions(step){
+  const allowed=agentPermissionProfiles(step.agentId);
+  return allowed.map(value=>`<option value="${value}" ${step.permissionProfile===value?"selected":""}>${PERMISSION_LABELS[value]||value}</option>`).join("");
+}
 function nodeInspectorHtml(s){
   const role=roleById(s.roleId)||{name:s.roleName||"未知角色",duty:s.roleDuty||"",enabled:false};
   return `<div class="inspector-heading"><strong>节点配置</strong><small>步骤由上到下严格串行执行</small></div>
@@ -203,8 +213,8 @@ function nodeInspectorHtml(s){
     <div class="inspector-grid"><label>超时（秒）<input data-node-field="timeoutSec" type="number" min="10" max="7200" value="${s.timeoutSec}"></label><label>工作目录<input data-node-field="workingDirectory" value="${esc(s.workingDirectory)}" placeholder="可选"></label></div>
     <label>Skill 标签<input data-node-field="skills" value="${esc(s.skills.join(", "))}" placeholder="多个标签用逗号分隔"></label>
     <label>MCP 标签<input data-node-field="mcps" value="${esc(s.mcps.join(", "))}" placeholder="多个标签用逗号分隔"></label>
-    <label class="check"><input data-node-field="writeEnabled" type="checkbox" ${s.writeEnabled?"checked":""}> 允许写入工作目录</label>
-    <p class="inspector-hint">Skill 与 MCP 当前仅作为配置标签，不改变真实执行权限。</p>`;
+    <label>权限档位<select data-node-field="permissionProfile">${permissionOptions(s)}</select></label>
+    <p class="inspector-hint">只读：业务工作区只读且不请求审批；工作区写入：允许修改工作区但不请求审批；自动审核：允许修改工作区，越界操作交由 Auto-review 判断。文件交接只开放托管输出目录并关闭网络。执行机关闭写入时只能选择只读。Skill 与 MCP 仍仅作为配置标签。</p>`;
 }
 
 function addRoleNode(roleId,index){
@@ -303,7 +313,7 @@ $("#content").addEventListener("input",e=>{
 });
 $("#content").addEventListener("change",e=>{
   const sf=e.target.dataset.sopField;if(sf&&state.sop.draft){updateField(e.target,state.sop.draft,sf);syncDirtyUi();return}
-  const nf=e.target.dataset.nodeField,step=selectedStep();if(nf&&step){updateField(e.target,step,nf);syncDirtyUi()}
+  const nf=e.target.dataset.nodeField,step=selectedStep();if(nf&&step){updateField(e.target,step,nf);if(nf==="permissionProfile")step.writeEnabled=step.permissionProfile!=="read_only";if(nf==="agentId"&&!agentPermissionProfiles(step.agentId).includes(step.permissionProfile)){step.permissionProfile="read_only";step.writeEnabled=false;renderSopWorkspace();return}syncDirtyUi()}
 });
 $("#content").addEventListener("dragstart",e=>{
   const role=e.target.closest("[data-drag-role]"),node=e.target.closest("[data-node-id]");

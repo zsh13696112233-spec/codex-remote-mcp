@@ -64,6 +64,24 @@ class RemotePathTests(unittest.TestCase):
         self.assertTrue(config.public_dict()["artifact_transfer_enabled"])
         self.assertNotIn("artifact_root", config.public_dict())
 
+    def test_public_permission_profiles_respect_agent_write_cap(self) -> None:
+        read_only = AgentConfig.from_dict(
+            "remote", {"url": "ws://127.0.0.1:4500", "cwd": "/srv/work"}
+        )
+        writable = AgentConfig.from_dict(
+            "remote",
+            {
+                "url": "ws://127.0.0.1:4500",
+                "cwd": "/srv/work",
+                "allow_write": True,
+            },
+        )
+        self.assertEqual(read_only.public_dict()["permission_profiles"], ["read_only"])
+        self.assertEqual(
+            writable.public_dict()["permission_profiles"],
+            ["read_only", "workspace_write", "auto_review"],
+        )
+
     def test_managed_remote_paths_cannot_accept_escape_components(self) -> None:
         self.assertEqual(
             remote_path_join(r"D:\artifacts", "workflows", "abc"),
@@ -209,6 +227,42 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(roots, [job.managed_output_dir])
                 self.assertIn("第1步 生成飞机", job.prompt)
                 self.assertIn("否则不得打开、引用或合并", job.prompt)
+
+    async def test_auto_review_file_handoff_keeps_scoped_roots_and_network_off(self) -> None:
+        async with MockAppServer() as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(
+                        directory,
+                        server.url,
+                        artifact_root=str(Path(directory, "artifacts")),
+                        allow_write=True,
+                    )
+                )
+                job = await self._dispatch(
+                    orchestrator,
+                    write=True,
+                    permission_profile="auto_review",
+                    artifact_handoff={
+                        "workflowId": "workflow-auto-review",
+                        "nodeId": "step-1",
+                        "stepNumber": 1,
+                        "steps": [],
+                    },
+                )
+                await orchestrator.wait(job.job_id, 2)
+
+                turn = next(
+                    request
+                    for request in server.requests
+                    if request.get("method") == "turn/start"
+                )["params"]
+                self.assertEqual(
+                    turn["sandboxPolicy"]["writableRoots"],
+                    [job.cwd, job.managed_output_dir],
+                )
+                self.assertFalse(turn["sandboxPolicy"]["networkAccess"])
+                self.assertEqual(turn["approvalsReviewer"], "auto_review")
 
     async def test_multiple_output_files_fail_validation(self) -> None:
         async with MockAppServer() as server:
@@ -438,6 +492,117 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         request["params"]["approvalsReviewer"], "auto_review"
                     )
+
+    async def test_permission_profiles_map_to_thread_and_turn_parameters(self) -> None:
+        cases = (
+            ("read_only", False, "read-only", "never", None),
+            ("workspace_write", True, "workspace-write", "never", None),
+            ("auto_review", True, "workspace-write", "on-request", "auto_review"),
+        )
+        for profile, write, sandbox, approval, reviewer in cases:
+            with self.subTest(profile=profile):
+                async with MockAppServer(delay_sec=0.01) as server:
+                    with tempfile.TemporaryDirectory() as directory:
+                        orchestrator = Orchestrator(
+                            self._write_config(
+                                directory, server.url, allow_write=True
+                            )
+                        )
+                        job = await self._dispatch(
+                            orchestrator,
+                            write=write,
+                            permission_profile=profile,
+                        )
+                        final = await orchestrator.wait(job.job_id, 1)
+                        self.assertEqual(final.status, "completed", final.snapshot())
+                        thread = next(
+                            request
+                            for request in server.requests
+                            if request["method"] == "thread/start"
+                        )["params"]
+                        turn = next(
+                            request
+                            for request in server.requests
+                            if request["method"] == "turn/start"
+                        )["params"]
+                        self.assertEqual(thread["sandbox"], sandbox)
+                        self.assertEqual(thread["approvalPolicy"], approval)
+                        self.assertEqual(turn["approvalPolicy"], approval)
+                        self.assertEqual(thread.get("approvalsReviewer"), reviewer)
+                        self.assertEqual(turn.get("approvalsReviewer"), reviewer)
+
+    async def test_permission_profile_rejects_write_cap_and_field_conflict(self) -> None:
+        async with MockAppServer() as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                with self.assertRaisesRegex(PermissionError, "未启用写权限"):
+                    await self._dispatch(
+                        orchestrator,
+                        write=True,
+                        permission_profile="workspace_write",
+                    )
+                with self.assertRaisesRegex(ValueError, "矛盾"):
+                    await self._dispatch(
+                        orchestrator,
+                        write=False,
+                        permission_profile="auto_review",
+                    )
+
+    async def test_managed_config_requirements_can_reject_profile_before_thread(self) -> None:
+        async with MockAppServer(
+            config_requirements={
+                "allowedApprovalPolicies": ["never"],
+                "allowedSandboxModes": ["readOnly", "workspaceWrite"],
+            }
+        ) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(directory, server.url, allow_write=True)
+                )
+                job = await self._dispatch(
+                    orchestrator,
+                    write=True,
+                    permission_profile="auto_review",
+                )
+                final = await orchestrator.wait(job.job_id, 1)
+                self.assertEqual(final.status, "failed")
+                self.assertEqual(final.error_stage, "permission/check")
+                self.assertIn("执行机管理策略不允许", final.error or "")
+                self.assertFalse(
+                    any(request["method"] == "thread/start" for request in server.requests)
+                )
+
+    async def test_auto_review_remote_rejection_and_timeout_are_terminal(self) -> None:
+        async with MockAppServer(
+            turn_status="failed",
+            turn_error={"code": "approval_rejected", "message": "auto review rejected"},
+        ) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(directory, server.url, allow_write=True)
+                )
+                job = await self._dispatch(
+                    orchestrator, write=True, permission_profile="auto_review"
+                )
+                rejected = await orchestrator.wait(job.job_id, 1)
+                self.assertEqual(rejected.status, "failed")
+                self.assertEqual(rejected.error_kind, "turn_failed")
+                self.assertEqual(
+                    rejected.error_details["turn_error"]["code"], "approval_rejected"
+                )
+
+        async with MockAppServer(delay_sec=10) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(directory, server.url, allow_write=True)
+                )
+                job = await self._dispatch(
+                    orchestrator, write=True, permission_profile="auto_review"
+                )
+                job.timeout_sec = 0.15
+                timed_out = await orchestrator.wait(job.job_id, 1)
+                self.assertEqual(timed_out.status, "failed")
+                self.assertEqual(timed_out.error_kind, "job_timeout")
 
     async def test_disconnect_wakes_waiter_and_marks_job_failed(self) -> None:
         async with MockAppServer(close_after_turn_start=(4101, "test disconnect")) as server:

@@ -86,7 +86,7 @@ SOP 还可选择全自动或半自动流转。全自动保持步骤成功后立�
 Copy-Item .\config\agents.example.json .\config\agents.json
 ```
 
-编辑 `config/agents.json`，为每个执行机配置 Codex app-server WebSocket 地址、默认工作目录和权限。访问令牌只填写环境变量名，不要直接写入 JSON。
+编辑 `config/agents.json`，为每个执行机配置 Codex app-server WebSocket 地址、默认工作目录和权限上限。业务步骤支持 `read_only`、`workspace_write`、`auto_review` 三档；分别对应只读且不审批、工作区写入且不审批、工作区写入并由 Auto-review 审核越界请求。访问令牌只填写环境变量名，不要直接写入 JSON。
 
 ### 2. 启动 Python 网关
 

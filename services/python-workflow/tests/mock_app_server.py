@@ -24,6 +24,7 @@ class MockAppServer:
         steer_commentary: bool = False,
         steer_completes_turn: bool = False,
         structured_reply: str | None = None,
+        config_requirements: dict[str, Any] | None = None,
     ) -> None:
         self.delay_sec = delay_sec
         self.turn_status = turn_status
@@ -42,6 +43,7 @@ class MockAppServer:
             "nodeId": None,
             "revisionInstruction": None,
         }, ensure_ascii=False)
+        self.config_requirements = config_requirements
         self.url = ""
         self.authorization: str | None = None
         self.requests: list[dict[str, Any]] = []
@@ -80,6 +82,12 @@ class MockAppServer:
 
                 if method == "initialize":
                     await self._result(connection, request_id, {"serverInfo": {"name": "mock"}})
+                elif method == "configRequirements/read":
+                    await self._result(
+                        connection,
+                        request_id,
+                        {"requirements": self.config_requirements},
+                    )
                 elif method in {"thread/start", "thread/resume"}:
                     await self._result(connection, request_id, {"thread": {"id": "thread-1"}})
                 elif method == "turn/start":

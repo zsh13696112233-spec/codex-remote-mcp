@@ -22,6 +22,8 @@ public class ConfigService {
   private static final Set<String> EXECUTOR_TYPES = Set.of("local", "remote");
   private static final Set<String> ADVANCE_MODES = Set.of("automatic", "semi_automatic");
   private static final Set<String> HANDOFF_MODES = Set.of("legacy_text", "cumulative_files");
+  private static final Set<String> PERMISSION_PROFILES =
+      Set.of("read_only", "workspace_write", "auto_review");
   private static final String DEFAULT_EXPECTED_OUTPUT = "完成本步骤，并返回清晰、完整且可验证的结果。";
 
   private final RoleRepository roles;
@@ -258,7 +260,19 @@ public class ConfigService {
     }
     step.agentId = body.agentId().trim();
     step.workingDirectory = normalizeNullable(body.workingDirectory());
-    step.writeEnabled = Boolean.TRUE.equals(body.writeEnabled());
+    step.permissionProfile = normalizeNullable(body.permissionProfile());
+    if (step.permissionProfile == null) {
+      step.permissionProfile =
+          Boolean.TRUE.equals(body.writeEnabled()) ? "workspace_write" : "read_only";
+    }
+    if (!PERMISSION_PROFILES.contains(step.permissionProfile)) {
+      throw new IllegalArgumentException(
+          "permissionProfile 只能是 read_only、workspace_write 或 auto_review。");
+    }
+    step.writeEnabled = !"read_only".equals(step.permissionProfile);
+    if (body.writeEnabled() != null && body.writeEnabled() != step.writeEnabled) {
+      throw new IllegalArgumentException("permissionProfile 与 writeEnabled 字段矛盾。");
+    }
     step.modelOverride = normalizeNullable(body.modelOverride());
     if (step.modelOverride != null) validateModel(step.modelOverride);
     step.timeoutSec = integerInRange(body.timeoutSec(), "timeoutSec", 1800, 10, 7200);

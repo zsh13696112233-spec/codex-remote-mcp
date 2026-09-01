@@ -149,6 +149,7 @@ public class WorkflowRunStore {
       previous = step.id;
       if (step.workingDirectory != null) node.put("cwd", step.workingDirectory);
       node.put("write", step.writeEnabled);
+      node.put("permissionProfile", step.permissionProfile);
       node.put(
           "model", step.modelOverride == null ? task.sop.defaultStepModel : step.modelOverride);
       node.put("timeoutSec", step.timeoutSec);

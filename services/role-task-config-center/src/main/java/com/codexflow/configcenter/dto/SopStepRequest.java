@@ -15,6 +15,7 @@ import java.util.Set;
  * @param agentId 执行机 ID
  * @param workingDirectory 可选工作目录
  * @param writeEnabled 是否允许文件写入
+ * @param permissionProfile 节点权限档位
  * @param modelOverride 可选模型覆盖值
  * @param timeoutSec 步骤超时秒数
  * @param skills Skill 标签集合
@@ -29,6 +30,7 @@ public record SopStepRequest(
     @NotBlank @Size(max = 128) String agentId,
     @Size(max = 1000) String workingDirectory,
     Boolean writeEnabled,
+    @Size(max = 32) String permissionProfile,
     @Size(max = 64) String modelOverride,
     Integer timeoutSec,
     Set<@Size(max = 160) String> skills,

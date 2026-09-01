@@ -76,13 +76,24 @@ class WorkflowGateway:
 
     async def submit(self, raw_spec: dict[str, Any]) -> dict[str, Any]:
         spec = WorkflowStore.normalize_spec(raw_spec)
-        available_agents = {item["agent_id"] for item in self.orchestrator.list_agents()}
+        agent_values = self.orchestrator.list_agents()
+        available_agents = {item["agent_id"] for item in agent_values}
         requested_agents = {spec["supervisorAgentId"]} | {
             node["agentId"] for node in spec["nodes"]
         }
         unknown = sorted(requested_agents - available_agents)
         if unknown:
             raise ValueError(f"工作流引用了未知执行机：{', '.join(unknown)}")
+        profiles_by_agent = {
+            item["agent_id"]: set(item.get("permission_profiles") or ["read_only"])
+            for item in agent_values
+        }
+        for node in spec["nodes"]:
+            profile = node["permissionProfile"]
+            if profile not in profiles_by_agent[node["agentId"]]:
+                raise PermissionError(
+                    f"执行机 {node['agentId']} 不允许节点 {node['id']} 使用权限档位 {profile}。"
+                )
 
         snapshot = await asyncio.to_thread(self.store.create_workflow, spec)
         workflow_id = spec["workflowId"]
@@ -109,6 +120,7 @@ class WorkflowGateway:
                 "defaultModel": item.get("model"),
                 "allowWrite": bool(item.get("allow_write")),
                 "allowCwdOverride": bool(item.get("allow_cwd_override")),
+                "permissionProfiles": list(item.get("permission_profiles") or []),
             }
             for item in self.orchestrator.list_agents()
         ]

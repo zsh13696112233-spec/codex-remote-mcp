@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.node.ObjectNode;
 
 /** 验证配置中心的数据库迁移、JPA 关系加载和请求参数校验。 */
@@ -54,6 +55,12 @@ class ConfigCenterApplicationTest {
         .isEqualTo(1);
     assertThat(
             jdbc.queryForObject(
+                "select count(*) from information_schema.columns "
+                    + "where table_name = 'codex_sop_steps' and column_name = 'permission_profile'",
+                Integer.class))
+        .isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
                 "select count(*) from information_schema.tables "
                     + "where table_name in ('codex_sop_feishu_bot_state', "
                     + "'codex_sop_feishu_workflow_bindings', "
@@ -74,7 +81,7 @@ class ConfigCenterApplicationTest {
             "select id from codex_sop_roles order by created_at limit 1", String.class);
     SopStepRequest step =
         new SopStepRequest(
-            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, Set.of(),
+            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
     SopSaveRequest sopBody = new SopSaveRequest("关系加载回归测试", null, null, null, null, List.of(step));
     ObjectNode createdSop = service.createSop(sopBody);
@@ -102,6 +109,89 @@ class ConfigCenterApplicationTest {
         .containsExactlyInAnyOrder("name", "duty");
   }
 
+  /** 确认权限档位会派生兼容写入字段、冻结到运行快照，并拒绝矛盾或非法值。 */
+  @Test
+  @Transactional
+  void permissionProfileIsValidatedAndFrozenIntoRunPayload() {
+    String roleId =
+        jdbc.queryForObject(
+            "select id from codex_sop_roles order by created_at limit 1", String.class);
+    SopStepRequest autoReview =
+        new SopStepRequest(
+            "自动审核步骤",
+            roleId,
+            "完成权限测试",
+            null,
+            "local",
+            "local",
+            null,
+            true,
+            "auto_review",
+            null,
+            1800,
+            Set.of(),
+            Set.of());
+    ObjectNode sop =
+        service.createSop(
+            new SopSaveRequest("权限档位测试", null, null, null, true, List.of(autoReview)));
+    ObjectNode task =
+        service.createTask(
+            new TaskDefinitionSaveRequest(
+                "权限档位任务", "验证权限档位快照", sop.path("id").asText(), null, true));
+    PreparedRun run = runStore.prepareLatest(task.path("id").asText());
+    PreparedRun retried = runStore.prepareRetry(run.workflowId());
+
+    assertThat(sop.path("steps").get(0).path("permissionProfile").asText())
+        .isEqualTo("auto_review");
+    assertThat(sop.path("steps").get(0).path("writeEnabled").asBoolean()).isTrue();
+    assertThat(run.payload().path("nodes").get(0).path("permissionProfile").asText())
+        .isEqualTo("auto_review");
+    assertThat(run.payload().path("nodes").get(0).path("write").asBoolean()).isTrue();
+    assertThat(retried.payload().path("nodes").get(0).path("permissionProfile").asText())
+        .isEqualTo("auto_review");
+
+    SopStepRequest contradictory =
+        new SopStepRequest(
+            "矛盾步骤",
+            roleId,
+            "不会保存",
+            null,
+            "local",
+            "local",
+            null,
+            true,
+            "read_only",
+            null,
+            1800,
+            Set.of(),
+            Set.of());
+    assertThatThrownBy(
+            () ->
+                service.createSop(
+                    new SopSaveRequest("矛盾权限", null, null, null, true, List.of(contradictory))))
+        .hasMessageContaining("矛盾");
+    SopStepRequest unknown =
+        new SopStepRequest(
+            "非法步骤",
+            roleId,
+            "不会保存",
+            null,
+            "local",
+            "local",
+            null,
+            null,
+            "danger_full_access",
+            null,
+            1800,
+            Set.of(),
+            Set.of());
+    assertThatThrownBy(
+            () ->
+                service.createSop(
+                    new SopSaveRequest("非法权限", null, null, null, true, List.of(unknown))))
+        .hasMessageContaining("permissionProfile");
+  }
+
   /** 确认重跑额度会冻结到网关载荷，整项任务重试沿用上限但不会携带已使用次数。 */
   @Test
   void retryLimitIsValidatedAndFrozenIntoFreshRunPayloads() {
@@ -110,7 +200,7 @@ class ConfigCenterApplicationTest {
             "select id from codex_sop_roles order by created_at limit 1", String.class);
     SopStepRequest step =
         new SopStepRequest(
-            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, Set.of(),
+            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
     SopSaveRequest sopBody = new SopSaveRequest("额度快照测试", null, null, null, true, 7, List.of(step));
     ObjectNode createdSop = service.createSop(sopBody);
@@ -153,7 +243,7 @@ class ConfigCenterApplicationTest {
             "select id from codex_sop_roles order by created_at limit 1", String.class);
     SopStepRequest step =
         new SopStepRequest(
-            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, Set.of(),
+            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
     ObjectNode sop =
         service.createSop(
@@ -185,7 +275,7 @@ class ConfigCenterApplicationTest {
             "select id from codex_sop_roles order by created_at limit 1", String.class);
     SopStepRequest step =
         new SopStepRequest(
-            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, Set.of(),
+            "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
     ObjectNode sop =
         service.createSop(

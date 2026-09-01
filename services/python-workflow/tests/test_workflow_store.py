@@ -140,7 +140,7 @@ class WorkflowStoreTests(unittest.TestCase):
                 "INSERT INTO workflow_nodes (workflow_id, node_id, position, agent_id, "
                 "executor_type, prompt, depends_on_json, write_enabled, timeout_sec, "
                 "status, created_at) VALUES "
-                "('legacy', 'a', 0, 'local', 'local', '旧提示', '[]', 0, 10, "
+                "('legacy', 'a', 0, 'local', 'local', '旧提示', '[]', 1, 10, "
                 "'pending', ?)",
                 (utc_now(),),
             )
@@ -165,6 +165,35 @@ class WorkflowStoreTests(unittest.TestCase):
             ).fetchone()
         self.assertIn("revision_instruction", control_columns)
         self.assertIsNotNone(revision_table)
+        dispatch = WorkflowStore(legacy_path).prepare_node_dispatch("legacy", "a")
+        self.assertEqual(dispatch["permissionProfile"], "workspace_write")
+        self.assertTrue(dispatch["write"])
+
+    def test_permission_profile_defaults_and_legacy_write_are_compatible(self) -> None:
+        default = WorkflowStore.normalize_spec(serial_workflow())
+        self.assertEqual(default["nodes"][0]["permissionProfile"], "read_only")
+        self.assertFalse(default["nodes"][0]["write"])
+
+        legacy = serial_workflow()
+        legacy["nodes"][0]["write"] = True
+        normalized = WorkflowStore.normalize_spec(legacy)
+        self.assertEqual(
+            normalized["nodes"][0]["permissionProfile"], "workspace_write"
+        )
+        self.assertTrue(normalized["nodes"][0]["write"])
+
+    def test_permission_profile_rejects_unknown_and_conflicting_legacy_field(self) -> None:
+        unknown = serial_workflow()
+        unknown["nodes"][0]["permissionProfile"] = "danger_full_access"
+        with self.assertRaisesRegex(ValueError, "permissionProfile"):
+            WorkflowStore.normalize_spec(unknown)
+
+        conflicting = serial_workflow()
+        conflicting["nodes"][0].update(
+            permissionProfile="auto_review", write=False
+        )
+        with self.assertRaisesRegex(ValueError, "矛盾"):
+            WorkflowStore.normalize_spec(conflicting)
 
     def test_cycle_is_rejected(self) -> None:
         value = serial_workflow()

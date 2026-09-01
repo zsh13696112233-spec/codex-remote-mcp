@@ -47,6 +47,7 @@ LEGACY_IMAGE_LINK_PATTERN = re.compile(
     r"\[[^\]]*\]\((?P<path>[^)]+\.(?:png|jpe?g|gif|webp))\)", re.IGNORECASE
 )
 LOGGER = logging.getLogger(__name__)
+PERMISSION_PROFILES = {"read_only", "workspace_write", "auto_review"}
 
 
 def utc_now() -> str:
@@ -245,6 +246,7 @@ class WorkflowStore:
                     depends_on_json TEXT NOT NULL,
                     cwd TEXT,
                     write_enabled INTEGER NOT NULL,
+                    permission_profile TEXT NOT NULL DEFAULT 'read_only',
                     model TEXT,
                     timeout_sec INTEGER NOT NULL,
                     status TEXT NOT NULL,
@@ -423,11 +425,24 @@ class WorkflowStore:
                 "original_prompt": "TEXT",
                 "actual_prompt": "TEXT",
                 "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "permission_profile": "TEXT NOT NULL DEFAULT 'read_only'",
             }.items():
                 if name not in columns:
                     connection.execute(
                         f"ALTER TABLE workflow_nodes ADD COLUMN {name} {definition}"
                     )
+            connection.execute(
+                """
+                UPDATE workflow_nodes
+                SET permission_profile = CASE
+                    WHEN write_enabled = 1 THEN 'workspace_write'
+                    ELSE 'read_only'
+                END
+                WHERE permission_profile IS NULL
+                   OR permission_profile = ''
+                   OR permission_profile = 'read_only' AND write_enabled = 1
+                """
+            )
             workflow_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(workflows)").fetchall()
@@ -556,6 +571,28 @@ class WorkflowStore:
             if not 10 <= timeout_sec <= 7200:
                 raise ValueError(f"节点 {node_id} 的 timeoutSec 必须在 10 到 7200 之间。")
 
+            raw_profile = raw_node.get(
+                "permissionProfile", raw_node.get("permission_profile")
+            )
+            has_legacy_write = "write" in raw_node
+            legacy_write = bool(raw_node.get("write", False))
+            if raw_profile is None:
+                permission_profile = (
+                    "workspace_write" if legacy_write else "read_only"
+                )
+            else:
+                permission_profile = str(raw_profile).strip().lower()
+                if permission_profile not in PERMISSION_PROFILES:
+                    raise ValueError(
+                        f"节点 {node_id} 的 permissionProfile 只能是 "
+                        "read_only、workspace_write 或 auto_review。"
+                    )
+                profile_write = permission_profile != "read_only"
+                if has_legacy_write and legacy_write != profile_write:
+                    raise ValueError(
+                        f"节点 {node_id} 的 permissionProfile 与 write 字段矛盾。"
+                    )
+
             nodes.append(
                 {
                     "id": node_id,
@@ -567,7 +604,8 @@ class WorkflowStore:
                     "roleName": str(raw_node.get("roleName") or "未指定角色").strip(),
                     "dependsOn": normalized_dependencies,
                     "cwd": raw_node.get("cwd"),
-                    "write": bool(raw_node.get("write", False)),
+                    "write": permission_profile != "read_only",
+                    "permissionProfile": permission_profile,
                     "model": raw_node.get("model"),
                     "timeoutSec": timeout_sec,
                 }
@@ -675,9 +713,9 @@ class WorkflowStore:
                     INSERT INTO workflow_nodes (
                         workflow_id, node_id, position, agent_id, executor_type,
                         prompt, display_name, role_name, original_prompt,
-                        depends_on_json, cwd, write_enabled, model,
+                        depends_on_json, cwd, write_enabled, permission_profile, model,
                         timeout_sec, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                     """,
                     (
                         spec["workflowId"],
@@ -692,6 +730,7 @@ class WorkflowStore:
                         json.dumps(node["dependsOn"], ensure_ascii=False),
                         node["cwd"],
                         int(node["write"]),
+                        node["permissionProfile"],
                         node["model"],
                         node["timeoutSec"],
                         timestamp,
@@ -2463,6 +2502,7 @@ class WorkflowStore:
             "prompt": row["actual_prompt"] or row["original_prompt"] or row["prompt"],
             "cwd": row["cwd"],
             "write": bool(row["write_enabled"]),
+            "permissionProfile": row["permission_profile"],
             "model": row["model"],
             "timeoutSec": row["timeout_sec"],
             "status": row["status"],

@@ -133,14 +133,52 @@ class SupervisorPromptTests(unittest.TestCase):
                     "agent_id": "local", "url": "ws://secret", "cwd": "/work",
                     "authenticated": True, "token_env": "SECRET_TOKEN",
                     "allow_write": True, "allow_cwd_override": False, "model": "gpt-5.6-sol",
+                    "permission_profiles": ["read_only", "workspace_write", "auto_review"],
                 }]
 
         gateway = WorkflowGateway(None, FakeOrchestrator())
         value = gateway.public_agents()[0]
         self.assertEqual(value["agentId"], "local")
+        self.assertEqual(value["permissionProfiles"], [
+            "read_only", "workspace_write", "auto_review",
+        ])
         self.assertNotIn("url", value)
         self.assertNotIn("authenticated", value)
         self.assertNotIn("token_env", value)
+
+
+class WorkflowSubmissionPermissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_submit_rejects_profile_above_agent_cap_before_persisting(self) -> None:
+        class ReadOnlyOrchestrator:
+            def list_agents(self):
+                return [
+                    {
+                        "agent_id": "local",
+                        "permission_profiles": ["read_only"],
+                    }
+                ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkflowStore(Path(directory, "workflows.db"))
+            gateway = WorkflowGateway(store, ReadOnlyOrchestrator())
+            with self.assertRaisesRegex(PermissionError, "不允许节点"):
+                await gateway.submit(
+                    {
+                        "workflowId": "write-denied",
+                        "supervisorAgentId": "local",
+                        "nodes": [
+                            {
+                                "id": "a",
+                                "prompt": "修改文件",
+                                "write": True,
+                                "permissionProfile": "workspace_write",
+                                "timeoutSec": 10,
+                            }
+                        ],
+                    }
+                )
+            with self.assertRaisesRegex(ValueError, "找不到工作流"):
+                store.get_workflow("write-denied")
 
 
 class WorkflowArtifactHttpTests(unittest.TestCase):

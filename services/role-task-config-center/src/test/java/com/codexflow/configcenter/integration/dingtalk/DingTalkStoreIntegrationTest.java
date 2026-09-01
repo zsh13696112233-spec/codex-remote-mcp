@@ -264,7 +264,7 @@ class DingTalkStoreIntegrationTest {
             "select id from codex_sop_roles order by created_at limit 1", String.class);
     SopStepRequest step =
         new SopStepRequest(
-            "钉钉步骤", roleId, "完成测试", null, null, "local", null, null, null, null, Set.of(),
+            "钉钉步骤", roleId, "完成测试", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
     ObjectNode sop =
         config.createSop(

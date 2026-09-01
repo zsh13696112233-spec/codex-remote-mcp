@@ -62,6 +62,10 @@ class SopStepEntity {
   @Column(name = "write_enabled", nullable = false)
   boolean writeEnabled;
 
+  /** 节点权限档位；写入兼容字段由该值派生。 */
+  @Column(name = "permission_profile", nullable = false)
+  String permissionProfile = "read_only";
+
   /** 可选的步骤模型覆盖值；为空时继承 SOP 默认模型。 */
   @Column(name = "model_override")
   String modelOverride;

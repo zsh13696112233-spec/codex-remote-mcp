@@ -41,6 +41,22 @@ MAX_PROMPT_LENGTH = 100_000
 DEFAULT_REQUEST_TIMEOUT_SEC = 30.0
 INTERRUPT_TIMEOUT_SEC = 10.0
 LOGGER = logging.getLogger(__name__)
+PERMISSION_PROFILES = ("read_only", "workspace_write", "auto_review")
+
+
+def permission_settings(
+    profile: str,
+) -> tuple[bool, Literal["never", "on-request"], Literal["auto_review"] | None]:
+    """把业务权限档位集中映射到 App Server 的写入、审批和审核者参数。"""
+    if profile == "read_only":
+        return False, "never", None
+    if profile == "workspace_write":
+        return True, "never", None
+    if profile == "auto_review":
+        return True, "on-request", "auto_review"
+    raise ValueError(
+        "permission_profile 只能是 read_only、workspace_write 或 auto_review。"
+    )
 
 
 def is_absolute_remote_path(path: str) -> bool:
@@ -124,6 +140,9 @@ class AgentConfig:
             "cwd": self.cwd,
             "authenticated": self.token_env is not None,
             "allow_write": self.allow_write,
+            "permission_profiles": list(
+                PERMISSION_PROFILES if self.allow_write else ("read_only",)
+            ),
             "allow_cwd_override": self.allow_cwd_override,
             "model": self.model,
             "artifact_transfer_enabled": self.artifact_root is not None,
@@ -138,6 +157,7 @@ class Job:
     requested_thread_id: str | None
     cwd: str
     write: bool
+    permission_profile: str | None
     model: str | None
     timeout_sec: int
     output_schema: dict[str, Any] | None = None
@@ -219,6 +239,7 @@ class Job:
             "turn_id": self.turn_id,
             "cwd": self.cwd,
             "write": self.write,
+            "permission_profile": self.permission_profile,
             "model": self.model,
             "response": self.response,
             "error": self.error,
@@ -631,6 +652,7 @@ class Orchestrator:
         thread_id: str | None,
         cwd: str | None,
         write: bool,
+        permission_profile: str | None = None,
         model: str | None,
         timeout_sec: int,
         approval_policy: Literal["never", "on-request", "untrusted"] = "never",
@@ -653,6 +675,15 @@ class Orchestrator:
         if agent_id not in agents:
             raise ValueError(f"未知执行机 {agent_id}，可用值：{', '.join(agents)}")
         agent = agents[agent_id]
+
+        if permission_profile is not None:
+            normalized_profile = permission_profile.strip().lower()
+            profile_write, approval_policy, approvals_reviewer = permission_settings(
+                normalized_profile
+            )
+            if write != profile_write:
+                raise ValueError("permission_profile 与 write 字段矛盾。")
+            permission_profile = normalized_profile
 
         selected_cwd = agent.cwd
         if cwd is not None:
@@ -737,6 +768,7 @@ class Orchestrator:
             requested_thread_id=thread_id,
             cwd=selected_cwd,
             write=write,
+            permission_profile=permission_profile,
             model=model or agent.model,
             timeout_sec=timeout_sec,
             output_schema=output_schema,
@@ -918,6 +950,10 @@ class Orchestrator:
                             raise
                         except TimeoutError:
                             raise JobTotalTimeout(job.timeout_sec) from None
+
+                        if job.permission_profile is not None:
+                            stage = "permission/check"
+                            await self._check_config_requirements(client, job, deadline)
 
                         if job.artifact_contract:
                             stage = "artifact/stage"
@@ -1122,6 +1158,63 @@ class Orchestrator:
                 "content": content,
             }
         ]
+
+    @staticmethod
+    async def _check_config_requirements(
+        client: AppServerClient,
+        job: Job,
+        deadline: float,
+    ) -> None:
+        """在启动步骤前尊重执行机的托管审批与沙箱限制。"""
+        try:
+            result = await Orchestrator._request_with_deadline(
+                client,
+                "configRequirements/read",
+                {},
+                deadline,
+                job.timeout_sec,
+            )
+        except AppServerRpcError as error:
+            if error.code == -32601:
+                return
+            raise
+        if not isinstance(result, dict):
+            return
+        requirements = result.get("requirements")
+        if not isinstance(requirements, dict):
+            return
+
+        def normalized(values: Any) -> set[str] | None:
+            if not isinstance(values, list):
+                return None
+            return {
+                "".join(
+                    character
+                    for character in str(value).lower()
+                    if character.isalnum()
+                )
+                for value in values
+            }
+
+        allowed_policies = normalized(requirements.get("allowedApprovalPolicies"))
+        required_policy = "".join(
+            character
+            for character in job.approval_policy.lower()
+            if character.isalnum()
+        )
+        if allowed_policies is not None and required_policy not in allowed_policies:
+            raise PermissionError(
+                f"执行机管理策略不允许权限档位 {job.permission_profile or '当前任务'} "
+                f"使用审批策略 {job.approval_policy}。"
+            )
+
+        allowed_sandboxes = normalized(requirements.get("allowedSandboxModes"))
+        required_sandbox = "workspacewrite" if job.write else "readonly"
+        if allowed_sandboxes is not None and required_sandbox not in allowed_sandboxes:
+            raise PermissionError(
+                f"执行机管理策略不允许权限档位 {job.permission_profile or '当前任务'} "
+                f"使用沙箱 {'workspace-write' if job.write else 'read-only'}。"
+            )
 
     @staticmethod
     async def _request_with_deadline(
@@ -1456,6 +1549,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             thread_id=None,
             cwd=node["cwd"],
             write=node["write"],
+            permission_profile=node["permissionProfile"],
             model=node["model"],
             timeout_sec=node["timeoutSec"],
             event_callback=record,

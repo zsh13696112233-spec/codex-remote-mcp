@@ -115,8 +115,8 @@ class SopDeletionIntegrationTest {
   private ObjectNode createSop(String name, String roleId) {
     SopStepRequest step =
         new SopStepRequest(
-            "执行步骤", roleId, "完成删除测试", null, "local", "local", null, false, null, 1800, Set.of(),
-            Set.of());
+            "执行步骤", roleId, "完成删除测试", null, "local", "local", null, false, null, null, 1800,
+            Set.of(), Set.of());
     return service.createSop(new SopSaveRequest(name, null, null, null, true, List.of(step)));
   }
 }

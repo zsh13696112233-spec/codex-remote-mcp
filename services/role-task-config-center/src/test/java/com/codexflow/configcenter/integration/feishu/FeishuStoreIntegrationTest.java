@@ -181,7 +181,7 @@ class FeishuStoreIntegrationTest {
             "select id from codex_sop_roles order by created_at limit 1", String.class);
     SopStepRequest step =
         new SopStepRequest(
-            "飞书步骤", roleId, "完成测试", null, null, "local", null, null, null, null, Set.of(),
+            "飞书步骤", roleId, "完成测试", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
     ObjectNode sop =
         config.createSop(
