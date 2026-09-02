@@ -26,7 +26,7 @@ class SopEntity extends Timestamped {
   @Column(length = 2000)
   String description;
 
-  /** 主监督执行机标识；当前业务规则固定为 {@code local}。 */
+  /** 主监督执行机标识；保存配置时不要求执行机在线。 */
   @Column(name = "supervisor_agent_id", nullable = false)
   String supervisorAgentId = "local";
 

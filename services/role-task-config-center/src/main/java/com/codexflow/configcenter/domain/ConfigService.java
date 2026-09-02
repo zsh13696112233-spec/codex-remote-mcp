@@ -215,7 +215,7 @@ public class ConfigService {
   private void applySop(SopEntity sop, SopSaveRequest body) {
     sop.name = body.name().trim();
     sop.description = normalizeNullable(body.description());
-    sop.supervisorAgentId = "local";
+    sop.supervisorAgentId = body.supervisorAgentId().trim();
     sop.failurePolicy = "stop";
     sop.supervisorTimeoutSec =
         integerInRange(body.supervisorTimeoutSec(), "supervisorTimeoutSec", 7200, 10, 7200);

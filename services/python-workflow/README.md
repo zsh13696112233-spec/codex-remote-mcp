@@ -28,7 +28,18 @@ python-workflow/
 Copy-Item .\config\agents.example.json .\config\agents.json
 ```
 
-`agents.json` 是本机配置并已被 Git 忽略。令牌使用 `token_env` 引用环境变量，不要写入配置文件。
+`agents.json` 是本机配置并已被 Git 忽略。令牌可以使用 `token_env` 引用环境变量，或使用 `token_file` 引用网关所在机器上的绝对文件路径；两者只能配置一个，不要把令牌明文写入配置文件。令牌文件使用 UTF-8 编码，只包含一行令牌且不能超过 8 KiB；网关在每次建立连接时重新读取，便于轮换令牌。请通过 Windows ACL 或 Linux 文件权限限制网关运行账号以外的访问。
+
+每个执行机可以配置：
+
+- `enabled`：是否允许新工作流使用，默认 `true`。
+- `capabilities`：只允许 `supervisor` 和 `executor`。旧配置未声明时，`local` 默认同时具备两种能力，其他执行机默认仅具备 `executor`。
+- `capacity`：具备 `supervisor` 能力时默认且仅允许为 `1`；纯执行机不配置该字段。
+- `token_env` / `token_file`：可选的认证令牌来源，分别表示环境变量名和网关本机的绝对文件路径，严格二选一。
+
+`GET /agents` 只返回脱敏后的 ID、默认目录/模型、启停、能力、主监督容量和权限上限。对于具备主监督能力的执行机，还返回缓存的 `connectionStatus`（`online`、`offline`、`unknown`）、基于持久租约计算的 `availability`（`idle`、`busy`）、`checkedAt` 和 `lastOnlineAt`；不返回地址、令牌或原始连接异常。网关每 10 秒只做一次 WebSocket 连接与 Codex 协议初始化，连续两次失败才标记离线，不创建 thread 或 turn。该状态是页面提示，不替代提交和实际派发校验。`POST /workflows` 在写入 SQLite 前校验主监督和每个步骤执行机是否存在、启用、能力匹配，并继续执行权限档位校验；不要求各步骤使用相同执行机或工作目录。
+
+提交成功的工作流先保持 `queued`。调度器按主监督分别以 `created_at + workflow_id` 领取最早任务；同一主监督固定只运行一个工作流，不同主监督可以并行。租约保存在 SQLite 的 `supervisor_leases` 表，完成、失败和取消时与终态在同一事务释放，半自动暂停继续占用。网关启动时把遗留的 `running/cancelling` 工作流直接标记失败、清空租约并继续排队任务，不重新附着旧外部会话。当前只提供不持久化的轻量可达性探测；远程 Sidecar、权威心跳、租约超时和可靠恢复不属于当前阶段。
 
 步骤发布的任意格式文件会作为工作流附件写入共享数据库；图片生成事件也会在事件截断前被合并。单文件上限为 20 MB，每个工作流的当前与历史文件合计最多 50 个，同一 SHA-256 内容自动去重。网关继续通过 `GET /workflows/{workflowId}/artifacts/{artifactId}` 只读返回附件，不提供任意文件路径读取能力。非图片响应强制附件下载并设置 `nosniff`。
 

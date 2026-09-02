@@ -11,6 +11,7 @@ import java.util.List;
  *
  * @param name SOP 名称
  * @param description 可选说明
+ * @param supervisorAgentId 主监督执行机 ID
  * @param supervisorTimeoutSec 主监督超时秒数
  * @param defaultStepModel 默认步骤模型
  * @param enabled 是否启用
@@ -22,6 +23,7 @@ import java.util.List;
 public record SopSaveRequest(
     @NotBlank @Size(max = 160) String name,
     @Size(max = 2000) String description,
+    @NotBlank @Size(max = 128) String supervisorAgentId,
     Integer supervisorTimeoutSec,
     @Size(max = 64) String defaultStepModel,
     Boolean enabled,
@@ -40,6 +42,7 @@ public record SopSaveRequest(
     this(
         name,
         description,
+        "local",
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
@@ -60,6 +63,7 @@ public record SopSaveRequest(
     this(
         name,
         description,
+        "local",
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
@@ -81,12 +85,36 @@ public record SopSaveRequest(
     this(
         name,
         description,
+        "local",
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
         maxRetryCount,
         advanceMode,
         null,
+        steps);
+  }
+
+  public SopSaveRequest(
+      String name,
+      String description,
+      Integer supervisorTimeoutSec,
+      String defaultStepModel,
+      Boolean enabled,
+      Integer maxRetryCount,
+      String advanceMode,
+      String handoffMode,
+      List<SopStepRequest> steps) {
+    this(
+        name,
+        description,
+        "local",
+        supervisorTimeoutSec,
+        defaultStepModel,
+        enabled,
+        maxRetryCount,
+        advanceMode,
+        handoffMode,
         steps);
   }
 }

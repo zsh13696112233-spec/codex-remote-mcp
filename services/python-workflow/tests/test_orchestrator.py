@@ -82,6 +82,107 @@ class RemotePathTests(unittest.TestCase):
             ["read_only", "workspace_write", "auto_review"],
         )
 
+    def test_agent_capability_defaults_and_fixed_supervisor_capacity(self) -> None:
+        local = AgentConfig.from_dict(
+            "local", {"url": "ws://127.0.0.1:4500", "cwd": "/srv/work"}
+        )
+        remote = AgentConfig.from_dict(
+            "remote", {"url": "ws://127.0.0.1:4501", "cwd": "/srv/work"}
+        )
+
+        self.assertEqual(local.capabilities, ("supervisor", "executor"))
+        self.assertEqual(local.capacity, 1)
+        self.assertEqual(remote.capabilities, ("executor",))
+        self.assertEqual(remote.capacity, 0)
+        self.assertTrue(local.enabled)
+        self.assertEqual(local.public_dict()["supervisor_capacity"], 1)
+
+    def test_agent_capabilities_enabled_and_capacity_are_validated(self) -> None:
+        disabled = AgentConfig.from_dict(
+            "supervisor-b",
+            {
+                "url": "ws://127.0.0.1:4501",
+                "cwd": "/srv/work",
+                "enabled": False,
+                "capabilities": ["supervisor"],
+                "capacity": 1,
+            },
+        )
+        self.assertFalse(disabled.enabled)
+        with self.assertRaisesRegex(ValueError, "capabilities"):
+            AgentConfig.from_dict(
+                "bad",
+                {
+                    "url": "ws://127.0.0.1:4502",
+                    "cwd": "/srv/work",
+                    "capabilities": ["scheduler"],
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "只能是 1"):
+            AgentConfig.from_dict(
+                "bad-capacity",
+                {
+                    "url": "ws://127.0.0.1:4502",
+                    "cwd": "/srv/work",
+                    "capabilities": ["supervisor"],
+                    "capacity": 2,
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "不能配置 capacity"):
+            AgentConfig.from_dict(
+                "executor-only",
+                {
+                    "url": "ws://127.0.0.1:4502",
+                    "cwd": "/srv/work",
+                    "capabilities": ["executor"],
+                    "capacity": 1,
+                },
+            )
+
+    def test_token_file_must_be_absolute_and_is_mutually_exclusive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "token_file.*绝对路径"):
+            AgentConfig.from_dict(
+                "remote",
+                {
+                    "url": "ws://127.0.0.1:4500",
+                    "cwd": "/srv/codex",
+                    "token_file": "secrets/token.txt",
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "只能配置一个"):
+            AgentConfig.from_dict(
+                "remote",
+                {
+                    "url": "ws://127.0.0.1:4500",
+                    "cwd": "/srv/codex",
+                    "token_env": "REMOTE_TOKEN",
+                    "token_file": str(Path.cwd().joinpath("token.txt").resolve()),
+                },
+            )
+
+    def test_token_file_content_is_bounded_utf8_and_single_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            token_path = Path(directory, "remote.token").resolve()
+            config = AgentConfig.from_dict(
+                "remote",
+                {
+                    "url": "ws://127.0.0.1:4500",
+                    "cwd": "/srv/codex",
+                    "token_file": str(token_path),
+                },
+            )
+            cases = (
+                (b"", "为空"),
+                (b"first\nsecond", "一行令牌"),
+                (b"x" * 8193, "不能超过"),
+                (b"\xff", "UTF-8"),
+            )
+            for content, message in cases:
+                with self.subTest(message=message):
+                    token_path.write_bytes(content)
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        Orchestrator._resolve_agent_token(config)
+
     def test_managed_remote_paths_cannot_accept_escape_components(self) -> None:
         self.assertEqual(
             remote_path_join(r"D:\artifacts", "workflows", "abc"),
@@ -102,6 +203,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         *,
         cwd: str = "/srv/codex",
         token_env: str | None = None,
+        token_file: str | None = None,
         artifact_root: str | None = None,
         allow_write: bool = False,
     ) -> Path:
@@ -113,6 +215,8 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         }
         if token_env:
             agent["token_env"] = token_env
+        if token_file:
+            agent["token_file"] = token_file
         if artifact_root:
             agent["artifact_root"] = artifact_root
         path = Path(directory, "agents.json")
@@ -131,6 +235,17 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         }
         values.update(kwargs)
         return await orchestrator.dispatch(**values)
+
+    async def test_probe_agent_only_initializes_connection(self) -> None:
+        async with MockAppServer() as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(self._write_config(directory, server.url))
+
+                await orchestrator.probe_agent("remote", timeout_sec=0.5)
+
+                self.assertEqual(
+                    [request["method"] for request in server.requests], ["initialize"]
+                )
 
     async def _publish_outputs(
         self,
@@ -719,6 +834,57 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                     request for request in server.requests if request.get("method") == "thread/start"
                 )
                 self.assertEqual(thread_start["params"]["cwd"], r"D:\codex")
+
+    async def test_token_file_is_read_for_each_connection_and_is_not_exposed(self) -> None:
+        first_secret = "first-secret-that-must-not-leak"
+        second_secret = "second-secret-that-must-not-leak"
+        async with MockAppServer(delay_sec=0.01) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                token_path = Path(directory, "remote.token")
+                token_path.write_text(first_secret + "\n", encoding="utf-8")
+                config_path = self._write_config(
+                    directory,
+                    server.url,
+                    token_file=str(token_path.resolve()),
+                )
+                orchestrator = Orchestrator(config_path)
+                first = await orchestrator.wait(
+                    (await self._dispatch(orchestrator)).job_id, 1
+                )
+                self.assertEqual(first.status, "completed")
+                self.assertEqual(server.authorization, f"Bearer {first_secret}")
+
+                token_path.write_text(second_secret, encoding="utf-8")
+                second = await orchestrator.wait(
+                    (await self._dispatch(orchestrator)).job_id, 1
+                )
+                self.assertEqual(second.status, "completed")
+                self.assertEqual(server.authorization, f"Bearer {second_secret}")
+                snapshots = json.dumps([first.snapshot(), second.snapshot()])
+                self.assertNotIn(first_secret, snapshots)
+                self.assertNotIn(second_secret, snapshots)
+                public_agent = orchestrator.list_agents()[0]
+                self.assertTrue(public_agent["authenticated"])
+                self.assertNotIn("token_file", public_agent)
+
+    async def test_invalid_token_file_fails_without_exposing_its_path(self) -> None:
+        async with MockAppServer(delay_sec=0.01) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                token_path = Path(directory, "missing-secret.token").resolve()
+                orchestrator = Orchestrator(
+                    self._write_config(
+                        directory,
+                        server.url,
+                        token_file=str(token_path),
+                    )
+                )
+                final = await orchestrator.wait(
+                    (await self._dispatch(orchestrator)).job_id, 1
+                )
+
+                self.assertEqual(final.status, "failed")
+                self.assertIn("令牌文件不存在", final.error)
+                self.assertNotIn(str(token_path), final.error)
 
 
 if __name__ == "__main__":

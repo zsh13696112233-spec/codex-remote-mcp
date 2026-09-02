@@ -11,11 +11,14 @@ import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
 import com.codexflow.configcenter.dto.TaskDefinitionSaveRequest;
 import jakarta.validation.Validator;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.node.ObjectNode;
@@ -107,6 +110,117 @@ class ConfigCenterApplicationTest {
     assertThat(validator.validate(request))
         .extracting(violation -> violation.getPropertyPath().toString())
         .containsExactlyInAnyOrder("name", "duty");
+  }
+
+  /** 独立运行状态入口必须展示四类主监督状态，并通过配置中心代理定时刷新。 */
+  @Test
+  void staticPageIncludesStandaloneRuntimeStatusDashboard() throws IOException {
+    String index = readClasspath("static/index.html");
+    String script = readClasspath("static/app.js");
+
+    assertThat(index).contains("data-page=\"runtime\">运行状态");
+    assertThat(script)
+        .contains("/api/gateway/ready")
+        .contains("在线空闲")
+        .contains("在线忙碌")
+        .contains("离线")
+        .contains("未知或停用")
+        .contains("setInterval(refreshAgentRuntimeStatuses,10000)");
+  }
+
+  @Test
+  void requestValidationRejectsInvalidSupervisorAgentId() {
+    SopSaveRequest blank =
+        new SopSaveRequest(
+            "测试", null, " ", null, null, true, 10, "automatic", "legacy_text", List.of());
+    SopSaveRequest tooLong =
+        new SopSaveRequest(
+            "测试",
+            null,
+            "s".repeat(129),
+            null,
+            null,
+            true,
+            10,
+            "automatic",
+            "legacy_text",
+            List.of());
+
+    assertThat(validator.validate(blank))
+        .extracting(violation -> violation.getPropertyPath().toString())
+        .contains("supervisorAgentId");
+    assertThat(validator.validate(tooLong))
+        .extracting(violation -> violation.getPropertyPath().toString())
+        .contains("supervisorAgentId");
+  }
+
+  /** 主监督 ID 只做配置校验，不依赖网关在线，并冻结到新运行及历史重试。 */
+  @Test
+  @Transactional
+  void arbitrarySupervisorAgentIdIsSavedUpdatedAndFrozenIntoRuns() {
+    String roleId =
+        jdbc.queryForObject(
+            "select id from codex_sop_roles order by created_at limit 1", String.class);
+    SopStepRequest step =
+        new SopStepRequest(
+            "执行步骤",
+            roleId,
+            "完成测试步骤",
+            null,
+            "remote",
+            "executor-offline",
+            null,
+            false,
+            "read_only",
+            null,
+            1800,
+            Set.of(),
+            Set.of());
+    SopSaveRequest firstBody =
+        new SopSaveRequest(
+            "多主监督快照",
+            null,
+            "supervisor-offline-a",
+            7200,
+            null,
+            true,
+            10,
+            "automatic",
+            "cumulative_files",
+            List.of(step));
+    ObjectNode sop = service.createSop(firstBody);
+    ObjectNode task =
+        service.createTask(
+            new TaskDefinitionSaveRequest(
+                "多主监督任务", "验证主监督快照", sop.path("id").asText(), null, true));
+    PreparedRun original = runStore.prepareLatest(task.path("id").asText());
+
+    SopSaveRequest updatedBody =
+        new SopSaveRequest(
+            "多主监督快照",
+            null,
+            "supervisor-offline-b",
+            7200,
+            null,
+            true,
+            10,
+            "automatic",
+            "cumulative_files",
+            List.of(step));
+    ObjectNode updated = service.updateSop(sop.path("id").asText(), updatedBody);
+    PreparedRun latest = runStore.prepareLatest(task.path("id").asText());
+    PreparedRun historicalRetry = runStore.prepareRetry(original.workflowId());
+
+    assertThat(sop.path("supervisorAgentId").asText()).isEqualTo("supervisor-offline-a");
+    assertThat(updated.path("supervisorAgentId").asText()).isEqualTo("supervisor-offline-b");
+    assertThat(original.payload().path("supervisorAgentId").asText())
+        .isEqualTo("supervisor-offline-a");
+    assertThat(latest.payload().path("supervisorAgentId").asText())
+        .isEqualTo("supervisor-offline-b");
+    assertThat(historicalRetry.payload().path("supervisorAgentId").asText())
+        .isEqualTo("supervisor-offline-a");
+    assertThat(latest.payload().path("nodes").get(0).path("executor").path("agentId").asText())
+        .isEqualTo("executor-offline");
   }
 
   /** 确认权限档位会派生兼容写入字段、冻结到运行快照，并拒绝矛盾或非法值。 */
@@ -305,5 +419,11 @@ class ConfigCenterApplicationTest {
                         "unsupported",
                         List.of(step))))
         .hasMessageContaining("handoffMode");
+  }
+
+  private static String readClasspath(String path) throws IOException {
+    try (var input = new ClassPathResource(path).getInputStream()) {
+      return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+    }
   }
 }

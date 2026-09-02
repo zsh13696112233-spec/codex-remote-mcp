@@ -427,7 +427,22 @@ workflow.retry_budget.updated
 POST /workflows/{workflowId}/cancel
 ```
 
-### 7. 健康检查
+### 7. 查询执行机建议和主监督状态
+
+```text
+GET /agents
+```
+
+接口返回脱敏后的执行机建议。具备主监督能力的条目还包含：
+
+- `connectionStatus`：`online`、`offline` 或 `unknown`，来自网关缓存的轻量连接探测。
+- `availability`：`idle` 或 `busy`，由当前持久化主监督租约计算。
+- `checkedAt`：最近一次连接探测时间。
+- `lastOnlineAt`：最近一次成功完成 WebSocket 和 Codex 协议初始化的时间。
+
+网关每 10 秒探测一次，连续两次失败才显示离线。探测不创建 thread 或 turn，不返回执行机地址、令牌或原始错误，也不参与租约回收和故障转移。该状态只用于页面提示，提交和实际派发仍执行权威校验。
+
+### 8. 健康检查
 
 ```text
 GET /readyz
@@ -522,7 +537,7 @@ Java 可以每隔一到数秒轮询一次。需要实时界面时，再使用 SS
 - `allow_write=false` 时只允许 `read_only`；为 `true` 时三档均可用。`read_only = read-only + never`，`workspace_write = workspace-write + never`，`auto_review = workspace-write + on-request + auto_review`。
 - 节点启动前调用 `configRequirements/read` 检查执行机管理策略；明确禁止所需审批策略或沙箱时直接失败，旧 app-server 不支持该方法时兼容继续。
 - 当前项目实际配置中还需要确认是否存在名为 `local` 的执行机。
-- token 不要直接写进 JSON，只写环境变量名称。
+- token 不要直接写进 JSON。可以通过 `token_env` 引用环境变量，或通过 `token_file` 引用网关所在机器上的绝对文件路径；两者只能配置一个。令牌文件使用 UTF-8 编码，只包含一行令牌且不能超过 8 KiB，并应使用系统文件权限限制访问。
 - 明文 `ws://` 建议只用于回环地址、可信内网或 SSH 隧道。
 - 跨不可信网络时使用 `wss://`。
 

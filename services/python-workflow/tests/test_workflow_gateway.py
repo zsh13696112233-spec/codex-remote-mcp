@@ -149,9 +149,72 @@ class SupervisorPromptTests(unittest.TestCase):
         self.assertEqual(value["permissionProfiles"], [
             "read_only", "workspace_write", "auto_review",
         ])
+        self.assertTrue(value["enabled"])
+        self.assertEqual(value["capabilities"], ["supervisor", "executor"])
+        self.assertEqual(value["supervisorCapacity"], 1)
+        self.assertEqual(value["connectionStatus"], "unknown")
+        self.assertEqual(value["availability"], "idle")
         self.assertNotIn("url", value)
         self.assertNotIn("authenticated", value)
         self.assertNotIn("token_env", value)
+
+
+class SupervisorReachabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_probe_uses_two_failures_and_recovers_online(self) -> None:
+        class FakeOrchestrator:
+            should_fail = True
+
+            def list_agents(self):
+                return [{
+                    "agent_id": "supervisor-a",
+                    "cwd": "/work",
+                    "enabled": True,
+                    "capabilities": ["supervisor"],
+                    "supervisor_capacity": 1,
+                    "permission_profiles": ["read_only"],
+                }]
+
+            async def probe_agent(self, agent_id, *, timeout_sec):
+                self.last_probe = (agent_id, timeout_sec)
+                if self.should_fail:
+                    raise ConnectionError("secret address must not be exposed")
+
+        orchestrator = FakeOrchestrator()
+        gateway = WorkflowGateway(None, orchestrator)
+
+        await gateway._probe_supervisors_once()
+        first = gateway.public_agents()[0]
+        self.assertEqual(first["connectionStatus"], "unknown")
+
+        await gateway._probe_supervisors_once()
+        second = gateway.public_agents()[0]
+        self.assertEqual(second["connectionStatus"], "offline")
+        self.assertNotIn("error", second)
+
+        orchestrator.should_fail = False
+        await gateway._probe_supervisors_once()
+        recovered = gateway.public_agents()[0]
+        self.assertEqual(recovered["connectionStatus"], "online")
+        self.assertEqual(recovered["checkedAt"], recovered["lastOnlineAt"])
+
+    def test_public_agents_reports_busy_from_persisted_lease(self) -> None:
+        class FakeStore:
+            def leased_supervisor_ids(self):
+                return {"supervisor-a"}
+
+        class FakeOrchestrator:
+            def list_agents(self):
+                return [{
+                    "agent_id": "supervisor-a",
+                    "cwd": "/work",
+                    "enabled": True,
+                    "capabilities": ["supervisor"],
+                    "supervisor_capacity": 1,
+                    "permission_profiles": ["read_only"],
+                }]
+
+        gateway = WorkflowGateway(FakeStore(), FakeOrchestrator())
+        self.assertEqual(gateway.public_agents()[0]["availability"], "busy")
 
 
 class WorkflowSubmissionPermissionTests(unittest.IsolatedAsyncioTestCase):
@@ -186,6 +249,300 @@ class WorkflowSubmissionPermissionTests(unittest.IsolatedAsyncioTestCase):
                 )
             with self.assertRaisesRegex(ValueError, "找不到工作流"):
                 store.get_workflow("write-denied")
+
+    async def test_submit_rejects_disabled_or_capability_mismatched_agents(self) -> None:
+        class CapabilityOrchestrator:
+            def list_agents(self):
+                return [
+                    {
+                        "agent_id": "supervisor-ok",
+                        "enabled": True,
+                        "capabilities": ["supervisor"],
+                        "permission_profiles": ["read_only"],
+                    },
+                    {
+                        "agent_id": "supervisor-disabled",
+                        "enabled": False,
+                        "capabilities": ["supervisor"],
+                        "permission_profiles": ["read_only"],
+                    },
+                    {
+                        "agent_id": "executor-ok",
+                        "enabled": True,
+                        "capabilities": ["executor"],
+                        "permission_profiles": ["read_only"],
+                    },
+                    {
+                        "agent_id": "executor-disabled",
+                        "enabled": False,
+                        "capabilities": ["executor"],
+                        "permission_profiles": ["read_only"],
+                    },
+                ]
+
+        cases = [
+            ("unknown", "missing", "executor-ok", ValueError, "未知执行机"),
+            (
+                "disabled-supervisor",
+                "supervisor-disabled",
+                "executor-ok",
+                PermissionError,
+                "已停用",
+            ),
+            (
+                "wrong-supervisor-capability",
+                "executor-ok",
+                "executor-ok",
+                PermissionError,
+                "主监督能力",
+            ),
+            (
+                "disabled-executor",
+                "supervisor-ok",
+                "executor-disabled",
+                PermissionError,
+                "已停用",
+            ),
+            (
+                "wrong-executor-capability",
+                "supervisor-ok",
+                "supervisor-ok",
+                PermissionError,
+                "步骤执行能力",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkflowStore(Path(directory, "workflows.db"))
+            gateway = WorkflowGateway(store, CapabilityOrchestrator())
+            gateway._schedule_pending = AsyncMock()
+            for workflow_id, supervisor_id, executor_id, error_type, message in cases:
+                with self.subTest(workflow_id=workflow_id):
+                    with self.assertRaisesRegex(error_type, message):
+                        await gateway.submit(
+                            {
+                                "workflowId": workflow_id,
+                                "supervisorAgentId": supervisor_id,
+                                "nodes": [
+                                    {
+                                        "id": "a",
+                                        "agentId": executor_id,
+                                        "prompt": "测试",
+                                        "timeoutSec": 10,
+                                    }
+                                ],
+                            }
+                        )
+                    with self.assertRaisesRegex(ValueError, "找不到工作流"):
+                        store.get_workflow(workflow_id)
+
+    async def test_submit_allows_different_executors_and_working_directories(self) -> None:
+        class CapabilityOrchestrator:
+            def list_agents(self):
+                return [
+                    {
+                        "agent_id": "supervisor-a",
+                        "enabled": True,
+                        "capabilities": ["supervisor"],
+                        "permission_profiles": ["read_only"],
+                    },
+                    {
+                        "agent_id": "executor-a",
+                        "enabled": True,
+                        "capabilities": ["executor"],
+                        "permission_profiles": ["read_only"],
+                    },
+                    {
+                        "agent_id": "executor-b",
+                        "enabled": True,
+                        "capabilities": ["executor"],
+                        "permission_profiles": ["read_only"],
+                    },
+                ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkflowStore(Path(directory, "workflows.db"))
+            gateway = WorkflowGateway(store, CapabilityOrchestrator())
+            gateway._schedule_pending = AsyncMock()
+
+            snapshot = await gateway.submit(
+                {
+                    "workflowId": "mixed-executors",
+                    "supervisorAgentId": "supervisor-a",
+                    "nodes": [
+                        {
+                            "id": "a",
+                            "agentId": "executor-a",
+                            "cwd": "/work/a",
+                            "prompt": "步骤 A",
+                            "timeoutSec": 10,
+                        },
+                        {
+                            "id": "b",
+                            "agentId": "executor-b",
+                            "cwd": "",
+                            "dependsOn": ["a"],
+                            "prompt": "步骤 B",
+                            "timeoutSec": 10,
+                        },
+                    ],
+                }
+            )
+
+            self.assertEqual(snapshot["status"], "queued")
+            spec = store.get_spec("mixed-executors")
+            self.assertEqual(
+                [node["agentId"] for node in spec["nodes"]],
+                ["executor-a", "executor-b"],
+            )
+            self.assertEqual(spec["nodes"][0]["cwd"], "/work/a")
+            self.assertEqual(spec["nodes"][1]["cwd"], "")
+
+
+class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    class FakeJob:
+        def __init__(self, job_id: str, agent_id: str) -> None:
+            self.job_id = job_id
+            self.agent_id = agent_id
+            self.thread_id = f"thread-{job_id}"
+            self.turn_id = f"turn-{job_id}"
+            self.status = "running"
+            self.response = None
+            self.error = None
+            self.completed = asyncio.Event()
+
+        def snapshot(self):
+            return {
+                "job_id": self.job_id,
+                "agent_id": self.agent_id,
+                "thread_id": self.thread_id,
+                "turn_id": self.turn_id,
+                "status": self.status,
+                "response": self.response,
+                "error": self.error,
+                "started_at": utc_now(),
+                "finished_at": utc_now() if self.completed.is_set() else None,
+            }
+
+    class FakeOrchestrator:
+        def __init__(self, *, fail_first: bool = False) -> None:
+            self.fail_first = fail_first
+            self.dispatch_count = 0
+            self.jobs = {}
+            self.dispatched = []
+
+        def list_agents(self):
+            return [
+                {
+                    "agent_id": "supervisor-a",
+                    "enabled": True,
+                    "capabilities": ["supervisor"],
+                    "permission_profiles": ["read_only"],
+                },
+                {
+                    "agent_id": "supervisor-b",
+                    "enabled": True,
+                    "capabilities": ["supervisor"],
+                    "permission_profiles": ["read_only"],
+                },
+                {
+                    "agent_id": "executor",
+                    "enabled": True,
+                    "capabilities": ["executor"],
+                    "permission_profiles": ["read_only"],
+                },
+            ]
+
+        async def dispatch(self, *, agent_id, prompt, **_):
+            self.dispatch_count += 1
+            if self.fail_first and self.dispatch_count == 1:
+                raise ConnectionError("主监督连接失败")
+            job = MultiSupervisorSchedulingTests.FakeJob(
+                f"job-{self.dispatch_count}", agent_id
+            )
+            self.jobs[job.job_id] = job
+            self.dispatched.append((agent_id, prompt, job))
+            return job
+
+        def get_job(self, job_id):
+            return self.jobs[job_id]
+
+        async def cancel(self, job_id):
+            job = self.jobs[job_id]
+            job.status = "cancelled"
+            job.error = "cancelled"
+            job.completed.set()
+            return job
+
+    @staticmethod
+    def spec(workflow_id: str, supervisor_id: str) -> dict:
+        return {
+            "workflowId": workflow_id,
+            "supervisorAgentId": supervisor_id,
+            "nodes": [
+                {
+                    "id": "a",
+                    "agentId": "executor",
+                    "prompt": "测试",
+                    "timeoutSec": 10,
+                }
+            ],
+        }
+
+    async def test_same_supervisor_is_fifo_and_different_supervisors_run_in_parallel(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkflowStore(Path(directory, "workflows.db"))
+            orchestrator = self.FakeOrchestrator()
+            gateway = WorkflowGateway(store, orchestrator)
+            try:
+                await gateway.submit(self.spec("first", "supervisor-a"))
+                await gateway.submit(self.spec("second", "supervisor-a"))
+                await gateway.submit(self.spec("parallel", "supervisor-b"))
+                await asyncio.sleep(0)
+
+                self.assertEqual(store.get_workflow("first")["status"], "running")
+                self.assertEqual(store.get_workflow("second")["status"], "queued")
+                self.assertEqual(store.get_workflow("parallel")["status"], "running")
+                self.assertEqual(
+                    {item[0] for item in orchestrator.dispatched},
+                    {"supervisor-a", "supervisor-b"},
+                )
+
+                first_job = next(
+                    item[2]
+                    for item in orchestrator.dispatched
+                    if item[0] == "supervisor-a"
+                )
+                first_job.status = "failed"
+                first_job.error = "测试结束"
+                first_job.completed.set()
+                for _ in range(100):
+                    if store.get_workflow("second")["status"] == "running":
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(store.get_workflow("second")["status"], "running")
+            finally:
+                await gateway.stop()
+                await gateway.event_batcher.close()
+
+    async def test_connection_failure_releases_slot_for_next_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkflowStore(Path(directory, "workflows.db"))
+            orchestrator = self.FakeOrchestrator(fail_first=True)
+            gateway = WorkflowGateway(store, orchestrator)
+            try:
+                await gateway.submit(self.spec("offline", "supervisor-a"))
+                await gateway.submit(self.spec("next", "supervisor-a"))
+                for _ in range(100):
+                    if store.get_workflow("next")["status"] == "running":
+                        break
+                    await asyncio.sleep(0.01)
+
+                self.assertEqual(store.get_workflow("offline")["status"], "failed")
+                self.assertEqual(store.get_workflow("next")["status"], "running")
+            finally:
+                await gateway.stop()
 
 
 class WorkflowArtifactHttpTests(unittest.TestCase):
@@ -250,33 +607,37 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                 db_path=Path(directory, "workflows.db"), config_path=config
             )
             store = app.state.gateway.store
-            store.create_workflow(
-                {
-                    "workflowId": "advance-demo",
-                    "supervisorAgentId": "local",
-                    "advanceMode": "semi_automatic",
-                    "nodes": [
-                        {"id": "a", "prompt": "a", "timeoutSec": 10},
-                        {
-                            "id": "b",
-                            "prompt": "b",
-                            "dependsOn": ["a"],
-                            "timeoutSec": 10,
-                        },
-                    ],
-                }
-            )
-            store.prepare_node_dispatch("advance-demo", "a")
-            store.sync_node_job(
-                "advance-demo",
-                "a",
-                {"status": "completed", "response": "A", "finished_at": utc_now()},
-            )
-            gate = store.get_workflow("advance-demo")["pendingAdvance"]
             app.state.gateway._pause_supervisor = AsyncMock()
             app.state.gateway._resume_supervisor_if_needed = AsyncMock()
 
             with TestClient(app) as client:
+                store.create_workflow(
+                    {
+                        "workflowId": "advance-demo",
+                        "supervisorAgentId": "local",
+                        "advanceMode": "semi_automatic",
+                        "nodes": [
+                            {"id": "a", "prompt": "a", "timeoutSec": 10},
+                            {
+                                "id": "b",
+                                "prompt": "b",
+                                "dependsOn": ["a"],
+                                "timeoutSec": 10,
+                            },
+                        ],
+                    }
+                )
+                store.prepare_node_dispatch("advance-demo", "a")
+                store.sync_node_job(
+                    "advance-demo",
+                    "a",
+                    {
+                        "status": "completed",
+                        "response": "A",
+                        "finished_at": utc_now(),
+                    },
+                )
+                gate = store.get_workflow("advance-demo")["pendingAdvance"]
                 held = client.post(
                     f"/workflows/advance-demo/advance/{gate['gateId']}/hold"
                 )
@@ -407,10 +768,8 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertEqual(len(assistant_resumes), 1)
 
-                tasks = list(gateway._tasks.values())
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await gateway.stop()
+                await gateway.event_batcher.close()
 
     async def test_assistant_turn_does_not_end_or_resume_supervisor_turn(self) -> None:
         async with MockAppServer(delay_sec=2) as server:
@@ -451,10 +810,8 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         and "outputSchema" in item["params"]
                     ]), 1)
                 finally:
-                    tasks = list(gateway._tasks.values())
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await gateway.stop()
+                    await gateway.event_batcher.close()
 
     async def test_running_message_streams_once_and_duplicate_is_idempotent(self) -> None:
         async with MockAppServer(delay_sec=2) as server:
@@ -503,10 +860,8 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                                    if event["type"] == "chat.assistant.completed"]
                 self.assertEqual(len(completed_after), 1)
 
-                running_tasks = list(gateway._tasks.values())
-                for task in running_tasks:
-                    task.cancel()
-                await asyncio.gather(*running_tasks, return_exceptions=True)
+                await gateway.stop()
+                await gateway.event_batcher.close()
 
 
 class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -565,6 +920,7 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     )
 
             gateway = WorkflowGateway(store, InterruptingOrchestrator())
+            gateway._resume_supervisor_if_needed = AsyncMock()
             confirmed = self._confirmed_restart(store)
             answer = await gateway._execute_control("control-demo", confirmed)
 

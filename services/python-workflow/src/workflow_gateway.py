@@ -29,6 +29,9 @@ from workflow_store import (
 
 DEFAULT_DB_PATH = Path(__file__).with_name("workflows.db")
 TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "cancelled"}
+SUPERVISOR_PROBE_INTERVAL_SEC = 10.0
+SUPERVISOR_PROBE_TIMEOUT_SEC = 2.5
+SUPERVISOR_OFFLINE_FAILURE_THRESHOLD = 2
 LOGGER = logging.getLogger(__name__)
 
 
@@ -56,8 +59,17 @@ class WorkflowGateway:
         self._chat_tasks: dict[str, asyncio.Task[None]] = {}
         self._control_locks: dict[str, asyncio.Lock] = {}
         self._control_in_progress: set[str] = set()
+        self._schedule_lock = asyncio.Lock()
+        self._supervisor_probe_task: asyncio.Task[None] | None = None
+        self._supervisor_runtime: dict[str, dict[str, Any]] = {}
+        self._closing = False
 
     async def start(self) -> None:
+        recovered = await asyncio.to_thread(
+            self.store.recover_active_workflows_after_restart
+        )
+        if recovered:
+            LOGGER.warning("网关启动时已将 %s 个遗留运行标记为失败。", len(recovered))
         self.store.recover_processing_chat_messages()
         try:
             imported = await asyncio.to_thread(self.store.import_legacy_generated_images)
@@ -67,6 +79,24 @@ class WorkflowGateway:
             LOGGER.exception("回填历史工作流图片附件失败。")
         for workflow_id in self.store.list_chat_workflows():
             self._ensure_chat_worker(workflow_id)
+        await self._schedule_pending()
+        self._supervisor_probe_task = asyncio.create_task(
+            self._supervisor_probe_loop(), name="supervisor-reachability-probe"
+        )
+
+    async def stop(self) -> None:
+        self._closing = True
+        if self._supervisor_probe_task is not None:
+            self._supervisor_probe_task.cancel()
+            await asyncio.gather(self._supervisor_probe_task, return_exceptions=True)
+            self._supervisor_probe_task = None
+        async with self._schedule_lock:
+            pass
+        await asyncio.to_thread(self.store.recover_active_workflows_after_restart)
+        tasks = list(self._tasks.values()) + list(self._chat_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def flush_events(self) -> None:
         try:
@@ -77,18 +107,47 @@ class WorkflowGateway:
     async def submit(self, raw_spec: dict[str, Any]) -> dict[str, Any]:
         spec = WorkflowStore.normalize_spec(raw_spec)
         agent_values = self.orchestrator.list_agents()
-        available_agents = {item["agent_id"] for item in agent_values}
+        agents_by_id = {item["agent_id"]: item for item in agent_values}
+        available_agents = set(agents_by_id)
         requested_agents = {spec["supervisorAgentId"]} | {
             node["agentId"] for node in spec["nodes"]
         }
         unknown = sorted(requested_agents - available_agents)
         if unknown:
             raise ValueError(f"工作流引用了未知执行机：{', '.join(unknown)}")
+        supervisor = agents_by_id[spec["supervisorAgentId"]]
+        supervisor_capabilities = set(
+            supervisor.get("capabilities")
+            or (
+                ["supervisor", "executor"]
+                if spec["supervisorAgentId"] == "local"
+                else ["executor"]
+            )
+        )
+        if not bool(supervisor.get("enabled", True)):
+            raise PermissionError(
+                f"主监督执行机 {spec['supervisorAgentId']} 已停用。"
+            )
+        if "supervisor" not in supervisor_capabilities:
+            raise PermissionError(
+                f"执行机 {spec['supervisorAgentId']} 不具备主监督能力。"
+            )
         profiles_by_agent = {
             item["agent_id"]: set(item.get("permission_profiles") or ["read_only"])
             for item in agent_values
         }
         for node in spec["nodes"]:
+            agent = agents_by_id[node["agentId"]]
+            capabilities = set(
+                agent.get("capabilities")
+                or (["supervisor", "executor"] if node["agentId"] == "local" else ["executor"])
+            )
+            if not bool(agent.get("enabled", True)):
+                raise PermissionError(f"执行机 {node['agentId']} 已停用。")
+            if "executor" not in capabilities:
+                raise PermissionError(
+                    f"执行机 {node['agentId']} 不具备步骤执行能力。"
+                )
             profile = node["permissionProfile"]
             if profile not in profiles_by_agent[node["agentId"]]:
                 raise PermissionError(
@@ -96,34 +155,176 @@ class WorkflowGateway:
                 )
 
         snapshot = await asyncio.to_thread(self.store.create_workflow, spec)
-        workflow_id = spec["workflowId"]
-        task = asyncio.create_task(
-            self._run_supervisor(spec), name=f"workflow-supervisor:{workflow_id}"
-        )
-        self._tasks[workflow_id] = task
-        task.add_done_callback(lambda done: self._drop_task(workflow_id, done))
+        await self._schedule_pending()
         return snapshot
+
+    async def _schedule_pending(self) -> None:
+        if self._closing:
+            return
+        async with self._schedule_lock:
+            for agent in self.orchestrator.list_agents():
+                agent_id = str(agent["agent_id"])
+                capabilities = set(
+                    agent.get("capabilities")
+                    or (
+                        ["supervisor", "executor"]
+                        if agent_id == "local"
+                        else ["executor"]
+                    )
+                )
+                if not bool(agent.get("enabled", True)) or "supervisor" not in capabilities:
+                    continue
+                spec = await asyncio.to_thread(
+                    self.store.claim_next_workflow, agent_id
+                )
+                if spec is None:
+                    continue
+                workflow_id = str(spec["workflowId"])
+                try:
+                    task = asyncio.create_task(
+                        self._run_supervisor(spec),
+                        name=f"workflow-supervisor:{workflow_id}",
+                    )
+                except BaseException:
+                    await asyncio.to_thread(
+                        self.store.release_supervisor_claim, workflow_id
+                    )
+                    raise
+                self._tasks[workflow_id] = task
+                task.add_done_callback(
+                    lambda done, selected=workflow_id: self._drop_task(selected, done)
+                )
 
     def _drop_task(self, workflow_id: str, task: asyncio.Task[Any]) -> None:
         if self._tasks.get(workflow_id) is task:
             self._tasks.pop(workflow_id, None)
+        if not self._closing:
+            asyncio.create_task(
+                self._schedule_after_task(), name="workflow-schedule-after-finish"
+            )
+
+    async def _schedule_after_task(self) -> None:
+        try:
+            await self._schedule_pending()
+        except Exception:
+            LOGGER.exception("工作流终态后调度下一项失败。")
 
     def _drop_chat_task(self, workflow_id: str, task: asyncio.Task[Any]) -> None:
         if self._chat_tasks.get(workflow_id) is task:
             self._chat_tasks.pop(workflow_id, None)
 
     def public_agents(self) -> list[dict[str, Any]]:
-        return [
-            {
+        leased_supervisors = (
+            self.store.leased_supervisor_ids()
+            if self.store is not None
+            else set()
+        )
+        result: list[dict[str, Any]] = []
+        for item in self.orchestrator.list_agents():
+            agent_id = str(item["agent_id"])
+            capabilities = list(
+                item.get("capabilities")
+                or (
+                    ["supervisor", "executor"]
+                    if agent_id == "local"
+                    else ["executor"]
+                )
+            )
+            value = {
                 "agentId": item["agent_id"],
                 "defaultCwd": item["cwd"],
                 "defaultModel": item.get("model"),
+                "enabled": bool(item.get("enabled", True)),
+                "capabilities": capabilities,
+                "supervisorCapacity": int(
+                    item.get("supervisor_capacity")
+                    or (
+                        1
+                        if "supervisor"
+                        in set(capabilities)
+                        else 0
+                    )
+                ),
                 "allowWrite": bool(item.get("allow_write")),
                 "allowCwdOverride": bool(item.get("allow_cwd_override")),
                 "permissionProfiles": list(item.get("permission_profiles") or []),
             }
-            for item in self.orchestrator.list_agents()
-        ]
+            if "supervisor" in capabilities:
+                runtime = self._supervisor_runtime.get(agent_id, {})
+                value.update(
+                    {
+                        "connectionStatus": runtime.get("connectionStatus", "unknown"),
+                        "availability": (
+                            "busy" if agent_id in leased_supervisors else "idle"
+                        ),
+                        "checkedAt": runtime.get("checkedAt"),
+                        "lastOnlineAt": runtime.get("lastOnlineAt"),
+                    }
+                )
+            result.append(value)
+        return result
+
+    async def _supervisor_probe_loop(self) -> None:
+        while not self._closing:
+            try:
+                await self._probe_supervisors_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("刷新主监督在线状态失败。")
+            await asyncio.sleep(SUPERVISOR_PROBE_INTERVAL_SEC)
+
+    async def _probe_supervisors_once(self) -> None:
+        probe = getattr(self.orchestrator, "probe_agent", None)
+        if not callable(probe):
+            return
+        supervisor_ids: list[str] = []
+        for item in self.orchestrator.list_agents():
+            agent_id = str(item["agent_id"])
+            capabilities = set(
+                item.get("capabilities")
+                or (["supervisor", "executor"] if agent_id == "local" else ["executor"])
+            )
+            if bool(item.get("enabled", True)) and "supervisor" in capabilities:
+                supervisor_ids.append(agent_id)
+        configured = set(supervisor_ids)
+        self._supervisor_runtime = {
+            agent_id: value
+            for agent_id, value in self._supervisor_runtime.items()
+            if agent_id in configured
+        }
+
+        async def check(agent_id: str) -> None:
+            checked_at = utc_now()
+            previous = self._supervisor_runtime.get(agent_id, {})
+            try:
+                await asyncio.wait_for(
+                    probe(agent_id, timeout_sec=SUPERVISOR_PROBE_TIMEOUT_SEC),
+                    timeout=SUPERVISOR_PROBE_TIMEOUT_SEC + 0.5,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                failures = int(previous.get("consecutiveFailures", 0)) + 1
+                self._supervisor_runtime[agent_id] = {
+                    "connectionStatus": (
+                        "offline"
+                        if failures >= SUPERVISOR_OFFLINE_FAILURE_THRESHOLD
+                        else "unknown"
+                    ),
+                    "checkedAt": checked_at,
+                    "lastOnlineAt": previous.get("lastOnlineAt"),
+                    "consecutiveFailures": failures,
+                }
+            else:
+                self._supervisor_runtime[agent_id] = {
+                    "connectionStatus": "online",
+                    "checkedAt": checked_at,
+                    "lastOnlineAt": checked_at,
+                    "consecutiveFailures": 0,
+                }
+
+        await asyncio.gather(*(check(agent_id) for agent_id in supervisor_ids))
 
     async def _run_supervisor(
         self, spec: dict[str, Any], *, resume_thread_id: str | None = None
@@ -264,11 +465,14 @@ class WorkflowGateway:
                 return
         except asyncio.CancelledError:
             held = False
+            active = False
             try:
-                held = self._advance_is_held(self.store.get_workflow(workflow_id))
+                current = self.store.get_workflow(workflow_id)
+                held = self._advance_is_held(current)
+                active = current["status"] in {"running", "cancelling"}
             except ValueError:
                 pass
-            if workflow_id not in self._control_in_progress and not held:
+            if workflow_id not in self._control_in_progress and not held and active:
                 self.store.finish_workflow(
                     workflow_id,
                     supervisor_status="cancelled",
@@ -696,6 +900,7 @@ class WorkflowGateway:
                     self.store.finish_control_execution(
                         action["actionId"], result={"retryPolicy": result["retryPolicy"]}
                     )
+                    await self._resume_supervisor_if_needed(workflow_id)
                     revision_copy = (
                         "已将确认的返工要求加入本次步骤提示词。"
                         if action.get("revisionInstruction")
@@ -715,6 +920,7 @@ class WorkflowGateway:
                     self.store.finish_control_execution(
                         action["actionId"], result={"status": result["status"]}
                     )
+                    await self._resume_supervisor_if_needed(workflow_id)
                     return "已跳过所选步骤，任务会继续执行后续步骤。"
                 await self._interrupt_nodes(
                     workflow_id,
@@ -727,6 +933,7 @@ class WorkflowGateway:
                 self.store.finish_control_execution(
                     action["actionId"], result={"status": result["status"]}
                 )
+                await self._schedule_pending()
                 return "任务已停止，已经完成的步骤结果会保留。"
             except Exception as error:
                 self.store.finish_control_execution(
@@ -826,7 +1033,12 @@ class WorkflowGateway:
 
     async def _resume_supervisor_if_needed(self, workflow_id: str) -> None:
         snapshot = self.store.get_workflow(workflow_id)
+        if snapshot["status"] == "queued":
+            await self._schedule_pending()
+            return
         if snapshot["status"] != "running" or self._advance_is_held(snapshot):
+            return
+        if not self.store.has_supervisor_lease(workflow_id):
             return
         job_id = snapshot["supervisor"].get("jobId")
         if job_id and job_id in self.orchestrator.jobs:
@@ -845,30 +1057,21 @@ class WorkflowGateway:
 
     async def cancel(self, workflow_id: str) -> dict[str, Any]:
         snapshot = await asyncio.to_thread(self.store.get_workflow, workflow_id)
-        held = self._advance_is_held(snapshot)
         task = self._tasks.get(workflow_id)
         job_id = snapshot["supervisor"].get("jobId")
         if job_id and job_id in self.orchestrator.jobs:
             await self.orchestrator.cancel(job_id)
         if task is not None and not task.done():
             task.cancel()
-        await asyncio.to_thread(
-            self.store.add_event,
+        result = await asyncio.to_thread(
+            self.store.cancel_workflow,
             workflow_id,
-            node_id=None,
+            reason="用户已取消任务。",
             source="gateway",
-            event_type="workflow.cancel_requested",
-            payload={"requestedAt": utc_now()},
+            event_reason="user_requested",
         )
-        if held:
-            await asyncio.to_thread(
-                self.store.finish_workflow,
-                workflow_id,
-                supervisor_status="cancelled",
-                response=None,
-                error="用户已取消任务。",
-            )
-        return await asyncio.to_thread(self.store.get_workflow, workflow_id)
+        await self._schedule_pending()
+        return result
 
 
 def _error_response(error: Exception, status_code: int = 400) -> JSONResponse:
@@ -1074,10 +1277,7 @@ def create_app(
     async def lifespan(_: Starlette):
         await gateway.start()
         yield
-        tasks = list(gateway._chat_tasks.values())
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await gateway.stop()
         try:
             await gateway.event_batcher.close()
         except Exception:

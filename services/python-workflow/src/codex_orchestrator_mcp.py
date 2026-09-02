@@ -42,6 +42,8 @@ DEFAULT_REQUEST_TIMEOUT_SEC = 30.0
 INTERRUPT_TIMEOUT_SEC = 10.0
 LOGGER = logging.getLogger(__name__)
 PERMISSION_PROFILES = ("read_only", "workspace_write", "auto_review")
+AGENT_CAPABILITIES = ("supervisor", "executor")
+MAX_TOKEN_FILE_BYTES = 8 * 1024
 
 
 def permission_settings(
@@ -85,7 +87,11 @@ class AgentConfig:
     agent_id: str
     url: str
     cwd: str
+    enabled: bool = True
+    capabilities: tuple[str, ...] = ("executor",)
+    capacity: int = 0
     token_env: str | None = None
+    token_file: str | None = None
     allow_write: bool = False
     allow_cwd_override: bool = False
     model: str | None = None
@@ -95,7 +101,7 @@ class AgentConfig:
     def from_dict(cls, agent_id: str, value: dict[str, Any]) -> "AgentConfig":
         if "token" in value:
             raise ValueError(
-                f"{agent_id}.token 不受支持；请在 token_env 中填写环境变量名。"
+                f"{agent_id}.token 不受支持；请使用 token_env 或 token_file。"
             )
         url = str(value.get("url", "")).strip()
         parsed = urlparse(url)
@@ -106,9 +112,57 @@ class AgentConfig:
         if not is_absolute_remote_path(cwd):
             raise ValueError(f"{agent_id}.cwd 必须是执行机上的绝对路径。")
 
+        enabled = value.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"{agent_id}.enabled 必须是布尔值。")
+        raw_capabilities = value.get("capabilities")
+        if raw_capabilities is None:
+            capabilities = (
+                ("supervisor", "executor") if agent_id == "local" else ("executor",)
+            )
+        else:
+            if not isinstance(raw_capabilities, list) or not raw_capabilities:
+                raise ValueError(f"{agent_id}.capabilities 必须是非空数组。")
+            normalized_capabilities: list[str] = []
+            for raw_capability in raw_capabilities:
+                capability = str(raw_capability).strip().lower()
+                if capability not in AGENT_CAPABILITIES:
+                    raise ValueError(
+                        f"{agent_id}.capabilities 只能包含 supervisor 或 executor。"
+                    )
+                if capability not in normalized_capabilities:
+                    normalized_capabilities.append(capability)
+            capabilities = tuple(normalized_capabilities)
+
+        raw_capacity = value.get("capacity")
+        if "supervisor" in capabilities:
+            capacity = 1 if raw_capacity is None else raw_capacity
+            if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity != 1:
+                raise ValueError(f"{agent_id}.capacity 第一阶段只能是 1。")
+        else:
+            if raw_capacity is not None:
+                raise ValueError(
+                    f"{agent_id} 不具备 supervisor 能力，不能配置 capacity。"
+                )
+            capacity = 0
+
         token_env = value.get("token_env")
         if token_env is not None and not str(token_env).strip():
             token_env = None
+        token_file = value.get("token_file")
+        if token_file is not None and not str(token_file).strip():
+            token_file = None
+        if token_env and token_file:
+            raise ValueError(
+                f"{agent_id}.token_env 和 token_file 只能配置一个。"
+            )
+        if token_file:
+            token_path = Path(str(token_file).strip())
+            if not token_path.is_absolute():
+                raise ValueError(
+                    f"{agent_id}.token_file 必须是网关所在机器上的绝对路径。"
+                )
+            token_file = str(token_path)
         artifact_root_value = value.get("artifact_root")
         artifact_root = None
         if artifact_root_value is not None:
@@ -126,7 +180,11 @@ class AgentConfig:
             agent_id=agent_id,
             url=url,
             cwd=cwd,
-            token_env=str(token_env) if token_env else None,
+            enabled=enabled,
+            capabilities=capabilities,
+            capacity=capacity,
+            token_env=str(token_env).strip() if token_env else None,
+            token_file=str(token_file) if token_file else None,
             allow_write=bool(value.get("allow_write", False)),
             allow_cwd_override=bool(value.get("allow_cwd_override", False)),
             model=str(value["model"]) if value.get("model") else None,
@@ -138,7 +196,12 @@ class AgentConfig:
             "agent_id": self.agent_id,
             "url": self.url,
             "cwd": self.cwd,
-            "authenticated": self.token_env is not None,
+            "enabled": self.enabled,
+            "capabilities": list(self.capabilities),
+            "supervisor_capacity": self.capacity,
+            "authenticated": (
+                self.token_env is not None or self.token_file is not None
+            ),
             "allow_write": self.allow_write,
             "permission_profiles": list(
                 PERMISSION_PROFILES if self.allow_write else ("read_only",)
@@ -644,6 +707,68 @@ class Orchestrator:
     def list_agents(self) -> list[dict[str, Any]]:
         return [agent.public_dict() for agent in self.load_agents().values()]
 
+    async def probe_agent(self, agent_id: str, *, timeout_sec: float = 2.5) -> None:
+        """连接并初始化指定 app-server，不创建 thread 或 turn。"""
+        agents = self.load_agents()
+        if agent_id not in agents:
+            raise ValueError(f"未知执行机：{agent_id}")
+        agent = agents[agent_id]
+        if not agent.enabled:
+            raise PermissionError(f"执行机 {agent_id} 已停用。")
+        token = self._resolve_agent_token(agent)
+        client = self._client_factory(
+            agent.url,
+            token=token,
+            request_timeout_sec=timeout_sec,
+        )
+        async with client:
+            return
+
+    @staticmethod
+    def _resolve_agent_token(agent: AgentConfig) -> str | None:
+        if agent.token_env:
+            token = os.getenv(agent.token_env)
+            if not token:
+                raise RuntimeError(f"环境变量 {agent.token_env} 未设置。")
+            return token
+        if not agent.token_file:
+            return None
+
+        token_path = Path(agent.token_file)
+        try:
+            if not token_path.is_file():
+                raise RuntimeError(
+                    f"执行机 {agent.agent_id} 的令牌文件不存在或不是普通文件。"
+                )
+            if token_path.stat().st_size > MAX_TOKEN_FILE_BYTES:
+                raise RuntimeError(
+                    f"执行机 {agent.agent_id} 的令牌文件不能超过 {MAX_TOKEN_FILE_BYTES} 字节。"
+                )
+            content = token_path.read_bytes()
+        except RuntimeError:
+            raise
+        except OSError as error:
+            raise RuntimeError(
+                f"无法读取执行机 {agent.agent_id} 的令牌文件。"
+            ) from error
+        if len(content) > MAX_TOKEN_FILE_BYTES:
+            raise RuntimeError(
+                f"执行机 {agent.agent_id} 的令牌文件不能超过 {MAX_TOKEN_FILE_BYTES} 字节。"
+            )
+        try:
+            token = content.decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise RuntimeError(
+                f"执行机 {agent.agent_id} 的令牌文件必须使用 UTF-8 编码。"
+            ) from error
+        if not token:
+            raise RuntimeError(f"执行机 {agent.agent_id} 的令牌文件为空。")
+        if "\r" in token or "\n" in token or "\0" in token:
+            raise RuntimeError(
+                f"执行机 {agent.agent_id} 的令牌文件必须只包含一行令牌。"
+            )
+        return token
+
     async def dispatch(
         self,
         *,
@@ -675,6 +800,8 @@ class Orchestrator:
         if agent_id not in agents:
             raise ValueError(f"未知执行机 {agent_id}，可用值：{', '.join(agents)}")
         agent = agents[agent_id]
+        if not agent.enabled:
+            raise PermissionError(f"执行机 {agent_id} 已停用。")
 
         if permission_profile is not None:
             normalized_profile = permission_profile.strip().lower()
@@ -876,11 +1003,7 @@ class Orchestrator:
         if not thread_id.strip() or not turn_id.strip():
             raise ValueError("thread_id 和 turn_id 不能为空。")
         agent = agents[agent_id]
-        token = None
-        if agent.token_env:
-            token = os.getenv(agent.token_env)
-            if not token:
-                raise RuntimeError(f"环境变量 {agent.token_env} 未设置。")
+        token = self._resolve_agent_token(agent)
         client = self._client_factory(agent.url, token=token)
         try:
             await client.open()
@@ -919,11 +1042,7 @@ class Orchestrator:
                 job.status = "running"
                 job.started_at = utc_now()
                 stage = "configuration"
-                token = None
-                if agent.token_env:
-                    token = os.getenv(agent.token_env)
-                    if not token:
-                        raise RuntimeError(f"环境变量 {agent.token_env} 未设置。")
+                token = self._resolve_agent_token(agent)
 
                 deadline = time.monotonic() + job.timeout_sec
                 stage = "connect"

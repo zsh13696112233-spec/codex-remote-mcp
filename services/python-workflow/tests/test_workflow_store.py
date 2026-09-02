@@ -163,8 +163,14 @@ class WorkflowStoreTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type = 'table' "
                 "AND name = 'workflow_node_revision_instructions'"
             ).fetchone()
+            lease_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'supervisor_leases'"
+            ).fetchone()
         self.assertIn("revision_instruction", control_columns)
         self.assertIsNotNone(revision_table)
+        self.assertIsNotNone(lease_table)
+        self.assertEqual(upgraded["workflowId"], "legacy")
         dispatch = WorkflowStore(legacy_path).prepare_node_dispatch("legacy", "a")
         self.assertEqual(dispatch["permissionProfile"], "workspace_write")
         self.assertTrue(dispatch["write"])
@@ -181,6 +187,116 @@ class WorkflowStoreTests(unittest.TestCase):
             normalized["nodes"][0]["permissionProfile"], "workspace_write"
         )
         self.assertTrue(normalized["nodes"][0]["write"])
+
+    def test_supervisor_leases_enforce_fifo_and_allow_other_supervisors(self) -> None:
+        first = serial_workflow()
+        first["workflowId"] = "fifo-a"
+        first["supervisorAgentId"] = "supervisor-a"
+        second = serial_workflow()
+        second["workflowId"] = "fifo-b"
+        second["supervisorAgentId"] = "supervisor-a"
+        parallel = serial_workflow()
+        parallel["workflowId"] = "parallel"
+        parallel["supervisorAgentId"] = "supervisor-b"
+        self.store.create_workflow(first)
+        self.store.create_workflow(second)
+        self.store.create_workflow(parallel)
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE workflows SET created_at = ? WHERE workflow_id IN (?, ?)",
+                ("2026-01-01T00:00:00+00:00", "fifo-a", "fifo-b"),
+            )
+
+        claimed_first = self.store.claim_next_workflow("supervisor-a")
+        claimed_parallel = self.store.claim_next_workflow("supervisor-b")
+
+        self.assertEqual(claimed_first["workflowId"], "fifo-a")
+        self.assertEqual(claimed_parallel["workflowId"], "parallel")
+        self.assertEqual(
+            self.store.leased_supervisor_ids(), {"supervisor-a", "supervisor-b"}
+        )
+        self.assertIsNone(self.store.claim_next_workflow("supervisor-a"))
+        self.assertEqual(self.store.get_workflow("fifo-a")["status"], "running")
+        self.assertEqual(self.store.get_workflow("fifo-b")["status"], "queued")
+
+        self.store.finish_workflow(
+            "fifo-a", supervisor_status="failed", response=None, error="测试失败"
+        )
+        claimed_second = self.store.claim_next_workflow("supervisor-a")
+        self.assertEqual(claimed_second["workflowId"], "fifo-b")
+
+    def test_cancelled_queued_workflow_never_acquires_lease(self) -> None:
+        value = serial_workflow()
+        value["supervisorAgentId"] = "supervisor-a"
+        self.store.create_workflow(value)
+
+        cancelled = self.store.cancel_workflow("serial-demo")
+
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertIsNone(self.store.claim_next_workflow("supervisor-a"))
+        self.assertFalse(self.store.has_supervisor_lease("serial-demo"))
+
+    def test_semi_automatic_hold_keeps_lease_until_cancelled(self) -> None:
+        value = serial_workflow()
+        value["supervisorAgentId"] = "supervisor-a"
+        value["advanceMode"] = "semi_automatic"
+        self.store.create_workflow(value)
+        self.store.claim_next_workflow("supervisor-a")
+        self.store.prepare_node_dispatch("serial-demo", "a")
+        self.store.sync_node_job(
+            "serial-demo", "a", {"status": "completed", "finished_at": utc_now()}
+        )
+        gate_id = self.store.get_workflow("serial-demo")["pendingAdvance"]["gateId"]
+
+        self.store.hold_advance("serial-demo", gate_id)
+
+        self.assertTrue(self.store.has_supervisor_lease("serial-demo"))
+        self.assertIsNone(self.store.claim_next_workflow("supervisor-a"))
+        self.store.cancel_workflow("serial-demo")
+        self.assertFalse(self.store.has_supervisor_lease("serial-demo"))
+
+    def test_restart_uses_existing_lease_or_returns_to_queue(self) -> None:
+        value = serial_workflow()
+        value["supervisorAgentId"] = "supervisor-a"
+        self.store.create_workflow(value)
+        self.store.claim_next_workflow("supervisor-a")
+        self.store.prepare_node_dispatch("serial-demo", "a")
+        self.store.sync_node_job(
+            "serial-demo",
+            "a",
+            {"status": "completed", "response": "A", "finished_at": utc_now()},
+        )
+
+        active_restart = self.store.restart_from_node("serial-demo", "b")
+        self.assertEqual(active_restart["status"], "running")
+        self.assertTrue(self.store.has_supervisor_lease("serial-demo"))
+
+        self.store.finish_workflow(
+            "serial-demo", supervisor_status="failed", response=None, error="结束本轮"
+        )
+        terminal_restart = self.store.restart_from_node("serial-demo", "b")
+        self.assertEqual(terminal_restart["status"], "queued")
+        self.assertFalse(self.store.has_supervisor_lease("serial-demo"))
+
+    def test_restart_recovery_fails_active_workflows_and_preserves_queue(self) -> None:
+        active = serial_workflow()
+        active["workflowId"] = "active"
+        active["supervisorAgentId"] = "supervisor-a"
+        queued = serial_workflow()
+        queued["workflowId"] = "queued"
+        queued["supervisorAgentId"] = "supervisor-a"
+        self.store.create_workflow(active)
+        self.store.create_workflow(queued)
+        self.store.claim_next_workflow("supervisor-a")
+
+        recovered = self.store.recover_active_workflows_after_restart()
+
+        self.assertEqual(recovered, ["active"])
+        self.assertEqual(self.store.get_workflow("active")["status"], "failed")
+        self.assertEqual(self.store.get_workflow("queued")["status"], "queued")
+        self.assertFalse(self.store.has_supervisor_lease("active"))
+        claimed = self.store.claim_next_workflow("supervisor-a")
+        self.assertEqual(claimed["workflowId"], "queued")
 
     def test_permission_profile_rejects_unknown_and_conflicting_legacy_field(self) -> None:
         unknown = serial_workflow()
@@ -583,7 +699,7 @@ class WorkflowStoreTests(unittest.TestCase):
 
         restarted = self.store.restart_from_node("serial-demo", "b")
 
-        self.assertEqual(restarted["status"], "running")
+        self.assertEqual(restarted["status"], "queued")
         self.assertEqual(restarted["retryPolicy"], {
             "maxRetries": 2, "usedRetries": 1, "remainingRetries": 1,
         })

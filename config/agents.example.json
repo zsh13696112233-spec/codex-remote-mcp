@@ -3,13 +3,28 @@
     "local": {
       "url": "ws://127.0.0.1:4500",
       "cwd": "C:\\work",
+      "enabled": true,
+      "capabilities": ["supervisor", "executor"],
+      "capacity": 1,
       "artifact_root": "C:\\codex-workflow-artifacts",
       "allow_write": true,
       "allow_cwd_override": true
     },
+    "supervisor-b": {
+      "url": "ws://127.0.0.1:4501",
+      "cwd": "C:\\work",
+      "enabled": true,
+      "capabilities": ["supervisor"],
+      "capacity": 1,
+      "token_file": "C:\\ProgramData\\codex-workflow\\supervisor-b.token",
+      "allow_write": false,
+      "allow_cwd_override": false
+    },
     "remote-build": {
       "url": "wss://worker.example.com/codex",
       "cwd": "/srv/work",
+      "enabled": true,
+      "capabilities": ["executor"],
       "token_env": "REMOTE_CODEX_TOKEN",
       "allow_write": false,
       "allow_cwd_override": false

@@ -232,6 +232,14 @@ class WorkflowStore:
                     spec_zlib BLOB
                 );
 
+                CREATE TABLE IF NOT EXISTS supervisor_leases (
+                    supervisor_id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL UNIQUE,
+                    leased_at TEXT NOT NULL,
+                    FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS workflow_nodes (
                     workflow_id TEXT NOT NULL,
                     node_id TEXT NOT NULL,
@@ -521,8 +529,8 @@ class WorkflowStore:
         supervisor_agent_id = str(
             value.get("supervisorAgentId") or value.get("supervisor_agent_id") or "local"
         ).strip()
-        if not supervisor_agent_id:
-            raise ValueError("supervisorAgentId 不能为空。")
+        if not supervisor_agent_id or len(supervisor_agent_id) > 128:
+            raise ValueError("supervisorAgentId 必须是 1 到 128 个字符。")
 
         nodes: list[dict[str, Any]] = []
         node_ids: set[str] = set()
@@ -551,6 +559,8 @@ class WorkflowStore:
             ).strip()
             if not agent_id:
                 raise ValueError(f"远程节点 {node_id} 必须指定 executor.agentId。")
+            if len(agent_id) > 128:
+                raise ValueError(f"节点 {node_id} 的 agentId 不能超过 128 个字符。")
 
             prompt = str(raw_node.get("prompt") or "").strip()
             if not prompt:
@@ -746,6 +756,151 @@ class WorkflowStore:
                 timestamp,
             )
         return self.get_workflow(spec["workflowId"])
+
+    def recover_active_workflows_after_restart(self) -> list[str]:
+        """阶段 A 不重新附着旧会话，网关重启后直接终止遗留运行。"""
+        timestamp = utc_now()
+        error = "工作流网关已重启，任务已中断。"
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT workflow_id FROM workflows "
+                "WHERE status IN ('running', 'cancelling') "
+                "ORDER BY created_at, workflow_id"
+            ).fetchall()
+            workflow_ids = [str(row["workflow_id"]) for row in rows]
+            for workflow_id in workflow_ids:
+                self._supersede_pending_advances(
+                    connection, workflow_id, "gateway_restarted", timestamp
+                )
+                connection.execute(
+                    "UPDATE workflow_nodes SET status = 'interrupted', "
+                    "error = COALESCE(error, ?), finished_at = COALESCE(finished_at, ?) "
+                    "WHERE workflow_id = ? "
+                    "AND status IN ('queued', 'running', 'cancelling')",
+                    (error, timestamp, workflow_id),
+                )
+                connection.execute(
+                    "UPDATE workflows SET status = 'failed', "
+                    "supervisor_status = 'failed', error = ?, finished_at = ?, "
+                    "state_version = state_version + 1 WHERE workflow_id = ?",
+                    (error, timestamp, workflow_id),
+                )
+                self._add_event_with_connection(
+                    connection,
+                    workflow_id,
+                    None,
+                    "gateway",
+                    "workflow.failed",
+                    {"status": "failed", "reason": "gateway_restarted", "error": error},
+                    timestamp,
+                )
+            connection.execute("DELETE FROM supervisor_leases")
+        return workflow_ids
+
+    def claim_next_workflow(self, supervisor_id: str) -> dict[str, Any] | None:
+        """以固定 FIFO 顺序为一个主监督领取至多一个工作流。"""
+        timestamp = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lease = connection.execute(
+                "SELECT l.workflow_id, w.status FROM supervisor_leases l "
+                "JOIN workflows w ON w.workflow_id = l.workflow_id "
+                "WHERE l.supervisor_id = ?",
+                (supervisor_id,),
+            ).fetchone()
+            if lease is not None and lease["status"] in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                connection.execute(
+                    "DELETE FROM supervisor_leases WHERE supervisor_id = ?",
+                    (supervisor_id,),
+                )
+                lease = None
+            if lease is not None:
+                return None
+
+            row = connection.execute(
+                "SELECT workflow_id FROM workflows "
+                "WHERE supervisor_agent_id = ? AND status = 'queued' "
+                "ORDER BY created_at, workflow_id LIMIT 1",
+                (supervisor_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            workflow_id = str(row["workflow_id"])
+            connection.execute(
+                "INSERT INTO supervisor_leases (supervisor_id, workflow_id, leased_at) "
+                "VALUES (?, ?, ?)",
+                (supervisor_id, workflow_id, timestamp),
+            )
+            connection.execute(
+                "UPDATE workflows SET status = 'running', supervisor_status = 'queued', "
+                "started_at = COALESCE(started_at, ?), finished_at = NULL, "
+                "state_version = state_version + 1 WHERE workflow_id = ?",
+                (timestamp, workflow_id),
+            )
+            self._add_event_with_connection(
+                connection,
+                workflow_id,
+                None,
+                "gateway",
+                "supervisor.lease_acquired",
+                {"supervisorAgentId": supervisor_id, "leasedAt": timestamp},
+                timestamp,
+            )
+        return self.get_spec(workflow_id)
+
+    def has_supervisor_lease(self, workflow_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM supervisor_leases WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+        return row is not None
+
+    def leased_supervisor_ids(self) -> set[str]:
+        """返回当前持有活动工作流租约的主监督 ID。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT supervisor_id FROM supervisor_leases"
+            ).fetchall()
+        return {str(row["supervisor_id"]) for row in rows}
+
+    def release_supervisor_claim(self, workflow_id: str) -> None:
+        """仅用于主监督任务尚未创建成功时，将领取恢复为排队。"""
+        timestamp = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lease = connection.execute(
+                "SELECT supervisor_id FROM supervisor_leases WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if lease is None:
+                return
+            connection.execute(
+                "DELETE FROM supervisor_leases WHERE workflow_id = ?", (workflow_id,)
+            )
+            connection.execute(
+                "UPDATE workflows SET status = 'queued', supervisor_status = 'queued', "
+                "started_at = NULL, state_version = state_version + 1 "
+                "WHERE workflow_id = ? AND status = 'running'",
+                (workflow_id,),
+            )
+            self._add_event_with_connection(
+                connection,
+                workflow_id,
+                None,
+                "gateway",
+                "supervisor.lease_released",
+                {
+                    "supervisorAgentId": lease["supervisor_id"],
+                    "reason": "task_start_failed",
+                },
+                timestamp,
+            )
 
     def get_spec(self, workflow_id: str) -> dict[str, Any]:
         with self._connect() as connection:
@@ -1832,10 +1987,13 @@ class WorkflowStore:
                 (workflow_id, row["position"]),
             )
             connection.execute(
-                "UPDATE workflows SET status = 'running', finished_at = NULL, response = NULL, "
-                "error = NULL, used_retry_count = used_retry_count + 1, "
+                "UPDATE workflows SET status = CASE WHEN EXISTS ("
+                "SELECT 1 FROM supervisor_leases WHERE workflow_id = ?"
+                ") THEN 'running' ELSE 'queued' END, supervisor_status = 'queued', "
+                "finished_at = NULL, response = NULL, error = NULL, "
+                "used_retry_count = used_retry_count + 1, "
                 "state_version = state_version + 1 WHERE workflow_id = ?",
-                (workflow_id,),
+                (workflow_id, workflow_id),
             )
             if action_id is not None:
                 connection.execute(
@@ -1885,9 +2043,12 @@ class WorkflowStore:
                 (now, workflow_id, node_id),
             )
             connection.execute(
-                "UPDATE workflows SET status = 'running', finished_at = NULL, error = NULL, "
+                "UPDATE workflows SET status = CASE WHEN EXISTS ("
+                "SELECT 1 FROM supervisor_leases WHERE workflow_id = ?"
+                ") THEN 'running' ELSE 'queued' END, supervisor_status = 'queued', "
+                "finished_at = NULL, error = NULL, "
                 "state_version = state_version + 1 WHERE workflow_id = ?",
-                (workflow_id,),
+                (workflow_id, workflow_id),
             )
             self._add_event_with_connection(
                 connection, workflow_id, node_id, "chat", "node.skipped",
@@ -1896,31 +2057,57 @@ class WorkflowStore:
         return self.get_workflow(workflow_id)
 
     def stop_workflow(self, workflow_id: str) -> dict[str, Any]:
+        return self.cancel_workflow(
+            workflow_id,
+            reason="用户已停止任务。",
+            source="chat",
+            event_reason="chat_control",
+        )
+
+    def cancel_workflow(
+        self,
+        workflow_id: str,
+        *,
+        reason: str = "用户已取消任务。",
+        source: str = "gateway",
+        event_reason: str = "user_requested",
+    ) -> dict[str, Any]:
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            exists = connection.execute(
-                "SELECT 1 FROM workflows WHERE workflow_id = ?", (workflow_id,)
+            workflow = connection.execute(
+                "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
             ).fetchone()
-            if exists is None:
+            if workflow is None:
                 raise ValueError(f"找不到工作流：{workflow_id}")
-            self._supersede_pending_advances(connection, workflow_id, "stop", now)
-            connection.execute(
-                "UPDATE workflow_nodes SET status = 'cancelled', error = COALESCE(error, ?), "
-                "finished_at = COALESCE(finished_at, ?) WHERE workflow_id = ? "
-                "AND status NOT IN ('completed', 'skipped', 'failed', 'cancelled', 'interrupted')",
-                ("用户已停止任务。", now, workflow_id),
-            )
-            connection.execute(
-                "UPDATE workflows SET status = 'cancelled', supervisor_status = 'cancelled', "
-                "error = ?, finished_at = ?, state_version = state_version + 1 "
-                "WHERE workflow_id = ?",
-                ("用户已停止任务。", now, workflow_id),
-            )
-            self._add_event_with_connection(
-                connection, workflow_id, None, "chat", "workflow.cancelled",
-                {"status": "cancelled", "reason": "chat_control"}, now,
-            )
+            if workflow["status"] not in {"completed", "failed", "cancelled"}:
+                self._supersede_pending_advances(connection, workflow_id, "stop", now)
+                connection.execute(
+                    "UPDATE workflow_nodes SET status = 'cancelled', "
+                    "error = COALESCE(error, ?), "
+                    "finished_at = COALESCE(finished_at, ?) WHERE workflow_id = ? "
+                    "AND status NOT IN "
+                    "('completed', 'skipped', 'failed', 'cancelled', 'interrupted')",
+                    (reason, now, workflow_id),
+                )
+                connection.execute(
+                    "UPDATE workflows SET status = 'cancelled', "
+                    "supervisor_status = 'cancelled', error = ?, finished_at = ?, "
+                    "state_version = state_version + 1 WHERE workflow_id = ?",
+                    (reason, now, workflow_id),
+                )
+                self._release_supervisor_lease_with_connection(
+                    connection, workflow_id, event_reason, now
+                )
+                self._add_event_with_connection(
+                    connection,
+                    workflow_id,
+                    None,
+                    source,
+                    "workflow.cancelled",
+                    {"status": "cancelled", "reason": event_reason},
+                    now,
+                )
         return self.get_workflow(workflow_id)
 
     @staticmethod
@@ -2757,6 +2944,14 @@ class WorkflowStore:
                 error = f"主监督线程已结束，但节点未全部完成：{', '.join(incomplete)}"
         timestamp = utc_now()
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
+            ).fetchone()
+            if current is None:
+                raise ValueError(f"找不到工作流：{workflow_id}")
+            if current["status"] in {"completed", "failed", "cancelled"}:
+                return
             self._supersede_pending_advances(
                 connection, workflow_id, "workflow_finished", timestamp
             )
@@ -2769,6 +2964,9 @@ class WorkflowStore:
                 """,
                 (status, supervisor_status, response, error, timestamp, workflow_id),
             )
+            self._release_supervisor_lease_with_connection(
+                connection, workflow_id, f"workflow_{status}", timestamp
+            )
             self._add_event_with_connection(
                 connection,
                 workflow_id,
@@ -2778,6 +2976,34 @@ class WorkflowStore:
                 {"status": status, "response": response, "error": error},
                 timestamp,
             )
+
+    def _release_supervisor_lease_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        workflow_id: str,
+        reason: str,
+        timestamp: str,
+    ) -> str | None:
+        lease = connection.execute(
+            "SELECT supervisor_id FROM supervisor_leases WHERE workflow_id = ?",
+            (workflow_id,),
+        ).fetchone()
+        if lease is None:
+            return None
+        supervisor_id = str(lease["supervisor_id"])
+        connection.execute(
+            "DELETE FROM supervisor_leases WHERE workflow_id = ?", (workflow_id,)
+        )
+        self._add_event_with_connection(
+            connection,
+            workflow_id,
+            None,
+            "gateway",
+            "supervisor.lease_released",
+            {"supervisorAgentId": supervisor_id, "reason": reason},
+            timestamp,
+        )
+        return supervisor_id
 
     def add_event(
         self,

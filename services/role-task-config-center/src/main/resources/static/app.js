@@ -1,4 +1,4 @@
-const state={page:"roles",roles:[],sops:[],tasks:[],agents:[],feishu:null,dingtalk:null,gatewayOnline:false,sop:{draft:null,baseline:"",selectedNodeId:null,tab:"workflow",drag:null}};
+const state={page:"roles",roles:[],sops:[],tasks:[],agents:[],feishu:null,dingtalk:null,gatewayOnline:false,agentsAvailable:false,agentRefreshInFlight:false,lastRuntimeRefreshAt:null,sop:{draft:null,baseline:"",selectedNodeId:null,tab:"workflow",drag:null}};
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uid=()=>`node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
@@ -17,14 +17,25 @@ function toast(s){const e=$("#toast");e.textContent=s;e.style.display="block";se
 function time(v){return v?new Date(v).toLocaleString("zh-CN",{hour12:false}):"—"}
 function status(x){return `<span class="badge ${x.enabled?"":"off"}">${x.enabled?"启用中":"已停用"}</span>`}
 
-async function loadBase(){
+function showGatewayStatus(online){
+  state.gatewayOnline=online;$("#gateway").className=`gateway ${online?"online":"offline"}`;$("#gateway").textContent=online?"● Python 网关正常":"● Python 网关不可用";
+}
+async function loadGatewayReady(){
+  try{const value=await api("/api/gateway/ready");showGatewayStatus(value.ready===true)}catch{showGatewayStatus(false)}
+}
+async function loadAgents({preserveOnFailure=false}={}){
   try{
-    const a=await api("/api/agents");state.agents=a.agents||[];state.gatewayOnline=true;
-    $("#gateway").className="gateway online";$("#gateway").textContent="● Python 网关正常";
+    const a=await api("/api/agents");state.agents=a.agents||[];state.agentsAvailable=true;
   }catch{
-    state.agents=[];state.gatewayOnline=false;
-    $("#gateway").className="gateway offline";$("#gateway").textContent="● Python 网关不可用";
+    state.agentsAvailable=false;if(!preserveOnFailure)state.agents=[];
   }
+}
+async function loadRuntime({preserveOnFailure=false}={}){
+  await Promise.all([loadAgents({preserveOnFailure}),loadGatewayReady()]);
+  state.lastRuntimeRefreshAt=new Date().toISOString();
+}
+async function loadBase(){
+  await loadRuntime();
   [state.roles,state.sops,state.tasks]=await Promise.all([api("/api/roles"),api("/api/sops"),api("/api/task-definitions")]);
 }
 function roleCard(x){return `<article class="card"><div><h3>${esc(x.name)} ${status(x)}</h3><p>${esc(x.duty)}</p><span class="meta">版本 ${x.version} · 更新于 ${time(x.updatedAt)}</span></div><div class="actions"><button data-action="edit-role" data-id="${x.id}">编辑</button><button data-action="delete-role" data-id="${x.id}">删除</button></div></article>`}
@@ -82,8 +93,36 @@ function dingtalkPayload(){
   return {enabled:f.enabled.checked,clientId:f.clientId.value.trim(),clientSecret:f.clientSecret.value.trim(),taskDefinitionId:f.taskDefinitionId.value,cardTemplateId:f.cardTemplateId.value.trim(),eventPollIntervalMs:Number(f.eventPollIntervalMs.value)};
 }
 
+function supervisorAgents(){
+  return state.agents.filter(a=>Array.isArray(a.capabilities)?a.capabilities.includes("supervisor"):a.agentId==="local");
+}
+function runtimeAgentCard(agent){
+  const view=supervisorRuntimeView(agent.agentId);
+  return `<article class="runtime-agent-card ${view.state}">
+    <div class="runtime-agent-heading"><div><span class="runtime-dot ${view.state}"></span><strong>${esc(agent.agentId)}</strong></div><span class="runtime-state ${view.state}">${esc(view.label)}</span></div>
+    <p>${esc(view.detail)}</p>
+    <dl><div><dt>默认模型</dt><dd>${esc(agent.defaultModel||"跟随执行机设置")}</dd></div><div><dt>并发容量</dt><dd>${Number(agent.supervisorCapacity)||1}</dd></div><div><dt>最近探测</dt><dd>${time(agent.checkedAt)}</dd></div><div><dt>最近在线</dt><dd>${time(agent.lastOnlineAt)}</dd></div></dl>
+  </article>`;
+}
+function renderRuntimeStatus(){
+  const agents=supervisorAgents(),counts={online:0,busy:0,offline:0,unknown:0};
+  agents.forEach(agent=>{const value=supervisorRuntimeView(agent.agentId).state;counts[value==="online"?"online":value==="busy"?"busy":value==="offline"?"offline":"unknown"]++});
+  const gatewayState=state.gatewayOnline?"online":"offline";
+  const emptyMessage=!state.gatewayOnline?"Python 网关不可用，恢复连接后会自动显示主监督状态。":!state.agentsAvailable?"主监督列表暂时无法读取，将在 10 秒后自动重试。":"尚未登记具备主监督能力的执行机。";
+  $("#content").className="content runtime-content";
+  $("#content").innerHTML=`<section class="runtime-dashboard">
+    <div class="runtime-overview">
+      <div class="runtime-overview-head"><div><h2>运行总览</h2><p>页面可独立查看，不需要新建或打开 SOP。在线状态每 10 秒自动刷新，连续两次探测失败才显示离线。</p></div><button data-runtime-refresh ${state.agentRefreshInFlight?"disabled":""}>立即刷新</button></div>
+      <div class="runtime-gateway ${gatewayState}"><span class="runtime-dot ${gatewayState}"></span><div><strong>Python 网关</strong><small>${state.gatewayOnline?"连接正常":"当前不可用"}</small></div><b>${state.gatewayOnline?"正常":"不可用"}</b></div>
+      <div class="runtime-summary"><div><span class="runtime-dot online"></span><strong>${counts.online}</strong><small>在线空闲</small></div><div><span class="runtime-dot busy"></span><strong>${counts.busy}</strong><small>在线忙碌</small></div><div><span class="runtime-dot offline"></span><strong>${counts.offline}</strong><small>离线</small></div><div><span class="runtime-dot unknown"></span><strong>${counts.unknown}</strong><small>未知或停用</small></div></div>
+      <p class="runtime-refreshed">最近刷新：${time(state.lastRuntimeRefreshAt)}</p>
+    </div>
+    <div class="runtime-supervisors"><div class="runtime-section-head"><div><h2>主监督执行机</h2><p>共 ${agents.length} 台已登记主监督；本页只展示状态，不提供运行控制。</p></div></div>${agents.length?`<div class="runtime-agent-grid">${agents.map(runtimeAgentCard).join("")}</div>`:`<div class="runtime-empty">${emptyMessage}</div>`}</div>
+  </section>`;
+}
+
 async function render({reload=true}={}){
-  if(reload)await loadBase();
+  if(reload){if(state.page==="runtime")await loadRuntime();else await loadBase()}
   if(state.page==="feishu"){
     $("#search").closest(".toolbar").classList.add("hidden");
     state.feishu=await api("/api/feishu/config");
@@ -93,6 +132,10 @@ async function render({reload=true}={}){
     $("#search").closest(".toolbar").classList.add("hidden");
     state.dingtalk=await api("/api/dingtalk/config");
     renderDingTalkConfig();return;
+  }
+  if(state.page==="runtime"){
+    $("#search").closest(".toolbar").classList.add("hidden");
+    renderRuntimeStatus();return;
   }
   if(state.page==="sops"){
     $("#search").closest(".toolbar").classList.add("hidden");
@@ -114,7 +157,7 @@ function setDraft(sop){
   const copy={...blankSop(),...sop,steps:(sop.steps||[]).map(normalizeStep)};
   state.sop.draft=copy;state.sop.selectedNodeId=copy.steps[0]?._clientId||null;state.sop.tab="workflow";state.sop.baseline=draftFingerprint(copy);
 }
-function sopPayload(d=state.sop.draft){return{name:d.name.trim(),description:(d.description||"").trim(),supervisorAgentId:"local",supervisorTimeoutSec:Number(d.supervisorTimeoutSec),maxRetryCount:Number(d.maxRetryCount),advanceMode:d.advanceMode||"automatic",handoffMode:d.handoffMode||"cumulative_files",defaultStepModel:d.defaultStepModel,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:(s.workingDirectory||"").trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
+function sopPayload(d=state.sop.draft){return{name:d.name.trim(),description:(d.description||"").trim(),supervisorAgentId:(d.supervisorAgentId||"").trim(),supervisorTimeoutSec:Number(d.supervisorTimeoutSec),maxRetryCount:Number(d.maxRetryCount),advanceMode:d.advanceMode||"automatic",handoffMode:d.handoffMode||"cumulative_files",defaultStepModel:d.defaultStepModel,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),executorType:s.executorType||"local",agentId:(s.agentId||"").trim(),workingDirectory:(s.workingDirectory||"").trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
 function draftFingerprint(d=state.sop.draft){return d?JSON.stringify(sopPayload(d)):""}
 function isSopDirty(){return !!state.sop.draft&&draftFingerprint()!==state.sop.baseline}
 function confirmDiscard(){return !isSopDirty()||confirm("当前工作流有未保存的修改，确定放弃吗？")}
@@ -182,16 +225,54 @@ function workflowInspectorHtml(){
     <label>步骤默认模型<select data-sop-field="defaultStepModel">${MODELS.map(m=>`<option ${d.defaultStepModel===m?"selected":""}>${m}</option>`).join("")}</select></label>
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，30 秒后自动继续）</option></select></label>
     <label>步骤结果交接<select data-sop-field="handoffMode"><option value="cumulative_files" ${d.handoffMode==="cumulative_files"?"selected":""}>文件交接（累计传递前序文件）</option><option value="legacy_text" ${d.handoffMode==="legacy_text"?"selected":""}>文字交接（追加上一步文字结果）</option></select></label>
+    <label>主监督执行机 *<div class="agent-picker"><input data-sop-field="supervisorAgentId" maxlength="128" value="${esc(d.supervisorAgentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
     <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="7200" value="${d.supervisorTimeoutSec}"></label>
     <label>单次任务最多重跑次数<input data-sop-field="maxRetryCount" type="number" min="0" max="100" value="${d.maxRetryCount}"></label>
     <label class="check"><input data-sop-field="enabled" type="checkbox" ${d.enabled?"checked":""}> 启用该工作流</label>
-    <p class="inspector-hint">文字交接适合纯文本串行任务；文件交接不会传递步骤文字，前序步骤应发布文件。主执行机固定使用本地，失败策略固定为步骤失败后停止。</p>`;
+    <p class="inspector-hint">文字交接适合纯文本串行任务；文件交接不会传递步骤文字，前序步骤应发布文件。执行机列表只提供填写建议，网关离线或列表中没有该 ID 时仍可保存；真正运行时由网关校验。失败策略固定为步骤失败后停止。</p>`;
 }
-function agentOptions(selected){
-  const known=state.agents.some(a=>a.agentId===selected);
-  const keep=selected&&!known?`<option value="${esc(selected)}" selected>${esc(selected)} · 当前配置${state.gatewayOnline?"（未在线）":"（网关离线）"}</option>`:"";
-  const empty=!selected&&!state.agents.length?`<option value="" selected>暂无可用执行机</option>`:"";
-  return empty+keep+state.agents.map(a=>`<option value="${esc(a.agentId)}" ${a.agentId===selected?"selected":""}>${esc(a.agentId)}${a.defaultModel?` · ${esc(a.defaultModel)}`:""}</option>`).join("");
+function suggestedAgents(capability){
+  return state.agents.filter(a=>a.enabled!==false&&(!Array.isArray(a.capabilities)||a.capabilities.includes(capability)||(capability==="supervisor"&&a.agentId==="local")));
+}
+function supervisorRuntimeView(agentId){
+  if(!state.gatewayOnline)return{state:"unknown",label:"状态未知",detail:"Python 网关不可用"};
+  if(!state.agentsAvailable)return{state:"unknown",label:"状态未知",detail:"主监督状态暂时无法读取"};
+  const agent=state.agents.find(a=>a.agentId===agentId);
+  if(!agent)return{state:"unregistered",label:"未登记",detail:"该 ID 不在当前执行机列表中"};
+  if(agent.enabled===false)return{state:"disabled",label:"已停用",detail:"该主监督已在网关配置中停用"};
+  const checked=agent.checkedAt?`最近检查 ${new Date(agent.checkedAt).toLocaleTimeString("zh-CN",{hour12:false})}`:"正在等待首次检查";
+  if(agent.connectionStatus==="online"&&agent.availability==="busy")return{state:"busy",label:"在线忙碌",detail:checked};
+  if(agent.connectionStatus==="online")return{state:"online",label:"在线空闲",detail:checked};
+  if(agent.connectionStatus==="offline")return{state:"offline",label:"离线",detail:checked};
+  return{state:"unknown",label:"状态未知",detail:checked};
+}
+function supervisorSelectionStatusHtml(agentId){
+  const view=supervisorRuntimeView(agentId||"");
+  return `<small class="agent-selection-status ${view.state}" data-supervisor-selection-status><i></i><span>${esc(view.label)}</span><b>${esc(view.detail)}</b></small>`;
+}
+function agentChoiceButtons(capability,scope){
+  const agents=suggestedAgents(capability);
+  return agents.length?agents.map(a=>{
+    if(capability!=="supervisor")return `<button type="button" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}"><span>${esc(a.agentId)}</span>${a.defaultModel?`<small>${esc(a.defaultModel)}</small>`:""}</button>`;
+    const view=supervisorRuntimeView(a.agentId);
+    return `<button type="button" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}" title="${esc(view.detail)}"><span class="agent-choice-main"><i class="agent-status-dot ${view.state}"></i><span>${esc(a.agentId)}</span></span><small class="agent-runtime-status ${view.state}">${esc(view.label)}</small></button>`;
+  }).join(""):'<span class="agent-picker-empty">暂无可用建议</span>';
+}
+function updateAgentRuntimeUi(){
+  document.querySelectorAll('[data-agent-choice="supervisor"]').forEach(button=>{
+    const view=supervisorRuntimeView(button.dataset.agentId),dot=button.querySelector(".agent-status-dot"),label=button.querySelector(".agent-runtime-status");
+    if(dot)dot.className=`agent-status-dot ${view.state}`;
+    if(label){label.className=`agent-runtime-status ${view.state}`;label.textContent=view.label}
+    button.title=view.detail;
+  });
+  const selected=document.querySelector("[data-supervisor-selection-status]"),input=document.querySelector('[data-sop-field="supervisorAgentId"]');
+  if(selected&&input){const view=supervisorRuntimeView(input.value.trim());selected.className=`agent-selection-status ${view.state}`;selected.innerHTML=`<i></i><span>${esc(view.label)}</span><b>${esc(view.detail)}</b>`}
+}
+async function refreshAgentRuntimeStatuses(){
+  if(document.hidden||!["sops","runtime"].includes(state.page)||state.agentRefreshInFlight)return;
+  state.agentRefreshInFlight=true;
+  try{await loadRuntime({preserveOnFailure:true})}finally{state.agentRefreshInFlight=false}
+  if(state.page==="runtime")renderRuntimeStatus();else updateAgentRuntimeUi();
 }
 function agentPermissionProfiles(agentId){
   const agent=state.agents.find(a=>a.agentId===agentId);if(!agent)return["read_only"];
@@ -208,7 +289,7 @@ function nodeInspectorHtml(s){
     <div class="selected-role"><i>${esc(role.name.slice(0,1))}</i><div><strong>${esc(role.name)}</strong><small>${esc(role.duty||"暂无职责说明")}</small></div>${role.enabled===false?'<b>已停用</b>':""}</div>
     <label>显示名称 *<input data-node-field="displayName" value="${esc(s.displayName)}"></label>
     <label>本步骤执行说明 *<textarea data-node-field="instruction" placeholder="描述该节点需要完成的工作">${esc(s.instruction)}</textarea></label>
-    <div class="inspector-grid"><label>执行位置<select data-node-field="executorType"><option value="local">本机</option><option value="remote" ${s.executorType==="remote"?"selected":""}>远程</option></select></label><label>执行机 *<select data-node-field="agentId">${agentOptions(s.agentId)}</select></label></div>
+    <div class="inspector-grid"><label>执行位置<select data-node-field="executorType"><option value="local">本机</option><option value="remote" ${s.executorType==="remote"?"selected":""}>远程</option></select></label><label>执行机 *<div class="agent-picker"><input data-node-field="agentId" maxlength="128" value="${esc(s.agentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部步骤执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("executor","executor")}</div></div></label></div>
     <label>模型<select data-node-field="modelOverride"><option value="">继承工作流默认模型</option>${MODELS.map(m=>`<option value="${m}" ${s.modelOverride===m?"selected":""}>${m}</option>`).join("")}</select></label>
     <div class="inspector-grid"><label>超时（秒）<input data-node-field="timeoutSec" type="number" min="10" max="7200" value="${s.timeoutSec}"></label><label>工作目录<input data-node-field="workingDirectory" value="${esc(s.workingDirectory)}" placeholder="可选"></label></div>
     <label>Skill 标签<input data-node-field="skills" value="${esc(s.skills.join(", "))}" placeholder="多个标签用逗号分隔"></label>
@@ -219,7 +300,7 @@ function nodeInspectorHtml(s){
 
 function addRoleNode(roleId,index){
   const role=roleById(roleId);if(!role||!role.enabled)return;
-  const node=normalizeStep({roleId:role.id,roleName:role.name,roleDuty:role.duty,displayName:role.name,instruction:role.duty,agentId:state.agents[0]?.agentId||""});
+  const suggested=state.agents.find(a=>a.enabled!==false&&(!Array.isArray(a.capabilities)||a.capabilities.includes("executor")));const node=normalizeStep({roleId:role.id,roleName:role.name,roleDuty:role.duty,displayName:role.name,instruction:role.duty,agentId:suggested?.agentId||"local"});
   state.sop.draft.steps.splice(index,0,node);state.sop.selectedNodeId=node._clientId;state.sop.tab="node";renderSopWorkspace();
 }
 function moveNode(nodeId,index){
@@ -240,13 +321,14 @@ function updateField(target,obj,field){
 }
 function validateSop(){
   const d=state.sop.draft;if(!d)return"请先选择或新建工作流。";if(!d.name.trim())return"请输入工作流名称。";
+  if(!(d.supervisorAgentId||"").trim())return"请输入主监督执行机 ID。";
   if(!d.steps.length)return"请至少拖入一个角色节点。";
   if(d.supervisorTimeoutSec<10||d.supervisorTimeoutSec>7200)return"主监督最长时间必须在 10 到 7200 秒之间。";
   if(d.maxRetryCount<0||d.maxRetryCount>100)return"单次任务最多重跑次数必须在 0 到 100 之间。";
   for(let i=0;i<d.steps.length;i++){
     const s=d.steps[i];if(!s.displayName.trim())return`请填写第 ${i+1} 个节点的显示名称。`;
     if(!s.instruction.trim())return`请填写第 ${i+1} 个节点的执行说明。`;
-    if(!s.agentId)return state.gatewayOnline?`请选择第 ${i+1} 个节点的执行机。`:`Python 网关不可用，无法为第 ${i+1} 个新节点选择执行机。`;
+    if(!(s.agentId||"").trim())return`请输入第 ${i+1} 个节点的执行机 ID。`;
     if(s.timeoutSec<10||s.timeoutSec>7200)return`第 ${i+1} 个节点的超时必须在 10 到 7200 秒之间。`;
   }
   return"";
@@ -268,6 +350,21 @@ $("#taskForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.
 $("#content").addEventListener("click",async e=>{
   let botTestButton=null;
   try{
+    const runtimeRefresh=e.target.closest("[data-runtime-refresh]");
+    if(runtimeRefresh){runtimeRefresh.disabled=true;await refreshAgentRuntimeStatuses();return}
+    const pickerToggle=e.target.closest("[data-agent-menu-toggle]");
+    if(pickerToggle){
+      const menu=pickerToggle.closest(".agent-picker").querySelector(".agent-picker-menu"),opening=menu.hidden;
+      document.querySelectorAll(".agent-picker-menu").forEach(item=>item.hidden=true);
+      document.querySelectorAll("[data-agent-menu-toggle]").forEach(item=>item.setAttribute("aria-expanded","false"));
+      menu.hidden=!opening;pickerToggle.setAttribute("aria-expanded",String(opening));return;
+    }
+    const agentChoice=e.target.closest("[data-agent-choice]");
+    if(agentChoice){
+      if(agentChoice.dataset.agentChoice==="supervisor"&&state.sop.draft){state.sop.draft.supervisorAgentId=agentChoice.dataset.agentId;renderSopWorkspace();return}
+      const step=selectedStep();if(agentChoice.dataset.agentChoice==="executor"&&step){step.agentId=agentChoice.dataset.agentId;if(!agentPermissionProfiles(step.agentId).includes(step.permissionProfile)){step.permissionProfile="read_only";step.writeEnabled=false}renderSopWorkspace();return}
+    }
+    if(!e.target.closest(".agent-picker")){document.querySelectorAll(".agent-picker-menu").forEach(item=>item.hidden=true);document.querySelectorAll("[data-agent-menu-toggle]").forEach(item=>item.setAttribute("aria-expanded","false"))}
     const test=e.target.closest("[data-feishu-test]");
     if(test){botTestButton=test;test.disabled=true;const result=await api("/api/feishu/config/test",{method:"POST",body:JSON.stringify(feishuPayload())});const output=$("#feishuTestResult");output.className=`test-result ${result.success?"success":"error"}`;output.textContent=result.message;test.disabled=false;return}
     const dingtalkTest=e.target.closest("[data-dingtalk-test]");
@@ -307,7 +404,7 @@ $("#content").addEventListener("submit",async e=>{
 $("#content").addEventListener("input",e=>{
   if(e.target.id==="sopSearch"){const q=e.target.value.trim().toLowerCase();document.querySelectorAll(".sop-list-item").forEach(item=>item.hidden=!item.dataset.name.includes(q));return}
   const sopField=e.target.dataset.sopField;
-  if(sopField&&state.sop.draft){updateField(e.target,state.sop.draft,sopField);const title=document.querySelector(".canvas-toolbar strong");if(sopField==="name"&&title)title.textContent=e.target.value||"未命名工作流";syncDirtyUi();return}
+  if(sopField&&state.sop.draft){updateField(e.target,state.sop.draft,sopField);const title=document.querySelector(".canvas-toolbar strong");if(sopField==="name"&&title)title.textContent=e.target.value||"未命名工作流";if(sopField==="supervisorAgentId")updateAgentRuntimeUi();syncDirtyUi();return}
   const nodeField=e.target.dataset.nodeField,step=selectedStep();
   if(nodeField&&step){updateField(e.target,step,nodeField);const card=document.querySelector(`[data-node-id="${step._clientId}"]`);if(card&&nodeField==="displayName")card.querySelector(".node-role strong").textContent=e.target.value||roleById(step.roleId)?.name||"未命名节点";if(card&&nodeField==="instruction")card.querySelector(".node-body>p").textContent=e.target.value||"尚未填写执行说明";syncDirtyUi()}
 });
@@ -377,13 +474,15 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   if(b.dataset.page===state.page)return;
   if(state.page==="sops"){const dirty=isSopDirty();if(!confirmDiscard())return;if(dirty)discardSopChanges()}
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
-  const map={roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、运行并追溯不可变快照。","＋ 新建任务"],feishu:["飞书机器人","配置长连接、固定任务和运行状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接、互动卡和固定任务。",""]};
+  const map={roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、运行并追溯不可变快照。","＋ 新建任务"],runtime:["运行状态","查看 Python 网关和全部主监督执行机的实时状态。",""],feishu:["飞书机器人","配置长连接、固定任务和运行状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接、互动卡和固定任务。",""]};
   [$("#title").textContent,$("#subtitle").textContent,$("#create").textContent]=map[state.page];
-  $("#create").classList.toggle("hidden",["feishu","dingtalk"].includes(state.page));
+  $("#create").classList.toggle("hidden",["runtime","feishu","dingtalk"].includes(state.page));
   try{await render()}catch(e){toast(e.message)}
 });
 $("#create").onclick=()=>state.page==="roles"?openRole():state.page==="sops"?startNewSop():state.page==="tasks"?openTask():null;
 $("#refresh").onclick=async()=>{if(state.page==="sops"&&!confirmDiscard())return;try{if(state.page==="sops"){const id=state.sop.draft?.id;await loadBase();if(id&&state.sops.some(s=>s.id===id))setDraft(await api(`/api/sops/${id}`));else if(state.sops.length)setDraft(state.sops[0]);else state.sop.draft=null;renderSopWorkspace()}else await render()}catch(e){toast(e.message)}};
 $("#search").oninput=()=>render({reload:false});
 window.addEventListener("beforeunload",e=>{if(isSopDirty()){e.preventDefault();e.returnValue=""}});
+setInterval(refreshAgentRuntimeStatuses,10000);
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)refreshAgentRuntimeStatuses()});
 render().catch(e=>toast(e.message));
