@@ -8,15 +8,18 @@
 飞书或钉钉群聊 ── HTTPS/WSS 443 长连接 ──▶ 角色任务配置中心（8091）
                                                 │ 提交工作流
           ▼
-Python 工作流网关（8080）── Codex Orchestrator MCP ── Codex App Server
+Python 工作流网关（8080）── 主监督 App Server（4500）
+          │                         │ 本机 Streamable HTTP MCP
+          │ 内部 API               ▼
+          └────────────────── 远程 Sidecar（127.0.0.1:8082）── 执行机 App Server
           ▲
           │ 查询、事件和对话
 任务运行监控中心（8090）
 ```
 
-Python 网关与 MCP 进程通过同一个 SQLite 数据库共享工作流、节点、消息和事件状态。配置中心另外使用 MySQL 保存角色、SOP、任务定义和运行快照。
+中央 Python 网关独占 SQLite 工作流运行库。阶段 A 的本机兼容 MCP 仍可与网关共享同一个数据库；阶段 B 的远程 Sidecar 只使用带机器认证的中央内部 API，不读取 SQLite，也不配置数据库账号。配置中心另外使用 MySQL 保存角色、SOP、任务定义和运行快照。
 
-网关支持在同一台机器上配置多个主监督 app-server。每个主监督固定容量为 `1`：同一主监督的工作流按 `created_at + workflowId` 排队，不同主监督可以并行。配置中心提供独立“运行状态”页面，并在 SOP 主监督建议列表中显示在线空闲、在线忙碌、离线或状态未知；两处状态都来自中央网关每 10 秒执行的轻量连接探测和当前租约，无需先创建 SOP。配置中心允许为 SOP 自由填写主监督和各步骤执行机 ID；保存不依赖网关在线，提交运行时才由网关校验执行机是否存在、启用且能力匹配。步骤执行机和工作目录不要求一致，空目录继承执行机默认值。
+网关支持本机和远程多个主监督 app-server。每个主监督固定容量为 `1`：同一主监督的工作流按 `created_at + workflowId` 排队，不同主监督可以并行。远程主监督由 Sidecar 每 5 秒上报权威心跳，20 秒未收到心跳即离线；本机兼容模式继续使用轻量连接探测。配置中心提供独立“运行状态”页面，并在 SOP 主监督建议列表中显示在线空闲、在线忙碌、离线或状态未知。配置中心允许为 SOP 自由填写主监督和各步骤执行机 ID；保存不依赖网关在线，提交运行时才由网关校验执行机是否存在、启用且能力匹配。步骤执行机和工作目录不要求一致，空目录继承执行机默认值。
 
 配置中心可选接入一个飞书机器人或钉钉机器人，两套适配均使用官方 Java SDK 主动建立长连接，不要求为 `8080`、`8090` 或 `8091` 配置公网域名或入站端口。同一部署只能启用一个平台，切换时必须先停用当前机器人。飞书在话题内继续对话；钉钉可在任务运行期间直接 `@机器人` 对话，也可回复或引用启动消息、进度消息或进度卡进入任务助手。两套适配都支持固定任务启动、可靠进度补发和任务助手完整回复，并共享“同时最多一个机器人任务”的限制；钉钉未配置卡片模板时使用内置 Markdown 进度消息和“暂停 / 继续”文字控制，配置模板后使用互动卡片按钮，并在同一卡片中动态展示当前步骤、最近产出和最新助手回复摘要。
 
@@ -78,6 +81,8 @@ SOP 还可选择全自动或半自动流转。全自动保持步骤成功后立�
 - [Python 工作流服务](services/python-workflow/README.md)
 - [任务运行监控中心](services/workflow-console/README.md)
 - [角色任务配置中心](services/role-task-config-center/README.md)
+- [完整部署指南](docs/DEPLOYMENT_GUIDE.zh-CN.md)
+- [Codex 远程混合机部署与旧版升级执行手册](docs/CODEX_HYBRID_MACHINE_DEPLOYMENT.zh-CN.md)
 - [完整工作流指南](docs/WORKFLOW_GUIDE.zh-CN.md)
 - [多主监督机工作流设计](docs/MULTI_SUPERVISOR_WORKFLOW_DESIGN.zh-CN.md)
 
@@ -90,6 +95,8 @@ Copy-Item .\config\agents.example.json .\config\agents.json
 ```
 
 编辑 `config/agents.json`，为每个执行机配置 Codex app-server WebSocket 地址、默认工作目录、`enabled`、`capabilities` 和权限上限。能力只允许 `supervisor`、`executor`；具备主监督能力时 `capacity` 固定为 `1`。旧配置中未声明能力的 `local` 同时具备两种能力，其他执行机默认为 `executor`。业务步骤支持 `read_only`、`workspace_write`、`auto_review` 三档；分别对应只读且不审批、工作区写入且不审批、工作区写入并由 Auto-review 审核越界请求。访问令牌通过 `token_env` 引用环境变量，或通过 `token_file` 引用网关本机的绝对文件路径，两者只能配置一个；不要直接把令牌写入 JSON。
+
+远程主监督在中央配置中增加 `"orchestration_mode": "remote_sidecar"`，并使用 `sidecar_token_env` 或 `sidecar_token_file` 配置独立机器令牌。该令牌只认证 Sidecar 到中央 `8080`，不能与中央网关连接主监督 app-server 的 `token_env`/`token_file` 混用。完整示例见 `config/agents.example.json`；远程机本地执行机清单见 `config/agents.remote-sidecar.example.json`。
 
 ### 2. 启动 Python 网关
 
@@ -121,6 +128,28 @@ required = true
 CODEX_AGENTS_FILE = "<PROJECT_ROOT>\\config\\agents.json"
 CODEX_WORKFLOW_DB = "<PROJECT_ROOT>\\workflows.db"
 ```
+
+远程主监督不使用上面的 stdio/SQLite 配置。在远程机启动 app-server `4500` 和 Sidecar `8082` 后，为该 app-server 配置官方 Streamable HTTP MCP：
+
+```toml
+[mcp_servers.codex_orchestrator]
+url = "http://127.0.0.1:8082/mcp"
+required = true
+```
+
+Sidecar 默认且只允许监听回环地址。示例启动命令如下；`SUPERVISOR_B_SIDECAR_TOKEN` 的值必须与中央配置解析出的机器令牌一致：
+
+```powershell
+Copy-Item .\config\agents.remote-sidecar.example.json .\config\agents.sidecar.json
+$env:SUPERVISOR_B_SIDECAR_TOKEN = "请通过密钥系统注入"
+.\scripts\start_workflow_sidecar.ps1 `
+  -AgentId supervisor-b `
+  -GatewayUrl http://central.internal:8080 `
+  -TokenEnv SUPERVISOR_B_SIDECAR_TOKEN `
+  -AgentsFile .\config\agents.sidecar.json
+```
+
+远程主监督当前只接受 `handoffMode: "legacy_text"`。提交 `cumulative_files` 会在写入运行库前稳定拒绝；跨机器附件传输留到后续阶段。
 
 ### 3. 启动两个 Java Web 应用
 
@@ -168,4 +197,6 @@ mvn -f .\services\role-task-config-center\pom.xml test
 - 飞书和钉钉机器人都只需要服务端主动访问平台 HTTPS/WSS `443`；无需给本系统开放公网入站接口，且同一部署只能启用其中一个平台。
 - `config/agents.json`、SQLite 数据库、IDE 配置及构建产物均不提交 Git。
 - 工作流队列和主监督租约持久化在 SQLite。网关重启时不会重新附着旧 Codex 会话：遗留的运行中或取消中工作流直接标记失败并清除租约，然后继续调度排队任务。
+- 远程 Sidecar 令牌按主监督独立配置；内部 API 认证失败返回 `401`，跨主监督访问返回 `403`，对象不存在返回 `404`，旧实例、旧租约或状态冲突返回 `409`。停止 Sidecar 后，活动工作流会在 20 秒内失败并释放租约，不自动迁移。
+- 远程机不得设置 `CODEX_WORKFLOW_DB` 或复制中央 SQLite；`8082` 不开放防火墙，`8080` 只允许 Java 服务和已登记的主监督机访问，并应位于可信内网、VPN 或 TLS 反向代理之后。
 - `prototypes/` 仅保存早期页面方案，不是生产入口。

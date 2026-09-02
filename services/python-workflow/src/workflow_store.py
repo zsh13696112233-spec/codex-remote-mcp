@@ -236,8 +236,30 @@ class WorkflowStore:
                     supervisor_id TEXT PRIMARY KEY,
                     workflow_id TEXT NOT NULL UNIQUE,
                     leased_at TEXT NOT NULL,
+                    lease_token TEXT,
+                    sidecar_instance_id TEXT,
+                    renewed_at TEXT,
+                    expires_at TEXT,
                     FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
                         ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS supervisor_sidecars (
+                    supervisor_id TEXT PRIMARY KEY,
+                    instance_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    last_heartbeat_at TEXT NOT NULL,
+                    last_online_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS supervisor_sidecar_instances (
+                    supervisor_id TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    retired_at TEXT,
+                    PRIMARY KEY (supervisor_id, instance_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS workflow_nodes (
@@ -278,6 +300,7 @@ class WorkflowStore:
                     node_id TEXT,
                     source TEXT NOT NULL,
                     event_type TEXT NOT NULL,
+                    external_event_id TEXT,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
@@ -390,6 +413,7 @@ class WorkflowStore:
                     node_id TEXT NOT NULL,
                     attempt_number INTEGER NOT NULL,
                     status TEXT NOT NULL,
+                    dispatch_token TEXT,
                     job_id TEXT,
                     thread_id TEXT,
                     turn_id TEXT,
@@ -434,6 +458,7 @@ class WorkflowStore:
                 "actual_prompt": "TEXT",
                 "attempt_count": "INTEGER NOT NULL DEFAULT 0",
                 "permission_profile": "TEXT NOT NULL DEFAULT 'read_only'",
+                "dispatch_token": "TEXT",
             }.items():
                 if name not in columns:
                     connection.execute(
@@ -505,6 +530,39 @@ class WorkflowStore:
                 connection.execute(
                     "ALTER TABLE workflow_advance_gates ADD COLUMN held_at TEXT"
                 )
+            lease_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(supervisor_leases)"
+                ).fetchall()
+            }
+            for name, definition in {
+                "lease_token": "TEXT",
+                "sidecar_instance_id": "TEXT",
+                "renewed_at": "TEXT",
+                "expires_at": "TEXT",
+            }.items():
+                if name not in lease_columns:
+                    connection.execute(
+                        f"ALTER TABLE supervisor_leases ADD COLUMN {name} {definition}"
+                    )
+            event_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(workflow_events)"
+                ).fetchall()
+            }
+            if "external_event_id" not in event_columns:
+                connection.execute(
+                    "ALTER TABLE workflow_events ADD COLUMN external_event_id TEXT"
+                )
+            # 幂等键只在一个工作流内唯一，避免另一工作流复用相同键时误命中。
+            connection.execute("DROP INDEX IF EXISTS workflow_events_external_id")
+            connection.execute(
+                "CREATE UNIQUE INDEX workflow_events_external_id "
+                "ON workflow_events(workflow_id, external_event_id) "
+                "WHERE external_event_id IS NOT NULL"
+            )
             connection.execute(
                 """
                 UPDATE workflow_nodes
@@ -798,9 +856,19 @@ class WorkflowStore:
             connection.execute("DELETE FROM supervisor_leases")
         return workflow_ids
 
-    def claim_next_workflow(self, supervisor_id: str) -> dict[str, Any] | None:
+    def claim_next_workflow(
+        self,
+        supervisor_id: str,
+        *,
+        sidecar_instance_id: str | None = None,
+        lease_timeout_sec: int | None = None,
+    ) -> dict[str, Any] | None:
         """以固定 FIFO 顺序为一个主监督领取至多一个工作流。"""
         timestamp = utc_now()
+        if (sidecar_instance_id is None) != (lease_timeout_sec is None):
+            raise ValueError("远程租约必须同时提供 Sidecar 实例和超时时间。")
+        if lease_timeout_sec is not None and lease_timeout_sec < 5:
+            raise ValueError("远程租约超时时间不能小于 5 秒。")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             lease = connection.execute(
@@ -822,6 +890,23 @@ class WorkflowStore:
             if lease is not None:
                 return None
 
+            sidecar_renewed_at: str | None = None
+            sidecar_expires_at: str | None = None
+            if sidecar_instance_id is not None:
+                sidecar = connection.execute(
+                    "SELECT instance_id, last_heartbeat_at FROM supervisor_sidecars "
+                    "WHERE supervisor_id = ?",
+                    (supervisor_id,),
+                ).fetchone()
+                if sidecar is None or str(sidecar["instance_id"]) != sidecar_instance_id:
+                    return None
+                heartbeat_at = datetime.fromisoformat(str(sidecar["last_heartbeat_at"]))
+                sidecar_deadline = heartbeat_at + timedelta(seconds=lease_timeout_sec)
+                if datetime.now(UTC) > sidecar_deadline:
+                    return None
+                sidecar_renewed_at = str(sidecar["last_heartbeat_at"])
+                sidecar_expires_at = sidecar_deadline.isoformat()
+
             row = connection.execute(
                 "SELECT workflow_id FROM workflows "
                 "WHERE supervisor_agent_id = ? AND status = 'queued' "
@@ -831,10 +916,22 @@ class WorkflowStore:
             if row is None:
                 return None
             workflow_id = str(row["workflow_id"])
+            lease_token = uuid.uuid4().hex if sidecar_instance_id else None
+            expires_at = sidecar_expires_at
             connection.execute(
-                "INSERT INTO supervisor_leases (supervisor_id, workflow_id, leased_at) "
-                "VALUES (?, ?, ?)",
-                (supervisor_id, workflow_id, timestamp),
+                "INSERT INTO supervisor_leases ("
+                "supervisor_id, workflow_id, leased_at, lease_token, "
+                "sidecar_instance_id, renewed_at, expires_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    supervisor_id,
+                    workflow_id,
+                    timestamp,
+                    lease_token,
+                    sidecar_instance_id,
+                    sidecar_renewed_at,
+                    expires_at,
+                ),
             )
             connection.execute(
                 "UPDATE workflows SET status = 'running', supervisor_status = 'queued', "
@@ -848,10 +945,317 @@ class WorkflowStore:
                 None,
                 "gateway",
                 "supervisor.lease_acquired",
-                {"supervisorAgentId": supervisor_id, "leasedAt": timestamp},
+                {
+                    "supervisorAgentId": supervisor_id,
+                    "leasedAt": timestamp,
+                    "remoteSidecar": sidecar_instance_id is not None,
+                },
                 timestamp,
             )
         return self.get_spec(workflow_id)
+
+    def record_sidecar_heartbeat(
+        self,
+        supervisor_id: str,
+        instance_id: str,
+        started_at: str,
+        *,
+        lease_timeout_sec: int,
+    ) -> dict[str, Any]:
+        """登记 Sidecar 实例、续租，并返回只属于该主监督的活动租约。"""
+        if not supervisor_id or not instance_id:
+            raise ValueError("Sidecar 身份和实例 ID 不能为空。")
+        if lease_timeout_sec < 5:
+            raise ValueError("租约超时时间不能小于 5 秒。")
+        timestamp = utc_now()
+        expires_at = (
+            datetime.now(UTC) + timedelta(seconds=lease_timeout_sec)
+        ).isoformat()
+        failed_workflow_id: str | None = None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT instance_id, started_at FROM supervisor_sidecars "
+                "WHERE supervisor_id = ?",
+                (supervisor_id,),
+            ).fetchone()
+            incoming_started_at = self._parse_sidecar_started_at(started_at)
+            if current is not None:
+                current_instance_id = str(current["instance_id"])
+                current_started_at = self._parse_sidecar_started_at(
+                    str(current["started_at"])
+                )
+                if current_instance_id == instance_id:
+                    if incoming_started_at != current_started_at:
+                        raise RuntimeError("Sidecar 实例的启动时间与已登记信息不一致。")
+                else:
+                    known_instance = connection.execute(
+                        "SELECT retired_at FROM supervisor_sidecar_instances "
+                        "WHERE supervisor_id = ? AND instance_id = ?",
+                        (supervisor_id, instance_id),
+                    ).fetchone()
+                    if known_instance is not None:
+                        raise RuntimeError("旧 Sidecar 实例已经失效，不能重新登记。")
+            if current is not None and str(current["instance_id"]) != instance_id:
+                connection.execute(
+                    "INSERT OR IGNORE INTO supervisor_sidecar_instances ("
+                    "supervisor_id, instance_id, started_at, first_seen_at, "
+                    "last_seen_at, retired_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        supervisor_id,
+                        str(current["instance_id"]),
+                        str(current["started_at"]),
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE supervisor_sidecar_instances SET retired_at = ? "
+                    "WHERE supervisor_id = ? AND instance_id = ?",
+                    (timestamp, supervisor_id, str(current["instance_id"])),
+                )
+                lease = connection.execute(
+                    "SELECT workflow_id, sidecar_instance_id FROM supervisor_leases "
+                    "WHERE supervisor_id = ?",
+                    (supervisor_id,),
+                ).fetchone()
+                if lease is not None and lease["sidecar_instance_id"] is not None:
+                    failed_workflow_id = str(lease["workflow_id"])
+                    self._fail_workflow_with_connection(
+                        connection,
+                        failed_workflow_id,
+                        "主监督 Sidecar 已重启，旧任务已中断。",
+                        "sidecar_instance_replaced",
+                        timestamp,
+                    )
+            connection.execute(
+                """
+                INSERT INTO supervisor_sidecars (
+                    supervisor_id, instance_id, started_at,
+                    last_heartbeat_at, last_online_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(supervisor_id) DO UPDATE SET
+                    instance_id = excluded.instance_id,
+                    started_at = excluded.started_at,
+                    last_heartbeat_at = excluded.last_heartbeat_at,
+                    last_online_at = excluded.last_online_at
+                """,
+                (supervisor_id, instance_id, started_at, timestamp, timestamp),
+            )
+            connection.execute(
+                """
+                INSERT INTO supervisor_sidecar_instances (
+                    supervisor_id, instance_id, started_at,
+                    first_seen_at, last_seen_at, retired_at
+                ) VALUES (?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(supervisor_id, instance_id) DO UPDATE SET
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (supervisor_id, instance_id, started_at, timestamp, timestamp),
+            )
+            connection.execute(
+                "UPDATE supervisor_leases SET renewed_at = ?, expires_at = ? "
+                "WHERE supervisor_id = ? AND sidecar_instance_id = ?",
+                (timestamp, expires_at, supervisor_id, instance_id),
+            )
+            lease = connection.execute(
+                "SELECT workflow_id, lease_token, expires_at "
+                "FROM supervisor_leases WHERE supervisor_id = ? "
+                "AND sidecar_instance_id = ?",
+                (supervisor_id, instance_id),
+            ).fetchone()
+        return {
+            "supervisorId": supervisor_id,
+            "instanceId": instance_id,
+            "heartbeatAt": timestamp,
+            "failedWorkflowId": failed_workflow_id,
+            "lease": (
+                {
+                    "workflowId": str(lease["workflow_id"]),
+                    "leaseToken": str(lease["lease_token"]),
+                    "expiresAt": str(lease["expires_at"]),
+                }
+                if lease is not None
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _parse_sidecar_started_at(value: str) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("Sidecar 启动时间必须是 ISO-8601 时间。") from error
+        if parsed.tzinfo is None:
+            raise ValueError("Sidecar 启动时间必须包含时区。")
+        return parsed.astimezone(UTC)
+
+    def sidecar_status(
+        self, supervisor_id: str, *, timeout_sec: int
+    ) -> dict[str, Any]:
+        """读取持久化心跳，并按当前时间计算远程主监督在线状态。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM supervisor_sidecars WHERE supervisor_id = ?",
+                (supervisor_id,),
+            ).fetchone()
+        if row is None:
+            return {
+                "connectionStatus": "offline",
+                "checkedAt": None,
+                "lastOnlineAt": None,
+                "instanceId": None,
+            }
+        checked_at = str(row["last_heartbeat_at"])
+        deadline = datetime.fromisoformat(checked_at) + timedelta(seconds=timeout_sec)
+        return {
+            "connectionStatus": (
+                "online" if datetime.now(UTC) <= deadline else "offline"
+            ),
+            "checkedAt": checked_at,
+            "lastOnlineAt": str(row["last_online_at"]),
+            "instanceId": str(row["instance_id"]),
+        }
+
+    def fail_next_queued_for_offline_sidecar(self, supervisor_id: str) -> str | None:
+        """远程主监督离线时立即失败最早排队项，不创建租约。"""
+        timestamp = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT workflow_id FROM workflows "
+                "WHERE supervisor_agent_id = ? AND status = 'queued' "
+                "ORDER BY created_at, workflow_id LIMIT 1",
+                (supervisor_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            workflow_id = str(row["workflow_id"])
+            self._fail_workflow_with_connection(
+                connection,
+                workflow_id,
+                "主监督 Sidecar 当前离线，任务无法启动。",
+                "sidecar_offline",
+                timestamp,
+            )
+        return workflow_id
+
+    def expire_sidecar_leases(self) -> list[dict[str, str]]:
+        """终止已超过心跳期限的远程租约，并拒绝旧实例继续写入。"""
+        timestamp = utc_now()
+        expired: list[dict[str, str]] = []
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT supervisor_id, workflow_id FROM supervisor_leases "
+                "WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (timestamp,),
+            ).fetchall()
+            for row in rows:
+                workflow_id = str(row["workflow_id"])
+                supervisor_id = str(row["supervisor_id"])
+                self._fail_workflow_with_connection(
+                    connection,
+                    workflow_id,
+                    "主监督 Sidecar 心跳超时，任务已中断。",
+                    "sidecar_heartbeat_timeout",
+                    timestamp,
+                )
+                expired.append(
+                    {"workflowId": workflow_id, "supervisorId": supervisor_id}
+                )
+        return expired
+
+    def validate_sidecar_access(
+        self,
+        supervisor_id: str,
+        workflow_id: str,
+        *,
+        lease_token: str | None = None,
+        require_lease: bool = False,
+    ) -> None:
+        """限制 Sidecar 只能访问自己的工作流，写操作必须持有当前租约。"""
+        with self._connect() as connection:
+            self._validate_sidecar_access_with_connection(
+                connection,
+                supervisor_id,
+                workflow_id,
+                lease_token=lease_token,
+                require_lease=require_lease,
+            )
+
+    @staticmethod
+    def _validate_sidecar_access_with_connection(
+        connection: sqlite3.Connection,
+        supervisor_id: str,
+        workflow_id: str,
+        *,
+        lease_token: str | None,
+        require_lease: bool,
+    ) -> None:
+        workflow = connection.execute(
+            "SELECT supervisor_agent_id FROM workflows WHERE workflow_id = ?",
+            (workflow_id,),
+        ).fetchone()
+        if workflow is None:
+            raise ValueError(f"找不到工作流：{workflow_id}")
+        if str(workflow["supervisor_agent_id"]) != supervisor_id:
+            raise PermissionError("Sidecar 无权访问其他主监督的工作流。")
+        if not require_lease:
+            return
+        lease = connection.execute(
+            "SELECT l.lease_token, l.expires_at, l.sidecar_instance_id, "
+            "s.instance_id AS current_instance_id "
+            "FROM supervisor_leases l "
+            "LEFT JOIN supervisor_sidecars s ON s.supervisor_id = l.supervisor_id "
+            "WHERE l.supervisor_id = ? AND l.workflow_id = ?",
+            (supervisor_id, workflow_id),
+        ).fetchone()
+        if (
+            lease is None
+            or not lease_token
+            or str(lease["lease_token"] or "") != lease_token
+            or lease["expires_at"] is None
+            or str(lease["expires_at"]) <= utc_now()
+            or not lease["sidecar_instance_id"]
+            or lease["sidecar_instance_id"] != lease["current_instance_id"]
+        ):
+            raise RuntimeError("Sidecar 租约不存在、已过期或已被替换。")
+
+    def _fail_workflow_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        workflow_id: str,
+        error: str,
+        reason: str,
+        timestamp: str,
+    ) -> None:
+        self._supersede_pending_advances(connection, workflow_id, reason, timestamp)
+        connection.execute(
+            "UPDATE workflow_nodes SET status = 'interrupted', error = COALESCE(error, ?), "
+            "finished_at = COALESCE(finished_at, ?) WHERE workflow_id = ? "
+            "AND status IN ('queued', 'running', 'cancelling')",
+            (error, timestamp, workflow_id),
+        )
+        connection.execute(
+            "UPDATE workflows SET status = 'failed', supervisor_status = 'failed', "
+            "error = ?, finished_at = ?, state_version = state_version + 1 "
+            "WHERE workflow_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')",
+            (error, timestamp, workflow_id),
+        )
+        connection.execute(
+            "DELETE FROM supervisor_leases WHERE workflow_id = ?", (workflow_id,)
+        )
+        self._add_event_with_connection(
+            connection,
+            workflow_id,
+            None,
+            "gateway",
+            "workflow.failed",
+            {"status": "failed", "reason": reason, "error": error},
+            timestamp,
+        )
 
     def has_supervisor_lease(self, workflow_id: str) -> bool:
         with self._connect() as connection:
@@ -1301,12 +1705,27 @@ class WorkflowStore:
         return steps
 
     def update_node_actual_prompt(
-        self, workflow_id: str, node_id: str, actual_prompt: str
+        self,
+        workflow_id: str,
+        node_id: str,
+        actual_prompt: str,
+        *,
+        sidecar_supervisor_id: str | None = None,
+        lease_token: str | None = None,
     ) -> None:
         """在远程文件路径已确定后保存本次真正派发的提示词。"""
         if len(actual_prompt) > PROMPT_LIMIT:
             raise ValueError("实际提示词不能超过 100000 个字符。")
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if sidecar_supervisor_id is not None:
+                self._validate_sidecar_access_with_connection(
+                    connection,
+                    sidecar_supervisor_id,
+                    workflow_id,
+                    lease_token=lease_token,
+                    require_lease=True,
+                )
             cursor = connection.execute(
                 "UPDATE workflow_nodes SET actual_prompt = ? "
                 "WHERE workflow_id = ? AND node_id = ?",
@@ -1980,7 +2399,7 @@ class WorkflowStore:
                 """
                 UPDATE workflow_nodes SET status = 'pending', job_id = NULL, thread_id = NULL,
                     turn_id = NULL, response = NULL, error = NULL, started_at = NULL,
-                    finished_at = NULL, actual_prompt = NULL,
+                    finished_at = NULL, actual_prompt = NULL, dispatch_token = NULL,
                     attempt_count = attempt_count + 1
                 WHERE workflow_id = ? AND position >= ?
                 """,
@@ -2364,10 +2783,25 @@ class WorkflowStore:
         assert result is not None
         return result
 
-    def release_timed_out_advance(self, workflow_id: str, gate_id: str) -> bool:
+    def release_timed_out_advance(
+        self,
+        workflow_id: str,
+        gate_id: str,
+        *,
+        sidecar_supervisor_id: str | None = None,
+        lease_token: str | None = None,
+    ) -> bool:
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if sidecar_supervisor_id is not None:
+                self._validate_sidecar_access_with_connection(
+                    connection,
+                    sidecar_supervisor_id,
+                    workflow_id,
+                    lease_token=lease_token,
+                    require_lease=True,
+                )
             row = connection.execute(
                 "SELECT * FROM workflow_advance_gates WHERE workflow_id = ? AND gate_id = ?",
                 (workflow_id, gate_id),
@@ -2458,9 +2892,25 @@ class WorkflowStore:
             ).fetchall()
         return [self._node_snapshot(row) for row in rows]
 
-    def prepare_node_dispatch(self, workflow_id: str, node_id: str) -> dict[str, Any]:
+    def prepare_node_dispatch(
+        self,
+        workflow_id: str,
+        node_id: str,
+        *,
+        sidecar_supervisor_id: str | None = None,
+        lease_token: str | None = None,
+        sidecar_dispatch_id: str | None = None,
+    ) -> dict[str, Any]:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if sidecar_supervisor_id is not None:
+                self._validate_sidecar_access_with_connection(
+                    connection,
+                    sidecar_supervisor_id,
+                    workflow_id,
+                    lease_token=lease_token,
+                    require_lease=True,
+                )
             workflow = connection.execute(
                 "SELECT status, handoff_mode FROM workflows WHERE workflow_id = ?", (workflow_id,)
             ).fetchone()
@@ -2478,7 +2928,15 @@ class WorkflowStore:
             if row is None:
                 raise ValueError(f"找不到节点：{node_id}")
             if row["status"] != "pending":
-                result = self._node_dispatch_spec(row, already_dispatched=True)
+                same_remote_prepare = (
+                    sidecar_dispatch_id is not None
+                    and row["status"] == "queued"
+                    and row["job_id"] is None
+                    and row["dispatch_token"] == sidecar_dispatch_id
+                )
+                result = self._node_dispatch_spec(
+                    row, already_dispatched=not same_remote_prepare
+                )
                 result["handoffMode"] = workflow["handoff_mode"]
                 return result
 
@@ -2552,10 +3010,17 @@ class WorkflowStore:
             connection.execute(
                 """
                 UPDATE workflow_nodes
-                SET status = 'queued', started_at = ?, actual_prompt = ?
+                SET status = 'queued', started_at = ?, actual_prompt = ?,
+                    dispatch_token = ?
                 WHERE workflow_id = ? AND node_id = ?
                 """,
-                (timestamp, actual_prompt, workflow_id, node_id),
+                (
+                    timestamp,
+                    actual_prompt,
+                    sidecar_dispatch_id,
+                    workflow_id,
+                    node_id,
+                ),
             )
             connection.execute(
                 """
@@ -2697,13 +3162,31 @@ class WorkflowStore:
             "alreadyDispatched": already_dispatched,
         }
 
-    def attach_node_job(self, workflow_id: str, node_id: str, snapshot: dict[str, Any]) -> None:
+    def attach_node_job(
+        self,
+        workflow_id: str,
+        node_id: str,
+        snapshot: dict[str, Any],
+        *,
+        sidecar_supervisor_id: str | None = None,
+        lease_token: str | None = None,
+    ) -> None:
         timestamp = utc_now()
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if sidecar_supervisor_id is not None:
+                self._validate_sidecar_access_with_connection(
+                    connection,
+                    sidecar_supervisor_id,
+                    workflow_id,
+                    lease_token=lease_token,
+                    require_lease=True,
+                )
             connection.execute(
                 """
                 UPDATE workflow_nodes
-                SET job_id = ?, thread_id = ?, turn_id = ?, status = ?
+                SET job_id = ?, thread_id = ?, turn_id = ?, status = ?,
+                    dispatch_token = NULL
                 WHERE workflow_id = ? AND node_id = ?
                 """,
                 (
@@ -2729,10 +3212,27 @@ class WorkflowStore:
                 timestamp,
             )
 
-    def sync_node_job(self, workflow_id: str, node_id: str, snapshot: dict[str, Any]) -> None:
+    def sync_node_job(
+        self,
+        workflow_id: str,
+        node_id: str,
+        snapshot: dict[str, Any],
+        *,
+        sidecar_supervisor_id: str | None = None,
+        lease_token: str | None = None,
+    ) -> None:
         status = str(snapshot.get("status") or "running")
         finished_at = snapshot.get("finished_at") if status in TERMINAL_NODE_STATUSES else None
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if sidecar_supervisor_id is not None:
+                self._validate_sidecar_access_with_connection(
+                    connection,
+                    sidecar_supervisor_id,
+                    workflow_id,
+                    lease_token=lease_token,
+                    require_lease=True,
+                )
             old = connection.execute(
                 """
                 SELECT status, job_id, thread_id, turn_id, response, error, finished_at
@@ -3019,10 +3519,39 @@ class WorkflowStore:
                 connection, workflow_id, node_id, source, event_type, payload, utc_now()
             )
 
-    def add_events(self, events: list[dict[str, Any]]) -> list[int]:
+    def add_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        sidecar_supervisor_id: str | None = None,
+        lease_token: str | None = None,
+    ) -> list[int]:
         if not events:
             return []
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if sidecar_supervisor_id is not None:
+                workflow_ids = {str(event["workflow_id"]) for event in events}
+                if len(workflow_ids) != 1:
+                    raise ValueError("Sidecar 事件批次只能属于一个工作流。")
+                self._validate_sidecar_access_with_connection(
+                    connection,
+                    sidecar_supervisor_id,
+                    next(iter(workflow_ids)),
+                    lease_token=lease_token,
+                    require_lease=True,
+                )
+                for event in events:
+                    node_id = event.get("node_id")
+                    if node_id is None:
+                        continue
+                    node = connection.execute(
+                        "SELECT 1 FROM workflow_nodes "
+                        "WHERE workflow_id = ? AND node_id = ?",
+                        (str(event["workflow_id"]), str(node_id)),
+                    ).fetchone()
+                    if node is None:
+                        raise ValueError(f"找不到节点：{node_id}")
             return [
                 self._add_event_with_connection(
                     connection,
@@ -3032,6 +3561,11 @@ class WorkflowStore:
                     str(event["event_type"]),
                     event["payload"],
                     str(event.get("created_at") or utc_now()),
+                    (
+                        str(event["external_event_id"])
+                        if event.get("external_event_id")
+                        else None
+                    ),
                 )
                 for event in events
             ]
@@ -3045,6 +3579,7 @@ class WorkflowStore:
         event_type: str,
         payload: dict[str, Any],
         created_at: str,
+        external_event_id: str | None = None,
     ) -> int:
         encoded = json.dumps(payload, ensure_ascii=False, default=str)
         if len(encoded) > EVENT_PAYLOAD_LIMIT:
@@ -3053,12 +3588,29 @@ class WorkflowStore:
             )
         cursor = connection.execute(
             """
-            INSERT INTO workflow_events (
-                workflow_id, node_id, source, event_type, payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO workflow_events (
+                workflow_id, node_id, source, event_type, external_event_id,
+                payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (workflow_id, node_id, source, event_type, encoded, created_at),
+            (
+                workflow_id,
+                node_id,
+                source,
+                event_type,
+                external_event_id,
+                encoded,
+                created_at,
+            ),
         )
+        if cursor.rowcount == 0 and external_event_id:
+            existing = connection.execute(
+                "SELECT sequence FROM workflow_events "
+                "WHERE workflow_id = ? AND external_event_id = ?",
+                (workflow_id, external_event_id),
+            ).fetchone()
+            if existing is not None:
+                return int(existing["sequence"])
         return int(cursor.lastrowid)
 
     def list_events(

@@ -29,6 +29,7 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
 from workflow_store import ARTIFACT_LIMIT, AsyncEventBatcher, WorkflowStore
+from workflow_runtime_client import InternalApiClient, RemoteEventBatcher
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "agents.json"
@@ -92,6 +93,9 @@ class AgentConfig:
     capacity: int = 0
     token_env: str | None = None
     token_file: str | None = None
+    orchestration_mode: str = "local_db"
+    sidecar_token_env: str | None = None
+    sidecar_token_file: str | None = None
     allow_write: bool = False
     allow_cwd_override: bool = False
     model: str | None = None
@@ -163,6 +167,44 @@ class AgentConfig:
                     f"{agent_id}.token_file 必须是网关所在机器上的绝对路径。"
                 )
             token_file = str(token_path)
+
+        orchestration_mode = str(
+            value.get("orchestration_mode", "local_db")
+        ).strip().lower()
+        if orchestration_mode not in {"local_db", "remote_sidecar"}:
+            raise ValueError(
+                f"{agent_id}.orchestration_mode 只能是 local_db 或 remote_sidecar。"
+            )
+        sidecar_token_env = value.get("sidecar_token_env")
+        if sidecar_token_env is not None and not str(sidecar_token_env).strip():
+            sidecar_token_env = None
+        sidecar_token_file = value.get("sidecar_token_file")
+        if sidecar_token_file is not None and not str(sidecar_token_file).strip():
+            sidecar_token_file = None
+        if sidecar_token_env and sidecar_token_file:
+            raise ValueError(
+                f"{agent_id}.sidecar_token_env 和 sidecar_token_file 只能配置一个。"
+            )
+        if orchestration_mode == "remote_sidecar":
+            if "supervisor" not in capabilities:
+                raise ValueError(
+                    f"{agent_id} 使用 remote_sidecar 时必须具备 supervisor 能力。"
+                )
+            if not sidecar_token_env and not sidecar_token_file:
+                raise ValueError(
+                    f"{agent_id} 使用 remote_sidecar 时必须配置 Sidecar 令牌来源。"
+                )
+        elif sidecar_token_env or sidecar_token_file:
+            raise ValueError(
+                f"{agent_id} 只有使用 remote_sidecar 时才能配置 Sidecar 令牌。"
+            )
+        if sidecar_token_file:
+            sidecar_token_path = Path(str(sidecar_token_file).strip())
+            if not sidecar_token_path.is_absolute():
+                raise ValueError(
+                    f"{agent_id}.sidecar_token_file 必须是网关所在机器上的绝对路径。"
+                )
+            sidecar_token_file = str(sidecar_token_path)
         artifact_root_value = value.get("artifact_root")
         artifact_root = None
         if artifact_root_value is not None:
@@ -185,6 +227,13 @@ class AgentConfig:
             capacity=capacity,
             token_env=str(token_env).strip() if token_env else None,
             token_file=str(token_file) if token_file else None,
+            orchestration_mode=orchestration_mode,
+            sidecar_token_env=(
+                str(sidecar_token_env).strip() if sidecar_token_env else None
+            ),
+            sidecar_token_file=(
+                str(sidecar_token_file) if sidecar_token_file else None
+            ),
             allow_write=bool(value.get("allow_write", False)),
             allow_cwd_override=bool(value.get("allow_cwd_override", False)),
             model=str(value["model"]) if value.get("model") else None,
@@ -199,6 +248,11 @@ class AgentConfig:
             "enabled": self.enabled,
             "capabilities": list(self.capabilities),
             "supervisor_capacity": self.capacity,
+            "orchestration_mode": self.orchestration_mode,
+            "sidecar_authenticated": (
+                self.sidecar_token_env is not None
+                or self.sidecar_token_file is not None
+            ),
             "authenticated": (
                 self.token_env is not None or self.token_file is not None
             ),
@@ -707,6 +761,13 @@ class Orchestrator:
     def list_agents(self) -> list[dict[str, Any]]:
         return [agent.public_dict() for agent in self.load_agents().values()]
 
+    def get_agent(self, agent_id: str) -> AgentConfig:
+        """读取单个执行机的完整私有配置，不对外序列化。"""
+        agents = self.load_agents()
+        if agent_id not in agents:
+            raise ValueError(f"未知执行机：{agent_id}")
+        return agents[agent_id]
+
     async def probe_agent(self, agent_id: str, *, timeout_sec: float = 2.5) -> None:
         """连接并初始化指定 app-server，不创建 thread 或 turn。"""
         agents = self.load_agents()
@@ -726,46 +787,82 @@ class Orchestrator:
 
     @staticmethod
     def _resolve_agent_token(agent: AgentConfig) -> str | None:
-        if agent.token_env:
-            token = os.getenv(agent.token_env)
+        return Orchestrator._resolve_token_source(
+            agent.agent_id,
+            "执行机",
+            agent.token_env,
+            agent.token_file,
+        )
+
+    @staticmethod
+    def resolve_sidecar_token(agent: AgentConfig) -> str:
+        """解析中央网关用于认证指定远程 Sidecar 的独立令牌。"""
+        token = Orchestrator._resolve_token_source(
+            agent.agent_id,
+            "Sidecar",
+            agent.sidecar_token_env,
+            agent.sidecar_token_file,
+        )
+        if token is None:
+            raise RuntimeError(f"主监督 {agent.agent_id} 未配置 Sidecar 令牌。")
+        return token
+
+    @staticmethod
+    def _resolve_token_source(
+        agent_id: str,
+        label: str,
+        token_env: str | None,
+        token_file: str | None,
+    ) -> str | None:
+        if token_env:
+            token = os.getenv(token_env)
             if not token:
-                raise RuntimeError(f"环境变量 {agent.token_env} 未设置。")
+                raise RuntimeError(f"环境变量 {token_env} 未设置。")
+            token = token.strip()
+            if (
+                not token
+                or len(token.encode("utf-8")) > MAX_TOKEN_FILE_BYTES
+                or "\r" in token
+                or "\n" in token
+                or "\0" in token
+            ):
+                raise RuntimeError(f"环境变量 {token_env} 必须包含一个有效的单行令牌。")
             return token
-        if not agent.token_file:
+        if not token_file:
             return None
 
-        token_path = Path(agent.token_file)
+        token_path = Path(token_file)
         try:
             if not token_path.is_file():
                 raise RuntimeError(
-                    f"执行机 {agent.agent_id} 的令牌文件不存在或不是普通文件。"
+                    f"{label} {agent_id} 的令牌文件不存在或不是普通文件。"
                 )
             if token_path.stat().st_size > MAX_TOKEN_FILE_BYTES:
                 raise RuntimeError(
-                    f"执行机 {agent.agent_id} 的令牌文件不能超过 {MAX_TOKEN_FILE_BYTES} 字节。"
+                    f"{label} {agent_id} 的令牌文件不能超过 {MAX_TOKEN_FILE_BYTES} 字节。"
                 )
             content = token_path.read_bytes()
         except RuntimeError:
             raise
         except OSError as error:
             raise RuntimeError(
-                f"无法读取执行机 {agent.agent_id} 的令牌文件。"
+                f"无法读取{label} {agent_id} 的令牌文件。"
             ) from error
         if len(content) > MAX_TOKEN_FILE_BYTES:
             raise RuntimeError(
-                f"执行机 {agent.agent_id} 的令牌文件不能超过 {MAX_TOKEN_FILE_BYTES} 字节。"
+                f"{label} {agent_id} 的令牌文件不能超过 {MAX_TOKEN_FILE_BYTES} 字节。"
             )
         try:
             token = content.decode("utf-8").strip()
         except UnicodeDecodeError as error:
             raise RuntimeError(
-                f"执行机 {agent.agent_id} 的令牌文件必须使用 UTF-8 编码。"
+                f"{label} {agent_id} 的令牌文件必须使用 UTF-8 编码。"
             ) from error
         if not token:
-            raise RuntimeError(f"执行机 {agent.agent_id} 的令牌文件为空。")
+            raise RuntimeError(f"{label} {agent_id} 的令牌文件为空。")
         if "\r" in token or "\n" in token or "\0" in token:
             raise RuntimeError(
-                f"执行机 {agent.agent_id} 的令牌文件必须只包含一行令牌。"
+                f"{label} {agent_id} 的令牌文件必须只包含一行令牌。"
             )
         return token
 
@@ -1438,23 +1535,36 @@ class Orchestrator:
 
 
 orchestrator = Orchestrator(CONFIG_PATH)
-_workflow_store: WorkflowStore | None = None
-_workflow_event_batcher: AsyncEventBatcher | None = None
+_workflow_store: WorkflowStore | InternalApiClient | None = None
+_workflow_event_batcher: AsyncEventBatcher | RemoteEventBatcher | None = None
 _workflow_monitors: set[asyncio.Task[None]] = set()
 
 
-def get_workflow_store() -> WorkflowStore:
+def configure_workflow_runtime(
+    runtime: WorkflowStore | InternalApiClient,
+) -> None:
+    """为常驻 Sidecar 注入远程运行时；stdio 兼容模式继续按需打开 SQLite。"""
+    global _workflow_store, _workflow_event_batcher
+    _workflow_store = runtime
+    _workflow_event_batcher = None
+
+
+def get_workflow_store() -> WorkflowStore | InternalApiClient:
     global _workflow_store
     if _workflow_store is None:
         _workflow_store = WorkflowStore(WORKFLOW_DB_PATH)
     return _workflow_store
 
 
-def get_workflow_event_batcher() -> AsyncEventBatcher:
+def get_workflow_event_batcher() -> AsyncEventBatcher | RemoteEventBatcher:
     global _workflow_event_batcher
     store = get_workflow_store()
     if _workflow_event_batcher is None or _workflow_event_batcher.store is not store:
-        _workflow_event_batcher = AsyncEventBatcher(store)
+        _workflow_event_batcher = (
+            RemoteEventBatcher(store)
+            if isinstance(store, InternalApiClient)
+            else AsyncEventBatcher(store)
+        )
     return _workflow_event_batcher
 
 
@@ -1612,6 +1722,10 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         if not isinstance(item, dict):
             item = {}
         if (
+            not getattr(store, "supports_artifacts", True)
+        ):
+            pass
+        elif (
             method == "item/completed"
             and item.get("type") == "imageGeneration"
             and item.get("status") == "completed"
@@ -1642,7 +1756,10 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
 
     try:
         artifact_handoff = None
-        if node.get("handoffMode") == "cumulative_files":
+        if (
+            node.get("handoffMode") == "cumulative_files"
+            and getattr(store, "supports_artifacts", True)
+        ):
             artifact_handoff = {
                 "workflowId": workflow_id,
                 "nodeId": node_id,

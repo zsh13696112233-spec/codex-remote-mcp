@@ -25,5 +25,7 @@ target/
 *.db
 *.db-shm
 *.db-wal
+*.token
 .env
 config/agents.json
+config/agents.sidecar.json

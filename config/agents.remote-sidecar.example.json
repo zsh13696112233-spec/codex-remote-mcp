@@ -1,0 +1,22 @@
+{
+  "agents": {
+    "supervisor-b": {
+      "url": "ws://127.0.0.1:4500",
+      "cwd": "C:\\codex-workspaces\\supervisor-b",
+      "enabled": true,
+      "capabilities": ["supervisor", "executor"],
+      "capacity": 1,
+      "allow_write": true,
+      "allow_cwd_override": true
+    },
+    "shared-executor": {
+      "url": "wss://executor.internal/codex",
+      "cwd": "C:\\codex-workspaces\\shared",
+      "enabled": true,
+      "capabilities": ["executor"],
+      "token_env": "SHARED_EXECUTOR_APP_SERVER_TOKEN",
+      "allow_write": true,
+      "allow_cwd_override": true
+    }
+  }
+}

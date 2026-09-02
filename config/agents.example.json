@@ -11,12 +11,14 @@
       "allow_cwd_override": true
     },
     "supervisor-b": {
-      "url": "ws://127.0.0.1:4501",
-      "cwd": "C:\\work",
+      "url": "wss://supervisor-b.internal/codex",
+      "cwd": "C:\\codex-workspaces\\supervisor-b",
       "enabled": true,
       "capabilities": ["supervisor"],
       "capacity": 1,
-      "token_file": "C:\\ProgramData\\codex-workflow\\supervisor-b.token",
+      "token_env": "SUPERVISOR_B_APP_SERVER_TOKEN",
+      "orchestration_mode": "remote_sidecar",
+      "sidecar_token_env": "SUPERVISOR_B_SIDECAR_TOKEN",
       "allow_write": false,
       "allow_cwd_override": false
     },

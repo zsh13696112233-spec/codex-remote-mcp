@@ -1,11 +1,13 @@
 import argparse
 import asyncio
+import hmac
 import json
 import logging
 import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,9 @@ TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "cancelled"}
 SUPERVISOR_PROBE_INTERVAL_SEC = 10.0
 SUPERVISOR_PROBE_TIMEOUT_SEC = 2.5
 SUPERVISOR_OFFLINE_FAILURE_THRESHOLD = 2
+SIDECAR_HEARTBEAT_INTERVAL_SEC = 5
+SIDECAR_LEASE_TIMEOUT_SEC = 20
+SIDECAR_WATCHDOG_INTERVAL_SEC = 1.0
 LOGGER = logging.getLogger(__name__)
 
 
@@ -61,6 +66,7 @@ class WorkflowGateway:
         self._control_in_progress: set[str] = set()
         self._schedule_lock = asyncio.Lock()
         self._supervisor_probe_task: asyncio.Task[None] | None = None
+        self._sidecar_watchdog_task: asyncio.Task[None] | None = None
         self._supervisor_runtime: dict[str, dict[str, Any]] = {}
         self._closing = False
 
@@ -83,6 +89,9 @@ class WorkflowGateway:
         self._supervisor_probe_task = asyncio.create_task(
             self._supervisor_probe_loop(), name="supervisor-reachability-probe"
         )
+        self._sidecar_watchdog_task = asyncio.create_task(
+            self._sidecar_watchdog_loop(), name="supervisor-sidecar-watchdog"
+        )
 
     async def stop(self) -> None:
         self._closing = True
@@ -90,6 +99,10 @@ class WorkflowGateway:
             self._supervisor_probe_task.cancel()
             await asyncio.gather(self._supervisor_probe_task, return_exceptions=True)
             self._supervisor_probe_task = None
+        if self._sidecar_watchdog_task is not None:
+            self._sidecar_watchdog_task.cancel()
+            await asyncio.gather(self._sidecar_watchdog_task, return_exceptions=True)
+            self._sidecar_watchdog_task = None
         async with self._schedule_lock:
             pass
         await asyncio.to_thread(self.store.recover_active_workflows_after_restart)
@@ -132,6 +145,11 @@ class WorkflowGateway:
             raise PermissionError(
                 f"执行机 {spec['supervisorAgentId']} 不具备主监督能力。"
             )
+        if (
+            supervisor.get("orchestration_mode") == "remote_sidecar"
+            and spec.get("handoffMode") != "legacy_text"
+        ):
+            raise ValueError("远程主监督当前只支持 legacy_text 文字交接。")
         profiles_by_agent = {
             item["agent_id"]: set(item.get("permission_profiles") or ["read_only"])
             for item in agent_values
@@ -156,7 +174,9 @@ class WorkflowGateway:
 
         snapshot = await asyncio.to_thread(self.store.create_workflow, spec)
         await self._schedule_pending()
-        return snapshot
+        return await asyncio.to_thread(
+            self.store.get_workflow, str(snapshot["workflowId"])
+        )
 
     async def _schedule_pending(self) -> None:
         if self._closing:
@@ -174,9 +194,28 @@ class WorkflowGateway:
                 )
                 if not bool(agent.get("enabled", True)) or "supervisor" not in capabilities:
                     continue
-                spec = await asyncio.to_thread(
-                    self.store.claim_next_workflow, agent_id
-                )
+                if agent.get("orchestration_mode") == "remote_sidecar":
+                    sidecar = await asyncio.to_thread(
+                        self.store.sidecar_status,
+                        agent_id,
+                        timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC,
+                    )
+                    if sidecar["connectionStatus"] != "online":
+                        while await asyncio.to_thread(
+                            self.store.fail_next_queued_for_offline_sidecar, agent_id
+                        ):
+                            pass
+                        continue
+                    spec = await asyncio.to_thread(
+                        self.store.claim_next_workflow,
+                        agent_id,
+                        sidecar_instance_id=str(sidecar["instanceId"]),
+                        lease_timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC,
+                    )
+                else:
+                    spec = await asyncio.to_thread(
+                        self.store.claim_next_workflow, agent_id
+                    )
                 if spec is None:
                     continue
                 workflow_id = str(spec["workflowId"])
@@ -250,7 +289,13 @@ class WorkflowGateway:
                 "permissionProfiles": list(item.get("permission_profiles") or []),
             }
             if "supervisor" in capabilities:
-                runtime = self._supervisor_runtime.get(agent_id, {})
+                runtime = (
+                    self.store.sidecar_status(
+                        agent_id, timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC
+                    )
+                    if item.get("orchestration_mode") == "remote_sidecar"
+                    else self._supervisor_runtime.get(agent_id, {})
+                )
                 value.update(
                     {
                         "connectionStatus": runtime.get("connectionStatus", "unknown"),
@@ -286,6 +331,8 @@ class WorkflowGateway:
                 or (["supervisor", "executor"] if agent_id == "local" else ["executor"])
             )
             if bool(item.get("enabled", True)) and "supervisor" in capabilities:
+                if item.get("orchestration_mode") == "remote_sidecar":
+                    continue
                 supervisor_ids.append(agent_id)
         configured = set(supervisor_ids)
         self._supervisor_runtime = {
@@ -325,6 +372,77 @@ class WorkflowGateway:
                 }
 
         await asyncio.gather(*(check(agent_id) for agent_id in supervisor_ids))
+
+    async def _sidecar_watchdog_loop(self) -> None:
+        """及时终止心跳过期的远程租约，并停止中央监督任务。"""
+        while not self._closing:
+            try:
+                expired = await asyncio.to_thread(self.store.expire_sidecar_leases)
+                for item in expired:
+                    task = self._tasks.get(item["workflowId"])
+                    if task is not None and not task.done():
+                        task.cancel()
+                if expired:
+                    await self._schedule_pending()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("清理过期 Sidecar 租约失败。")
+            await asyncio.sleep(SIDECAR_WATCHDOG_INTERVAL_SEC)
+
+    def authenticate_sidecar(self, authorization: str | None) -> str:
+        """使用独立 Bearer Token 将内部请求绑定到唯一主监督。"""
+        if not authorization:
+            raise PermissionError("Sidecar 认证失败。")
+        scheme, separator, presented = authorization.partition(" ")
+        if not separator or scheme.lower() != "bearer":
+            raise PermissionError("Sidecar 认证失败。")
+        presented = presented.strip()
+        if not presented or len(presented) > 8192:
+            raise PermissionError("Sidecar 认证失败。")
+        matched: list[str] = []
+        for agent in self.orchestrator.load_agents().values():
+            if agent.orchestration_mode != "remote_sidecar" or not agent.enabled:
+                continue
+            try:
+                expected = self.orchestrator.resolve_sidecar_token(agent)
+            except RuntimeError:
+                continue
+            if hmac.compare_digest(presented, expected):
+                matched.append(agent.agent_id)
+        if len(matched) != 1:
+            raise PermissionError("Sidecar 认证失败。")
+        return matched[0]
+
+    async def accept_sidecar_heartbeat(
+        self, supervisor_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        instance_id = str(payload.get("instanceId") or "").strip()
+        started_at = str(payload.get("startedAt") or "").strip()
+        if not 1 <= len(instance_id) <= 128:
+            raise ValueError("instanceId 必须是 1 到 128 个字符。")
+        try:
+            parsed_started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("startedAt 必须是 ISO-8601 时间。") from error
+        if parsed_started_at.tzinfo is None:
+            raise ValueError("startedAt 必须包含时区。")
+        result = await asyncio.to_thread(
+            self.store.record_sidecar_heartbeat,
+            supervisor_id,
+            instance_id,
+            started_at,
+            lease_timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC,
+        )
+        failed_id = result.get("failedWorkflowId")
+        if failed_id:
+            task = self._tasks.get(str(failed_id))
+            if task is not None and not task.done():
+                task.cancel()
+        await self._schedule_pending()
+        result["heartbeatIntervalSec"] = SIDECAR_HEARTBEAT_INTERVAL_SEC
+        result["leaseTimeoutSec"] = SIDECAR_LEASE_TIMEOUT_SEC
+        return result
 
     async def _run_supervisor(
         self, spec: dict[str, Any], *, resume_thread_id: str | None = None
@@ -1259,6 +1377,375 @@ async def list_agents(request: Request) -> Response:
     return JSONResponse({"agents": gateway.public_agents()})
 
 
+def _sidecar_identity(request: Request) -> tuple[WorkflowGateway, str]:
+    gateway: WorkflowGateway = request.app.state.gateway
+    supervisor_id = gateway.authenticate_sidecar(request.headers.get("Authorization"))
+    return gateway, supervisor_id
+
+
+def _internal_error_response(error: Exception) -> JSONResponse:
+    if isinstance(error, PermissionError):
+        status = 403 if "其他主监督" in str(error) else 401
+    elif isinstance(error, LookupError):
+        status = 404
+    elif isinstance(error, RuntimeError):
+        status = 409
+    elif isinstance(error, ValueError) and "找不到" in str(error):
+        status = 404
+    else:
+        status = 400
+    message = str(error)
+    if status == 401:
+        message = "Sidecar 认证失败。"
+    return JSONResponse({"error": message}, status_code=status)
+
+
+def _sidecar_node_view(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """内部 API 不回传 app-server 的底层 thread/turn 标识。"""
+    return {
+        key: value
+        for key, value in snapshot.items()
+        if key not in {"threadId", "turnId"}
+    }
+
+
+def _sidecar_workflow_view(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """只返回远程 MCP 工具编排步骤所需的工作流上下文。"""
+    keys = {
+        "workflowId",
+        "name",
+        "status",
+        "failurePolicy",
+        "advanceMode",
+        "handoffMode",
+        "pendingAdvance",
+        "currentNodes",
+        "progress",
+        "retryPolicy",
+        "response",
+        "error",
+        "createdAt",
+        "startedAt",
+        "finishedAt",
+        "stateVersion",
+        "nodes",
+    }
+    value = {key: snapshot[key] for key in keys if key in snapshot}
+    value["nodes"] = [
+        _sidecar_node_view(node) for node in snapshot.get("nodes", [])
+    ]
+    return value
+
+
+def _sidecar_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """验证 Sidecar 上报的最小任务快照，忽略运行时私有诊断字段。"""
+    allowed_statuses = {
+        "queued",
+        "running",
+        "cancelling",
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted",
+    }
+    result: dict[str, Any] = {}
+    for key in ("job_id", "thread_id", "turn_id"):
+        raw = snapshot.get(key)
+        if raw is not None:
+            value = str(raw)
+            if not 1 <= len(value) <= 512:
+                raise ValueError(f"{key} 必须是 1 到 512 个字符。")
+            result[key] = value
+    if snapshot.get("status") is not None:
+        status = str(snapshot["status"])
+        if status not in allowed_statuses:
+            raise ValueError("任务状态无效。")
+        result["status"] = status
+    for key in ("response", "error"):
+        raw = snapshot.get(key)
+        if raw is not None:
+            value = str(raw)
+            if len(value) > 20_000:
+                raise ValueError(f"{key} 不能超过 20000 个字符。")
+            result[key] = value
+    for key in ("started_at", "finished_at"):
+        raw = snapshot.get(key)
+        if raw is not None:
+            value = str(raw)
+            if len(value) > 128:
+                raise ValueError(f"{key} 不能超过 128 个字符。")
+            _validate_internal_timestamp(value, key)
+            result[key] = value
+    return result
+
+
+def _validate_internal_timestamp(value: str, label: str) -> None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{label} 必须是 ISO-8601 时间。") from error
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} 必须包含时区。")
+
+
+def _sanitize_sidecar_event_payload(value: Any, *, parent_key: str = "") -> Any:
+    """事件可诊断但不得把令牌或底层会话标识带入公开事件流。"""
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            normalized = key.replace("_", "").replace("-", "").lower()
+            if normalized in {
+                "authorization",
+                "accesstoken",
+                "bearertoken",
+                "refreshtoken",
+                "token",
+                "threadid",
+                "turnid",
+            }:
+                continue
+            if key == "id" and parent_key.lower() in {"thread", "turn"}:
+                continue
+            result[key] = _sanitize_sidecar_event_payload(item, parent_key=key)
+        return result
+    if isinstance(value, list):
+        return [
+            _sanitize_sidecar_event_payload(item, parent_key=parent_key)
+            for item in value
+        ]
+    return value
+
+
+async def sidecar_heartbeat(request: Request) -> Response:
+    try:
+        gateway, supervisor_id = _sidecar_identity(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("请求体必须是 JSON 对象。")
+        return JSONResponse(
+            await gateway.accept_sidecar_heartbeat(supervisor_id, payload)
+        )
+    except (PermissionError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        return _internal_error_response(error)
+
+
+async def internal_get_workflow(request: Request) -> Response:
+    try:
+        gateway, supervisor_id = _sidecar_identity(request)
+        workflow_id = request.path_params["workflow_id"]
+        await asyncio.to_thread(
+            gateway.store.validate_sidecar_access, supervisor_id, workflow_id
+        )
+        snapshot = await asyncio.to_thread(gateway.store.get_workflow, workflow_id)
+        return JSONResponse(_sidecar_workflow_view(snapshot))
+    except (PermissionError, RuntimeError, ValueError) as error:
+        return _internal_error_response(error)
+
+
+async def internal_get_node(request: Request) -> Response:
+    try:
+        gateway, supervisor_id = _sidecar_identity(request)
+        workflow_id = request.path_params["workflow_id"]
+        await asyncio.to_thread(
+            gateway.store.validate_sidecar_access, supervisor_id, workflow_id
+        )
+        snapshot = await asyncio.to_thread(
+            gateway.store.get_node,
+            workflow_id,
+            request.path_params["node_id"],
+        )
+        return JSONResponse(_sidecar_node_view(snapshot))
+    except (PermissionError, RuntimeError, ValueError) as error:
+        return _internal_error_response(error)
+
+
+def _lease_header(request: Request) -> str:
+    token = str(request.headers.get("X-Workflow-Lease") or "").strip()
+    if not token or len(token) > 256:
+        raise RuntimeError("请求缺少有效的工作流租约。")
+    return token
+
+
+async def _validate_internal_write(
+    request: Request,
+) -> tuple[WorkflowGateway, str, str, str]:
+    gateway, supervisor_id = _sidecar_identity(request)
+    workflow_id = request.path_params["workflow_id"]
+    lease_token = _lease_header(request)
+    await asyncio.to_thread(
+        gateway.store.validate_sidecar_access,
+        supervisor_id,
+        workflow_id,
+        lease_token=lease_token,
+        require_lease=True,
+    )
+    return gateway, supervisor_id, workflow_id, lease_token
+
+
+async def internal_get_advance(request: Request) -> Response:
+    try:
+        gateway, _, workflow_id, _ = await _validate_internal_write(request)
+        value = await asyncio.to_thread(
+            gateway.store.pending_advance_for_node,
+            workflow_id,
+            request.path_params["node_id"],
+        )
+        return JSONResponse({"advance": value})
+    except (PermissionError, RuntimeError, ValueError) as error:
+        return _internal_error_response(error)
+
+
+async def internal_release_advance(request: Request) -> Response:
+    try:
+        gateway, supervisor_id, workflow_id, lease_token = (
+            await _validate_internal_write(request)
+        )
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("请求体必须是 JSON 对象。")
+        gate_id = str(payload.get("gateId") or "").strip()
+        if not 1 <= len(gate_id) <= 128:
+            raise ValueError("gateId 必须是 1 到 128 个字符。")
+        released = await asyncio.to_thread(
+            gateway.store.release_timed_out_advance,
+            workflow_id,
+            gate_id,
+            sidecar_supervisor_id=supervisor_id,
+            lease_token=lease_token,
+        )
+        return JSONResponse({"released": released})
+    except (PermissionError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        return _internal_error_response(error)
+
+
+async def internal_prepare_node(request: Request) -> Response:
+    try:
+        gateway, supervisor_id, workflow_id, lease_token = (
+            await _validate_internal_write(request)
+        )
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("请求体必须是 JSON 对象。")
+        dispatch_id = str(payload.get("dispatchId") or "").strip()
+        if not 1 <= len(dispatch_id) <= 128:
+            raise ValueError("dispatchId 必须是 1 到 128 个字符。")
+        result = await asyncio.to_thread(
+            gateway.store.prepare_node_dispatch,
+            workflow_id,
+            request.path_params["node_id"],
+            sidecar_supervisor_id=supervisor_id,
+            lease_token=lease_token,
+            sidecar_dispatch_id=dispatch_id,
+        )
+        return JSONResponse(result)
+    except (PermissionError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        return _internal_error_response(error)
+
+
+async def internal_update_node(request: Request) -> Response:
+    try:
+        gateway, supervisor_id, workflow_id, lease_token = (
+            await _validate_internal_write(request)
+        )
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("请求体必须是 JSON 对象。")
+        operation = str(payload.get("operation") or "")
+        node_id = request.path_params["node_id"]
+        if operation == "attach":
+            snapshot = payload.get("snapshot")
+            if not isinstance(snapshot, dict):
+                raise ValueError("snapshot 必须是 JSON 对象。")
+            await asyncio.to_thread(
+                gateway.store.attach_node_job,
+                workflow_id,
+                node_id,
+                _sidecar_job_snapshot(snapshot),
+                sidecar_supervisor_id=supervisor_id,
+                lease_token=lease_token,
+            )
+        elif operation == "sync":
+            snapshot = payload.get("snapshot")
+            if not isinstance(snapshot, dict):
+                raise ValueError("snapshot 必须是 JSON 对象。")
+            await asyncio.to_thread(
+                gateway.store.sync_node_job,
+                workflow_id,
+                node_id,
+                _sidecar_job_snapshot(snapshot),
+                sidecar_supervisor_id=supervisor_id,
+                lease_token=lease_token,
+            )
+        elif operation == "actual_prompt":
+            prompt = str(payload.get("actualPrompt") or "")
+            await asyncio.to_thread(
+                gateway.store.update_node_actual_prompt,
+                workflow_id,
+                node_id,
+                prompt,
+                sidecar_supervisor_id=supervisor_id,
+                lease_token=lease_token,
+            )
+        else:
+            raise ValueError("operation 只能是 attach、sync 或 actual_prompt。")
+        result = await asyncio.to_thread(gateway.store.get_node, workflow_id, node_id)
+        return JSONResponse(_sidecar_node_view(result))
+    except (PermissionError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        return _internal_error_response(error)
+
+
+async def internal_add_events(request: Request) -> Response:
+    try:
+        gateway, supervisor_id, workflow_id, lease_token = (
+            await _validate_internal_write(request)
+        )
+        payload = await request.json()
+        raw_events = payload.get("events") if isinstance(payload, dict) else None
+        if not isinstance(raw_events, list) or not 1 <= len(raw_events) <= 64:
+            raise ValueError("events 必须包含 1 到 64 项。")
+        events: list[dict[str, Any]] = []
+        for raw in raw_events:
+            if not isinstance(raw, dict):
+                raise ValueError("事件必须是 JSON 对象。")
+            external_id = str(raw.get("eventId") or "").strip()
+            if not 1 <= len(external_id) <= 128:
+                raise ValueError("eventId 必须是 1 到 128 个字符。")
+            event_payload = raw.get("payload")
+            if not isinstance(event_payload, dict):
+                raise ValueError("事件 payload 必须是 JSON 对象。")
+            node_id = raw.get("nodeId")
+            if node_id is not None and not 1 <= len(str(node_id)) <= 128:
+                raise ValueError("事件 nodeId 必须是 1 到 128 个字符。")
+            source = str(raw.get("source") or "worker")
+            if source != "worker":
+                raise ValueError("Sidecar 只能上报 worker 来源的事件。")
+            event_type = str(raw.get("type") or "").strip()
+            if not 1 <= len(event_type) <= 128:
+                raise ValueError("事件 type 必须是 1 到 128 个字符。")
+            events.append(
+                {
+                    "workflow_id": workflow_id,
+                    "node_id": str(node_id) if node_id is not None else None,
+                    "source": source,
+                    "event_type": event_type,
+                    "payload": _sanitize_sidecar_event_payload(event_payload),
+                    "created_at": str(raw.get("createdAt") or utc_now()),
+                    "external_event_id": external_id,
+                }
+            )
+            _validate_internal_timestamp(events[-1]["created_at"], "事件 createdAt")
+        sequences = await asyncio.to_thread(
+            gateway.store.add_events,
+            events,
+            sidecar_supervisor_id=supervisor_id,
+            lease_token=lease_token,
+        )
+        return JSONResponse({"sequences": sequences})
+    except (PermissionError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        return _internal_error_response(error)
+
+
 def create_app(
     *,
     db_path: Path | str | None = None,
@@ -1287,6 +1774,46 @@ def create_app(
         routes=[
             Route("/readyz", ready, methods=["GET"]),
             Route("/agents", list_agents, methods=["GET"]),
+            Route(
+                "/internal/v1/sidecars/heartbeat",
+                sidecar_heartbeat,
+                methods=["POST"],
+            ),
+            Route(
+                "/internal/v1/workflows/{workflow_id}",
+                internal_get_workflow,
+                methods=["GET"],
+            ),
+            Route(
+                "/internal/v1/workflows/{workflow_id}/nodes/{node_id}",
+                internal_get_node,
+                methods=["GET"],
+            ),
+            Route(
+                "/internal/v1/workflows/{workflow_id}/nodes/{node_id}/advance",
+                internal_get_advance,
+                methods=["GET"],
+            ),
+            Route(
+                "/internal/v1/workflows/{workflow_id}/nodes/{node_id}/advance/release",
+                internal_release_advance,
+                methods=["POST"],
+            ),
+            Route(
+                "/internal/v1/workflows/{workflow_id}/nodes/{node_id}/prepare",
+                internal_prepare_node,
+                methods=["POST"],
+            ),
+            Route(
+                "/internal/v1/workflows/{workflow_id}/nodes/{node_id}/state",
+                internal_update_node,
+                methods=["POST"],
+            ),
+            Route(
+                "/internal/v1/workflows/{workflow_id}/events:batch",
+                internal_add_events,
+                methods=["POST"],
+            ),
             Route("/workflows", create_workflow, methods=["POST"]),
             Route("/workflows/{workflow_id}", get_workflow, methods=["GET"]),
             Route(

@@ -58,6 +58,8 @@ workflow_gateway.py（Codex 执行机，默认 8080）
                     └── 远程 app-server
 ```
 
+远程主监督采用阶段 B 链路时，中央 `workflow_gateway.py` 仍连接该主监督的 app-server；主监督 app-server 通过本机 `http://127.0.0.1:8082/mcp` 调用常驻 Sidecar。Sidecar 使用独立 Bearer Token 调用中央 `/internal/v1` 读取步骤上下文和同步状态，再由 Sidecar 连接业务执行机 app-server。远程机器不读取 `workflows.db`，也不配置 `CODEX_WORKFLOW_DB`。
+
 各组件职责：
 
 ### Java 主机
@@ -98,6 +100,8 @@ workflow_gateway.py（Codex 执行机，默认 8080）
 - 为节点创建新的 Codex thread 和 turn。
 - 将节点状态与原始 app-server 事件写回 SQLite。
 
+在远程 Sidecar 模式下，上述工具名和主监督用法保持不变，但状态后端改为中央内部 API；步骤 app-server 连接仍由 Sidecar 本机完成。Sidecar 每 5 秒心跳，中央 20 秒未收到心跳即使活动工作流失败并释放租约。远程模式当前只支持 `legacy_text`，不支持跨机器 `cumulative_files`。
+
 ### `workflows.db`
 
 - 存储工作流定义。
@@ -105,6 +109,8 @@ workflow_gateway.py（Codex 执行机，默认 8080）
 - 存储每个节点的状态、结果和错误。
 - 存储主会话及节点的 app-server 原始事件。
 - HTTP 网关和 MCP 进程必须使用同一个数据库绝对路径。
+
+最后一条只适用于中央网关与本机 `local_db` 兼容 MCP。远程 Sidecar 不得复制或打开该数据库。
 
 ## 三、Java 应该把节点发给谁
 
