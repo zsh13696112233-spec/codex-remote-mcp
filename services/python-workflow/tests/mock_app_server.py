@@ -148,6 +148,8 @@ class MockAppServer:
                     {
                         "method": "item/completed",
                         "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
                             "item": {
                                 "type": "agentMessage",
                                 "phase": "final_answer",
@@ -172,10 +174,14 @@ class MockAppServer:
             if self.steer_commentary:
                 await connection.send(json.dumps({
                     "method": "item/completed",
-                    "params": {"item": {
-                        "type": "agentMessage", "phase": "commentary",
-                        "text": "我先查询最新状态。",
-                    }},
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {
+                            "type": "agentMessage", "phase": "commentary",
+                            "text": "我先查询最新状态。",
+                        },
+                    },
                 }))
             await connection.send(json.dumps({
                 "method": "item/agentMessage/delta",
@@ -183,10 +189,14 @@ class MockAppServer:
             }))
             await connection.send(json.dumps({
                 "method": "item/completed",
-                "params": {"item": {
-                    "type": "agentMessage", "phase": "final_answer",
-                    "text": "mock chat reply",
-                }},
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "agentMessage", "phase": "final_answer",
+                        "text": "mock chat reply",
+                    },
+                },
             }))
             if self.steer_completes_turn:
                 await connection.send(json.dumps({

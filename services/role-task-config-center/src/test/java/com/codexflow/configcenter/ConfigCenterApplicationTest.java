@@ -142,6 +142,7 @@ class ConfigCenterApplicationTest {
         .contains("/api/dingtalk/targets/directory")
         .contains("data-department-toggle")
         .contains("data-person-search")
+        .contains("finally{if(document.body.contains(sync))sync.disabled=false}")
         .contains("人员启用状态已自动保存")
         .contains("dingtalkTargetId:f.dingtalkTargetId.value||null")
         .contains("首次同步的人员默认停用");

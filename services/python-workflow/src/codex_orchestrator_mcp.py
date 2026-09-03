@@ -41,6 +41,7 @@ WORKFLOW_DB_PATH = Path(
 MAX_PROMPT_LENGTH = 100_000
 DEFAULT_REQUEST_TIMEOUT_SEC = 30.0
 FINAL_ANSWER_COMPLETION_GRACE_SEC = 5.0
+TURN_RECONCILIATION_FAILURE_LIMIT = 3
 INTERRUPT_TIMEOUT_SEC = 10.0
 LOGGER = logging.getLogger(__name__)
 PERMISSION_PROFILES = ("read_only", "workspace_write", "auto_review")
@@ -1478,10 +1479,19 @@ class Orchestrator:
     ) -> None:
         agent_messages: list[tuple[str | None, str]] = []
         final_answer_received_at: float | None = None
+        reconciliation_failures = 0
+        last_reconciliation_error: Exception | None = None
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise JobTotalTimeout(job.timeout_sec)
+                details = None
+                if last_reconciliation_error is not None:
+                    details = {
+                        "completion_reconciliation_error": str(
+                            last_reconciliation_error
+                        )
+                    }
+                raise JobTotalTimeout(job.timeout_sec, details)
 
             notification_timeout = remaining
             if final_answer_received_at is not None:
@@ -1489,65 +1499,184 @@ class Orchestrator:
                     time.monotonic() - final_answer_received_at
                 )
                 if grace_remaining <= 0:
-                    final_messages = [
-                        text for phase, text in agent_messages if phase == "final_answer"
-                    ]
-                    job.response = final_messages[-1]
-                    job.status = "completed"
-                    return
+                    try:
+                        if await self._reconcile_turn(
+                            job, client, deadline, agent_messages
+                        ):
+                            return
+                    except (AppServerRpcError, AppServerRpcTimeout) as error:
+                        reconciliation_failures += 1
+                        last_reconciliation_error = error
+                        if (
+                            reconciliation_failures
+                            >= TURN_RECONCILIATION_FAILURE_LIMIT
+                        ):
+                            interrupt = await self._interrupt_after_timeout(job, client)
+                            job.status = "failed"
+                            job.error = "已收到最终回答，但无法确认 Codex 执行是否结束。"
+                            job.error_kind = "completion_unconfirmed"
+                            job.error_stage = "turn/status"
+                            job.error_details = {
+                                "attempts": reconciliation_failures,
+                                "query_error": str(error),
+                                "interrupt": interrupt,
+                            }
+                            return
+                    else:
+                        reconciliation_failures = 0
+                        last_reconciliation_error = None
+                    final_answer_received_at = time.monotonic()
+                    continue
                 notification_timeout = min(notification_timeout, grace_remaining)
 
             try:
                 event = await client.next_notification(notification_timeout)
             except TimeoutError:
-                final_messages = [
-                    text for phase, text in agent_messages if phase == "final_answer"
-                ]
-                if final_messages:
-                    job.response = final_messages[-1]
-                    job.status = "completed"
-                    return
+                if final_answer_received_at is not None:
+                    final_answer_received_at = (
+                        time.monotonic() - FINAL_ANSWER_COMPLETION_GRACE_SEC
+                    )
+                    continue
                 raise JobTotalTimeout(job.timeout_sec) from None
             method = event.get("method")
             params = event.get("params") or {}
+            event_turn_id = params.get("turnId")
+            if event_turn_id and event_turn_id != job.turn_id:
+                continue
 
             if method == "item/completed":
                 item = params.get("item") or {}
                 if item.get("type") == "agentMessage" and item.get("text"):
                     agent_messages.append((item.get("phase"), str(item["text"])))
-                    if item.get("phase") == "final_answer":
+                    if (
+                        item.get("phase") == "final_answer"
+                        and final_answer_received_at is None
+                    ):
                         final_answer_received_at = time.monotonic()
             elif method == "turn/diff/updated":
                 job.diff = params.get("diff")
             elif method == "turn/completed":
                 turn = params.get("turn") or {}
-                event_turn_id = turn.get("id")
-                if event_turn_id and event_turn_id != job.turn_id:
+                completed_turn_id = turn.get("id")
+                if completed_turn_id and completed_turn_id != job.turn_id:
                     continue
-                final_messages = [text for phase, text in agent_messages if phase == "final_answer"]
-                if not final_messages:
-                    final_messages = [text for _, text in agent_messages]
-                job.response = final_messages[-1] if final_messages else None
-
-                turn_status = str(turn.get("status", "completed"))
-                if turn_status == "completed":
-                    job.status = "completed"
-                elif turn_status == "interrupted":
-                    job.status = "interrupted"
-                else:
-                    job.status = "failed"
-                    error = turn.get("error") or {}
-                    if isinstance(error, dict):
-                        job.error = str(error.get("message") or f"turn 状态为 {turn_status}。")
-                    else:
-                        job.error = str(error or f"turn 状态为 {turn_status}。")
-                    job.error_kind = "turn_failed"
-                    job.error_stage = "turn/completed"
-                    job.error_details = {
-                        "turn_status": turn_status,
-                        "turn_error": error,
-                    }
+                self._apply_terminal_turn(
+                    job, turn, agent_messages, source="turn/completed"
+                )
                 return
+
+    async def _reconcile_turn(
+        self,
+        job: Job,
+        client: AppServerClient,
+        deadline: float,
+        agent_messages: list[tuple[str | None, str]],
+    ) -> bool:
+        turn, source = await self._read_turn(job, client, deadline)
+        if str(turn.get("status", "")) == "inProgress":
+            return False
+        self._apply_terminal_turn(job, turn, agent_messages, source=source)
+        return True
+
+    async def _read_turn(
+        self,
+        job: Job,
+        client: AppServerClient,
+        deadline: float,
+    ) -> tuple[dict[str, Any], str]:
+        if not job.thread_id or not job.turn_id:
+            raise AppServerRpcError("缺少 thread 或 turn 标识，无法确认执行终态。")
+
+        list_error: AppServerRpcError | None = None
+        try:
+            result = await self._request_with_deadline(
+                client,
+                "thread/turns/list",
+                {
+                    "threadId": job.thread_id,
+                    "limit": 20,
+                    "sortDirection": "desc",
+                    "itemsView": "notLoaded",
+                },
+                deadline,
+                job.timeout_sec,
+            )
+            turn = self._find_turn(
+                result.get("data") if isinstance(result, dict) else None,
+                job.turn_id,
+            )
+            if turn is not None:
+                return turn, "thread/turns/list"
+        except AppServerRpcError as error:
+            list_error = error
+
+        try:
+            result = await self._request_with_deadline(
+                client,
+                "thread/read",
+                {"threadId": job.thread_id, "includeTurns": True},
+                deadline,
+                job.timeout_sec,
+            )
+            thread = result.get("thread") if isinstance(result, dict) else None
+            turns = thread.get("turns") if isinstance(thread, dict) else None
+            turn = self._find_turn(turns, job.turn_id)
+            if turn is not None:
+                return turn, "thread/read"
+        except AppServerRpcError as error:
+            if list_error is not None:
+                raise AppServerRpcError(
+                    "无法通过 thread/turns/list 或 thread/read 查询执行终态："
+                    f"{list_error}；{error}"
+                ) from error
+            raise
+
+        raise AppServerRpcError(f"无法在 thread 中找到 turn：{job.turn_id}")
+
+    @staticmethod
+    def _find_turn(values: Any, turn_id: str) -> dict[str, Any] | None:
+        if not isinstance(values, list):
+            return None
+        for value in values:
+            if isinstance(value, dict) and value.get("id") == turn_id:
+                return value
+        return None
+
+    @staticmethod
+    def _apply_terminal_turn(
+        job: Job,
+        turn: dict[str, Any],
+        agent_messages: list[tuple[str | None, str]],
+        *,
+        source: str,
+    ) -> None:
+        final_messages = [
+            text for phase, text in agent_messages if phase == "final_answer"
+        ]
+        if not final_messages:
+            final_messages = [text for _, text in agent_messages]
+        job.response = final_messages[-1] if final_messages else None
+
+        turn_status = str(turn.get("status") or "unknown")
+        if turn_status == "completed":
+            job.status = "completed"
+        elif turn_status == "interrupted":
+            job.status = "interrupted"
+        else:
+            job.status = "failed"
+            error = turn.get("error") or {}
+            if isinstance(error, dict):
+                job.error = str(
+                    error.get("message") or f"turn 状态为 {turn_status}。"
+                )
+            else:
+                job.error = str(error or f"turn 状态为 {turn_status}。")
+            job.error_kind = "turn_failed"
+            job.error_stage = source
+            job.error_details = {
+                "turn_status": turn_status,
+                "turn_error": error,
+            }
 
     @staticmethod
     def _extract_id(result: Any, entity: str) -> str:

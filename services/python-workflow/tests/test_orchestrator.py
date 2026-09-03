@@ -249,11 +249,13 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 )
 
 
-    async def test_final_answer_completes_after_turn_event_grace_expires(self) -> None:
+    async def test_final_answer_reconciles_turn_after_event_grace_expires(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
                 self.calls = 0
                 self.timeouts = []
+                self.requests = []
+                self.request_timeout_sec = 30.0
 
             async def next_notification(self, timeout_sec):
                 self.calls += 1
@@ -262,6 +264,8 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                     return {
                         "method": "item/completed",
                         "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
                             "item": {
                                 "type": "agentMessage",
                                 "phase": "final_answer",
@@ -271,6 +275,118 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                     }
                 raise TimeoutError
 
+            async def request(self, method, params, *, timeout_sec=None):
+                self.requests.append((method, params, timeout_sec))
+                return {
+                    "data": [
+                        {"id": "turn-1", "status": "completed", "items": []}
+                    ]
+                }
+
+        job = SimpleNamespace(
+            timeout_sec=600,
+            thread_id="thread-1",
+            turn_id="turn-1",
+            diff=None,
+            response=None,
+            status="running",
+        )
+        client = FakeClient()
+        orchestrator = Orchestrator.__new__(Orchestrator)
+
+        await orchestrator._consume_turn(
+            job, client, time.monotonic() + job.timeout_sec
+        )
+
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.response, "任务已全部完成。")
+        self.assertEqual(client.calls, 2)
+        self.assertLessEqual(client.timeouts[1], 5.0)
+        self.assertEqual(client.requests[0][0], "thread/turns/list")
+
+    async def test_reconciled_failed_turn_does_not_complete_from_final_answer(self) -> None:
+        class FakeClient:
+            request_timeout_sec = 30.0
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def next_notification(self, timeout_sec):
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "method": "item/completed",
+                        "params": {
+                            "turnId": "turn-1",
+                            "item": {
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "text": "看起来已经完成。",
+                            },
+                        },
+                    }
+                raise TimeoutError
+
+            async def request(self, method, params, *, timeout_sec=None):
+                return {
+                    "data": [{
+                        "id": "turn-1",
+                        "status": "failed",
+                        "error": {"message": "远端收尾失败。"},
+                        "items": [],
+                    }]
+                }
+
+        job = SimpleNamespace(
+            timeout_sec=600,
+            thread_id="thread-1",
+            turn_id="turn-1",
+            diff=None,
+            response=None,
+            status="running",
+            error=None,
+            error_kind=None,
+            error_stage=None,
+            error_details=None,
+        )
+
+        orchestrator = Orchestrator.__new__(Orchestrator)
+        await orchestrator._consume_turn(
+            job, FakeClient(), time.monotonic() + job.timeout_sec
+        )
+
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.error, "远端收尾失败。")
+        self.assertEqual(job.error_stage, "thread/turns/list")
+        self.assertEqual(job.error_details["turn_status"], "failed")
+
+    async def test_item_completed_for_another_turn_is_ignored(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.events = [
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "turnId": "turn-other",
+                            "item": {
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "text": "其他任务的回答。",
+                            },
+                        },
+                    },
+                    {
+                        "method": "turn/completed",
+                        "params": {
+                            "turnId": "turn-1",
+                            "turn": {"id": "turn-1", "status": "completed"},
+                        },
+                    },
+                ]
+
+            async def next_notification(self, timeout_sec):
+                return self.events.pop(0)
+
         job = SimpleNamespace(
             timeout_sec=600,
             turn_id="turn-1",
@@ -278,16 +394,69 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
             response=None,
             status="running",
         )
-        client = FakeClient()
 
-        await Orchestrator._consume_turn(
-            object(), job, client, time.monotonic() + job.timeout_sec
+        orchestrator = Orchestrator.__new__(Orchestrator)
+        await orchestrator._consume_turn(
+            job, FakeClient(), time.monotonic() + job.timeout_sec
         )
 
         self.assertEqual(job.status, "completed")
-        self.assertEqual(job.response, "任务已全部完成。")
-        self.assertEqual(client.calls, 2)
-        self.assertLessEqual(client.timeouts[1], 5.0)
+        self.assertIsNone(job.response)
+
+    async def test_unconfirmed_final_answer_is_interrupted_and_failed(self) -> None:
+        class FakeClient:
+            request_timeout_sec = 30.0
+
+            def __init__(self) -> None:
+                self.calls = 0
+                self.requests = []
+
+            async def next_notification(self, timeout_sec):
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "method": "item/completed",
+                        "params": {
+                            "turnId": "turn-1",
+                            "item": {
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "text": "尚未确认的回答。",
+                            },
+                        },
+                    }
+                raise TimeoutError
+
+            async def request(self, method, params, *, timeout_sec=None):
+                self.requests.append(method)
+                return {}
+
+        job = SimpleNamespace(
+            timeout_sec=600,
+            thread_id="thread-1",
+            turn_id="turn-1",
+            diff=None,
+            response=None,
+            status="running",
+            error=None,
+            error_kind=None,
+            error_stage=None,
+            error_details=None,
+        )
+        client = FakeClient()
+        orchestrator = Orchestrator.__new__(Orchestrator)
+
+        await orchestrator._consume_turn(
+            job, client, time.monotonic() + job.timeout_sec
+        )
+
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.error_kind, "completion_unconfirmed")
+        self.assertIsNone(job.response)
+        self.assertEqual(client.requests.count("thread/turns/list"), 3)
+        self.assertEqual(client.requests.count("thread/read"), 3)
+        self.assertEqual(client.requests.count("turn/interrupt"), 1)
+        self.assertTrue(job.error_details["interrupt"]["succeeded"])
 
     async def _publish_outputs(
         self,
