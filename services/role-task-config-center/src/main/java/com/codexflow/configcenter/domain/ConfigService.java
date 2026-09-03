@@ -233,7 +233,7 @@ public class ConfigService {
       throw new IllegalArgumentException("advanceMode 只能是 automatic 或 semi_automatic。");
     }
     sop.handoffMode = normalizeNullable(body.handoffMode());
-    if (sop.handoffMode == null) sop.handoffMode = "cumulative_files";
+    if (sop.handoffMode == null) sop.handoffMode = "legacy_text";
     if (!HANDOFF_MODES.contains(sop.handoffMode)) {
       throw new IllegalArgumentException("handoffMode 只能是 legacy_text 或 cumulative_files。");
     }

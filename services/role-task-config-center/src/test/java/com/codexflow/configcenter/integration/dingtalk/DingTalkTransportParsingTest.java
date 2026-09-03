@@ -2,6 +2,7 @@ package com.codexflow.configcenter.integration.dingtalk;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.IOException;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
@@ -112,5 +113,28 @@ class DingTalkTransportParsingTest {
     assertThat(body.has("cardTemplateId")).isFalse();
     assertThat(objectMapper.readTree(body.path("msgParam").asText()))
         .isEqualTo(objectMapper.createObjectNode().put("title", "任务进度").put("text", "**状态：** 运行中"));
+  }
+
+  @Test
+  void parsesChildDepartmentIdsFromNestedResult() throws Exception {
+    assertThat(
+            OfficialDingTalkTransport.childDepartmentIds(
+                objectMapper.readTree(
+                    """
+                    {"errcode":0,"errmsg":"ok","result":{"dept_id_list":[2,3,4]}}
+                    """)))
+        .isEqualTo(objectMapper.readTree("[2,3,4]"));
+  }
+
+  @Test
+  void retriesOnlyFailuresCausedByIoErrors() {
+    assertThat(
+            OfficialDingTalkTransport.causedByIOException(
+                new IllegalStateException("request failed", new IOException("GOAWAY"))))
+        .isTrue();
+    assertThat(
+            OfficialDingTalkTransport.causedByIOException(
+                new IllegalStateException("invalid response")))
+        .isFalse();
   }
 }

@@ -48,7 +48,7 @@ class SopEntity extends Timestamped {
 
   /** 步骤之间传递文字结果或累计文件的交接方式。 */
   @Column(name = "handoff_mode", nullable = false)
-  String handoffMode = "cumulative_files";
+  String handoffMode = "legacy_text";
 
   /** 步骤未单独指定模型时使用的默认模型。 */
   @Column(name = "default_step_model", nullable = false)

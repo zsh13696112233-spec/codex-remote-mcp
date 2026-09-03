@@ -71,9 +71,11 @@ class ConfigCenterApplicationTest {
                     + "'codex_sop_feishu_bot_settings', 'codex_sop_dingtalk_bot_state', "
                     + "'codex_sop_dingtalk_workflow_bindings', "
                     + "'codex_sop_dingtalk_inbound_messages', 'codex_sop_dingtalk_outbox', "
-                    + "'codex_sop_dingtalk_bot_settings', 'codex_sop_dingtalk_targets')",
+                    + "'codex_sop_dingtalk_bot_settings', 'codex_sop_dingtalk_targets', "
+                    + "'codex_sop_dingtalk_departments', "
+                    + "'codex_sop_dingtalk_target_departments')",
                 Integer.class))
-        .isEqualTo(11);
+        .isEqualTo(13);
   }
 
   /** 确认跨事务加载的 SOP、角色和任务关系可用于构建完整 API 快照。 */
@@ -137,6 +139,10 @@ class ConfigCenterApplicationTest {
     assertThat(index).contains("name=\"dingtalkTargetId\"");
     assertThat(script)
         .contains("/api/dingtalk/targets/sync-people")
+        .contains("/api/dingtalk/targets/directory")
+        .contains("data-department-toggle")
+        .contains("data-person-search")
+        .contains("人员启用状态已自动保存")
         .contains("dingtalkTargetId:f.dingtalkTargetId.value||null")
         .contains("首次同步的人员默认停用");
   }
@@ -342,9 +348,9 @@ class ConfigCenterApplicationTest {
     assertThat(first.payload().path("maxRetryCount").asInt()).isEqualTo(7);
     assertThat(retried.payload().path("maxRetryCount").asInt()).isEqualTo(7);
     assertThat(first.payload().path("advanceMode").asText()).isEqualTo("automatic");
-    assertThat(createdSop.path("handoffMode").asText()).isEqualTo("cumulative_files");
-    assertThat(first.payload().path("handoffMode").asText()).isEqualTo("cumulative_files");
-    assertThat(retried.payload().path("handoffMode").asText()).isEqualTo("cumulative_files");
+    assertThat(createdSop.path("handoffMode").asText()).isEqualTo("legacy_text");
+    assertThat(first.payload().path("handoffMode").asText()).isEqualTo("legacy_text");
+    assertThat(retried.payload().path("handoffMode").asText()).isEqualTo("legacy_text");
     assertThat(retried.workflowId()).isNotEqualTo(first.workflowId());
     assertThat(retried.payload().has("usedRetryCount")).isFalse();
     ObjectNode legacyPayload = first.payload().deepCopy();

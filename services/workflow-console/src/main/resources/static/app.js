@@ -420,6 +420,9 @@ function render(snapshot) {
   const initializing = isInitializing(snapshot);
   const active = nodes.find(node => ACTIVE.has(node.status));
   const failed = nodes.find(node => FAILED.has(node.status));
+  const allStepsFinished = nodes.length > 0
+    && nodes.every(node => node.status === "completed" || node.status === "skipped");
+  const allStepsPending = nodes.length === 0 || nodes.every(node => node.status === "pending");
   $("#current").textContent = initializing
     ? initializationMessage(snapshot)
     : snapshot.pendingAdvance?.state === "held"
@@ -429,7 +432,10 @@ function render(snapshot) {
     : active
     ? `第 ${nodes.indexOf(active) + 1} 步：${active.displayName || "正在执行"}`
     : failed ? `第 ${nodes.indexOf(failed) + 1} 步未完成`
-      : snapshot.status === "completed" ? "全部步骤已完成" : "尚未开始";
+      : allStepsFinished && snapshot.status === "completed" ? "全部步骤已完成"
+      : allStepsFinished && TERMINAL.has(snapshot.status) ? "所有步骤已完成，但任务总结未完成"
+      : allStepsFinished ? "所有步骤已完成，正在生成任务总结"
+      : allStepsPending ? "尚未开始" : "等待任务继续";
   $("#progress").textContent = `${snapshot.progress?.completed || 0} / ${snapshot.progress?.total || nodes.length}`;
   $("#retries").textContent = snapshot.retryPolicy
     ? `${snapshot.retryPolicy.remainingRetries} / ${snapshot.retryPolicy.maxRetries}`

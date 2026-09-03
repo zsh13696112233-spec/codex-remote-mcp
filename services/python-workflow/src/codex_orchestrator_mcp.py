@@ -40,6 +40,7 @@ WORKFLOW_DB_PATH = Path(
 ).expanduser()
 MAX_PROMPT_LENGTH = 100_000
 DEFAULT_REQUEST_TIMEOUT_SEC = 30.0
+FINAL_ANSWER_COMPLETION_GRACE_SEC = 5.0
 INTERRUPT_TIMEOUT_SEC = 10.0
 LOGGER = logging.getLogger(__name__)
 PERMISSION_PROFILES = ("read_only", "workspace_write", "auto_review")
@@ -1476,14 +1477,36 @@ class Orchestrator:
         deadline: float,
     ) -> None:
         agent_messages: list[tuple[str | None, str]] = []
+        final_answer_received_at: float | None = None
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise JobTotalTimeout(job.timeout_sec)
 
+            notification_timeout = remaining
+            if final_answer_received_at is not None:
+                grace_remaining = FINAL_ANSWER_COMPLETION_GRACE_SEC - (
+                    time.monotonic() - final_answer_received_at
+                )
+                if grace_remaining <= 0:
+                    final_messages = [
+                        text for phase, text in agent_messages if phase == "final_answer"
+                    ]
+                    job.response = final_messages[-1]
+                    job.status = "completed"
+                    return
+                notification_timeout = min(notification_timeout, grace_remaining)
+
             try:
-                event = await client.next_notification(remaining)
+                event = await client.next_notification(notification_timeout)
             except TimeoutError:
+                final_messages = [
+                    text for phase, text in agent_messages if phase == "final_answer"
+                ]
+                if final_messages:
+                    job.response = final_messages[-1]
+                    job.status = "completed"
+                    return
                 raise JobTotalTimeout(job.timeout_sec) from None
             method = event.get("method")
             params = event.get("params") or {}
@@ -1492,6 +1515,8 @@ class Orchestrator:
                 item = params.get("item") or {}
                 if item.get("type") == "agentMessage" and item.get("text"):
                     agent_messages.append((item.get("phase"), str(item["text"])))
+                    if item.get("phase") == "final_answer":
+                        final_answer_received_at = time.monotonic()
             elif method == "turn/diff/updated":
                 job.diff = params.get("diff")
             elif method == "turn/completed":

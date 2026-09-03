@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_orchestrator_mcp import (
@@ -246,6 +247,47 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     [request["method"] for request in server.requests], ["initialize"]
                 )
+
+
+    async def test_final_answer_completes_after_turn_event_grace_expires(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.timeouts = []
+
+            async def next_notification(self, timeout_sec):
+                self.calls += 1
+                self.timeouts.append(timeout_sec)
+                if self.calls == 1:
+                    return {
+                        "method": "item/completed",
+                        "params": {
+                            "item": {
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "text": "任务已全部完成。",
+                            }
+                        },
+                    }
+                raise TimeoutError
+
+        job = SimpleNamespace(
+            timeout_sec=600,
+            turn_id="turn-1",
+            diff=None,
+            response=None,
+            status="running",
+        )
+        client = FakeClient()
+
+        await Orchestrator._consume_turn(
+            object(), job, client, time.monotonic() + job.timeout_sec
+        )
+
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.response, "任务已全部完成。")
+        self.assertEqual(client.calls, 2)
+        self.assertLessEqual(client.timeouts[1], 5.0)
 
     async def _publish_outputs(
         self,

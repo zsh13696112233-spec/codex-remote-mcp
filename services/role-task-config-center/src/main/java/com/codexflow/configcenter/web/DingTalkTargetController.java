@@ -31,6 +31,11 @@ public class DingTalkTargetController {
     return service.list();
   }
 
+  @GetMapping("/directory")
+  public DingTalkTargetDirectory.DirectoryView directory() {
+    return service.directory();
+  }
+
   @PostMapping("/sync-people")
   public DingTalkTargetDirectory.SyncResult syncPeople() {
     return service.syncPeople();

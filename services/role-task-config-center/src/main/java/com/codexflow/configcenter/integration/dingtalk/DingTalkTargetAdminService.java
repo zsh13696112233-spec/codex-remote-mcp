@@ -28,8 +28,15 @@ public class DingTalkTargetAdminService {
 
   public DingTalkTargetDirectory.SyncResult syncPeople() {
     DingTalkSettingsStore.Settings value = requiredSettings();
-    return targets.syncPeople(
-        value.clientId(), transport.listPeople(value.clientId(), value.clientSecret()));
+    return targets.syncDirectory(
+        value.clientId(), transport.listDirectory(value.clientId(), value.clientSecret()));
+  }
+
+  public DingTalkTargetDirectory.DirectoryView directory() {
+    String clientId = settings.current().clientId();
+    return clientId.isBlank()
+        ? new DingTalkTargetDirectory.DirectoryView(List.of(), List.of())
+        : targets.directory(clientId);
   }
 
   public DingTalkTargetDirectory.TargetView update(String id, String displayName, boolean enabled) {

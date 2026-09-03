@@ -3,8 +3,13 @@ package com.codexflow.configcenter.domain;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.JoinTable;
+import jakarta.persistence.ManyToMany;
 import jakarta.persistence.Table;
 import java.time.Instant;
+import java.util.HashSet;
+import java.util.Set;
 
 /** 可供 SOP 选择的钉钉人员或群。 */
 @Entity
@@ -42,4 +47,11 @@ class DingTalkTargetEntity extends Timestamped {
 
   @Column(name = "last_synced_at")
   Instant lastSyncedAt;
+
+  @ManyToMany
+  @JoinTable(
+      name = "codex_sop_dingtalk_target_departments",
+      joinColumns = @JoinColumn(name = "target_id"),
+      inverseJoinColumns = @JoinColumn(name = "department_id"))
+  Set<DingTalkDepartmentEntity> departments = new HashSet<>();
 }

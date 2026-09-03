@@ -83,6 +83,11 @@ class WorkflowConsoleApplicationTest {
             "请在任务助手中说明修改点",
             "confirmAdvance",
             "holdAdvance",
+            "allStepsFinished",
+            "所有步骤已完成，正在生成任务总结",
+            "所有步骤已完成，但任务总结未完成",
+            "allStepsPending",
+            "等待任务继续",
             "step-file-link",
             "artifact.mediaType",
             "file.download");

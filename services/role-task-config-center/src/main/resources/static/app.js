@@ -1,4 +1,4 @@
-const state={page:"roles",roles:[],sops:[],tasks:[],agents:[],feishu:null,dingtalk:null,dingtalkTargets:[],dingtalkTargetType:"GROUP",gatewayOnline:false,agentsAvailable:false,agentRefreshInFlight:false,lastRuntimeRefreshAt:null,sop:{draft:null,baseline:"",selectedNodeId:null,tab:"workflow",drag:null}};
+const state={page:"roles",roles:[],sops:[],tasks:[],agents:[],feishu:null,dingtalk:null,dingtalkTargets:[],dingtalkDirectory:{departments:[],people:[]},dingtalkTargetType:"GROUP",dingtalkDepartmentId:"__all__",dingtalkCollapsedDepartments:new Set(),dingtalkPersonSearch:"",gatewayOnline:false,agentsAvailable:false,agentRefreshInFlight:false,lastRuntimeRefreshAt:null,sop:{draft:null,baseline:"",selectedNodeId:null,tab:"workflow",drag:null}};
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uid=()=>`node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
@@ -96,18 +96,40 @@ function dingtalkPayload(){
 function targetTypeLabel(value){return value==="PERSON"?"人员":"群聊"}
 function renderDingTalkTargets(){
   const configured=!!state.dingtalk?.clientId,items=state.dingtalkTargets.filter(x=>x.targetType===state.dingtalkTargetType);
+  const list=state.dingtalkTargetType==="PERSON"?directoryView(configured,items):`<div class="target-list">${!configured?'<div class="empty">请先在“钉钉机器人”页面保存 Client ID 和 Client Secret。</div>':items.length?items.map(targetCard).join(""):'<div class="empty">暂无群聊，请先在目标群中 @ 机器人。</div>'}</div>`;
   $("#content").className="content target-content";
   $("#content").innerHTML=`<section class="target-panel">
     <div class="settings-heading"><div><h2>钉钉通知对象</h2><p>一个群或人员只能绑定一个任务定义；这里只维护本机器人所属应用的对象。</p></div>${configured?'<span class="connection-status online"><i></i>应用已配置</span>':'<span class="connection-status off"><i></i>请先配置机器人</span>'}</div>
-    <div class="target-toolbar"><div class="target-tabs"><button class="${state.dingtalkTargetType==="GROUP"?"active":""}" data-target-type="GROUP">群聊</button><button class="${state.dingtalkTargetType==="PERSON"?"active":""}" data-target-type="PERSON">人员</button></div>${state.dingtalkTargetType==="PERSON"?`<button data-target-sync ${configured?"":"disabled"}>同步公司人员</button>`:""}</div>
-    <p class="hint">${state.dingtalkTargetType==="GROUP"?'在群里首次 @ 机器人后，该群会自动出现在这里；管理员确认名称并启用后才可供任务定义选择。':'点击“同步公司人员”从钉钉通讯录拉取。首次同步的人员默认停用，确认后手动启用。'}</p>
-    <div class="target-list">${!configured?'<div class="empty">请先在“钉钉机器人”页面保存 Client ID 和 Client Secret。</div>':items.length?items.map(targetCard).join(""):`<div class="empty">暂无${targetTypeLabel(state.dingtalkTargetType)}，${state.dingtalkTargetType==="GROUP"?'请先在目标群中 @ 机器人。':'请点击上方按钮同步。'}</div>`}</div>
+    <div class="target-toolbar"><div class="target-tabs"><button class="${state.dingtalkTargetType==="GROUP"?"active":""}" data-target-type="GROUP">群聊</button><button class="${state.dingtalkTargetType==="PERSON"?"active":""}" data-target-type="PERSON">人员</button></div>${state.dingtalkTargetType==="GROUP"?`<button data-target-refresh ${configured?"":"disabled"}>刷新群聊</button>`:`<button data-target-sync ${configured?"":"disabled"}>同步公司人员</button>`}</div>
+    <p class="hint">${state.dingtalkTargetType==="GROUP"?'在群里首次 @ 机器人后，点击“刷新群聊”；管理员确认名称并启用后才可供任务定义选择。':'点击“同步公司人员”从钉钉通讯录拉取。首次同步的人员默认停用，确认后手动启用。'}</p>
+    ${list}
   </section>`;
 }
+function directoryView(configured,people){
+  if(!configured)return '<div class="empty">请先在“钉钉机器人”页面保存 Client ID 和 Client Secret。</div>';
+  const departments=state.dingtalkDirectory.departments||[],ids=new Set(departments.map(x=>x.externalId));
+  if(state.dingtalkDepartmentId!=="__all__"&&!ids.has(state.dingtalkDepartmentId))state.dingtalkDepartmentId="__all__";
+  const selected=state.dingtalkDepartmentId,visible=filteredDirectoryPeople(people);
+  return `<div class="directory-layout"><aside class="department-tree"><button class="department-node root ${selected==="__all__"?"active":""}" data-department-id="__all__"><span>全部人员</span><b>${people.length}</b></button>${departmentTree(departments,people,selected)}</aside><div class="department-people"><div class="department-heading"><strong>${selectedDepartmentName(departments,selected)}</strong><input class="person-search" data-person-search type="search" maxlength="100" placeholder="搜索人员姓名" value="${esc(state.dingtalkPersonSearch)}"><span data-person-count>${visible.length} 人</span></div><div class="target-list">${directoryPeopleHtml(visible)}</div></div></div>`;
+}
+function filteredDirectoryPeople(people){const selected=state.dingtalkDepartmentId,keyword=state.dingtalkPersonSearch.trim().toLocaleLowerCase("zh-CN"),departmentPeople=selected==="__all__"?people:people.filter(x=>(x.departmentIds||[]).includes(selected));return keyword?departmentPeople.filter(x=>String(x.displayName??"").toLocaleLowerCase("zh-CN").includes(keyword)):departmentPeople}
+function directoryPeopleHtml(people){return people.length?people.map(targetCard).join(""):`<div class="empty">${state.dingtalkPersonSearch.trim()?"未找到匹配人员。":"该部门暂无直属人员。"}</div>`}
+function refreshDirectoryPeople(){const people=state.dingtalkTargets.filter(x=>x.targetType==="PERSON"),visible=filteredDirectoryPeople(people),list=document.querySelector(".department-people .target-list"),count=document.querySelector("[data-person-count]");if(list)list.innerHTML=directoryPeopleHtml(visible);if(count)count.textContent=`${visible.length} 人`}
+function departmentTree(departments,people,selected){
+  const ids=new Set(departments.map(x=>x.externalId)),children=new Map(),visited=new Set();
+  departments.forEach(x=>{const parent=x.parentExternalId&&ids.has(x.parentExternalId)?x.parentExternalId:"__root__";if(!children.has(parent))children.set(parent,[]);children.get(parent).push(x)});
+  children.forEach(items=>items.sort((a,b)=>a.displayName.localeCompare(b.displayName,"zh-CN")));
+  const branch=(parent,depth)=>((children.get(parent)||[]).map(x=>{if(visited.has(x.externalId))return "";visited.add(x.externalId);const count=people.filter(p=>(p.departmentIds||[]).includes(x.externalId)).length,hasChildren=(children.get(x.externalId)||[]).length>0,collapsed=state.dingtalkCollapsedDepartments.has(x.externalId);return `<div class="department-branch"><div class="department-row" style="--depth:${depth}">${hasChildren?`<button class="department-toggle" data-department-toggle="${esc(x.externalId)}" aria-label="${collapsed?"展开":"收起"}${esc(x.displayName)}">${collapsed?"▶":"▼"}</button>`:'<span class="department-toggle-spacer"></span>'}<button class="department-node ${selected===x.externalId?"active":""}" data-department-id="${esc(x.externalId)}"><span>${esc(x.displayName)}</span><b>${count}</b></button></div>${hasChildren&&!collapsed?branch(x.externalId,depth+1):""}</div>`}).join(""));
+  return branch("__root__",0);
+}
+function selectedDepartmentName(departments,id){return id==="__all__"?"全部人员":departments.find(x=>x.externalId===id)?.displayName||"部门人员"}
 function targetCard(x){
   const unavailable=!x.available;
   const owner=state.tasks.find(t=>t.dingtalkTargetId===x.id);
-  return `<article class="target-card" data-target-id="${x.id}"><div class="target-main"><div class="target-name"><span class="target-kind">${targetTypeLabel(x.targetType)}</span><input data-target-name maxlength="160" value="${esc(x.displayName)}"></div><p>${x.departmentDisplay?`部门：${esc(x.departmentDisplay)}`:`钉钉标识：${esc(x.externalId)}`}</p><small>最近同步：${time(x.lastSyncedAt)}${unavailable?' · 当前已不在通讯录中':''}${owner?` · 已绑定任务：${esc(owner.name)}`:""}</small></div><label class="check"><input data-target-enabled type="checkbox" ${x.enabled?"checked":""} ${unavailable?"disabled":""}> 启用</label><div class="actions"><button data-target-test>测试</button><button class="primary" data-target-save>保存</button><button data-target-delete>删除</button></div></article>`;
+  const name=x.targetType==="PERSON"?`<strong>${esc(x.displayName)}</strong>`:`<input data-target-name maxlength="160" value="${esc(x.displayName)}">`;
+  const save=x.targetType==="PERSON"?"":'<button class="primary" data-target-save>保存</button>';
+  const remove=x.targetType==="PERSON"?"":'<button data-target-delete>删除</button>';
+  return `<article class="target-card" data-target-id="${x.id}"><div class="target-main"><div class="target-name"><span class="target-kind">${targetTypeLabel(x.targetType)}</span>${name}</div><p>${x.departmentDisplay?`部门：${esc(x.departmentDisplay)}`:`钉钉标识：${esc(x.externalId)}`}</p><small>最近同步：${time(x.lastSyncedAt)}${unavailable?' · 当前已不在通讯录中':''}${owner?` · 已绑定任务：${esc(owner.name)}`:""}</small></div><label class="check"><input data-target-enabled type="checkbox" ${x.enabled?"checked":""} ${unavailable?"disabled":""}> 启用</label><div class="actions"><button data-target-test>测试</button>${save}${remove}</div></article>`;
 }
 
 function supervisorAgents(){
@@ -152,7 +174,8 @@ async function render({reload=true}={}){
   }
   if(state.page==="dingtalk-targets"){
     $("#search").closest(".toolbar").classList.add("hidden");
-    [state.dingtalk,state.dingtalkTargets]=await Promise.all([api("/api/dingtalk/config"),api("/api/dingtalk/targets")]);
+    [state.dingtalk,state.dingtalkTargets,state.dingtalkDirectory]=await Promise.all([api("/api/dingtalk/config"),api("/api/dingtalk/targets"),api("/api/dingtalk/targets/directory")]);
+    state.dingtalkCollapsedDepartments=new Set((state.dingtalkDirectory.departments||[]).map(x=>x.externalId));
     renderDingTalkTargets();return;
   }
   if(state.page==="runtime"){
@@ -173,13 +196,13 @@ async function render({reload=true}={}){
 function openRole(x={enabled:true}){const f=$("#roleForm");f.reset();f.id.value=x.id||"";f.version.value=x.version??0;f.name.value=x.name||"";f.duty.value=x.duty||"";f.enabled.checked=x.enabled!==false;$("#roleDialog").showModal()}
 function openTask(x={enabled:true}){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=x.objective||"";f.additionalNotes.value=x.additionalNotes||"";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");const used=new Set(state.tasks.filter(t=>t.id!==x.id&&t.dingtalkTargetId).map(t=>t.dingtalkTargetId));const targets=state.dingtalkTargets.filter(t=>(t.enabled&&t.available&&!used.has(t.id))||t.id===x.dingtalkTargetId);f.dingtalkTargetId.innerHTML=`<option value="">不绑定钉钉</option>${targets.map(t=>`<option value="${t.id}" ${t.id===x.dingtalkTargetId?"selected":""}>${targetTypeLabel(t.targetType)} · ${esc(t.displayName)}${!t.enabled||!t.available?"（已不可用）":""}</option>`).join("")}`;f.dingtalkTargetId.value=x.dingtalkTargetId||"";f.enabled.checked=x.enabled!==false;$("#taskDialog").showModal()}
 
-function blankSop(){return{id:"",name:"",description:"",supervisorAgentId:"local",supervisorTimeoutSec:7200,maxRetryCount:10,advanceMode:"automatic",handoffMode:"cumulative_files",defaultStepModel:"gpt-5.6-sol",enabled:true,steps:[]}}
+function blankSop(){return{id:"",name:"",description:"",supervisorAgentId:"local",supervisorTimeoutSec:7200,maxRetryCount:10,advanceMode:"automatic",handoffMode:"legacy_text",defaultStepModel:"gpt-5.6-sol",enabled:true,steps:[]}}
 function normalizeStep(s){const permissionProfile=s.permissionProfile||(s.writeEnabled===true?"workspace_write":"read_only");return{...s,_clientId:s._clientId||uid(),displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",permissionProfile,writeEnabled:permissionProfile!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
 function setDraft(sop){
   const copy={...blankSop(),...sop,steps:(sop.steps||[]).map(normalizeStep)};
   state.sop.draft=copy;state.sop.selectedNodeId=copy.steps[0]?._clientId||null;state.sop.tab="workflow";state.sop.baseline=draftFingerprint(copy);
 }
-function sopPayload(d=state.sop.draft){return{name:d.name.trim(),description:(d.description||"").trim(),supervisorAgentId:(d.supervisorAgentId||"").trim(),supervisorTimeoutSec:Number(d.supervisorTimeoutSec),maxRetryCount:Number(d.maxRetryCount),advanceMode:d.advanceMode||"automatic",handoffMode:d.handoffMode||"cumulative_files",defaultStepModel:d.defaultStepModel,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),executorType:s.executorType||"local",agentId:(s.agentId||"").trim(),workingDirectory:(s.workingDirectory||"").trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
+function sopPayload(d=state.sop.draft){return{name:d.name.trim(),description:(d.description||"").trim(),supervisorAgentId:(d.supervisorAgentId||"").trim(),supervisorTimeoutSec:Number(d.supervisorTimeoutSec),maxRetryCount:Number(d.maxRetryCount),advanceMode:d.advanceMode||"automatic",handoffMode:d.handoffMode||"legacy_text",defaultStepModel:d.defaultStepModel,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),executorType:s.executorType||"local",agentId:(s.agentId||"").trim(),workingDirectory:(s.workingDirectory||"").trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
 function draftFingerprint(d=state.sop.draft){return d?JSON.stringify(sopPayload(d)):""}
 function isSopDirty(){return !!state.sop.draft&&draftFingerprint()!==state.sop.baseline}
 function confirmDiscard(){return !isSopDirty()||confirm("当前工作流有未保存的修改，确定放弃吗？")}
@@ -246,7 +269,7 @@ function workflowInspectorHtml(){
     <label>工作流说明<textarea data-sop-field="description" maxlength="2000" placeholder="说明这个流程的适用场景">${esc(d.description||"")}</textarea></label>
     <label>步骤默认模型<select data-sop-field="defaultStepModel">${MODELS.map(m=>`<option ${d.defaultStepModel===m?"selected":""}>${m}</option>`).join("")}</select></label>
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，30 秒后自动继续）</option></select></label>
-    <label>步骤结果交接<select data-sop-field="handoffMode"><option value="cumulative_files" ${d.handoffMode==="cumulative_files"?"selected":""}>文件交接（累计传递前序文件）</option><option value="legacy_text" ${d.handoffMode==="legacy_text"?"selected":""}>文字交接（追加上一步文字结果）</option></select></label>
+    <label>步骤结果交接<select data-sop-field="handoffMode"><option value="legacy_text" ${d.handoffMode==="legacy_text"?"selected":""}>文字交接（追加上一步文字结果）</option><option value="cumulative_files" ${d.handoffMode==="cumulative_files"?"selected":""}>文件交接（累计传递前序文件）</option></select></label>
     <label>主监督执行机 *<div class="agent-picker"><input data-sop-field="supervisorAgentId" maxlength="128" value="${esc(d.supervisorAgentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
     <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="7200" value="${d.supervisorTimeoutSec}"></label>
     <label>单次任务最多重跑次数<input data-sop-field="maxRetryCount" type="number" min="0" max="100" value="${d.maxRetryCount}"></label>
@@ -392,9 +415,12 @@ $("#content").addEventListener("click",async e=>{
     const dingtalkTest=e.target.closest("[data-dingtalk-test]");
     if(dingtalkTest){botTestButton=dingtalkTest;dingtalkTest.disabled=true;const result=await api("/api/dingtalk/config/test",{method:"POST",body:JSON.stringify(dingtalkPayload())});const output=$("#dingtalkTestResult");output.className=`test-result ${result.success?"success":"error"}`;output.textContent=result.message;dingtalkTest.disabled=false;return}
     const targetType=e.target.closest("[data-target-type]");if(targetType){state.dingtalkTargetType=targetType.dataset.targetType;renderDingTalkTargets();return}
-    const sync=e.target.closest("[data-target-sync]");if(sync){sync.disabled=true;const result=await api("/api/dingtalk/targets/sync-people",{method:"POST"});state.dingtalkTargets=await api("/api/dingtalk/targets");renderDingTalkTargets();toast(`同步完成：新增 ${result.created}，更新 ${result.updated}，失效 ${result.unavailable}`);return}
+    const departmentToggle=e.target.closest("[data-department-toggle]");if(departmentToggle){const id=departmentToggle.dataset.departmentToggle;if(state.dingtalkCollapsedDepartments.has(id))state.dingtalkCollapsedDepartments.delete(id);else state.dingtalkCollapsedDepartments.add(id);renderDingTalkTargets();return}
+    const department=e.target.closest("[data-department-id]");if(department){state.dingtalkDepartmentId=department.dataset.departmentId;renderDingTalkTargets();return}
+    const targetRefresh=e.target.closest("[data-target-refresh]");if(targetRefresh){targetRefresh.disabled=true;try{state.dingtalkTargets=await api("/api/dingtalk/targets");renderDingTalkTargets();toast("群聊列表已刷新")}finally{if(document.body.contains(targetRefresh))targetRefresh.disabled=false}return}
+    const sync=e.target.closest("[data-target-sync]");if(sync){sync.disabled=true;const result=await api("/api/dingtalk/targets/sync-people",{method:"POST"});[state.dingtalkTargets,state.dingtalkDirectory]=await Promise.all([api("/api/dingtalk/targets"),api("/api/dingtalk/targets/directory")]);state.dingtalkCollapsedDepartments=new Set((state.dingtalkDirectory.departments||[]).map(x=>x.externalId));renderDingTalkTargets();toast(`同步完成：新增 ${result.created}，更新 ${result.updated}，失效 ${result.unavailable}`);return}
     const targetAction=e.target.closest("[data-target-save],[data-target-test],[data-target-delete]");
-    if(targetAction){const card=targetAction.closest("[data-target-id]"),id=card.dataset.targetId;if(targetAction.matches("[data-target-save]")){await api(`/api/dingtalk/targets/${id}`,{method:"PUT",body:JSON.stringify({displayName:card.querySelector("[data-target-name]").value.trim(),enabled:card.querySelector("[data-target-enabled]").checked})});toast("通知对象已保存")}else if(targetAction.matches("[data-target-test]")){await api(`/api/dingtalk/targets/${id}/test`,{method:"POST"});toast("测试消息已发送")}else{if(!confirm("确定删除这个通知对象？"))return;await api(`/api/dingtalk/targets/${id}`,{method:"DELETE"});toast("通知对象已删除")}state.dingtalkTargets=await api("/api/dingtalk/targets");renderDingTalkTargets();return}
+    if(targetAction){const card=targetAction.closest("[data-target-id]"),id=card.dataset.targetId,target=state.dingtalkTargets.find(x=>x.id===id);if(targetAction.matches("[data-target-save]")){const nameInput=card.querySelector("[data-target-name]");await api(`/api/dingtalk/targets/${id}`,{method:"PUT",body:JSON.stringify({displayName:nameInput?nameInput.value.trim():target?.displayName||"",enabled:card.querySelector("[data-target-enabled]").checked})});toast("通知对象已保存")}else if(targetAction.matches("[data-target-test]")){await api(`/api/dingtalk/targets/${id}/test`,{method:"POST"});toast("测试消息已发送")}else{if(!confirm("确定删除这个通知对象？"))return;await api(`/api/dingtalk/targets/${id}`,{method:"DELETE"});toast("通知对象已删除")}state.dingtalkTargets=await api("/api/dingtalk/targets");renderDingTalkTargets();return}
     const action=e.target.closest("button[data-action]");
     if(action){
       const id=action.dataset.id,a=action.dataset.action;
@@ -428,13 +454,15 @@ $("#content").addEventListener("submit",async e=>{
   }catch(x){toast(x.message);submit.disabled=false}
 });
 $("#content").addEventListener("input",e=>{
+  if(e.target.matches("[data-person-search]")){state.dingtalkPersonSearch=e.target.value;refreshDirectoryPeople();return}
   if(e.target.id==="sopSearch"){const q=e.target.value.trim().toLowerCase();document.querySelectorAll(".sop-list-item").forEach(item=>item.hidden=!item.dataset.name.includes(q));return}
   const sopField=e.target.dataset.sopField;
   if(sopField&&state.sop.draft){updateField(e.target,state.sop.draft,sopField);const title=document.querySelector(".canvas-toolbar strong");if(sopField==="name"&&title)title.textContent=e.target.value||"未命名工作流";if(sopField==="supervisorAgentId")updateAgentRuntimeUi();syncDirtyUi();return}
   const nodeField=e.target.dataset.nodeField,step=selectedStep();
   if(nodeField&&step){updateField(e.target,step,nodeField);const card=document.querySelector(`[data-node-id="${step._clientId}"]`);if(card&&nodeField==="displayName")card.querySelector(".node-role strong").textContent=e.target.value||roleById(step.roleId)?.name||"未命名节点";if(card&&nodeField==="instruction")card.querySelector(".node-body>p").textContent=e.target.value||"尚未填写执行说明";syncDirtyUi()}
 });
-$("#content").addEventListener("change",e=>{
+$("#content").addEventListener("change",async e=>{
+  if(e.target.matches("[data-target-enabled]")){const card=e.target.closest("[data-target-id]"),target=state.dingtalkTargets.find(x=>x.id===card?.dataset.targetId);if(target?.targetType==="PERSON"){const previous=target.enabled;e.target.disabled=true;try{const saved=await api(`/api/dingtalk/targets/${target.id}`,{method:"PUT",body:JSON.stringify({displayName:target.displayName,enabled:e.target.checked})});Object.assign(target,saved);toast("人员启用状态已自动保存")}catch(x){e.target.checked=previous;toast(x.message)}finally{e.target.disabled=!target.available}return}}
   const sf=e.target.dataset.sopField;if(sf&&state.sop.draft){updateField(e.target,state.sop.draft,sf);syncDirtyUi();return}
   const nf=e.target.dataset.nodeField,step=selectedStep();if(nf&&step){updateField(e.target,step,nf);if(nf==="permissionProfile")step.writeEnabled=step.permissionProfile!=="read_only";if(nf==="agentId"&&!agentPermissionProfiles(step.agentId).includes(step.permissionProfile)){step.permissionProfile="read_only";step.writeEnabled=false;renderSopWorkspace();return}syncDirtyUi()}
 });

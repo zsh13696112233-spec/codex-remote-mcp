@@ -6,6 +6,7 @@ import com.dingtalk.open.app.api.OpenDingTalkStreamClientBuilder;
 import com.dingtalk.open.app.api.callback.DingTalkStreamTopics;
 import com.dingtalk.open.app.api.callback.OpenDingTalkCallbackListener;
 import com.dingtalk.open.app.api.security.AuthClientCredential;
+import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -44,7 +45,11 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   OfficialDingTalkTransport(DingTalkProperties properties, ObjectMapper objectMapper) {
     this.properties = properties;
     this.objectMapper = objectMapper;
-    this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    this.httpClient =
+        HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .version(HttpClient.Version.HTTP_1_1)
+            .build();
   }
 
   @Override
@@ -161,30 +166,55 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   @Override
   public List<DingTalkTargetDirectory.RemotePerson> listPeople(
       String clientId, String clientSecret) {
+    return listDirectory(clientId, clientSecret).people();
+  }
+
+  @Override
+  public DingTalkTargetDirectory.RemoteDirectory listDirectory(
+      String clientId, String clientSecret) {
     String token = fetchAccessToken(clientId, clientSecret).value();
     ArrayDeque<Long> pending = new ArrayDeque<>();
     HashSet<Long> visited = new HashSet<>();
     HashMap<Long, String> departmentNames = new HashMap<>();
+    LinkedHashMap<Long, DingTalkTargetDirectory.RemoteDepartment> departments =
+        new LinkedHashMap<>();
     HashMap<String, PersonAccumulator> people = new HashMap<>();
     pending.add(1L);
     departmentNames.put(1L, "根部门");
+    departments.put(1L, new DingTalkTargetDirectory.RemoteDepartment("1", null, "根部门"));
     while (!pending.isEmpty()) {
       long departmentId = pending.removeFirst();
       if (!visited.add(departmentId)) continue;
       collectDepartmentUsers(token, departmentId, departmentNames, people);
       ObjectNode request = objectMapper.createObjectNode().put("dept_id", departmentId);
-      JsonNode children = legacy("/topapi/v2/department/listsubid", request, token).path("result");
+      JsonNode children =
+          childDepartmentIds(legacy("/topapi/v2/department/listsubid", request, token));
       if (children.isArray()) {
         for (JsonNode child : children) {
           long childId = child.asLong();
-          if (childId > 0 && !visited.contains(childId)) pending.addLast(childId);
+          if (childId > 0) {
+            String childName =
+                departmentNames.computeIfAbsent(childId, key -> departmentName(token, key));
+            departments.putIfAbsent(
+                childId,
+                new DingTalkTargetDirectory.RemoteDepartment(
+                    Long.toString(childId), Long.toString(departmentId), childName));
+            if (!visited.contains(childId)) pending.addLast(childId);
+          }
         }
       }
     }
-    return people.values().stream()
-        .map(PersonAccumulator::view)
-        .sorted((left, right) -> left.displayName().compareToIgnoreCase(right.displayName()))
-        .toList();
+    List<DingTalkTargetDirectory.RemotePerson> personViews =
+        people.values().stream()
+            .map(value -> value.view(departmentNames))
+            .sorted((left, right) -> left.displayName().compareToIgnoreCase(right.displayName()))
+            .toList();
+    return new DingTalkTargetDirectory.RemoteDirectory(
+        departments.values().stream().toList(), personViews);
+  }
+
+  static JsonNode childDepartmentIds(JsonNode response) {
+    return response.path("result").path("dept_id_list");
   }
 
   private void collectDepartmentUsers(
@@ -213,12 +243,12 @@ class OfficialDingTalkTransport implements DingTalkTransport {
           if (departments.isArray()) {
             for (JsonNode department : departments) {
               long id = department.asLong();
-              person.departments.add(
-                  departmentNames.computeIfAbsent(id, key -> departmentName(token, key)));
+              departmentNames.computeIfAbsent(id, key -> departmentName(token, key));
+              person.departmentIds.add(id);
             }
           } else {
-            person.departments.add(
-                departmentNames.computeIfAbsent(departmentId, key -> departmentName(token, key)));
+            departmentNames.computeIfAbsent(departmentId, key -> departmentName(token, key));
+            person.departmentIds.add(departmentId);
           }
         }
       }
@@ -407,10 +437,27 @@ class OfficialDingTalkTransport implements DingTalkTransport {
 
   private JsonNode legacy(String path, JsonNode body, String token) {
     String encoded = URLEncoder.encode(token, StandardCharsets.UTF_8);
-    JsonNode response = sendTo(OAPI_HOST + path + "?access_token=" + encoded, "POST", body, null);
+    JsonNode response = sendDirectoryRequest(OAPI_HOST + path + "?access_token=" + encoded, body);
     int code = response.path("errcode").asInt();
     if (code != 0) throw new IllegalStateException("钉钉通讯录接口调用失败，错误码 " + code + "。");
     return response;
+  }
+
+  private JsonNode sendDirectoryRequest(String url, JsonNode body) {
+    for (int attempt = 1; ; attempt++) {
+      try {
+        return sendTo(url, "POST", body, null);
+      } catch (IllegalStateException error) {
+        if (attempt >= 3 || !causedByIOException(error)) throw error;
+      }
+    }
+  }
+
+  static boolean causedByIOException(Throwable error) {
+    for (Throwable current = error; current != null; current = current.getCause()) {
+      if (current instanceof IOException) return true;
+    }
+    return false;
   }
 
   private JsonNode sendTo(String url, String method, JsonNode body, String token) {
@@ -488,16 +535,24 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   private static final class PersonAccumulator {
     private final String userId;
     private final String name;
-    private final HashSet<String> departments = new HashSet<>();
+    private final HashSet<Long> departmentIds = new HashSet<>();
 
     private PersonAccumulator(String userId, String name) {
       this.userId = userId;
       this.name = name;
     }
 
-    private DingTalkTargetDirectory.RemotePerson view() {
+    private DingTalkTargetDirectory.RemotePerson view(Map<Long, String> departmentNames) {
       return new DingTalkTargetDirectory.RemotePerson(
-          userId, name, String.join("、", departments.stream().sorted().toList()));
+          userId,
+          name,
+          String.join(
+              "、",
+              departmentIds.stream()
+                  .map(id -> departmentNames.getOrDefault(id, "部门 " + id))
+                  .sorted()
+                  .toList()),
+          departmentIds.stream().map(Object::toString).sorted().toList());
     }
   }
 

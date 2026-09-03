@@ -37,6 +37,12 @@ interface DingTalkTransport {
     throw new UnsupportedOperationException("当前钉钉通道不支持通讯录同步。");
   }
 
+  default DingTalkTargetDirectory.RemoteDirectory listDirectory(
+      String clientId, String clientSecret) {
+    return new DingTalkTargetDirectory.RemoteDirectory(
+        List.of(), listPeople(clientId, clientSecret));
+  }
+
   DingTalkModels.SendResult sendCard(
       String conversationId, String replyToMessageId, Map<String, Object> cardData);
 
