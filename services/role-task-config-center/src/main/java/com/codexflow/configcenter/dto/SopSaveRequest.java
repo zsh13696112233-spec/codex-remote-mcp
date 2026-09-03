@@ -18,6 +18,7 @@ import java.util.List;
  * @param maxRetryCount 单次运行允许的人工重跑总次数
  * @param advanceMode 步骤成功后的流转方式
  * @param handoffMode 步骤之间的结果交接方式
+ * @param dingtalkTargetId 唯一钉钉通知对象，可不配置
  * @param steps 按执行顺序排列的步骤列表
  */
 public record SopSaveRequest(
@@ -30,7 +31,33 @@ public record SopSaveRequest(
     Integer maxRetryCount,
     @Size(max = 32) String advanceMode,
     @Size(max = 32) String handoffMode,
+    @Size(max = 36) String dingtalkTargetId,
     @NotEmpty List<@Valid SopStepRequest> steps) {
+
+  public SopSaveRequest(
+      String name,
+      String description,
+      String supervisorAgentId,
+      Integer supervisorTimeoutSec,
+      String defaultStepModel,
+      Boolean enabled,
+      Integer maxRetryCount,
+      String advanceMode,
+      String handoffMode,
+      List<SopStepRequest> steps) {
+    this(
+        name,
+        description,
+        supervisorAgentId,
+        supervisorTimeoutSec,
+        defaultStepModel,
+        enabled,
+        maxRetryCount,
+        advanceMode,
+        handoffMode,
+        null,
+        steps);
+  }
 
   public SopSaveRequest(
       String name,
@@ -46,6 +73,7 @@ public record SopSaveRequest(
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
+        null,
         null,
         null,
         null,
@@ -68,6 +96,7 @@ public record SopSaveRequest(
         defaultStepModel,
         enabled,
         maxRetryCount,
+        null,
         null,
         null,
         steps);
@@ -91,6 +120,7 @@ public record SopSaveRequest(
         enabled,
         maxRetryCount,
         advanceMode,
+        null,
         null,
         steps);
   }
@@ -115,6 +145,7 @@ public record SopSaveRequest(
         maxRetryCount,
         advanceMode,
         handoffMode,
+        null,
         steps);
   }
 }

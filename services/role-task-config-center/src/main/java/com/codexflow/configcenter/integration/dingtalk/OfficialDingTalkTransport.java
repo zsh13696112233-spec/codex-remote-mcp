@@ -1,16 +1,23 @@
 package com.codexflow.configcenter.integration.dingtalk;
 
+import com.codexflow.configcenter.domain.DingTalkTargetDirectory;
 import com.dingtalk.open.app.api.OpenDingTalkClient;
 import com.dingtalk.open.app.api.OpenDingTalkStreamClientBuilder;
 import com.dingtalk.open.app.api.callback.DingTalkStreamTopics;
 import com.dingtalk.open.app.api.callback.OpenDingTalkCallbackListener;
 import com.dingtalk.open.app.api.security.AuthClientCredential;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -24,6 +31,7 @@ import tools.jackson.databind.node.ObjectNode;
 class OfficialDingTalkTransport implements DingTalkTransport {
 
   private static final String API_HOST = "https://api.dingtalk.com";
+  private static final String OAPI_HOST = "https://oapi.dingtalk.com";
 
   private final DingTalkProperties properties;
   private final ObjectMapper objectMapper;
@@ -118,6 +126,114 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     return new DingTalkModels.SendResult(messageId);
   }
 
+  @Override
+  public DingTalkModels.SendResult sendPersonText(String userId, String text) {
+    return sendPersonMessage(
+        userId, "sampleText", objectMapper.createObjectNode().put("content", text));
+  }
+
+  @Override
+  public DingTalkModels.SendResult sendPersonMarkdown(
+      String userId, String title, String markdown) {
+    return sendPersonMessage(
+        userId,
+        "sampleMarkdown",
+        objectMapper.createObjectNode().put("title", title).put("text", markdown));
+  }
+
+  private DingTalkModels.SendResult sendPersonMessage(
+      String userId, String msgKey, ObjectNode msgParam) {
+    ObjectNode body = objectMapper.createObjectNode();
+    body.put("robotCode", properties.getClientId());
+    body.putArray("userIds").add(userId);
+    body.put("msgKey", msgKey);
+    try {
+      body.put("msgParam", objectMapper.writeValueAsString(msgParam));
+    } catch (Exception error) {
+      throw new IllegalStateException("无法生成钉钉个人消息。", error);
+    }
+    JsonNode response = authorized("POST", "/v1.0/robot/oToMessages/batchSend", body);
+    String messageId = response.path("processQueryKey").asText();
+    if (messageId.isBlank()) messageId = UUID.randomUUID().toString();
+    return new DingTalkModels.SendResult(messageId);
+  }
+
+  @Override
+  public List<DingTalkTargetDirectory.RemotePerson> listPeople(
+      String clientId, String clientSecret) {
+    String token = fetchAccessToken(clientId, clientSecret).value();
+    ArrayDeque<Long> pending = new ArrayDeque<>();
+    HashSet<Long> visited = new HashSet<>();
+    HashMap<Long, String> departmentNames = new HashMap<>();
+    HashMap<String, PersonAccumulator> people = new HashMap<>();
+    pending.add(1L);
+    departmentNames.put(1L, "根部门");
+    while (!pending.isEmpty()) {
+      long departmentId = pending.removeFirst();
+      if (!visited.add(departmentId)) continue;
+      collectDepartmentUsers(token, departmentId, departmentNames, people);
+      ObjectNode request = objectMapper.createObjectNode().put("dept_id", departmentId);
+      JsonNode children = legacy("/topapi/v2/department/listsubid", request, token).path("result");
+      if (children.isArray()) {
+        for (JsonNode child : children) {
+          long childId = child.asLong();
+          if (childId > 0 && !visited.contains(childId)) pending.addLast(childId);
+        }
+      }
+    }
+    return people.values().stream()
+        .map(PersonAccumulator::view)
+        .sorted((left, right) -> left.displayName().compareToIgnoreCase(right.displayName()))
+        .toList();
+  }
+
+  private void collectDepartmentUsers(
+      String token,
+      long departmentId,
+      Map<Long, String> departmentNames,
+      Map<String, PersonAccumulator> people) {
+    long cursor = 0;
+    do {
+      ObjectNode request =
+          objectMapper
+              .createObjectNode()
+              .put("dept_id", departmentId)
+              .put("cursor", cursor)
+              .put("size", 100);
+      JsonNode result = legacy("/topapi/v2/user/list", request, token).path("result");
+      JsonNode items = result.path("list");
+      if (items.isArray()) {
+        for (JsonNode item : items) {
+          String userId = item.path("userid").asText();
+          String name = item.path("name").asText();
+          if (userId.isBlank() || name.isBlank()) continue;
+          PersonAccumulator person =
+              people.computeIfAbsent(userId, ignored -> new PersonAccumulator(userId, name));
+          JsonNode departments = item.path("dept_id_list");
+          if (departments.isArray()) {
+            for (JsonNode department : departments) {
+              long id = department.asLong();
+              person.departments.add(
+                  departmentNames.computeIfAbsent(id, key -> departmentName(token, key)));
+            }
+          } else {
+            person.departments.add(
+                departmentNames.computeIfAbsent(departmentId, key -> departmentName(token, key)));
+          }
+        }
+      }
+      cursor = result.path("has_more").asBoolean(false) ? result.path("next_cursor").asLong() : -1;
+    } while (cursor >= 0);
+  }
+
+  private String departmentName(String token, long departmentId) {
+    if (departmentId == 1) return "根部门";
+    ObjectNode request = objectMapper.createObjectNode().put("dept_id", departmentId);
+    String name =
+        legacy("/topapi/v2/department/get", request, token).path("result").path("name").asText();
+    return name.isBlank() ? "部门 " + departmentId : name;
+  }
+
   ObjectNode groupMessageBody(String conversationId, String msgKey, ObjectNode msgParam)
       throws Exception {
     ObjectNode body = objectMapper.createObjectNode();
@@ -203,7 +319,8 @@ class OfficialDingTalkTransport implements DingTalkTransport {
           content == null ? "" : content.trim(),
           value.path("isInAtList").asBoolean(false),
           mentionAll(value, content),
-          replyTo);
+          replyTo,
+          firstText(value, "conversationTitle", "conversationName"));
     } catch (Exception error) {
       throw new IllegalArgumentException("无法解析钉钉机器人消息。", error);
     }
@@ -285,9 +402,21 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   }
 
   private JsonNode send(String method, String path, JsonNode body, String token) {
+    return sendTo(API_HOST + path, method, body, token);
+  }
+
+  private JsonNode legacy(String path, JsonNode body, String token) {
+    String encoded = URLEncoder.encode(token, StandardCharsets.UTF_8);
+    JsonNode response = sendTo(OAPI_HOST + path + "?access_token=" + encoded, "POST", body, null);
+    int code = response.path("errcode").asInt();
+    if (code != 0) throw new IllegalStateException("钉钉通讯录接口调用失败，错误码 " + code + "。");
+    return response;
+  }
+
+  private JsonNode sendTo(String url, String method, JsonNode body, String token) {
     try {
       HttpRequest.Builder request =
-          HttpRequest.newBuilder(URI.create(API_HOST + path))
+          HttpRequest.newBuilder(URI.create(url))
               .timeout(Duration.ofSeconds(30))
               .header("Content-Type", "application/json")
               .header("Accept", "application/json");
@@ -355,6 +484,22 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   }
 
   private record Token(String value, long expiresInSeconds) {}
+
+  private static final class PersonAccumulator {
+    private final String userId;
+    private final String name;
+    private final HashSet<String> departments = new HashSet<>();
+
+    private PersonAccumulator(String userId, String name) {
+      this.userId = userId;
+      this.name = name;
+    }
+
+    private DingTalkTargetDirectory.RemotePerson view() {
+      return new DingTalkTargetDirectory.RemotePerson(
+          userId, name, String.join("、", departments.stream().sorted().toList()));
+    }
+  }
 
   private static final class UnauthorizedFailure extends RuntimeException {}
 }

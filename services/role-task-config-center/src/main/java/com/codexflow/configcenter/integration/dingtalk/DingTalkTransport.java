@@ -1,5 +1,7 @@
 package com.codexflow.configcenter.integration.dingtalk;
 
+import com.codexflow.configcenter.domain.DingTalkTargetDirectory;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -20,6 +22,20 @@ interface DingTalkTransport {
 
   DingTalkModels.SendResult sendMarkdown(
       String conversationId, String replyToMessageId, String title, String markdown);
+
+  default DingTalkModels.SendResult sendPersonText(String userId, String text) {
+    throw new UnsupportedOperationException("当前钉钉通道不支持个人消息。");
+  }
+
+  default DingTalkModels.SendResult sendPersonMarkdown(
+      String userId, String title, String markdown) {
+    throw new UnsupportedOperationException("当前钉钉通道不支持个人消息。");
+  }
+
+  default List<DingTalkTargetDirectory.RemotePerson> listPeople(
+      String clientId, String clientSecret) {
+    throw new UnsupportedOperationException("当前钉钉通道不支持通讯录同步。");
+  }
 
   DingTalkModels.SendResult sendCard(
       String conversationId, String replyToMessageId, Map<String, Object> cardData);

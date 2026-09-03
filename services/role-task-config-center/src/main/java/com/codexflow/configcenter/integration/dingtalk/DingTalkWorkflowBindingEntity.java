@@ -27,6 +27,15 @@ class DingTalkWorkflowBindingEntity {
   @Column(name = "conversation_id", nullable = false, length = 256)
   String conversationId;
 
+  @Column(name = "target_type", length = 16)
+  String targetType;
+
+  @Column(name = "target_external_id", length = 256)
+  String targetExternalId;
+
+  @Column(name = "target_name", length = 160)
+  String targetName;
+
   @Column(name = "root_message_id", nullable = false, length = 256)
   String rootMessageId;
 

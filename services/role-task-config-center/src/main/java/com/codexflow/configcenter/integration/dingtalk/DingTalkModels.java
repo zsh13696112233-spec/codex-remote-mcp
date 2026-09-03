@@ -17,7 +17,30 @@ final class DingTalkModels {
       String content,
       boolean mentionedBot,
       boolean mentionAll,
-      String replyToMessageId) {}
+      String replyToMessageId,
+      String conversationTitle) {
+
+    Message(
+        String messageId,
+        String conversationId,
+        String conversationType,
+        String senderUserId,
+        String content,
+        boolean mentionedBot,
+        boolean mentionAll,
+        String replyToMessageId) {
+      this(
+          messageId,
+          conversationId,
+          conversationType,
+          senderUserId,
+          content,
+          mentionedBot,
+          mentionAll,
+          replyToMessageId,
+          null);
+    }
+  }
 
   record CardAction(
       String cardInstanceId,
@@ -33,11 +56,36 @@ final class DingTalkModels {
   record Binding(
       String workflowId,
       String conversationId,
+      String targetType,
+      String targetExternalId,
+      String targetName,
       String rootMessageId,
       String status,
       long eventCursor,
       String progressCardInstanceId,
-      boolean waitingAssistant) {}
+      boolean waitingAssistant) {
+
+    Binding(
+        String workflowId,
+        String conversationId,
+        String rootMessageId,
+        String status,
+        long eventCursor,
+        String progressCardInstanceId,
+        boolean waitingAssistant) {
+      this(
+          workflowId,
+          conversationId,
+          "GROUP",
+          conversationId,
+          "群聊",
+          rootMessageId,
+          status,
+          eventCursor,
+          progressCardInstanceId,
+          waitingAssistant);
+    }
+  }
 
   record Inbound(String messageId, String workflowId, String workflowMessageId, String status) {}
 
@@ -45,7 +93,28 @@ final class DingTalkModels {
       String id,
       String workflowId,
       String conversationId,
+      String targetType,
+      String targetExternalId,
       String replyToMessageId,
       String messageKind,
-      JsonNode payload) {}
+      JsonNode payload) {
+
+    Outbox(
+        String id,
+        String workflowId,
+        String conversationId,
+        String replyToMessageId,
+        String messageKind,
+        JsonNode payload) {
+      this(
+          id,
+          workflowId,
+          conversationId,
+          "GROUP",
+          conversationId,
+          replyToMessageId,
+          messageKind,
+          payload);
+    }
+  }
 }

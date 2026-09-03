@@ -3,6 +3,7 @@ package com.codexflow.configcenter.integration.dingtalk;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.codexflow.configcenter.domain.ConfigService;
+import com.codexflow.configcenter.domain.DingTalkTargetDirectory;
 import com.codexflow.configcenter.dto.DingTalkConfigSaveRequest;
 import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
@@ -30,6 +31,7 @@ class DingTalkStoreIntegrationTest {
   @Autowired JdbcTemplate jdbc;
   @Autowired ObjectMapper objectMapper;
   @Autowired DingTalkBotAdminService adminService;
+  @Autowired DingTalkTargetDirectory targets;
 
   @Test
   void pageSettingsPersistWithoutReturningTheSecret() {
@@ -66,8 +68,8 @@ class DingTalkStoreIntegrationTest {
 
   @Test
   void duplicateTriggerAndConcurrentStartsKeepOneActiveWorkflow() throws Exception {
-    String taskId = createTask();
     String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
     store.initialize(clientId);
     CountDownLatch start = new CountDownLatch(1);
     ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -112,8 +114,8 @@ class DingTalkStoreIntegrationTest {
 
   @Test
   void markdownProgressOutboxPersistsBuiltInMessagePayload() {
-    String taskId = createTask();
     String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
     store.initialize(clientId);
     DingTalkModels.StartReservation reservation =
         store.reserveStart(clientId, taskId, message("markdown-trigger"));
@@ -134,9 +136,23 @@ class DingTalkStoreIntegrationTest {
   }
 
   @Test
-  void inboundUuidEventCursorOutboxAndTerminalReleaseAreDurable() {
-    String taskId = createTask();
+  void rejectsStartFromGroupOtherThanSopTarget() {
     String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
+    store.initialize(clientId);
+    DingTalkModels.Message wrongGroup =
+        new DingTalkModels.Message(
+            "wrong-group-trigger", "chat-2", "2", "user-2", "运行", true, false, null);
+
+    assertThat(store.reserveStart(clientId, taskId, wrongGroup).outcome())
+        .isEqualTo("unauthorized");
+    assertThat(store.active(clientId)).isEmpty();
+  }
+
+  @Test
+  void inboundUuidEventCursorOutboxAndTerminalReleaseAreDurable() {
+    String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
     store.initialize(clientId);
     DingTalkModels.StartReservation reservation =
         store.reserveStart(clientId, taskId, message("trigger-1"));
@@ -206,8 +222,8 @@ class DingTalkStoreIntegrationTest {
 
   @Test
   void assistantReplyAndItsCardRefreshArePersistedAtomically() {
-    String taskId = createTask();
     String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
     store.initialize(clientId);
     DingTalkModels.StartReservation reservation =
         store.reserveStart(clientId, taskId, message("assistant-card-trigger"));
@@ -259,6 +275,10 @@ class DingTalkStoreIntegrationTest {
   }
 
   private String createTask() {
+    return createTask(null);
+  }
+
+  private String createTask(String clientId) {
     String roleId =
         jdbc.queryForObject(
             "select id from codex_sop_roles order by created_at limit 1", String.class);
@@ -266,16 +286,24 @@ class DingTalkStoreIntegrationTest {
         new SopStepRequest(
             "钉钉步骤", roleId, "完成测试", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
+    String targetId = null;
+    if (clientId != null) {
+      DingTalkTargetDirectory.TargetView target = targets.discoverGroup(clientId, "chat-1", "测试群");
+      targetId = targets.update(clientId, target.id(), target.displayName(), true).id();
+    }
     ObjectNode sop =
         config.createSop(
             new SopSaveRequest(
                 "钉钉SOP-" + UUID.randomUUID(),
                 null,
+                "local",
                 null,
                 null,
                 true,
                 3,
                 "semi_automatic",
+                null,
+                targetId,
                 List.of(step)));
     return config
         .createTask(

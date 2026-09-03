@@ -51,6 +51,10 @@ class DingTalkSettingsStore {
     if (!task.path("enabled").asBoolean() || task.path("deleted").asBoolean()) {
       throw new ConflictFailure("机器人只能绑定已启用且未删除的任务定义。");
     }
+    if (request.enabled()) {
+      configService.requireDingTalkTargetForTask(
+          request.taskDefinitionId().trim(), request.clientId().trim());
+    }
     Settings previous = current();
     String secret = normalized(request.clientSecret());
     if (secret.isBlank()) secret = previous.clientSecret();

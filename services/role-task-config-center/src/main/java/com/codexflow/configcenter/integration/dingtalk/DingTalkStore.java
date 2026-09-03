@@ -1,5 +1,7 @@
 package com.codexflow.configcenter.integration.dingtalk;
 
+import com.codexflow.configcenter.domain.ConfigService;
+import com.codexflow.configcenter.domain.DingTalkTargetDirectory;
 import com.codexflow.configcenter.domain.PreparedRun;
 import com.codexflow.configcenter.domain.WorkflowRunStore;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +29,8 @@ class DingTalkStore {
   private final DingTalkInboundMessageRepository inboundMessages;
   private final DingTalkOutboxRepository outbox;
   private final WorkflowRunStore workflowRuns;
+  private final ConfigService configService;
+  private final DingTalkTargetDirectory targetDirectory;
   private final ObjectMapper objectMapper;
 
   DingTalkStore(
@@ -35,12 +39,16 @@ class DingTalkStore {
       DingTalkInboundMessageRepository inboundMessages,
       DingTalkOutboxRepository outbox,
       WorkflowRunStore workflowRuns,
+      ConfigService configService,
+      DingTalkTargetDirectory targetDirectory,
       ObjectMapper objectMapper) {
     this.states = states;
     this.bindings = bindings;
     this.inboundMessages = inboundMessages;
     this.outbox = outbox;
     this.workflowRuns = workflowRuns;
+    this.configService = configService;
+    this.targetDirectory = targetDirectory;
     this.objectMapper = objectMapper;
   }
 
@@ -72,6 +80,11 @@ class DingTalkStore {
       return new DingTalkModels.StartReservation("busy", state.activeWorkflowId, null);
     }
 
+    DingTalkTargetDirectory.TargetView target =
+        configService.requireDingTalkTargetForTask(taskDefinitionId, clientId);
+    if (!matches(target.targetType(), target.externalId(), message)) {
+      return new DingTalkModels.StartReservation("unauthorized", null, null);
+    }
     PreparedRun prepared = workflowRuns.prepareLatest(taskDefinitionId);
     Instant now = Instant.now();
     DingTalkWorkflowBindingEntity binding = new DingTalkWorkflowBindingEntity();
@@ -80,6 +93,9 @@ class DingTalkStore {
     binding.taskDefinitionId = taskDefinitionId;
     binding.triggerMessageId = message.messageId();
     binding.conversationId = message.conversationId();
+    binding.targetType = target.targetType();
+    binding.targetExternalId = target.externalId();
+    binding.targetName = target.displayName();
     binding.rootMessageId = message.messageId();
     binding.initiatorUserId = message.senderUserId();
     binding.status = "submitting";
@@ -90,6 +106,17 @@ class DingTalkStore {
     state.updatedAt = now;
     return new DingTalkModels.StartReservation(
         "started", prepared.workflowId(), prepared.payload());
+  }
+
+  @Transactional(readOnly = true)
+  public DingTalkTargetDirectory.TargetView configuredTarget(
+      String clientId, String taskDefinitionId) {
+    return configService.requireDingTalkTargetForTask(taskDefinitionId, clientId);
+  }
+
+  @Transactional
+  public void discoverGroup(String clientId, DingTalkModels.Message message) {
+    targetDirectory.discoverGroup(clientId, message.conversationId(), message.conversationTitle());
   }
 
   @Transactional(readOnly = true)
@@ -182,6 +209,8 @@ class DingTalkStore {
         "submit-failed:" + workflowId,
         workflowId,
         binding.conversationId,
+        binding.targetType,
+        binding.targetExternalId,
         binding.rootMessageId,
         "text",
         objectMapper.createObjectNode().put("text", reason));
@@ -251,7 +280,15 @@ class DingTalkStore {
     DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
     if (sequence <= binding.eventCursor) return false;
     if (messageKind != null) {
-      enqueue(dedupKey, workflowId, binding.conversationId, replyTo, messageKind, payload);
+      enqueue(
+          dedupKey,
+          workflowId,
+          binding.conversationId,
+          binding.targetType,
+          binding.targetExternalId,
+          replyTo,
+          messageKind,
+          payload);
     }
     binding.eventCursor = sequence;
     binding.updatedAt = Instant.now();
@@ -274,7 +311,15 @@ class DingTalkStore {
       JsonNode cardPayload) {
     DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
     if (sequence <= binding.eventCursor) return false;
-    enqueue(textDedupKey, workflowId, binding.conversationId, replyTo, "text", textPayload);
+    enqueue(
+        textDedupKey,
+        workflowId,
+        binding.conversationId,
+        binding.targetType,
+        binding.targetExternalId,
+        replyTo,
+        "text",
+        textPayload);
     binding.latestAssistantReply = abbreviate(assistantReply, 20_000);
     binding.latestAssistantReplyAt = Instant.now();
     if (cardPayload != null) {
@@ -282,6 +327,8 @@ class DingTalkStore {
           cardDedupKey,
           workflowId,
           binding.conversationId,
+          binding.targetType,
+          binding.targetExternalId,
           binding.rootMessageId,
           binding.progressCardInstanceId == null ? "card" : "card_update",
           objectMapper.createObjectNode().set("card", cardPayload));
@@ -310,10 +357,36 @@ class DingTalkStore {
   @Transactional
   public void enqueueText(
       String dedupKey, String workflowId, String conversationId, String replyTo, String text) {
+    if (workflowId != null) {
+      DingTalkWorkflowBindingEntity binding = requiredBinding(workflowId);
+      enqueueTargetText(
+          dedupKey,
+          workflowId,
+          binding.conversationId,
+          binding.targetType == null ? "GROUP" : binding.targetType,
+          binding.targetExternalId == null ? binding.conversationId : binding.targetExternalId,
+          replyTo,
+          text);
+      return;
+    }
+    enqueueTargetText(dedupKey, workflowId, conversationId, "GROUP", conversationId, replyTo, text);
+  }
+
+  @Transactional
+  public void enqueueTargetText(
+      String dedupKey,
+      String workflowId,
+      String conversationId,
+      String targetType,
+      String targetExternalId,
+      String replyTo,
+      String text) {
     enqueue(
         dedupKey,
         workflowId,
         conversationId,
+        targetType,
+        targetExternalId,
         replyTo,
         "text",
         objectMapper.createObjectNode().put("text", text));
@@ -326,6 +399,8 @@ class DingTalkStore {
         dedupKey,
         workflowId,
         binding.conversationId,
+        binding.targetType,
+        binding.targetExternalId,
         binding.rootMessageId,
         binding.progressCardInstanceId == null ? "card" : "card_update",
         objectMapper.createObjectNode().set("card", card));
@@ -339,6 +414,8 @@ class DingTalkStore {
         dedupKey,
         workflowId,
         binding.conversationId,
+        binding.targetType,
+        binding.targetExternalId,
         binding.rootMessageId,
         "markdown",
         objectMapper.createObjectNode().put("title", title).put("text", markdown));
@@ -399,6 +476,8 @@ class DingTalkStore {
       String dedupKey,
       String workflowId,
       String conversationId,
+      String targetType,
+      String targetExternalId,
       String replyTo,
       String messageKind,
       JsonNode payload) {
@@ -409,6 +488,8 @@ class DingTalkStore {
     item.dedupKey = dedupKey;
     item.workflowId = workflowId;
     item.conversationId = conversationId;
+    item.targetType = targetType;
+    item.targetExternalId = targetExternalId;
     item.replyToMessageId = replyTo;
     item.messageKind = messageKind;
     try {
@@ -445,6 +526,8 @@ class DingTalkStore {
           item.id,
           item.workflowId,
           item.conversationId,
+          item.targetType == null ? "GROUP" : item.targetType,
+          item.targetExternalId == null ? item.conversationId : item.targetExternalId,
           item.replyToMessageId,
           item.messageKind,
           objectMapper.readTree(item.payloadJson));
@@ -457,6 +540,9 @@ class DingTalkStore {
     return new DingTalkModels.Binding(
         binding.workflowId,
         binding.conversationId,
+        binding.targetType == null ? "GROUP" : binding.targetType,
+        binding.targetExternalId == null ? binding.conversationId : binding.targetExternalId,
+        binding.targetName == null ? "群聊" : binding.targetName,
         binding.rootMessageId,
         binding.status,
         binding.eventCursor,
@@ -495,6 +581,16 @@ class DingTalkStore {
 
   private static String blankToNull(String value) {
     return value == null || value.isBlank() ? null : value;
+  }
+
+  private static boolean matches(
+      String targetType, String targetExternalId, DingTalkModels.Message message) {
+    if ("PERSON".equals(targetType)) {
+      return !"2".equals(message.conversationType())
+          && targetExternalId.equals(message.senderUserId());
+    }
+    return "2".equals(message.conversationType())
+        && targetExternalId.equals(message.conversationId());
   }
 
   private static String abbreviate(String value, int maxLength) {

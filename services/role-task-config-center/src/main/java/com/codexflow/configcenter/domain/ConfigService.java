@@ -31,6 +31,7 @@ public class ConfigService {
   private final SopStepRepository steps;
   private final TaskDefinitionRepository tasks;
   private final DomainJsonMapper json;
+  private final DingTalkTargetDirectory dingtalkTargets;
   private final String defaultModel;
 
   /** 注入配置数据访问组件、JSON 映射器和默认模型配置。 */
@@ -40,12 +41,14 @@ public class ConfigService {
       SopStepRepository steps,
       TaskDefinitionRepository tasks,
       DomainJsonMapper json,
+      DingTalkTargetDirectory dingtalkTargets,
       @Value("${codex.default-step-model:gpt-5.6-sol}") String defaultModel) {
     this.roles = roles;
     this.sops = sops;
     this.steps = steps;
     this.tasks = tasks;
     this.json = json;
+    this.dingtalkTargets = dingtalkTargets;
     this.defaultModel = defaultModel;
   }
 
@@ -234,12 +237,30 @@ public class ConfigService {
     if (sop.defaultStepModel == null) sop.defaultStepModel = defaultModel;
     validateModel(sop.defaultStepModel);
     if (body.enabled() != null) sop.enabled = body.enabled();
+    String targetId = normalizeNullable(body.dingtalkTargetId());
+    sop.dingtalkTarget = targetId == null ? null : dingtalkTargets.requiredSelectable(targetId);
 
     sop.steps.clear();
     int position = 0;
     for (SopStepRequest rawStep : body.steps()) {
       sop.steps.add(createStep(sop, rawStep, position++));
     }
+  }
+
+  /** 校验机器人固定任务引用的 SOP 已配置属于当前应用的有效通知对象。 */
+  @Transactional(readOnly = true)
+  public DingTalkTargetDirectory.TargetView requireDingTalkTargetForTask(
+      String taskId, String clientId) {
+    TaskDefinitionEntity task = findTask(taskId, false);
+    DingTalkTargetEntity target = task.sop.dingtalkTarget;
+    if (target == null) throw new ConflictFailure("固定任务的 SOP 尚未选择钉钉通知对象。");
+    if (target.deleted || !target.enabled || !target.available) {
+      throw new ConflictFailure("固定任务的钉钉通知对象未启用或当前不可用。");
+    }
+    if (!target.clientId.equals(clientId)) {
+      throw new ConflictFailure("固定任务的钉钉通知对象不属于当前机器人应用，请重新选择。");
+    }
+    return DingTalkTargetDirectory.view(target);
   }
 
   /** 根据步骤请求创建一个已关联所属 SOP 和角色的步骤实体。 */

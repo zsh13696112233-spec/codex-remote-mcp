@@ -202,6 +202,15 @@ Skill 和 MCP 在第一版只保存和展示，具体限制如下：
 - `workflowId`。
 - 提交时间和返回结果。
 
+### 7. 钉钉通知对象
+
+- 一个钉钉机器人固定绑定一个任务定义，该任务引用的 SOP 最多选择一个通知对象；对象类型只能是人员或群聊，严格二选一。
+- 公司人员由 8091 管理员手动从钉钉通讯录同步，首次同步默认停用；人员离开可见通讯录后标记为不可用并自动停用，不做定时同步。
+- 群聊在群内首次 @ 机器人后自动登记，默认停用；管理员确认名称、测试并启用后才可供 SOP 选择。
+- 启用机器人或从钉钉启动任务前，必须校验 SOP 目标已启用、仍可用且属于当前 Client ID。
+- 只有从配置目标发起的钉钉运行建立消息绑定并回推钉钉；8091 页面发起的运行不回推。群目标允许群内成员 @、回复或引用消息进行咨询和控制；人员目标仅允许该人员在单聊中直接咨询和控制。
+- 个人消息只发送文本或 Markdown；群聊可以使用可选互动卡片。运行绑定和 Outbox 必须冻结目标类型与外部 ID，配置变更不得改变历史运行去向。
+
 ## 三、工作流生成规则
 
 ### 1. 步骤基础提示词
@@ -358,6 +367,12 @@ POST   /api/task-runs/{workflowId}/retry
 
 GET    /api/agents
 GET    /api/gateway/ready
+
+GET    /api/dingtalk/targets
+POST   /api/dingtalk/targets/sync-people
+PUT    /api/dingtalk/targets/{id}
+DELETE /api/dingtalk/targets/{id}
+POST   /api/dingtalk/targets/{id}/test
 ```
 
 ### 2. Python 网关新增接口
@@ -399,6 +414,7 @@ sop_step_skills
 sop_step_mcps
 task_definitions
 task_runs
+dingtalk_targets
 ```
 
 ### 2. 配置中心环境变量

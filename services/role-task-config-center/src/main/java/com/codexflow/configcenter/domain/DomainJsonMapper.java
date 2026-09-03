@@ -53,6 +53,18 @@ class DomainJsonMapper {
     result.put("advanceMode", sop.advanceMode);
     result.put("handoffMode", sop.handoffMode);
     result.put("defaultStepModel", sop.defaultStepModel);
+    if (sop.dingtalkTarget == null) {
+      result.putNull("dingtalkTargetId");
+      result.putNull("dingtalkTarget");
+    } else {
+      result.put("dingtalkTargetId", sop.dingtalkTarget.id);
+      ObjectNode target = result.putObject("dingtalkTarget");
+      target.put("id", sop.dingtalkTarget.id);
+      target.put("targetType", sop.dingtalkTarget.targetType);
+      target.put("displayName", sop.dingtalkTarget.displayName);
+      target.put("available", sop.dingtalkTarget.available);
+      target.put("enabled", sop.dingtalkTarget.enabled);
+    }
     result.put("enabled", sop.enabled);
     var steps = result.putArray("steps");
     for (SopStepEntity step : sop.steps) {

@@ -302,12 +302,14 @@ class DingTalkBotCoordinatorTest {
     coordinator.safelyHandleMessage(message);
 
     verify(store)
-        .enqueueText(
+        .enqueueTargetText(
             "top-help:question-top-other",
             null,
             "chat-1",
+            "GROUP",
+            "chat-1",
             "question-top-other",
-            "请发送“@机器人 运行”启动任务；运行期间可直接 @机器人 提问，也可回复或引用任务消息咨询或控制。");
+            "该群尚未绑定当前 SOP，或当前没有运行中的任务。请联系管理员确认后发送“@机器人 运行”。");
     verify(store, never()).registerInbound(eq("cli_test"), any(), any());
     verify(gateway, never()).post(eq("/workflows/" + WORKFLOW_2 + "/messages"), any());
   }
@@ -384,6 +386,53 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void configuredPersonCanChatWithoutMentionAndReceivesDirectMessages() {
+    DingTalkModels.Binding binding =
+        new DingTalkModels.Binding(
+            WORKFLOW_2,
+            "person-chat-1",
+            "PERSON",
+            "person-1",
+            "测试人员",
+            "root-1",
+            "active",
+            0,
+            null,
+            false);
+    DingTalkModels.Message message =
+        new DingTalkModels.Message(
+            "person-question-1", "person-chat-1", "1", "person-1", "现在进度如何", false, false, null);
+    when(store.active("cli_test")).thenReturn(Optional.of(binding));
+    when(store.registerInbound("cli_test", binding, message))
+        .thenReturn(
+            new DingTalkModels.Inbound(
+                "person-question-1",
+                WORKFLOW_2,
+                "11111111-1111-5111-8111-111111111111",
+                "accepted"));
+
+    coordinator.safelyHandleMessage(message);
+
+    verify(gateway).post(eq("/workflows/" + WORKFLOW_2 + "/messages"), any());
+
+    DingTalkModels.Outbox item =
+        new DingTalkModels.Outbox(
+            "person-outbox-1",
+            WORKFLOW_2,
+            "person-chat-1",
+            "PERSON",
+            "person-1",
+            null,
+            "text",
+            objectMapper.createObjectNode().put("text", "个人通知"));
+    coordinator.deliver(item);
+
+    org.assertj.core.api.Assertions.assertThat(transport.lastPersonId).isEqualTo("person-1");
+    org.assertj.core.api.Assertions.assertThat(transport.lastPersonText).isEqualTo("个人通知");
+    verify(store).markOutboxSent("person-outbox-1", "sent-person-1");
+  }
+
+  @Test
   void staleCardUpdateIsDiscardedBeforeItCanOverwriteNewerProgress() {
     DingTalkModels.Outbox item =
         new DingTalkModels.Outbox(
@@ -423,6 +472,8 @@ class DingTalkBotCoordinatorTest {
     RuntimeException sendFailure;
     String lastMarkdownTitle;
     String lastMarkdown;
+    String lastPersonId;
+    String lastPersonText;
 
     @Override
     public void start(
@@ -460,6 +511,14 @@ class DingTalkBotCoordinatorTest {
       lastMarkdownTitle = title;
       lastMarkdown = markdown;
       return new DingTalkModels.SendResult("sent-markdown-1");
+    }
+
+    @Override
+    public DingTalkModels.SendResult sendPersonText(String userId, String text) {
+      if (sendFailure != null) throw sendFailure;
+      lastPersonId = userId;
+      lastPersonText = text;
+      return new DingTalkModels.SendResult("sent-person-1");
     }
 
     @Override

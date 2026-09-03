@@ -40,6 +40,24 @@ class DingTalkTransportParsingTest {
   }
 
   @Test
+  void parsesDirectPersonMessageAndGroupTitle() {
+    DingTalkModels.Message person =
+        transport.toMessage(
+            """
+            {"msgId":"person-message","conversationId":"person-chat","conversationType":"1","senderStaffId":"user-9","text":{"content":"运行"}}
+            """);
+    DingTalkModels.Message group =
+        transport.toMessage(
+            """
+            {"msgId":"group-message","conversationId":"group-9","conversationType":"2","senderStaffId":"user-9","conversationTitle":"研发群","isInAtList":true,"text":{"content":"运行"}}
+            """);
+
+    assertThat(person.senderUserId()).isEqualTo("user-9");
+    assertThat(person.conversationType()).isEqualTo("1");
+    assertThat(group.conversationTitle()).isEqualTo("研发群");
+  }
+
+  @Test
   void parsesEmbeddedQuotedMessageAndMentionAll() {
     String raw =
         """

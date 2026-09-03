@@ -71,9 +71,9 @@ class ConfigCenterApplicationTest {
                     + "'codex_sop_feishu_bot_settings', 'codex_sop_dingtalk_bot_state', "
                     + "'codex_sop_dingtalk_workflow_bindings', "
                     + "'codex_sop_dingtalk_inbound_messages', 'codex_sop_dingtalk_outbox', "
-                    + "'codex_sop_dingtalk_bot_settings')",
+                    + "'codex_sop_dingtalk_bot_settings', 'codex_sop_dingtalk_targets')",
                 Integer.class))
-        .isEqualTo(10);
+        .isEqualTo(11);
   }
 
   /** 确认跨事务加载的 SOP、角色和任务关系可用于构建完整 API 快照。 */
@@ -126,6 +126,18 @@ class ConfigCenterApplicationTest {
         .contains("离线")
         .contains("未知或停用")
         .contains("setInterval(refreshAgentRuntimeStatuses,10000)");
+  }
+
+  @Test
+  void staticPageIncludesDingTalkTargetsAndSopSingleSelection() throws IOException {
+    String index = readClasspath("static/index.html");
+    String script = readClasspath("static/app.js");
+
+    assertThat(index).contains("data-page=\"dingtalk-targets\">钉钉通知对象");
+    assertThat(script)
+        .contains("/api/dingtalk/targets/sync-people")
+        .contains("data-sop-field=\"dingtalkTargetId\"")
+        .contains("首次同步的人员默认停用");
   }
 
   @Test

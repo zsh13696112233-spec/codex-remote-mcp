@@ -24,6 +24,12 @@ class DingTalkOutboxEntity {
   @Column(name = "conversation_id", nullable = false, length = 256)
   String conversationId;
 
+  @Column(name = "target_type", length = 16)
+  String targetType;
+
+  @Column(name = "target_external_id", length = 256)
+  String targetExternalId;
+
   @Column(name = "reply_to_message_id", length = 256)
   String replyToMessageId;
 
