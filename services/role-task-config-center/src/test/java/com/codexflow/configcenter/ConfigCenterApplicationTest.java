@@ -129,14 +129,15 @@ class ConfigCenterApplicationTest {
   }
 
   @Test
-  void staticPageIncludesDingTalkTargetsAndSopSingleSelection() throws IOException {
+  void staticPageIncludesDingTalkTargetsAndTaskSingleSelection() throws IOException {
     String index = readClasspath("static/index.html");
     String script = readClasspath("static/app.js");
 
     assertThat(index).contains("data-page=\"dingtalk-targets\">钉钉通知对象");
+    assertThat(index).contains("name=\"dingtalkTargetId\"");
     assertThat(script)
         .contains("/api/dingtalk/targets/sync-people")
-        .contains("data-sop-field=\"dingtalkTargetId\"")
+        .contains("dingtalkTargetId:f.dingtalkTargetId.value||null")
         .contains("首次同步的人员默认停用");
   }
 

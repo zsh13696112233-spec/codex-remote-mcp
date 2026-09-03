@@ -198,8 +198,12 @@ public class ConfigService {
   @Transactional
   public void deleteTask(String id) {
     TaskDefinitionEntity task = findTask(id, false);
+    if (task.dingtalkActiveWorkflowId != null) {
+      throw new ConflictFailure("当前钉钉任务仍在运行，不能删除任务定义。");
+    }
     task.deleted = true;
     task.enabled = false;
+    task.dingtalkTarget = null;
     tasks.save(task);
   }
 
@@ -237,30 +241,11 @@ public class ConfigService {
     if (sop.defaultStepModel == null) sop.defaultStepModel = defaultModel;
     validateModel(sop.defaultStepModel);
     if (body.enabled() != null) sop.enabled = body.enabled();
-    String targetId = normalizeNullable(body.dingtalkTargetId());
-    sop.dingtalkTarget = targetId == null ? null : dingtalkTargets.requiredSelectable(targetId);
-
     sop.steps.clear();
     int position = 0;
     for (SopStepRequest rawStep : body.steps()) {
       sop.steps.add(createStep(sop, rawStep, position++));
     }
-  }
-
-  /** 校验机器人固定任务引用的 SOP 已配置属于当前应用的有效通知对象。 */
-  @Transactional(readOnly = true)
-  public DingTalkTargetDirectory.TargetView requireDingTalkTargetForTask(
-      String taskId, String clientId) {
-    TaskDefinitionEntity task = findTask(taskId, false);
-    DingTalkTargetEntity target = task.sop.dingtalkTarget;
-    if (target == null) throw new ConflictFailure("固定任务的 SOP 尚未选择钉钉通知对象。");
-    if (target.deleted || !target.enabled || !target.available) {
-      throw new ConflictFailure("固定任务的钉钉通知对象未启用或当前不可用。");
-    }
-    if (!target.clientId.equals(clientId)) {
-      throw new ConflictFailure("固定任务的钉钉通知对象不属于当前机器人应用，请重新选择。");
-    }
-    return DingTalkTargetDirectory.view(target);
   }
 
   /** 根据步骤请求创建一个已关联所属 SOP 和角色的步骤实体。 */
@@ -309,6 +294,15 @@ public class ConfigService {
     task.sop = findSop(body.sopId().trim());
     task.additionalNotes = normalizeNullable(body.additionalNotes());
     if (body.enabled() != null) task.enabled = body.enabled();
+    String targetId = normalizeNullable(body.dingtalkTargetId());
+    String currentTargetId = task.dingtalkTarget == null ? null : task.dingtalkTarget.id;
+    if (!java.util.Objects.equals(currentTargetId, targetId)) {
+      if (task.dingtalkActiveWorkflowId != null) {
+        throw new ConflictFailure("当前钉钉任务仍在运行，不能解除或更换通知对象。");
+      }
+      task.dingtalkTarget =
+          targetId == null ? null : dingtalkTargets.requiredSelectable(targetId, task.id);
+    }
   }
 
   /** 根据 ID 查询角色，不存在时抛出领域未找到异常。 */

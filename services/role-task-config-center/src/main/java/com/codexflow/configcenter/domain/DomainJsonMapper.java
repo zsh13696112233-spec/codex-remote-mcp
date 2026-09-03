@@ -53,18 +53,6 @@ class DomainJsonMapper {
     result.put("advanceMode", sop.advanceMode);
     result.put("handoffMode", sop.handoffMode);
     result.put("defaultStepModel", sop.defaultStepModel);
-    if (sop.dingtalkTarget == null) {
-      result.putNull("dingtalkTargetId");
-      result.putNull("dingtalkTarget");
-    } else {
-      result.put("dingtalkTargetId", sop.dingtalkTarget.id);
-      ObjectNode target = result.putObject("dingtalkTarget");
-      target.put("id", sop.dingtalkTarget.id);
-      target.put("targetType", sop.dingtalkTarget.targetType);
-      target.put("displayName", sop.dingtalkTarget.displayName);
-      target.put("available", sop.dingtalkTarget.available);
-      target.put("enabled", sop.dingtalkTarget.enabled);
-    }
     result.put("enabled", sop.enabled);
     var steps = result.putArray("steps");
     for (SopStepEntity step : sop.steps) {
@@ -102,6 +90,19 @@ class DomainJsonMapper {
     result.put("sopId", task.sop.id);
     result.put("sopName", task.sop.name);
     putNullable(result, "additionalNotes", task.additionalNotes);
+    if (task.dingtalkTarget == null) {
+      result.putNull("dingtalkTargetId");
+      result.putNull("dingtalkTarget");
+    } else {
+      result.put("dingtalkTargetId", task.dingtalkTarget.id);
+      ObjectNode target = result.putObject("dingtalkTarget");
+      target.put("id", task.dingtalkTarget.id);
+      target.put("targetType", task.dingtalkTarget.targetType);
+      target.put("displayName", task.dingtalkTarget.displayName);
+      target.put("available", task.dingtalkTarget.available);
+      target.put("enabled", task.dingtalkTarget.enabled);
+    }
+    putNullable(result, "dingtalkActiveWorkflowId", task.dingtalkActiveWorkflowId);
     result.put("enabled", task.enabled);
     result.put("deleted", task.deleted);
     addTimes(result, task.createdAt, task.updatedAt);

@@ -33,6 +33,15 @@ class TaskDefinitionEntity extends Timestamped {
   @Column(name = "additional_notes", columnDefinition = "LONGTEXT")
   String additionalNotes;
 
+  /** 从钉钉启动该任务时使用的唯一人员或群聊；同一对象只能绑定一个任务定义。 */
+  @ManyToOne
+  @JoinColumn(name = "dingtalk_target_id")
+  DingTalkTargetEntity dingtalkTarget;
+
+  /** 该钉钉任务绑定当前占用的工作流；不同任务定义之间可以并行。 */
+  @Column(name = "dingtalk_active_workflow_id", length = 128)
+  String dingtalkActiveWorkflowId;
+
   /** 任务定义是否允许发起新的运行。 */
   @Column(nullable = false)
   boolean enabled = true;

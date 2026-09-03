@@ -25,7 +25,6 @@ import tools.jackson.databind.node.ObjectNode;
 /** 不连接真实钉钉，验证消息、卡片动作、发送失败和长连接生命周期。 */
 class DingTalkBotCoordinatorTest {
 
-  private static final String TASK_ID = "00000000-0000-4000-8000-000000000001";
   private static final String WORKFLOW_1 = "00000000-0000-4000-8000-000000000101";
   private static final String WORKFLOW_2 = "00000000-0000-4000-8000-000000000102";
   private static final String WORKFLOW_3 = "00000000-0000-4000-8000-000000000103";
@@ -47,7 +46,6 @@ class DingTalkBotCoordinatorTest {
     properties.setEnabled(true);
     properties.setClientId("cli_test");
     properties.setClientSecret("test-secret");
-    properties.setTaskDefinitionId(TASK_ID);
     properties.setCardTemplateId("test.schema");
     transport = new TestTransport();
     settings = mock(DingTalkSettingsStore.class);
@@ -74,7 +72,7 @@ class DingTalkBotCoordinatorTest {
   void topLevelMentionStartsOnceAndCreatesProgressCard() {
     ObjectNode payload = objectMapper.createObjectNode().put("workflowId", WORKFLOW_1);
     when(store.conversation(eq("cli_test"), any())).thenReturn(Optional.empty());
-    when(store.reserveStart(eq("cli_test"), eq(TASK_ID), any()))
+    when(store.reserveStart(eq("cli_test"), any()))
         .thenReturn(new DingTalkModels.StartReservation("started", WORKFLOW_1, payload));
     when(gateway.get("/workflows/" + WORKFLOW_1)).thenReturn(snapshot("running"));
     when(cards.render(any(), any(), any())).thenReturn(Map.of("schema", "2.0"));
@@ -86,8 +84,7 @@ class DingTalkBotCoordinatorTest {
     verify(store).enqueueCard(eq("start-card:" + WORKFLOW_1), eq(WORKFLOW_1), any());
 
     coordinator.safelyHandleMessage(message("ignored", "运行", false, null));
-    verify(store, never())
-        .reserveStart(eq("cli_test"), eq(TASK_ID), eq(message("ignored", "运行", false, null)));
+    verify(store, never()).reserveStart(eq("cli_test"), eq(message("ignored", "运行", false, null)));
   }
 
   @Test
@@ -97,7 +94,7 @@ class DingTalkBotCoordinatorTest {
         new DingTalkModels.Message(
             "start-blank-context", "chat-1", "2", "user-1", "运行", true, false, "");
     when(store.conversation("cli_test", message)).thenReturn(Optional.empty());
-    when(store.reserveStart("cli_test", TASK_ID, message))
+    when(store.reserveStart("cli_test", message))
         .thenReturn(new DingTalkModels.StartReservation("started", WORKFLOW_1, payload));
     when(gateway.get("/workflows/" + WORKFLOW_1)).thenReturn(snapshot("running"));
     when(cards.render(any(), any(), any())).thenReturn(Map.of("schema", "2.0"));
@@ -115,7 +112,7 @@ class DingTalkBotCoordinatorTest {
     ObjectNode payload = objectMapper.createObjectNode().put("workflowId", WORKFLOW_1);
     DingTalkModels.Message message = message("text-start", "运行", true, null);
     when(store.conversation("cli_test", message)).thenReturn(Optional.empty());
-    when(store.reserveStart("cli_test", TASK_ID, message))
+    when(store.reserveStart("cli_test", message))
         .thenReturn(new DingTalkModels.StartReservation("started", WORKFLOW_1, payload));
     when(gateway.get("/workflows/" + WORKFLOW_1)).thenReturn(snapshot("running"));
     when(cards.renderMarkdown(any(), any())).thenReturn("**任务：** 测试任务");
@@ -275,7 +272,7 @@ class DingTalkBotCoordinatorTest {
         new DingTalkModels.Binding(WORKFLOW_2, "chat-1", "root-1", "active", 0, null, false);
     DingTalkModels.Message message = message("question-top-1", "在吗", true, null);
     when(store.conversation("cli_test", message)).thenReturn(Optional.empty());
-    when(store.active("cli_test")).thenReturn(Optional.of(binding));
+    when(store.active("cli_test", message)).thenReturn(Optional.of(binding));
     when(store.registerInbound("cli_test", binding, message))
         .thenReturn(
             new DingTalkModels.Inbound(
@@ -288,7 +285,7 @@ class DingTalkBotCoordinatorTest {
     org.assertj.core.api.Assertions.assertThat(body.getValue().path("text").asText())
         .isEqualTo("在吗");
     verify(store, never()).enqueueText(eq("top-help:question-top-1"), any(), any(), any(), any());
-    verify(store, never()).reserveStart(eq("cli_test"), eq(TASK_ID), any());
+    verify(store, never()).reserveStart(eq("cli_test"), any());
   }
 
   @Test
@@ -297,7 +294,7 @@ class DingTalkBotCoordinatorTest {
         new DingTalkModels.Binding(WORKFLOW_2, "chat-2", "root-2", "active", 0, null, false);
     DingTalkModels.Message message = message("question-top-other", "在吗", true, null);
     when(store.conversation("cli_test", message)).thenReturn(Optional.empty());
-    when(store.active("cli_test")).thenReturn(Optional.of(binding));
+    when(store.active("cli_test", message)).thenReturn(Optional.of(binding));
 
     coordinator.safelyHandleMessage(message);
 
@@ -309,7 +306,7 @@ class DingTalkBotCoordinatorTest {
             "GROUP",
             "chat-1",
             "question-top-other",
-            "该群尚未绑定当前 SOP，或当前没有运行中的任务。请联系管理员确认后发送“@机器人 运行”。");
+            "该群尚未绑定任务定义，或当前没有运行中的任务。请联系管理员确认后发送“@机器人 运行”。");
     verify(store, never()).registerInbound(eq("cli_test"), any(), any());
     verify(gateway, never()).post(eq("/workflows/" + WORKFLOW_2 + "/messages"), any());
   }
@@ -402,7 +399,7 @@ class DingTalkBotCoordinatorTest {
     DingTalkModels.Message message =
         new DingTalkModels.Message(
             "person-question-1", "person-chat-1", "1", "person-1", "现在进度如何", false, false, null);
-    when(store.active("cli_test")).thenReturn(Optional.of(binding));
+    when(store.active("cli_test", message)).thenReturn(Optional.of(binding));
     when(store.registerInbound("cli_test", binding, message))
         .thenReturn(
             new DingTalkModels.Inbound(

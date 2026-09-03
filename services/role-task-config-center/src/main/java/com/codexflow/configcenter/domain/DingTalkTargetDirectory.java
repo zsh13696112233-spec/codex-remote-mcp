@@ -13,11 +13,11 @@ import org.springframework.transaction.annotation.Transactional;
 public class DingTalkTargetDirectory {
 
   private final DingTalkTargetRepository targets;
-  private final SopRepository sops;
+  private final TaskDefinitionRepository tasks;
 
-  DingTalkTargetDirectory(DingTalkTargetRepository targets, SopRepository sops) {
+  DingTalkTargetDirectory(DingTalkTargetRepository targets, TaskDefinitionRepository tasks) {
     this.targets = targets;
-    this.sops = sops;
+    this.tasks = tasks;
   }
 
   @Transactional(readOnly = true)
@@ -118,21 +118,28 @@ public class DingTalkTargetDirectory {
   @Transactional
   public void delete(String clientId, String id) {
     DingTalkTargetEntity target = requiredOwned(clientId, id);
-    if (sops.existsByDingtalkTarget_IdAndDeletedFalse(id)) {
-      throw new ConflictFailure("通知对象已被 SOP 引用，只能停用。");
+    if (tasks.existsByDingtalkTargetIdAndDeletedFalse(id)) {
+      throw new ConflictFailure("通知对象已被任务定义绑定，只能停用。");
     }
     target.enabled = false;
     target.deleted = true;
     targets.save(target);
   }
 
-  @Transactional(readOnly = true)
-  DingTalkTargetEntity requiredSelectable(String id) {
+  @Transactional
+  DingTalkTargetEntity requiredSelectable(String id, String taskId) {
     DingTalkTargetEntity target =
-        targets.findById(id).orElseThrow(() -> new NotFoundFailure("找不到钉钉通知对象：" + id));
+        targets.findForUpdate(id).orElseThrow(() -> new NotFoundFailure("找不到钉钉通知对象：" + id));
     if (target.deleted || !target.enabled || !target.available) {
       throw new ConflictFailure("所选钉钉通知对象未启用或当前不可用。");
     }
+    tasks
+        .findFirstByDingtalkTargetIdAndDeletedFalse(id)
+        .filter(owner -> !owner.id.equals(taskId))
+        .ifPresent(
+            owner -> {
+              throw new ConflictFailure("该钉钉通知对象已绑定其他任务定义。");
+            });
     return target;
   }
 

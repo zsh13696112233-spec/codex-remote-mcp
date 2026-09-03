@@ -4,8 +4,6 @@ import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
-import jakarta.persistence.JoinColumn;
-import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.OrderBy;
 import jakarta.persistence.Table;
@@ -55,11 +53,6 @@ class SopEntity extends Timestamped {
   /** 步骤未单独指定模型时使用的默认模型。 */
   @Column(name = "default_step_model", nullable = false)
   String defaultStepModel = "gpt-5.6-sol";
-
-  /** 钉钉机器人启动此 SOP 的固定任务时使用的唯一通知对象。 */
-  @ManyToOne
-  @JoinColumn(name = "dingtalk_target_id")
-  DingTalkTargetEntity dingtalkTarget;
 
   /** SOP 是否可用于创建新的任务运行。 */
   @Column(nullable = false)

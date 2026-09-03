@@ -39,7 +39,7 @@ async function loadBase(){
   [state.roles,state.sops,state.tasks,state.dingtalkTargets]=await Promise.all([api("/api/roles"),api("/api/sops"),api("/api/task-definitions"),api("/api/dingtalk/targets")]);
 }
 function roleCard(x){return `<article class="card"><div><h3>${esc(x.name)} ${status(x)}</h3><p>${esc(x.duty)}</p><span class="meta">版本 ${x.version} · 更新于 ${time(x.updatedAt)}</span></div><div class="actions"><button data-action="edit-role" data-id="${x.id}">编辑</button><button data-action="delete-role" data-id="${x.id}">删除</button></div></article>`}
-function taskCard(x){return `<article class="card"><div><h3>${esc(x.name)} ${status(x)}</h3><p>${esc(x.objective)}</p><span class="meta">SOP：${esc(x.sopName)} · 更新于 ${time(x.updatedAt)}</span></div><div class="actions"><button class="primary" data-action="run-task" data-id="${x.id}">运行</button><button data-action="runs" data-id="${x.id}" data-name="${esc(x.name)}">记录</button><button data-action="edit-task" data-id="${x.id}">编辑</button><button data-action="copy-task" data-id="${x.id}">复制</button><button data-action="delete-task" data-id="${x.id}">删除</button></div></article>`}
+function taskCard(x){const binding=x.dingtalkTarget?` · 钉钉：${targetTypeLabel(x.dingtalkTarget.targetType)} ${esc(x.dingtalkTarget.displayName)}${x.dingtalkActiveWorkflowId?"（运行中）":""}`:"";return `<article class="card"><div><h3>${esc(x.name)} ${status(x)}</h3><p>${esc(x.objective)}</p><span class="meta">SOP：${esc(x.sopName)}${binding} · 更新于 ${time(x.updatedAt)}</span></div><div class="actions"><button class="primary" data-action="run-task" data-id="${x.id}">运行</button><button data-action="runs" data-id="${x.id}" data-name="${esc(x.name)}">记录</button><button data-action="edit-task" data-id="${x.id}">编辑</button><button data-action="copy-task" data-id="${x.id}">复制</button><button data-action="delete-task" data-id="${x.id}">删除</button></div></article>`}
 
 function feishuStatus(value){
   const map={connected:["已连接","online"],failed:["连接失败","offline"],disconnected:["未连接","offline"],disabled:["未启用","off"]};
@@ -70,8 +70,8 @@ function feishuPayload(){
 }
 
 function renderDingTalkConfig(){
-  const x=state.dingtalk||{enabled:false,clientId:"",secretConfigured:false,taskDefinitionId:"",cardTemplateId:"",eventPollIntervalMs:1000,connectionStatus:"disabled"};
-  const tasks=state.tasks.filter(t=>t.enabled&&!t.deleted);
+  const x=state.dingtalk||{enabled:false,clientId:"",secretConfigured:false,cardTemplateId:"",eventPollIntervalMs:1000,connectionStatus:"disabled"};
+  const bindings=state.tasks.filter(t=>t.dingtalkTarget);
   $("#content").className="content";
   $("#content").innerHTML=`<section class="settings-panel">
     <div class="settings-heading"><div><h2>钉钉机器人配置</h2><p>通过官方 Stream SDK 接收群聊和卡片回调，无需开放公网地址。</p></div>${feishuStatus(x.connectionStatus)}</div>
@@ -79,10 +79,10 @@ function renderDingTalkConfig(){
       <label class="check"><input name="enabled" type="checkbox" ${x.enabled?"checked":""}> 启用钉钉机器人 Stream 长连接</label>
       <div class="grid"><label>Client ID<input name="clientId" maxlength="128" required value="${esc(x.clientId)}" placeholder="dingxxxxxxxxxxxxxxxx"></label>
       <label>Client Secret<input name="clientSecret" type="password" maxlength="512" placeholder="${x.secretConfigured?"已保存；留空表示不修改":"请输入 Client Secret"}"></label></div>
-      <label>固定任务定义<select name="taskDefinitionId" required><option value="">请选择任务</option>${tasks.map(t=>`<option value="${t.id}" ${t.id===x.taskDefinitionId?"selected":""}>${esc(t.name)}</option>`).join("")}</select></label>
       <label>互动进度卡模板 ID（可选）<input name="cardTemplateId" maxlength="256" value="${esc(x.cardTemplateId)}" placeholder="留空时使用内置 Markdown 进度；填写已发布的 .schema 模板 ID"></label>
       <label>事件轮询间隔（毫秒）<input name="eventPollIntervalMs" type="number" min="250" max="60000" required value="${Number(x.eventPollIntervalMs)||1000}"></label>
-      <p class="hint">Client Secret 只保存在服务端且不会回显。模板 ID 留空时使用钉钉内置 Markdown 进度消息，可回复“暂停”“继续”或“立即进入下一步”；填写模板后使用可更新、带按钮的互动进度卡。飞书和钉钉只能启用一个，任务运行期间不能切换模式或修改关键配置。后续咨询需回复或引用启动消息、进度消息或进度卡。</p>
+      <p class="hint">Client Secret 只保存在服务端且不会回显。任务与通知对象在“任务定义”中绑定；不同绑定可以同时运行。模板 ID 留空时使用钉钉内置 Markdown 进度消息，填写后使用互动进度卡。</p>
+      <div class="target-list">${bindings.length?bindings.map(t=>`<article class="target-card"><div class="target-main"><strong>${esc(t.name)}</strong><p>${targetTypeLabel(t.dingtalkTarget.targetType)}：${esc(t.dingtalkTarget.displayName)}</p></div><span class="badge ${t.dingtalkActiveWorkflowId?"":"off"}">${t.dingtalkActiveWorkflowId?"运行中":"已绑定"}</span></article>`).join(""):'<div class="empty">尚未绑定任务。请在“任务定义”中选择一个钉钉群或人员。</div>'}</div>
       <div id="dingtalkTestResult" class="test-result"></div>
       <footer><button type="button" data-dingtalk-test>测试连接</button><button class="primary" type="submit">保存配置</button></footer>
     </form>
@@ -90,7 +90,7 @@ function renderDingTalkConfig(){
 }
 function dingtalkPayload(){
   const f=$("#dingtalkForm");
-  return {enabled:f.enabled.checked,clientId:f.clientId.value.trim(),clientSecret:f.clientSecret.value.trim(),taskDefinitionId:f.taskDefinitionId.value,cardTemplateId:f.cardTemplateId.value.trim(),eventPollIntervalMs:Number(f.eventPollIntervalMs.value)};
+  return {enabled:f.enabled.checked,clientId:f.clientId.value.trim(),clientSecret:f.clientSecret.value.trim(),cardTemplateId:f.cardTemplateId.value.trim(),eventPollIntervalMs:Number(f.eventPollIntervalMs.value)};
 }
 
 function targetTypeLabel(value){return value==="PERSON"?"人员":"群聊"}
@@ -98,15 +98,16 @@ function renderDingTalkTargets(){
   const configured=!!state.dingtalk?.clientId,items=state.dingtalkTargets.filter(x=>x.targetType===state.dingtalkTargetType);
   $("#content").className="content target-content";
   $("#content").innerHTML=`<section class="target-panel">
-    <div class="settings-heading"><div><h2>钉钉通知对象</h2><p>SOP 只能选择一个人员或群聊；这里只维护本机器人所属应用的对象。</p></div>${configured?'<span class="connection-status online"><i></i>应用已配置</span>':'<span class="connection-status off"><i></i>请先配置机器人</span>'}</div>
+    <div class="settings-heading"><div><h2>钉钉通知对象</h2><p>一个群或人员只能绑定一个任务定义；这里只维护本机器人所属应用的对象。</p></div>${configured?'<span class="connection-status online"><i></i>应用已配置</span>':'<span class="connection-status off"><i></i>请先配置机器人</span>'}</div>
     <div class="target-toolbar"><div class="target-tabs"><button class="${state.dingtalkTargetType==="GROUP"?"active":""}" data-target-type="GROUP">群聊</button><button class="${state.dingtalkTargetType==="PERSON"?"active":""}" data-target-type="PERSON">人员</button></div>${state.dingtalkTargetType==="PERSON"?`<button data-target-sync ${configured?"":"disabled"}>同步公司人员</button>`:""}</div>
-    <p class="hint">${state.dingtalkTargetType==="GROUP"?'在群里首次 @ 机器人后，该群会自动出现在这里；管理员确认名称并启用后才可供 SOP 选择。':'点击“同步公司人员”从钉钉通讯录拉取。首次同步的人员默认停用，确认后手动启用。'}</p>
+    <p class="hint">${state.dingtalkTargetType==="GROUP"?'在群里首次 @ 机器人后，该群会自动出现在这里；管理员确认名称并启用后才可供任务定义选择。':'点击“同步公司人员”从钉钉通讯录拉取。首次同步的人员默认停用，确认后手动启用。'}</p>
     <div class="target-list">${!configured?'<div class="empty">请先在“钉钉机器人”页面保存 Client ID 和 Client Secret。</div>':items.length?items.map(targetCard).join(""):`<div class="empty">暂无${targetTypeLabel(state.dingtalkTargetType)}，${state.dingtalkTargetType==="GROUP"?'请先在目标群中 @ 机器人。':'请点击上方按钮同步。'}</div>`}</div>
   </section>`;
 }
 function targetCard(x){
   const unavailable=!x.available;
-  return `<article class="target-card" data-target-id="${x.id}"><div class="target-main"><div class="target-name"><span class="target-kind">${targetTypeLabel(x.targetType)}</span><input data-target-name maxlength="160" value="${esc(x.displayName)}"></div><p>${x.departmentDisplay?`部门：${esc(x.departmentDisplay)}`:`钉钉标识：${esc(x.externalId)}`}</p><small>最近同步：${time(x.lastSyncedAt)}${unavailable?' · 当前已不在通讯录中':''}</small></div><label class="check"><input data-target-enabled type="checkbox" ${x.enabled?"checked":""} ${unavailable?"disabled":""}> 启用</label><div class="actions"><button data-target-test>测试</button><button class="primary" data-target-save>保存</button><button data-target-delete>删除</button></div></article>`;
+  const owner=state.tasks.find(t=>t.dingtalkTargetId===x.id);
+  return `<article class="target-card" data-target-id="${x.id}"><div class="target-main"><div class="target-name"><span class="target-kind">${targetTypeLabel(x.targetType)}</span><input data-target-name maxlength="160" value="${esc(x.displayName)}"></div><p>${x.departmentDisplay?`部门：${esc(x.departmentDisplay)}`:`钉钉标识：${esc(x.externalId)}`}</p><small>最近同步：${time(x.lastSyncedAt)}${unavailable?' · 当前已不在通讯录中':''}${owner?` · 已绑定任务：${esc(owner.name)}`:""}</small></div><label class="check"><input data-target-enabled type="checkbox" ${x.enabled?"checked":""} ${unavailable?"disabled":""}> 启用</label><div class="actions"><button data-target-test>测试</button><button class="primary" data-target-save>保存</button><button data-target-delete>删除</button></div></article>`;
 }
 
 function supervisorAgents(){
@@ -170,15 +171,15 @@ async function render({reload=true}={}){
   $("#content").innerHTML=data.length?data.map(state.page==="roles"?roleCard:taskCard).join(""):`<div class="empty">暂无数据，点击右上角开始创建。</div>`;
 }
 function openRole(x={enabled:true}){const f=$("#roleForm");f.reset();f.id.value=x.id||"";f.version.value=x.version??0;f.name.value=x.name||"";f.duty.value=x.duty||"";f.enabled.checked=x.enabled!==false;$("#roleDialog").showModal()}
-function openTask(x={enabled:true}){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=x.objective||"";f.additionalNotes.value=x.additionalNotes||"";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");f.enabled.checked=x.enabled!==false;$("#taskDialog").showModal()}
+function openTask(x={enabled:true}){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=x.objective||"";f.additionalNotes.value=x.additionalNotes||"";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");const used=new Set(state.tasks.filter(t=>t.id!==x.id&&t.dingtalkTargetId).map(t=>t.dingtalkTargetId));const targets=state.dingtalkTargets.filter(t=>(t.enabled&&t.available&&!used.has(t.id))||t.id===x.dingtalkTargetId);f.dingtalkTargetId.innerHTML=`<option value="">不绑定钉钉</option>${targets.map(t=>`<option value="${t.id}" ${t.id===x.dingtalkTargetId?"selected":""}>${targetTypeLabel(t.targetType)} · ${esc(t.displayName)}${!t.enabled||!t.available?"（已不可用）":""}</option>`).join("")}`;f.dingtalkTargetId.value=x.dingtalkTargetId||"";f.enabled.checked=x.enabled!==false;$("#taskDialog").showModal()}
 
-function blankSop(){return{id:"",name:"",description:"",dingtalkTargetId:"",supervisorAgentId:"local",supervisorTimeoutSec:7200,maxRetryCount:10,advanceMode:"automatic",handoffMode:"cumulative_files",defaultStepModel:"gpt-5.6-sol",enabled:true,steps:[]}}
+function blankSop(){return{id:"",name:"",description:"",supervisorAgentId:"local",supervisorTimeoutSec:7200,maxRetryCount:10,advanceMode:"automatic",handoffMode:"cumulative_files",defaultStepModel:"gpt-5.6-sol",enabled:true,steps:[]}}
 function normalizeStep(s){const permissionProfile=s.permissionProfile||(s.writeEnabled===true?"workspace_write":"read_only");return{...s,_clientId:s._clientId||uid(),displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",permissionProfile,writeEnabled:permissionProfile!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
 function setDraft(sop){
   const copy={...blankSop(),...sop,steps:(sop.steps||[]).map(normalizeStep)};
   state.sop.draft=copy;state.sop.selectedNodeId=copy.steps[0]?._clientId||null;state.sop.tab="workflow";state.sop.baseline=draftFingerprint(copy);
 }
-function sopPayload(d=state.sop.draft){return{name:d.name.trim(),description:(d.description||"").trim(),dingtalkTargetId:d.dingtalkTargetId||null,supervisorAgentId:(d.supervisorAgentId||"").trim(),supervisorTimeoutSec:Number(d.supervisorTimeoutSec),maxRetryCount:Number(d.maxRetryCount),advanceMode:d.advanceMode||"automatic",handoffMode:d.handoffMode||"cumulative_files",defaultStepModel:d.defaultStepModel,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),executorType:s.executorType||"local",agentId:(s.agentId||"").trim(),workingDirectory:(s.workingDirectory||"").trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
+function sopPayload(d=state.sop.draft){return{name:d.name.trim(),description:(d.description||"").trim(),supervisorAgentId:(d.supervisorAgentId||"").trim(),supervisorTimeoutSec:Number(d.supervisorTimeoutSec),maxRetryCount:Number(d.maxRetryCount),advanceMode:d.advanceMode||"automatic",handoffMode:d.handoffMode||"cumulative_files",defaultStepModel:d.defaultStepModel,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),executorType:s.executorType||"local",agentId:(s.agentId||"").trim(),workingDirectory:(s.workingDirectory||"").trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
 function draftFingerprint(d=state.sop.draft){return d?JSON.stringify(sopPayload(d)):""}
 function isSopDirty(){return !!state.sop.draft&&draftFingerprint()!==state.sop.baseline}
 function confirmDiscard(){return !isSopDirty()||confirm("当前工作流有未保存的修改，确定放弃吗？")}
@@ -240,14 +241,12 @@ function inspectorHtml(){
 }
 function workflowInspectorHtml(){
   const d=state.sop.draft;if(!d)return `<div class="inspector-empty">请先选择工作流</div>`;
-  const selectedTarget=state.dingtalkTargets.find(x=>x.id===d.dingtalkTargetId),selectable=state.dingtalkTargets.filter(x=>(x.enabled&&x.available)||x.id===d.dingtalkTargetId);
   return `<div class="inspector-heading"><strong>工作流配置</strong><small>设置工作流的基础运行参数</small></div>
     <label>工作流名称 *<input data-sop-field="name" maxlength="100" value="${esc(d.name)}" placeholder="例如：需求开发与质量验收"></label>
     <label>工作流说明<textarea data-sop-field="description" maxlength="2000" placeholder="说明这个流程的适用场景">${esc(d.description||"")}</textarea></label>
     <label>步骤默认模型<select data-sop-field="defaultStepModel">${MODELS.map(m=>`<option ${d.defaultStepModel===m?"selected":""}>${m}</option>`).join("")}</select></label>
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，30 秒后自动继续）</option></select></label>
     <label>步骤结果交接<select data-sop-field="handoffMode"><option value="cumulative_files" ${d.handoffMode==="cumulative_files"?"selected":""}>文件交接（累计传递前序文件）</option><option value="legacy_text" ${d.handoffMode==="legacy_text"?"selected":""}>文字交接（追加上一步文字结果）</option></select></label>
-    <label>钉钉通知对象<select data-sop-field="dingtalkTargetId"><option value="">不通过钉钉启动</option>${selectable.map(x=>`<option value="${x.id}" ${x.id===d.dingtalkTargetId?"selected":""}>${targetTypeLabel(x.targetType)} · ${esc(x.displayName)}${!x.enabled||!x.available?"（已不可用）":""}</option>`).join("")}</select>${selectedTarget&&(!selectedTarget.enabled||!selectedTarget.available)?'<small class="field-warning">当前对象已不可用，请重新选择后再启用机器人。</small>':''}</label>
     <label>主监督执行机 *<div class="agent-picker"><input data-sop-field="supervisorAgentId" maxlength="128" value="${esc(d.supervisorAgentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
     <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="7200" value="${d.supervisorTimeoutSec}"></label>
     <label>单次任务最多重跑次数<input data-sop-field="maxRetryCount" type="number" min="0" max="100" value="${d.maxRetryCount}"></label>
@@ -368,7 +367,7 @@ async function selectSop(id){
 function startNewSop(){if(!confirmDiscard())return;setDraft(blankSop());renderSopWorkspace();setTimeout(()=>document.querySelector('[data-sop-field="name"]')?.focus(),0)}
 
 $("#roleForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.currentTarget,b={name:f.name.value,duty:f.duty.value,enabled:f.enabled.checked};try{if(f.id.value){b.version=Number(f.version.value);await api(`/api/roles/${f.id.value}`,{method:"PUT",body:JSON.stringify(b)})}else await api("/api/roles",{method:"POST",body:JSON.stringify(b)});$("#roleDialog").close();toast("角色已保存");render()}catch(x){toast(x.message)}});
-$("#taskForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.currentTarget,b={name:f.name.value,objective:f.objective.value,sopId:f.sopId.value,additionalNotes:f.additionalNotes.value,enabled:f.enabled.checked};try{await api(f.id.value?`/api/task-definitions/${f.id.value}`:"/api/task-definitions",{method:f.id.value?"PUT":"POST",body:JSON.stringify(b)});$("#taskDialog").close();toast("任务定义已保存");render()}catch(x){toast(x.message)}});
+$("#taskForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.currentTarget,b={name:f.name.value,objective:f.objective.value,sopId:f.sopId.value,additionalNotes:f.additionalNotes.value,enabled:f.enabled.checked,dingtalkTargetId:f.dingtalkTargetId.value||null};try{await api(f.id.value?`/api/task-definitions/${f.id.value}`:"/api/task-definitions",{method:f.id.value?"PUT":"POST",body:JSON.stringify(b)});$("#taskDialog").close();toast("任务定义已保存");render()}catch(x){toast(x.message)}});
 
 $("#content").addEventListener("click",async e=>{
   let botTestButton=null;
@@ -501,7 +500,7 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   if(b.dataset.page===state.page)return;
   if(state.page==="sops"){const dirty=isSopDirty();if(!confirmDiscard())return;if(dirty)discardSopChanges()}
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
-  const map={roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、运行并追溯不可变快照。","＋ 新建任务"],runtime:["运行状态","查看 Python 网关和全部主监督执行机的实时状态。",""],feishu:["飞书机器人","配置长连接、固定任务和运行状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接、互动卡和固定任务。",""],"dingtalk-targets":["钉钉通知对象","维护 SOP 可选择的一个人员或群聊。",""]};
+  const map={roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、钉钉绑定、运行并追溯不可变快照。","＋ 新建任务"],runtime:["运行状态","查看 Python 网关和全部主监督执行机的实时状态。",""],feishu:["飞书机器人","配置长连接、固定任务和运行状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接并查看任务绑定。",""],"dingtalk-targets":["钉钉通知对象","维护任务定义可选择的人员或群聊。",""]};
   [$("#title").textContent,$("#subtitle").textContent,$("#create").textContent]=map[state.page];
   $("#create").classList.toggle("hidden",["runtime","feishu","dingtalk","dingtalk-targets"].includes(state.page));
   try{await render()}catch(e){toast(e.message)}

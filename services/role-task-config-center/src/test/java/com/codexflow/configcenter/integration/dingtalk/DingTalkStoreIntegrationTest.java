@@ -1,8 +1,10 @@
 package com.codexflow.configcenter.integration.dingtalk;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.codexflow.configcenter.domain.ConfigService;
+import com.codexflow.configcenter.domain.ConflictFailure;
 import com.codexflow.configcenter.domain.DingTalkTargetDirectory;
 import com.codexflow.configcenter.dto.DingTalkConfigSaveRequest;
 import com.codexflow.configcenter.dto.SopSaveRequest;
@@ -22,7 +24,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
-/** 验证钉钉单任务锁、消息幂等、事件游标和可靠发送状态。 */
+/** 验证钉钉任务级并发锁、目标路由、消息幂等、事件游标和可靠发送状态。 */
 @SpringBootTest
 class DingTalkStoreIntegrationTest {
 
@@ -35,15 +37,13 @@ class DingTalkStoreIntegrationTest {
 
   @Test
   void pageSettingsPersistWithoutReturningTheSecret() {
-    String taskId = createTask();
     String clientId = "cli_" + UUID.randomUUID().toString().replace("-", "");
     DingTalkBotAdminService.ConfigView saved =
         adminService.save(
             new DingTalkConfigSaveRequest(
-                false, clientId, "secret-value", taskId, "progress.schema", 1500L));
+                false, clientId, "secret-value", "progress.schema", 1500L));
 
     assertThat(saved.clientId()).isEqualTo(clientId);
-    assertThat(saved.taskDefinitionId()).isEqualTo(taskId);
     assertThat(saved.cardTemplateId()).isEqualTo("progress.schema");
     assertThat(saved.eventPollIntervalMs()).isEqualTo(1500L);
     assertThat(saved.secretConfigured()).isTrue();
@@ -56,7 +56,7 @@ class DingTalkStoreIntegrationTest {
         .isEqualTo("secret-value");
 
     DingTalkBotAdminService.ConfigView updated =
-        adminService.save(new DingTalkConfigSaveRequest(false, clientId, "", taskId, "", 2000L));
+        adminService.save(new DingTalkConfigSaveRequest(false, clientId, "", "", 2000L));
     assertThat(updated.cardTemplateId()).isEmpty();
     assertThat(updated.eventPollIntervalMs()).isEqualTo(2000L);
     assertThat(
@@ -78,13 +78,13 @@ class DingTalkStoreIntegrationTest {
           executor.submit(
               () -> {
                 start.await();
-                return store.reserveStart(clientId, taskId, message("m-1"));
+                return store.reserveStart(clientId, message("m-1"));
               });
       Future<DingTalkModels.StartReservation> second =
           executor.submit(
               () -> {
                 start.await();
-                return store.reserveStart(clientId, taskId, message("m-2"));
+                return store.reserveStart(clientId, message("m-2"));
               });
       start.countDown();
       List<DingTalkModels.StartReservation> results = List.of(first.get(), second.get());
@@ -96,7 +96,7 @@ class DingTalkStoreIntegrationTest {
               .filter(value -> "started".equals(value.outcome()))
               .findFirst()
               .orElseThrow();
-      assertThat(store.active(clientId))
+      assertThat(store.active(clientId, message("active-check")))
           .get()
           .extracting(DingTalkModels.Binding::workflowId)
           .isEqualTo(started.workflowId());
@@ -105,11 +105,58 @@ class DingTalkStoreIntegrationTest {
               "select trigger_message_id from codex_sop_dingtalk_workflow_bindings where workflow_id = ?",
               String.class,
               started.workflowId());
-      assertThat(store.reserveStart(clientId, taskId, message(triggerMessageId)).outcome())
+      assertThat(store.reserveStart(clientId, message(triggerMessageId)).outcome())
           .isEqualTo("duplicate");
     } finally {
       executor.shutdownNow();
     }
+  }
+
+  @Test
+  void differentTargetsSharingOneSopCanRunAndReleaseIndependently() {
+    String clientId = "app-" + UUID.randomUUID();
+    String sopId = createSop();
+    String firstTarget = createGroupTarget(clientId, "chat-a", "甲群");
+    String secondTarget = createGroupTarget(clientId, "chat-b", "乙群");
+    createBoundTask(sopId, firstTarget);
+    createBoundTask(sopId, secondTarget);
+    DingTalkModels.Message firstMessage = message("multi-a", "chat-a");
+    DingTalkModels.Message secondMessage = message("multi-b", "chat-b");
+
+    DingTalkModels.StartReservation first = store.reserveStart(clientId, firstMessage);
+    DingTalkModels.StartReservation second = store.reserveStart(clientId, secondMessage);
+
+    assertThat(first.outcome()).isEqualTo("started");
+    assertThat(second.outcome()).isEqualTo("started");
+    assertThat(first.workflowId()).isNotEqualTo(second.workflowId());
+    assertThat(store.active(clientId, firstMessage))
+        .get()
+        .extracting(DingTalkModels.Binding::workflowId)
+        .isEqualTo(first.workflowId());
+    assertThat(store.active(clientId, secondMessage))
+        .get()
+        .extracting(DingTalkModels.Binding::workflowId)
+        .isEqualTo(second.workflowId());
+
+    store.recordEvent(clientId, first.workflowId(), 1, null, null, null, null, true);
+
+    assertThat(store.active(clientId, firstMessage)).isEmpty();
+    assertThat(store.active(clientId, secondMessage))
+        .get()
+        .extracting(DingTalkModels.Binding::workflowId)
+        .isEqualTo(second.workflowId());
+  }
+
+  @Test
+  void oneTargetCannotBindTwoTaskDefinitions() {
+    String clientId = "app-" + UUID.randomUUID();
+    String sopId = createSop();
+    String targetId = createGroupTarget(clientId, "chat-unique", "唯一绑定群");
+    createBoundTask(sopId, targetId);
+
+    assertThatThrownBy(() -> createBoundTask(sopId, targetId))
+        .isInstanceOf(ConflictFailure.class)
+        .hasMessageContaining("已绑定其他任务定义");
   }
 
   @Test
@@ -118,7 +165,7 @@ class DingTalkStoreIntegrationTest {
     String taskId = createTask(clientId);
     store.initialize(clientId);
     DingTalkModels.StartReservation reservation =
-        store.reserveStart(clientId, taskId, message("markdown-trigger"));
+        store.reserveStart(clientId, message("markdown-trigger"));
     store.markSubmitted(reservation.workflowId());
 
     store.enqueueProgressMarkdown(
@@ -144,9 +191,8 @@ class DingTalkStoreIntegrationTest {
         new DingTalkModels.Message(
             "wrong-group-trigger", "chat-2", "2", "user-2", "运行", true, false, null);
 
-    assertThat(store.reserveStart(clientId, taskId, wrongGroup).outcome())
-        .isEqualTo("unauthorized");
-    assertThat(store.active(clientId)).isEmpty();
+    assertThat(store.reserveStart(clientId, wrongGroup).outcome()).isEqualTo("unauthorized");
+    assertThat(store.active(clientId, wrongGroup)).isEmpty();
   }
 
   @Test
@@ -155,7 +201,7 @@ class DingTalkStoreIntegrationTest {
     String taskId = createTask(clientId);
     store.initialize(clientId);
     DingTalkModels.StartReservation reservation =
-        store.reserveStart(clientId, taskId, message("trigger-1"));
+        store.reserveStart(clientId, message("trigger-1"));
     store.markSubmitted(reservation.workflowId());
     DingTalkModels.Binding binding = store.binding(reservation.workflowId()).orElseThrow();
 
@@ -212,7 +258,7 @@ class DingTalkStoreIntegrationTest {
         .isEqualTo(10L);
 
     store.recordEvent(clientId, binding.workflowId(), 11, null, null, null, null, true);
-    assertThat(store.active(clientId)).isEmpty();
+    assertThat(store.active(clientId, message("after-terminal"))).isEmpty();
     assertThat(store.binding(binding.workflowId()))
         .get()
         .extracting(DingTalkModels.Binding::status)
@@ -226,7 +272,7 @@ class DingTalkStoreIntegrationTest {
     String taskId = createTask(clientId);
     store.initialize(clientId);
     DingTalkModels.StartReservation reservation =
-        store.reserveStart(clientId, taskId, message("assistant-card-trigger"));
+        store.reserveStart(clientId, message("assistant-card-trigger"));
     store.markSubmitted(reservation.workflowId());
 
     ObjectNode text = objectMapper.createObjectNode().put("text", "质量审查正在执行。");
@@ -279,6 +325,11 @@ class DingTalkStoreIntegrationTest {
   }
 
   private String createTask(String clientId) {
+    String targetId = clientId == null ? null : createGroupTarget(clientId, "chat-1", "测试群");
+    return createBoundTask(createSop(), targetId);
+  }
+
+  private String createSop() {
     String roleId =
         jdbc.queryForObject(
             "select id from codex_sop_roles order by created_at limit 1", String.class);
@@ -286,11 +337,6 @@ class DingTalkStoreIntegrationTest {
         new SopStepRequest(
             "钉钉步骤", roleId, "完成测试", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
-    String targetId = null;
-    if (clientId != null) {
-      DingTalkTargetDirectory.TargetView target = targets.discoverGroup(clientId, "chat-1", "测试群");
-      targetId = targets.update(clientId, target.id(), target.displayName(), true).id();
-    }
     ObjectNode sop =
         config.createSop(
             new SopSaveRequest(
@@ -303,17 +349,32 @@ class DingTalkStoreIntegrationTest {
                 3,
                 "semi_automatic",
                 null,
-                targetId,
+                null,
                 List.of(step)));
+    return sop.path("id").asText();
+  }
+
+  private String createGroupTarget(String clientId, String conversationId, String name) {
+    DingTalkTargetDirectory.TargetView target =
+        targets.discoverGroup(clientId, conversationId, name);
+    return targets.update(clientId, target.id(), target.displayName(), true).id();
+  }
+
+  private String createBoundTask(String sopId, String targetId) {
     return config
         .createTask(
             new TaskDefinitionSaveRequest(
-                "钉钉任务-" + UUID.randomUUID(), "验证钉钉任务启动", sop.path("id").asText(), null, true))
+                "钉钉任务-" + UUID.randomUUID(), "验证钉钉任务启动", sopId, null, true, targetId))
         .path("id")
         .asText();
   }
 
   private static DingTalkModels.Message message(String messageId) {
-    return new DingTalkModels.Message(messageId, "chat-1", "2", "user-1", "运行", true, false, null);
+    return message(messageId, "chat-1");
+  }
+
+  private static DingTalkModels.Message message(String messageId, String conversationId) {
+    return new DingTalkModels.Message(
+        messageId, conversationId, "2", "user-1", "运行", true, false, null);
   }
 }

@@ -98,7 +98,6 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     try {
       platformGuard.assertCanEnable("dingtalk", true);
       properties.validateEnabledConfiguration();
-      store.configuredTarget(properties.getClientId(), properties.getTaskDefinitionId());
       store.initialize(properties.getClientId());
       handlers = Executors.newFixedThreadPool(4);
       transport.start(
@@ -108,7 +107,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       connectionStatus = "connected";
       nextEventPollAt.set(0);
       nextOutboxSendAt.set(0);
-      LOGGER.info("钉钉机器人长连接已启动。任务并发上限为 1。");
+      LOGGER.info("钉钉机器人长连接已启动。不同任务绑定可以并行运行。");
     } catch (RuntimeException error) {
       running = false;
       connectionStatus = "failed";
@@ -206,7 +205,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     LOGGER.info("收到钉钉顶层 @ 消息，messageId={}。", message.messageId());
     String command = normalizedCommand(message.content());
     if (!command.isEmpty() && !"运行".equals(command)) {
-      Optional<DingTalkModels.Binding> active = store.active(properties.getClientId());
+      Optional<DingTalkModels.Binding> active = store.active(properties.getClientId(), message);
       if (active.isPresent() && matches(active.get(), message)) {
         if (!supportsCard(active.get()) && handleTextAdvanceControl(active.get(), message)) return;
         forwardToAssistant(active.get(), message);
@@ -219,7 +218,9 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           incomingTargetType(message),
           incomingTargetId(message),
           message.messageId(),
-          group ? "该群尚未绑定当前 SOP，或当前没有运行中的任务。请联系管理员确认后发送“@机器人 运行”。" : "当前没有运行中的任务，请发送“运行”启动任务。");
+          group
+              ? "该群尚未绑定任务定义，或当前没有运行中的任务。请联系管理员确认后发送“@机器人 运行”。"
+              : "该人员尚未绑定任务定义，或当前没有运行中的任务。请联系管理员确认后发送“运行”。");
       return;
     }
     startOrReport(message);
@@ -227,8 +228,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
 
   private void startOrReport(DingTalkModels.Message message) {
     DingTalkModels.StartReservation reservation;
-    reservation =
-        store.reserveStart(properties.getClientId(), properties.getTaskDefinitionId(), message);
+    reservation = store.reserveStart(properties.getClientId(), message);
     if (!"started".equals(reservation.outcome())) {
       if ("unauthorized".equals(reservation.outcome())) {
         store.enqueueTargetText(
@@ -238,14 +238,14 @@ class DingTalkBotCoordinator implements SmartLifecycle {
             incomingTargetType(message),
             incomingTargetId(message),
             message.messageId(),
-            "当前人员或群不是固定任务 SOP 选择的通知对象，不能启动任务。");
+            "当前人员或群尚未绑定可运行的任务定义，不能启动任务。");
         return;
       }
       String workflowId = reservation.workflowId();
       String text =
           "duplicate".equals(reservation.outcome())
               ? "这条启动消息已经处理，任务编号：" + workflowId
-              : "机器人当前已有任务运行，任务编号：" + workflowId;
+              : "当前绑定已有任务运行，任务编号：" + workflowId;
       store.enqueueTargetText(
           "start-result:" + message.messageId(),
           workflowId,

@@ -18,7 +18,7 @@ import java.util.List;
  * @param maxRetryCount 单次运行允许的人工重跑总次数
  * @param advanceMode 步骤成功后的流转方式
  * @param handoffMode 步骤之间的结果交接方式
- * @param dingtalkTargetId 唯一钉钉通知对象，可不配置
+ * @param dingtalkTargetId V1 兼容字段，当前忽略；通知对象由任务定义维护
  * @param steps 按执行顺序排列的步骤列表
  */
 public record SopSaveRequest(

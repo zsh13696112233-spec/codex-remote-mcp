@@ -3,7 +3,6 @@ package com.codexflow.configcenter.integration.dingtalk;
 import com.codexflow.configcenter.domain.ConflictFailure;
 import com.codexflow.configcenter.dto.DingTalkConfigSaveRequest;
 import java.time.Instant;
-import java.util.Optional;
 import org.springframework.stereotype.Service;
 
 /** 为配置中心页面提供不回显密钥的钉钉机器人管理能力。 */
@@ -32,10 +31,9 @@ public class DingTalkBotAdminService {
 
   public ConfigView save(DingTalkConfigSaveRequest request) {
     DingTalkSettingsStore.Settings previous = settings.current();
-    Optional<DingTalkModels.Binding> active =
-        previous.clientId().isBlank() ? Optional.empty() : botStore.active(previous.clientId());
-    if (active.isPresent() && criticalChange(previous, request)) {
-      throw new ConflictFailure("当前有机器人任务正在运行，不能停用或修改应用、密钥和固定任务。任务编号：" + active.get().workflowId());
+    boolean active = !previous.clientId().isBlank() && botStore.hasActive(previous.clientId());
+    if (active && criticalChange(previous, request)) {
+      throw new ConflictFailure("当前有钉钉任务正在运行，不能停用或修改应用、密钥和卡片模板。");
     }
     DingTalkSettingsStore.Settings saved = settings.save(request);
     boolean reconnect =
@@ -62,7 +60,6 @@ public class DingTalkBotAdminService {
         value.enabled(),
         value.clientId(),
         !value.clientSecret().isBlank(),
-        value.taskDefinitionId(),
         value.cardTemplateId(),
         value.eventPollIntervalMs(),
         value.persisted(),
@@ -76,7 +73,6 @@ public class DingTalkBotAdminService {
     return previous.enabled() != request.enabled()
         || !previous.clientId().equals(request.clientId().trim())
         || (!submittedSecret.isBlank() && !previous.clientSecret().equals(submittedSecret))
-        || !previous.taskDefinitionId().equals(request.taskDefinitionId().trim())
         || !previous.cardTemplateId().equals(request.cardTemplateId().trim());
   }
 
@@ -84,7 +80,6 @@ public class DingTalkBotAdminService {
       boolean enabled,
       String clientId,
       boolean secretConfigured,
-      String taskDefinitionId,
       String cardTemplateId,
       long eventPollIntervalMs,
       boolean persisted,

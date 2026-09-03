@@ -441,7 +441,7 @@ pending → queued → running → completed
 | 8091 | `FEISHU_TASK_DEFINITION_ID` | MySQL 尚无页面配置时的固定任务默认值 |
 | 8091 | `FEISHU_EVENT_POLL_INTERVAL_MS` | MySQL 尚无页面配置时的轮询间隔默认值，默认 1000 毫秒 |
 | 8091 | `DINGTALK_ENABLED`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET` | MySQL 尚无页面配置时的钉钉开关与应用凭据默认值 |
-| 8091 | `DINGTALK_TASK_DEFINITION_ID`、`DINGTALK_CARD_TEMPLATE_ID` | MySQL 尚无页面配置时的钉钉固定任务和可选互动卡片模板默认值；模板留空时使用内置 Markdown 进度消息 |
+| 8091 | `DINGTALK_CARD_TEMPLATE_ID` | MySQL 尚无页面配置时的钉钉可选互动卡片模板默认值；模板留空时使用内置 Markdown 进度消息 |
 | 8091 | `DINGTALK_EVENT_POLL_INTERVAL_MS` | MySQL 尚无页面配置时的钉钉轮询间隔默认值，默认 1000 毫秒 |
 | 8090 | `CODEX_GATEWAY_URL` | 8080 地址 |
 
@@ -450,7 +450,7 @@ pending → queued → running → completed
 - 三个服务（8080、8090、8091）默认监听 `0.0.0.0` 以支持可信内网访问；必须通过主机防火墙限制来源，三者都不得直接暴露到公网。只需本机访问时应显式改为 `127.0.0.1`。
 - 飞书和钉钉 SDK 均由 `8091` 主动访问平台 HTTPS/WSS `443`，不新增公网入站接口，也不改变三个服务的回环或内网部署边界。
 - App Secret 或 Client Secret 可由 8091 内网页面写入 MySQL；查询接口、页面和日志不回显原值。数据库账号与备份必须按密钥级别保护，密钥不得写入仓库。
-- 飞书与钉钉启用状态互斥，切换平台必须先手动停用当前机器人。钉钉只允许固定任务 SOP 选择的唯一人员或群聊启动和控制；群目标内所有成员共享控制权，人员目标只有该人员可用。通讯录同步需要企业应用相应读取权限，并由 8091 管理员手动触发。
+- 飞书与钉钉启用状态互斥，切换平台必须先手动停用当前机器人。钉钉按任务定义绑定的唯一人员或群聊路由；同一对象不能重复绑定，不同任务绑定可以并发。群目标内所有成员共享本群任务控制权，人员目标只有该人员可用。通讯录同步需要企业应用相应读取权限，并由 8091 管理员手动触发。
 - 第一版没有登录和多用户授权，应只在本机或受保护的可信内网使用。
 - `config/agents.json`、数据库文件、令牌和密码不得提交到 Git。
 - 执行机配置通过 `token_env` 引用环境变量，或通过 `token_file` 引用网关本机的绝对令牌文件，两者严格二选一；不能在 JSON 中直接保存 token。

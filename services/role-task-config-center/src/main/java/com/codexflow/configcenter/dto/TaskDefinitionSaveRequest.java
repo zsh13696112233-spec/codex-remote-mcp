@@ -11,10 +11,18 @@ import jakarta.validation.constraints.Size;
  * @param sopId 关联 SOP ID
  * @param additionalNotes 可选补充说明
  * @param enabled 是否启用
+ * @param dingtalkTargetId 可选钉钉通知对象
  */
 public record TaskDefinitionSaveRequest(
     @NotBlank @Size(max = 160) String name,
     @NotBlank String objective,
     @NotBlank String sopId,
     String additionalNotes,
-    Boolean enabled) {}
+    Boolean enabled,
+    @Size(max = 36) String dingtalkTargetId) {
+
+  public TaskDefinitionSaveRequest(
+      String name, String objective, String sopId, String additionalNotes, Boolean enabled) {
+    this(name, objective, sopId, additionalNotes, enabled, null);
+  }
+}

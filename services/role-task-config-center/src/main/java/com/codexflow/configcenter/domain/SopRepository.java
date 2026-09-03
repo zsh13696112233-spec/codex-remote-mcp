@@ -8,6 +8,4 @@ interface SopRepository extends JpaRepository<SopEntity, String> {
 
   /** 按名称模糊查询未软删除的 SOP，并将新建 SOP 排在前面。 */
   List<SopEntity> findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(String query);
-
-  boolean existsByDingtalkTarget_IdAndDeletedFalse(String targetId);
 }

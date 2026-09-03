@@ -1,9 +1,7 @@
 package com.codexflow.configcenter.integration.dingtalk;
 
-import com.codexflow.configcenter.domain.ConfigService;
 import com.codexflow.configcenter.domain.DingTalkTargetDirectory;
-import com.codexflow.configcenter.domain.PreparedRun;
-import com.codexflow.configcenter.domain.WorkflowRunStore;
+import com.codexflow.configcenter.domain.DingTalkTaskBindingDirectory;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -24,37 +22,30 @@ class DingTalkStore {
 
   private static final List<String> POLLED_STATUSES = List.of("submitting", "active", "terminal");
 
-  private final DingTalkBotStateRepository states;
   private final DingTalkWorkflowBindingRepository bindings;
   private final DingTalkInboundMessageRepository inboundMessages;
   private final DingTalkOutboxRepository outbox;
-  private final WorkflowRunStore workflowRuns;
-  private final ConfigService configService;
+  private final DingTalkTaskBindingDirectory taskBindings;
   private final DingTalkTargetDirectory targetDirectory;
   private final ObjectMapper objectMapper;
 
   DingTalkStore(
-      DingTalkBotStateRepository states,
       DingTalkWorkflowBindingRepository bindings,
       DingTalkInboundMessageRepository inboundMessages,
       DingTalkOutboxRepository outbox,
-      WorkflowRunStore workflowRuns,
-      ConfigService configService,
+      DingTalkTaskBindingDirectory taskBindings,
       DingTalkTargetDirectory targetDirectory,
       ObjectMapper objectMapper) {
-    this.states = states;
     this.bindings = bindings;
     this.inboundMessages = inboundMessages;
     this.outbox = outbox;
-    this.workflowRuns = workflowRuns;
-    this.configService = configService;
+    this.taskBindings = taskBindings;
     this.targetDirectory = targetDirectory;
     this.objectMapper = objectMapper;
   }
 
   @Transactional
   public void initialize(String clientId) {
-    states.insertIfAbsent(clientId);
     for (DingTalkOutboxEntity item : outbox.findAll()) {
       if ("sending".equals(item.status)) {
         item.status = "pending";
@@ -66,31 +57,23 @@ class DingTalkStore {
 
   @Transactional
   public DingTalkModels.StartReservation reserveStart(
-      String clientId, String taskDefinitionId, DingTalkModels.Message message) {
+      String clientId, DingTalkModels.Message message) {
     Optional<DingTalkWorkflowBindingEntity> duplicate =
         bindings.findByClientIdAndTriggerMessageId(clientId, message.messageId());
     if (duplicate.isPresent()) {
       return new DingTalkModels.StartReservation("duplicate", duplicate.get().workflowId, null);
     }
-    DingTalkBotStateEntity state =
-        states
-            .findForUpdate(clientId)
-            .orElseThrow(() -> new IllegalStateException("钉钉机器人状态尚未初始化。"));
-    if (state.activeWorkflowId != null) {
-      return new DingTalkModels.StartReservation("busy", state.activeWorkflowId, null);
+    DingTalkTaskBindingDirectory.StartRoute route =
+        taskBindings.reserveStart(clientId, incomingTargetType(message), incomingTargetId(message));
+    if (!"started".equals(route.outcome())) {
+      return new DingTalkModels.StartReservation(route.outcome(), route.workflowId(), null);
     }
-
-    DingTalkTargetDirectory.TargetView target =
-        configService.requireDingTalkTargetForTask(taskDefinitionId, clientId);
-    if (!matches(target.targetType(), target.externalId(), message)) {
-      return new DingTalkModels.StartReservation("unauthorized", null, null);
-    }
-    PreparedRun prepared = workflowRuns.prepareLatest(taskDefinitionId);
+    DingTalkTargetDirectory.TargetView target = route.target();
     Instant now = Instant.now();
     DingTalkWorkflowBindingEntity binding = new DingTalkWorkflowBindingEntity();
-    binding.workflowId = prepared.workflowId();
+    binding.workflowId = route.workflowId();
     binding.clientId = clientId;
-    binding.taskDefinitionId = taskDefinitionId;
+    binding.taskDefinitionId = route.taskDefinitionId();
     binding.triggerMessageId = message.messageId();
     binding.conversationId = message.conversationId();
     binding.targetType = target.targetType();
@@ -102,16 +85,8 @@ class DingTalkStore {
     binding.createdAt = now;
     binding.updatedAt = now;
     bindings.saveAndFlush(binding);
-    state.activeWorkflowId = prepared.workflowId();
-    state.updatedAt = now;
     return new DingTalkModels.StartReservation(
-        "started", prepared.workflowId(), prepared.payload());
-  }
-
-  @Transactional(readOnly = true)
-  public DingTalkTargetDirectory.TargetView configuredTarget(
-      String clientId, String taskDefinitionId) {
-    return configService.requireDingTalkTargetForTask(taskDefinitionId, clientId);
+        "started", route.workflowId(), route.prepared().payload());
   }
 
   @Transactional
@@ -120,8 +95,15 @@ class DingTalkStore {
   }
 
   @Transactional(readOnly = true)
-  public Optional<DingTalkModels.Binding> active(String clientId) {
-    return states.findById(clientId).flatMap(state -> binding(state.activeWorkflowId));
+  public Optional<DingTalkModels.Binding> active(String clientId, DingTalkModels.Message message) {
+    return taskBindings
+        .active(clientId, incomingTargetType(message), incomingTargetId(message))
+        .flatMap(route -> binding(route.workflowId()));
+  }
+
+  @Transactional(readOnly = true)
+  public boolean hasActive(String clientId) {
+    return taskBindings.hasActive(clientId);
   }
 
   @Transactional(readOnly = true)
@@ -161,13 +143,9 @@ class DingTalkStore {
 
   @Transactional
   public Optional<String> acquireForRestart(String clientId, String workflowId) {
-    DingTalkBotStateEntity state = states.findForUpdate(clientId).orElseThrow();
-    if (state.activeWorkflowId != null && !workflowId.equals(state.activeWorkflowId)) {
-      return Optional.of(state.activeWorkflowId);
-    }
-    state.activeWorkflowId = workflowId;
-    state.updatedAt = Instant.now();
     DingTalkWorkflowBindingEntity binding = requiredBinding(workflowId);
+    Optional<String> busy = taskBindings.acquireForRestart(binding.taskDefinitionId, workflowId);
+    if (busy.isPresent()) return busy;
     binding.status = "active";
     binding.updatedAt = Instant.now();
     return Optional.empty();
@@ -178,7 +156,7 @@ class DingTalkStore {
     DingTalkWorkflowBindingEntity binding = requiredBinding(workflowId);
     binding.status = "terminal";
     binding.updatedAt = Instant.now();
-    releaseSlot(clientId, workflowId);
+    releaseSlot(binding, workflowId);
   }
 
   @Transactional
@@ -187,12 +165,9 @@ class DingTalkStore {
     if (List.of("completed", "failed", "cancelled").contains(runtimeStatus)) {
       binding.status = "terminal";
       binding.updatedAt = Instant.now();
-      releaseSlot(clientId, workflowId);
+      releaseSlot(binding, workflowId);
     } else if (List.of("queued", "running", "cancelling").contains(runtimeStatus)) {
-      DingTalkBotStateEntity state = states.findForUpdate(clientId).orElseThrow();
-      if (state.activeWorkflowId == null || workflowId.equals(state.activeWorkflowId)) {
-        state.activeWorkflowId = workflowId;
-        state.updatedAt = Instant.now();
+      if (taskBindings.reconcile(binding.taskDefinitionId, workflowId, true)) {
         binding.status = "active";
         binding.updatedAt = Instant.now();
       }
@@ -204,7 +179,7 @@ class DingTalkStore {
     DingTalkWorkflowBindingEntity binding = requiredBinding(workflowId);
     binding.status = "failed";
     binding.updatedAt = Instant.now();
-    releaseSlot(clientId, workflowId);
+    releaseSlot(binding, workflowId);
     enqueue(
         "submit-failed:" + workflowId,
         workflowId,
@@ -294,7 +269,7 @@ class DingTalkStore {
     binding.updatedAt = Instant.now();
     if (terminal) {
       binding.status = "terminal";
-      releaseSlot(clientId, workflowId);
+      releaseSlot(binding, workflowId);
     }
     return true;
   }
@@ -504,12 +479,8 @@ class DingTalkStore {
     outbox.save(item);
   }
 
-  private void releaseSlot(String clientId, String workflowId) {
-    DingTalkBotStateEntity state = states.findForUpdate(clientId).orElseThrow();
-    if (workflowId.equals(state.activeWorkflowId)) {
-      state.activeWorkflowId = null;
-      state.updatedAt = Instant.now();
-    }
+  private void releaseSlot(DingTalkWorkflowBindingEntity binding, String workflowId) {
+    taskBindings.reconcile(binding.taskDefinitionId, workflowId, false);
   }
 
   private DingTalkWorkflowBindingEntity requiredBinding(String workflowId) {
@@ -583,14 +554,14 @@ class DingTalkStore {
     return value == null || value.isBlank() ? null : value;
   }
 
-  private static boolean matches(
-      String targetType, String targetExternalId, DingTalkModels.Message message) {
-    if ("PERSON".equals(targetType)) {
-      return !"2".equals(message.conversationType())
-          && targetExternalId.equals(message.senderUserId());
-    }
+  private static String incomingTargetType(DingTalkModels.Message message) {
+    return "2".equals(message.conversationType()) ? "GROUP" : "PERSON";
+  }
+
+  private static String incomingTargetId(DingTalkModels.Message message) {
     return "2".equals(message.conversationType())
-        && targetExternalId.equals(message.conversationId());
+        ? message.conversationId()
+        : message.senderUserId();
   }
 
   private static String abbreviate(String value, int maxLength) {

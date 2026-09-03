@@ -23,7 +23,8 @@ class DingTalkSettingsEntity {
   @Column(name = "client_secret", nullable = false, length = 512)
   String clientSecret;
 
-  @Column(name = "task_definition_id", nullable = false, length = 36)
+  /** V1 兼容列；V14 起任务绑定由任务定义自身维护。 */
+  @Column(name = "task_definition_id", length = 36)
   String taskDefinitionId;
 
   @Column(name = "card_template_id", nullable = false, length = 256)
