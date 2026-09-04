@@ -1,12 +1,10 @@
 package com.codexflow.configcenter.domain;
 
-import jakarta.persistence.LockModeType;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -64,11 +62,13 @@ interface TaskDefinitionRepository extends JpaRepository<TaskDefinitionEntity, S
       nativeQuery = true)
   int releaseWorkflow(@Param("workflowId") String workflowId);
 
-  @Lock(LockModeType.PESSIMISTIC_WRITE)
   @Query(
-      "SELECT task FROM TaskDefinitionEntity task WHERE task.deleted = false AND task.enabled ="
-          + " true AND task.scheduleEnabled = true AND task.scheduleTime = :scheduleTime AND"
-          + " (task.lastScheduleDate IS NULL OR task.lastScheduleDate <> :scheduleDate)")
+      value =
+          "SELECT task.* FROM codex_sop_task_definitions task WHERE task.deleted = FALSE AND"
+              + " task.enabled = TRUE AND task.schedule_enabled = TRUE AND task.schedule_time ="
+              + " :scheduleTime AND (task.last_schedule_date IS NULL OR task.last_schedule_date <>"
+              + " :scheduleDate) FOR UPDATE",
+      nativeQuery = true)
   List<TaskDefinitionEntity> findDueSchedulesForUpdate(
       @Param("scheduleDate") LocalDate scheduleDate, @Param("scheduleTime") LocalTime scheduleTime);
 

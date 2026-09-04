@@ -183,9 +183,11 @@ CODEX_WORKFLOW_DB = "..."
 [mcp_servers.codex_orchestrator]
 url = "http://127.0.0.1:8082/mcp"
 required = true
+enabled_tools = ["dispatch_node", "wait_node", "node_status", "cancel_node", "workflow_status"]
+default_tools_approval_mode = "approve"
 ```
 
-不要同时保留 stdio 和 HTTP 两种同名配置。迁移不需要重新安装另一套 MCP；只是把 Codex 的连接方式由本地 stdio 子进程改成常驻 HTTP Sidecar。
+不要同时保留 stdio 和 HTTP 两种同名配置。迁移不需要重新安装另一套 MCP；只是把 Codex 的连接方式由本地 stdio 子进程改成常驻 HTTP Sidecar。`enabled_tools` 把主监督限制在五个编排工具内，`default_tools_approval_mode = "approve"` 只预批准这些工具，避免无人值守任务为每次派发和等待启动一次 Auto-review。
 
 修改前为 `config.toml` 创建带时间戳的本机备份，但不得提交备份。
 

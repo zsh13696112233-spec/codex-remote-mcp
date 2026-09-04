@@ -119,7 +119,11 @@ Codex app-server 使用 Streamable HTTP MCP：
 [mcp_servers.codex_orchestrator]
 url = "http://127.0.0.1:8082/mcp"
 required = true
+enabled_tools = ["dispatch_node", "wait_node", "node_status", "cancel_node", "workflow_status"]
+default_tools_approval_mode = "approve"
 ```
+
+仅预批准上述主监督编排工具，可以避免 `dispatch_node` 和 `wait_node` 逐次进入 Auto-review。主监督仍使用只读沙箱，业务步骤的 `read_only`、`workspace_write` 和 `auto_review` 权限语义不变。
 
 Sidecar 启动时先确认 `8082` 已监听，再向中央登记上线，之后每 5 秒心跳。中央 `/internal/v1` 提供心跳、工作流/步骤上下文、原子准备派发、步骤状态同步和最多 64 项的事件批量上报。Bearer Token 唯一映射到一个启用的 `remote_sidecar` 主监督；所有写操作还必须携带 `X-Workflow-Lease`。认证失败、越权、未找到和租约冲突分别返回 `401`、`403`、`404`、`409`。事件使用工作流内幂等键，网络重试不会重复写入。
 

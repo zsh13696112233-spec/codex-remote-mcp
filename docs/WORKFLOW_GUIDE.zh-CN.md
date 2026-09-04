@@ -559,6 +559,8 @@ args = [
   "python", "<PROJECT_ROOT>\\services\\python-workflow\\src\\codex_orchestrator_mcp.py"
 ]
 required = true
+enabled_tools = ["dispatch_node", "wait_node", "node_status", "cancel_node", "workflow_status"]
+default_tools_approval_mode = "approve"
 
 [mcp_servers.codex_orchestrator.env]
 CODEX_AGENTS_FILE = "<PROJECT_ROOT>\\config\\agents.json"
@@ -569,19 +571,18 @@ CODEX_WORKFLOW_DB = "<PROJECT_ROOT>\\workflows.db"
 
 ### 主监督 MCP 审批策略
 
-MCP 工具调用不能在 `approvalPolicy = "never"` 的主监督 turn 中直接运行，
-否则会出现 `MCP tool call requires approval, but approval policy is never`。
-
-当前网关只对主监督任务发送：
+当前网关对主监督任务发送：
 
 ```text
 approvalPolicy = on-request
 approvalsReviewer = auto_review
 ```
 
-Codex 会逐次自动审核主监督发起的 MCP 调度调用；普通节点仍使用 `never`。
-这比在 `config.toml` 中把整个 Orchestrator MCP 永久设成无条件批准更安全，
-也适合无人值守的 Java/Python 工作流。
+主监督 app-server 的 `config.toml` 必须同时使用上面的 `enabled_tools` 精确允许列表和
+`default_tools_approval_mode = "approve"`。这样仅五个已授权的编排工具不再逐次进入
+Auto-review；其他 MCP 工具不会暴露给主监督。不要只把主监督改为
+`approvalPolicy = "never"`：未预批准的 MCP 工具在该策略下会直接失败。普通业务节点
+仍按 `read_only`、`workspace_write` 或 `auto_review` 档位运行，不受这里影响。
 
 最重要的要求是：
 
@@ -701,7 +702,7 @@ uv run --project .\services\python-workflow `
 - 重复派发的幂等行为。
 - 节点 MCP 派发新 thread。
 - 节点状态和事件写入 SQLite。
-- 主监督的作用域审批策略会同时传给 thread/start 和 turn/start。
+- 主监督的作用域审批策略会同时传给 thread/start 和 turn/start；主监督 app-server 通过 MCP 工具允许列表预批准五个编排工具。
 
 ## 十六、最简记忆版本
 

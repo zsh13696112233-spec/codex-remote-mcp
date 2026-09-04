@@ -94,13 +94,29 @@
 
 Python（从仓库根目录）：
 
+当前 Windows 工作区已经在仓库根目录准备好 `.venv`（Python 3.12.10 及项目依赖），但没有可从 `PATH` 调用的全局 `uv`，虚拟环境中也不包含 `uv.exe`。在此工作区运行 Python 命令时，不要先尝试 `uv` 或重复排查环境；优先直接使用根目录虚拟环境中的解释器：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover `
+  -s services/python-workflow/tests `
+  -t services/python-workflow -v
+```
+
+只有根目录 `.venv` 不存在或不可用时，才回退到以下跨平台 `uv` 命令；不要仅为了运行测试擅自安装 `uv` 或重建虚拟环境：
+
 ```sh
 uv run --project services/python-workflow \
   python -m unittest discover -s services/python-workflow/tests \
   -t services/python-workflow -v
 ```
 
-长任务集成验证（需要可用的本地环境时）：
+长任务集成验证（需要可用的本地环境时）同样优先使用根目录虚拟环境：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
+```
+
+根目录 `.venv` 不可用时再回退到：
 
 ```sh
 uv run --project services/python-workflow \

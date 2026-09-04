@@ -135,7 +135,11 @@ CODEX_WORKFLOW_DB = "<PROJECT_ROOT>\\workflows.db"
 [mcp_servers.codex_orchestrator]
 url = "http://127.0.0.1:8082/mcp"
 required = true
+enabled_tools = ["dispatch_node", "wait_node", "node_status", "cancel_node", "workflow_status"]
+default_tools_approval_mode = "approve"
 ```
+
+这里仅预批准主监督完成编排所需的五个工具，避免每次派发和等待都触发 Auto-review；不要把未使用的 MCP 工具加入允许列表。主监督本身仍保持只读沙箱，业务步骤继续使用各自的权限档位。
 
 Sidecar 默认且只允许监听回环地址。示例启动命令如下；`SUPERVISOR_B_SIDECAR_TOKEN` 的值必须与中央配置解析出的机器令牌一致：
 
