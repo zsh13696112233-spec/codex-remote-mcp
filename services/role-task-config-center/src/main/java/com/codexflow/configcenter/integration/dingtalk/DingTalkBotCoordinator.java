@@ -251,15 +251,19 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           "duplicate".equals(reservation.outcome())
               ? "这条启动消息已经处理，任务编号：" + workflowId
               : "当前绑定已有任务运行，任务编号：" + workflowId;
+      Optional<DingTalkModels.Binding> existingBinding =
+          store.binding(workflowId).filter(binding -> matches(binding, message));
       store.enqueueTargetText(
           "start-result:" + message.messageId(),
-          workflowId,
+          existingBinding.isPresent() ? workflowId : null,
           message.conversationId(),
           incomingTargetType(message),
           incomingTargetId(message),
           message.messageId(),
           text);
-      enqueueCurrentProgress(workflowId, "已返回当前任务进度。", "start-current:" + message.messageId());
+      if (existingBinding.isPresent()) {
+        enqueueCurrentProgress(workflowId, "已返回当前任务进度。", "start-current:" + message.messageId());
+      }
       return;
     }
 

@@ -143,7 +143,20 @@ class ConfigCenterApplicationTest {
     String script = readClasspath("static/app.js");
 
     assertThat(index).contains("data-page=\"dingtalk-targets\">钉钉通知对象");
-    assertThat(index).contains("name=\"dingtalkTargetId\"");
+    assertThat(index)
+        .contains("name=\"dingtalkTargetId\"")
+        .contains("name=\"dingtalkTargetType\" value=\"NONE\"")
+        .contains("name=\"dingtalkTargetType\" value=\"GROUP\"")
+        .contains("name=\"dingtalkTargetType\" value=\"PERSON\"")
+        .contains("群聊和人员分开选择")
+        .contains("styles.css?v=20260904-dialog-cancel")
+        .contains("app.js?v=20260904-dialog-cancel")
+        .contains("任务目标")
+        .contains("发送给所有步骤")
+        .contains("type=\"hidden\" name=\"additionalNotes\"");
+    assertThat(index)
+        .containsPattern(
+            "(?s)<button type=\"button\" data-dialog-close>取消</button>.*<button type=\"button\" data-dialog-close>关闭</button>");
     assertThat(index)
         .contains("name=\"scheduleEnabled\"")
         .contains("name=\"scheduleMode\"")
@@ -157,6 +170,11 @@ class ConfigCenterApplicationTest {
         .contains("data-person-search")
         .contains("finally{if(document.body.contains(sync))sync.disabled=false}")
         .contains("人员启用状态已自动保存")
+        .contains("syncTaskDingTalkTargetFields")
+        .contains("t.targetType===type")
+        .contains("taskRequirements")
+        .contains("f.additionalNotes.value=\"\"")
+        .contains("button.closest(\"dialog\")?.close()")
         .contains("dingtalkTargetId:f.dingtalkTargetId.value||null")
         .contains("scheduleEnabled:f.scheduleEnabled.checked")
         .contains("scheduleMode:f.scheduleMode.value")

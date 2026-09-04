@@ -150,6 +150,39 @@ class DingTalkStoreIntegrationTest {
   }
 
   @Test
+  void webRunWithoutProactiveNotificationCanQueueUnboundBusyReply() {
+    String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
+    TaskLaunchStore.LaunchReservation web = taskLaunches.reserveLatest(taskId);
+    DingTalkModels.Message message = message("busy-after-web");
+
+    DingTalkModels.StartReservation busy = store.reserveStart(clientId, message);
+
+    assertThat(busy.outcome()).isEqualTo("busy");
+    assertThat(busy.workflowId()).isEqualTo(web.prepared().workflowId());
+    assertThat(store.binding(busy.workflowId())).isEmpty();
+
+    store.enqueueTargetText(
+        "busy-after-web",
+        null,
+        message.conversationId(),
+        "GROUP",
+        message.conversationId(),
+        message.messageId(),
+        "当前绑定已有任务运行，任务编号：" + busy.workflowId());
+
+    DingTalkModels.Outbox outgoing =
+        store.claimDue().stream()
+            .filter(item -> message.messageId().equals(item.replyToMessageId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(outgoing.workflowId()).isNull();
+    assertThat(outgoing.payload().path("text").asText()).contains(busy.workflowId());
+    store.markOutboxSent(outgoing.id(), "busy-after-web-reply");
+    taskLaunches.release(web.prepared().workflowId());
+  }
+
+  @Test
   void oneTargetCannotBindTwoTaskDefinitions() {
     String clientId = "app-" + UUID.randomUUID();
     String sopId = createSop();

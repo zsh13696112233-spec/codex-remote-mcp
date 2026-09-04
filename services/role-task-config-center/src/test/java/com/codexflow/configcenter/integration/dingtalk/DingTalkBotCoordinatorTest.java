@@ -107,6 +107,28 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void busyWebRunWithoutDingTalkBindingRepliesWithoutForeignKeyReference() {
+    DingTalkModels.Message message = message("busy-web-run", "运行", true, null);
+    when(store.conversation("cli_test", message)).thenReturn(Optional.empty());
+    when(store.reserveStart("cli_test", message))
+        .thenReturn(new DingTalkModels.StartReservation("busy", WORKFLOW_1, null));
+    when(store.binding(WORKFLOW_1)).thenReturn(Optional.empty());
+
+    coordinator.safelyHandleMessage(message);
+
+    verify(store)
+        .enqueueTargetText(
+            "start-result:busy-web-run",
+            null,
+            "chat-1",
+            "GROUP",
+            "chat-1",
+            "busy-web-run",
+            "当前绑定已有任务运行，任务编号：" + WORKFLOW_1);
+    verify(store, never()).enqueueCard(any(), any(), any());
+  }
+
+  @Test
   void blankTemplateStartsWithMarkdownProgressAndConnectsNormally() {
     properties.setCardTemplateId("");
     ObjectNode payload = objectMapper.createObjectNode().put("workflowId", WORKFLOW_1);
