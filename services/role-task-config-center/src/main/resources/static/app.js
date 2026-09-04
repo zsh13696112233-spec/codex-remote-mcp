@@ -4,7 +4,7 @@ const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 const uid=()=>`node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
 const DEFAULT_EXPECTED_OUTPUT="完成本步骤，并返回清晰、完整且可验证的结果。";
 const MODELS=["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"];
-const PERMISSION_LABELS={read_only:"只读",workspace_write:"工作区写入",auto_review:"自动审核"};
+const PERMISSION_LABELS={read_only:"只读",workspace_write:"工作区写入",auto_review:"自动审核",full_access:"完全访问"};
 
 async function api(path,options={}){
   const r=await fetch(path,{headers:{"Content-Type":"application/json"},...options});
@@ -341,7 +341,7 @@ function nodeInspectorHtml(s){
     <label>Skill 标签<input data-node-field="skills" value="${esc(s.skills.join(", "))}" placeholder="多个标签用逗号分隔"></label>
     <label>MCP 标签<input data-node-field="mcps" value="${esc(s.mcps.join(", "))}" placeholder="多个标签用逗号分隔"></label>
     <label>权限档位<select data-node-field="permissionProfile">${permissionOptions(s)}</select></label>
-    <p class="inspector-hint">只读：业务工作区只读且不请求审批；工作区写入：允许修改工作区但不请求审批；自动审核：允许修改工作区，越界操作交由 Auto-review 判断。文件交接只开放托管输出目录并关闭网络。执行机关闭写入时只能选择只读。Skill 与 MCP 仍仅作为配置标签。</p>`;
+    <p class="inspector-hint">只读：业务工作区只读且不请求审批；工作区写入：允许修改工作区但不请求审批；自动审核：允许修改工作区，越界操作交由 Auto-review 判断；完全访问：不受文件系统和网络沙箱限制且不会请求审批，仅在执行机显式授权时可选。完全访问会取消文件交接的目录和网络隔离。执行机关闭写入时只能选择只读。Skill 与 MCP 仍仅作为配置标签。</p>`;
 }
 
 function addRoleNode(roleId,index){

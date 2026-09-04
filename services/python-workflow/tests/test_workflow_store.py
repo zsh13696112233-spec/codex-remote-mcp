@@ -188,6 +188,16 @@ class WorkflowStoreTests(unittest.TestCase):
         )
         self.assertTrue(normalized["nodes"][0]["write"])
 
+        full_access = serial_workflow()
+        full_access["nodes"][0].update(
+            permissionProfile="full_access", write=True
+        )
+        normalized_full_access = WorkflowStore.normalize_spec(full_access)
+        self.assertEqual(
+            normalized_full_access["nodes"][0]["permissionProfile"], "full_access"
+        )
+        self.assertTrue(normalized_full_access["nodes"][0]["write"])
+
     def test_supervisor_leases_enforce_fifo_and_allow_other_supervisors(self) -> None:
         first = serial_workflow()
         first["workflowId"] = "fifo-a"

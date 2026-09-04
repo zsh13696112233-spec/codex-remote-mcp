@@ -285,9 +285,9 @@ class ConfigCenterApplicationTest {
     String roleId =
         jdbc.queryForObject(
             "select id from codex_sop_roles order by created_at limit 1", String.class);
-    SopStepRequest autoReview =
+    SopStepRequest fullAccess =
         new SopStepRequest(
-            "自动审核步骤",
+            "完全访问步骤",
             roleId,
             "完成权限测试",
             null,
@@ -295,14 +295,14 @@ class ConfigCenterApplicationTest {
             "local",
             null,
             true,
-            "auto_review",
+            "full_access",
             null,
             1800,
             Set.of(),
             Set.of());
     ObjectNode sop =
         service.createSop(
-            new SopSaveRequest("权限档位测试", null, null, null, true, List.of(autoReview)));
+            new SopSaveRequest("权限档位测试", null, null, null, true, List.of(fullAccess)));
     ObjectNode task =
         service.createTask(
             new TaskDefinitionSaveRequest(
@@ -311,13 +311,13 @@ class ConfigCenterApplicationTest {
     PreparedRun retried = runStore.prepareRetry(run.workflowId());
 
     assertThat(sop.path("steps").get(0).path("permissionProfile").asText())
-        .isEqualTo("auto_review");
+        .isEqualTo("full_access");
     assertThat(sop.path("steps").get(0).path("writeEnabled").asBoolean()).isTrue();
     assertThat(run.payload().path("nodes").get(0).path("permissionProfile").asText())
-        .isEqualTo("auto_review");
+        .isEqualTo("full_access");
     assertThat(run.payload().path("nodes").get(0).path("write").asBoolean()).isTrue();
     assertThat(retried.payload().path("nodes").get(0).path("permissionProfile").asText())
-        .isEqualTo("auto_review");
+        .isEqualTo("full_access");
 
     SopStepRequest contradictory =
         new SopStepRequest(

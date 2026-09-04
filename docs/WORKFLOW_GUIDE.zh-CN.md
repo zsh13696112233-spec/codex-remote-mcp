@@ -201,7 +201,7 @@ POST http://192.168.1.100:8080/workflows
 | `nodes[].dependsOn` | 本节点依赖的节点 ID 数组；必须全部 `completed` 才允许启动 |
 | `nodes[].timeoutSec` | 节点总超时，范围 10–7200 秒 |
 | `nodes[].write` | 是否需要写权限；执行机配置也必须允许写入 |
-| `nodes[].permissionProfile` | `read_only`、`workspace_write` 或 `auto_review`；旧请求缺省时由 `write` 派生 |
+| `nodes[].permissionProfile` | `read_only`、`workspace_write`、`auto_review` 或 `full_access`；旧请求缺省时由 `write` 派生 |
 | `nodes[].cwd` | 可选的远程绝对工作目录；执行机必须允许覆盖 cwd |
 | `nodes[].model` | 可选的模型覆盖值 |
 
@@ -540,7 +540,8 @@ Java 可以每隔一到数秒轮询一次。需要实时界面时，再使用 SS
 - 文件流水线的本机执行机必须配置绝对路径 `artifact_root`；该配置只授权编排器在此目录内暂存工作流文件。
 - 当前编排器直接用该路径读写文件，不通过 app-server 传输文件内容；远程文件流水线暂不支持。
 - `allow_write` 仍只决定 Agent 是否能写业务工作区，不代替 `artifact_root` 授权。
-- `allow_write=false` 时只允许 `read_only`；为 `true` 时三档均可用。`read_only = read-only + never`，`workspace_write = workspace-write + never`，`auto_review = workspace-write + on-request + auto_review`。
+- `allow_write=false` 时只允许 `read_only`；为 `true` 时允许 `read_only`、`workspace_write` 和 `auto_review`。只有再显式配置 `allow_full_access=true` 时才增加 `full_access`。`allow_full_access=true` 但 `allow_write=false` 的执行机配置会被拒绝。
+- 权限映射为：`read_only = read-only + never`，`workspace_write = workspace-write + never`，`auto_review = workspace-write + on-request + auto_review`，`full_access = danger-full-access + never`。完全访问不受文件系统和网络沙箱限制，也不会请求审批；文件交接仍只从托管输出目录收集交付文件，但该目录不再是节点的安全边界。
 - 节点启动前调用 `configRequirements/read` 检查执行机管理策略；明确禁止所需审批策略或沙箱时直接失败，旧 app-server 不支持该方法时兼容继续。
 - 当前项目实际配置中还需要确认是否存在名为 `local` 的执行机。
 - token 不要直接写进 JSON。可以通过 `token_env` 引用环境变量，或通过 `token_file` 引用网关所在机器上的绝对文件路径；两者只能配置一个。令牌文件使用 UTF-8 编码，只包含一行令牌且不能超过 8 KiB，并应使用系统文件权限限制访问。
@@ -582,7 +583,7 @@ approvalsReviewer = auto_review
 `default_tools_approval_mode = "approve"`。这样仅五个已授权的编排工具不再逐次进入
 Auto-review；其他 MCP 工具不会暴露给主监督。不要只把主监督改为
 `approvalPolicy = "never"`：未预批准的 MCP 工具在该策略下会直接失败。普通业务节点
-仍按 `read_only`、`workspace_write` 或 `auto_review` 档位运行，不受这里影响。
+仍按 `read_only`、`workspace_write`、`auto_review` 或 `full_access` 档位运行，不受这里影响。
 
 最重要的要求是：
 

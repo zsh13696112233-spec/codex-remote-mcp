@@ -94,7 +94,7 @@ SOP 还可选择全自动或半自动流转。全自动保持步骤成功后立�
 Copy-Item .\config\agents.example.json .\config\agents.json
 ```
 
-编辑 `config/agents.json`，为每个执行机配置 Codex app-server WebSocket 地址、默认工作目录、`enabled`、`capabilities` 和权限上限。能力只允许 `supervisor`、`executor`；具备主监督能力时 `capacity` 固定为 `1`。旧配置中未声明能力的 `local` 同时具备两种能力，其他执行机默认为 `executor`。业务步骤支持 `read_only`、`workspace_write`、`auto_review` 三档；分别对应只读且不审批、工作区写入且不审批、工作区写入并由 Auto-review 审核越界请求。访问令牌通过 `token_env` 引用环境变量，或通过 `token_file` 引用网关本机的绝对文件路径，两者只能配置一个；不要直接把令牌写入 JSON。
+编辑 `config/agents.json`，为每个执行机配置 Codex app-server WebSocket 地址、默认工作目录、`enabled`、`capabilities` 和权限上限。能力只允许 `supervisor`、`executor`；具备主监督能力时 `capacity` 固定为 `1`。旧配置中未声明能力的 `local` 同时具备两种能力，其他执行机默认为 `executor`。业务步骤支持 `read_only`、`workspace_write`、`auto_review`、`full_access` 四档；前三档分别对应只读且不审批、工作区写入且不审批、工作区写入并由 Auto-review 审核越界请求。`full_access` 对应无沙箱且不审批，只有执行机同时配置 `allow_write: true` 和 `allow_full_access: true` 时才可选。访问令牌通过 `token_env` 引用环境变量，或通过 `token_file` 引用网关本机的绝对文件路径，两者只能配置一个；不要直接把令牌写入 JSON。
 
 远程主监督在中央配置中增加 `"orchestration_mode": "remote_sidecar"`，并使用 `sidecar_token_env` 或 `sidecar_token_file` 配置独立机器令牌。该令牌只认证 Sidecar 到中央 `8080`，不能与中央网关连接主监督 app-server 的 `token_env`/`token_file` 混用。完整示例见 `config/agents.example.json`；远程机本地执行机清单见 `config/agents.remote-sidecar.example.json`。
 

@@ -267,6 +267,7 @@ java -jar .\target\role-task-config-center-0.1.0.jar
       "orchestration_mode": "remote_sidecar",
       "sidecar_token_file": "C:\\codex-secrets\\supervisor-a-sidecar.token",
       "allow_write": false,
+      "allow_full_access": false,
       "allow_cwd_override": false
     },
     "worker-a": {
@@ -276,6 +277,7 @@ java -jar .\target\role-task-config-center-0.1.0.jar
       "capabilities": ["executor"],
       "token_file": "C:\\codex-secrets\\worker-a-app-server.token",
       "allow_write": true,
+      "allow_full_access": false,
       "allow_cwd_override": true
     },
     "hybrid-a": {
@@ -288,6 +290,7 @@ java -jar .\target\role-task-config-center-0.1.0.jar
       "orchestration_mode": "remote_sidecar",
       "sidecar_token_file": "C:\\codex-secrets\\hybrid-a-sidecar.token",
       "allow_write": true,
+      "allow_full_access": false,
       "allow_cwd_override": true
     }
   }
@@ -306,6 +309,7 @@ java -jar .\target\role-task-config-center-0.1.0.jar
 - `sidecar_token_file` 是中央网关机器上可读的绝对路径，不是远程主监督机上的路径。
 - 使用环境变量时，变量必须存在于读取该配置的进程环境中。中央 `agents.json` 的 `token_env` 和 `sidecar_token_env` 由中央网关进程读取。
 - 不允许在 JSON 中直接写明文令牌。
+- `allow_write` 控制工作区写入上限；只有同时显式设置 `allow_full_access: true` 才向该执行机开放 `full_access`。完全访问没有文件系统和网络沙箱，默认必须保持关闭。
 
 ### 中央机兼任本地主监督或执行机（可选）
 
@@ -321,6 +325,7 @@ java -jar .\target\role-task-config-center-0.1.0.jar
     "capacity": 1,
     "orchestration_mode": "local_db",
     "allow_write": true,
+    "allow_full_access": false,
     "allow_cwd_override": true
   }
 }
@@ -511,6 +516,7 @@ Workflow Sidecar 8082：给主监督提供工作流工具，并派发业务步�
     "orchestration_mode": "remote_sidecar",
     "sidecar_token_file": "C:\\codex-secrets\\hybrid-a-sidecar.token",
     "allow_write": true,
+    "allow_full_access": false,
     "allow_cwd_override": true
   }
 }
@@ -528,6 +534,7 @@ Workflow Sidecar 8082：给主监督提供工作流工具，并派发业务步�
       "capabilities": ["supervisor", "executor"],
       "capacity": 1,
       "allow_write": true,
+      "allow_full_access": false,
       "allow_cwd_override": true
     },
     "worker-a": {
@@ -537,6 +544,7 @@ Workflow Sidecar 8082：给主监督提供工作流工具，并派发业务步�
       "capabilities": ["executor"],
       "token_file": "C:\\codex-secrets\\worker-a-app-server.token",
       "allow_write": true,
+      "allow_full_access": false,
       "allow_cwd_override": true
     }
   }

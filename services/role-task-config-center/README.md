@@ -44,7 +44,7 @@ Java 根包为 `com.codexflow.configcenter`。代码按 Web 接口、应用编�
 
 第一版失败策略固定为 `stop`。Skill 和 MCP 仅作为配置标签保存和展示，不影响真实执行权限。
 
-新节点默认使用 `read_only`。权限档位固定为 `read_only`（只读、不审批）、`workspace_write`（工作区写入、不审批）和 `auto_review`（工作区写入、越界请求交给 Auto-review）；不提供完全访问和人工审批。页面从 `/api/agents` 的 `permissionProfiles` 限制选项；旧网关未返回该字段时仅保留原有只读/写入两种能力。
+新节点默认使用 `read_only`。权限档位为 `read_only`（只读、不审批）、`workspace_write`（工作区写入、不审批）、`auto_review`（工作区写入、越界请求交给 Auto-review）和 `full_access`（完全访问、不审批）。`full_access` 只有在执行机同时配置 `allow_write: true` 与 `allow_full_access: true` 时才显示；它不受文件系统和网络沙箱限制。页面从 `/api/agents` 的 `permissionProfiles` 限制选项；旧网关未返回该字段时仅保留原有只读/写入两种能力。
 
 新建 SOP 的主监督默认填写 `local`，但可以修改。配置中心保存时只校验主监督 ID 非空且不超过 128 个字符，不访问网关校验在线、启停或能力；真正运行时由 Python 网关权威校验。不同步骤可以保存不同执行机和不同工作目录，目录留空继续表示继承执行机默认目录。使用最新配置运行和按历史快照重试都会冻结并复用对应的 `supervisorAgentId`。
 

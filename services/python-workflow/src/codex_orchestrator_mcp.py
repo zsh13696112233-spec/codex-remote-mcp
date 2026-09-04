@@ -44,23 +44,36 @@ FINAL_ANSWER_COMPLETION_GRACE_SEC = 5.0
 TURN_RECONCILIATION_FAILURE_LIMIT = 3
 INTERRUPT_TIMEOUT_SEC = 10.0
 LOGGER = logging.getLogger(__name__)
-PERMISSION_PROFILES = ("read_only", "workspace_write", "auto_review")
+FULL_ACCESS_PERMISSION_PROFILE = "full_access"
+PERMISSION_PROFILES = (
+    "read_only",
+    "workspace_write",
+    "auto_review",
+    FULL_ACCESS_PERMISSION_PROFILE,
+)
 AGENT_CAPABILITIES = ("supervisor", "executor")
 MAX_TOKEN_FILE_BYTES = 8 * 1024
 
 
 def permission_settings(
     profile: str,
-) -> tuple[bool, Literal["never", "on-request"], Literal["auto_review"] | None]:
+) -> tuple[
+    bool,
+    Literal["read-only", "workspace-write", "danger-full-access"],
+    Literal["never", "on-request"],
+    Literal["auto_review"] | None,
+]:
     """把业务权限档位集中映射到 App Server 的写入、审批和审核者参数。"""
     if profile == "read_only":
-        return False, "never", None
+        return False, "read-only", "never", None
     if profile == "workspace_write":
-        return True, "never", None
+        return True, "workspace-write", "never", None
     if profile == "auto_review":
-        return True, "on-request", "auto_review"
+        return True, "workspace-write", "on-request", "auto_review"
+    if profile == FULL_ACCESS_PERMISSION_PROFILE:
+        return True, "danger-full-access", "never", None
     raise ValueError(
-        "permission_profile 只能是 read_only、workspace_write 或 auto_review。"
+        "permission_profile 只能是 read_only、workspace_write、auto_review 或 full_access。"
     )
 
 
@@ -99,6 +112,7 @@ class AgentConfig:
     sidecar_token_env: str | None = None
     sidecar_token_file: str | None = None
     allow_write: bool = False
+    allow_full_access: bool = False
     allow_cwd_override: bool = False
     model: str | None = None
     artifact_root: str | None = None
@@ -220,6 +234,15 @@ class AgentConfig:
             )
             artifact_root = path_module.normpath(artifact_root)
 
+        allow_write = bool(value.get("allow_write", False))
+        allow_full_access = value.get("allow_full_access", False)
+        if not isinstance(allow_full_access, bool):
+            raise ValueError(f"{agent_id}.allow_full_access 必须是布尔值。")
+        if allow_full_access and not allow_write:
+            raise ValueError(
+                f"{agent_id}.allow_full_access=true 时必须同时启用 allow_write。"
+            )
+
         return cls(
             agent_id=agent_id,
             url=url,
@@ -236,7 +259,8 @@ class AgentConfig:
             sidecar_token_file=(
                 str(sidecar_token_file) if sidecar_token_file else None
             ),
-            allow_write=bool(value.get("allow_write", False)),
+            allow_write=allow_write,
+            allow_full_access=allow_full_access,
             allow_cwd_override=bool(value.get("allow_cwd_override", False)),
             model=str(value["model"]) if value.get("model") else None,
             artifact_root=artifact_root,
@@ -260,7 +284,13 @@ class AgentConfig:
             ),
             "allow_write": self.allow_write,
             "permission_profiles": list(
-                PERMISSION_PROFILES if self.allow_write else ("read_only",)
+                (
+                    PERMISSION_PROFILES
+                    if self.allow_full_access
+                    else PERMISSION_PROFILES[:-1]
+                )
+                if self.allow_write
+                else ("read_only",)
             ),
             "allow_cwd_override": self.allow_cwd_override,
             "model": self.model,
@@ -280,6 +310,9 @@ class Job:
     model: str | None
     timeout_sec: int
     output_schema: dict[str, Any] | None = None
+    sandbox_mode: Literal[
+        "read-only", "workspace-write", "danger-full-access"
+    ] = "read-only"
     approval_policy: Literal["never", "on-request", "untrusted"] = "never"
     approvals_reviewer: Literal["user", "auto_review"] | None = None
     status: Literal[
@@ -902,11 +935,17 @@ class Orchestrator:
         if not agent.enabled:
             raise PermissionError(f"执行机 {agent_id} 已停用。")
 
+        sandbox_mode: Literal[
+            "read-only", "workspace-write", "danger-full-access"
+        ] = ("workspace-write" if write else "read-only")
         if permission_profile is not None:
             normalized_profile = permission_profile.strip().lower()
-            profile_write, approval_policy, approvals_reviewer = permission_settings(
-                normalized_profile
-            )
+            (
+                profile_write,
+                sandbox_mode,
+                approval_policy,
+                approvals_reviewer,
+            ) = permission_settings(normalized_profile)
             if write != profile_write:
                 raise ValueError("permission_profile 与 write 字段矛盾。")
             permission_profile = normalized_profile
@@ -920,6 +959,11 @@ class Orchestrator:
             selected_cwd = cwd
         if write and not agent.allow_write:
             raise PermissionError(f"{agent_id} 未启用写权限。")
+        if (
+            permission_profile == FULL_ACCESS_PERMISSION_PROFILE
+            and not agent.allow_full_access
+        ):
+            raise PermissionError(f"{agent_id} 未启用完全访问权限。")
 
         job_id = uuid.uuid4().hex
         managed_attempt_dir = None
@@ -994,6 +1038,7 @@ class Orchestrator:
             model=model or agent.model,
             timeout_sec=timeout_sec,
             output_schema=output_schema,
+            sandbox_mode=sandbox_mode,
             approval_policy=approval_policy,
             approvals_reviewer=approvals_reviewer,
             event_callback=event_callback,
@@ -1176,7 +1221,7 @@ class Orchestrator:
                         thread_params: dict[str, Any] = {
                             "cwd": job.cwd,
                             "approvalPolicy": job.approval_policy,
-                            "sandbox": "workspace-write" if job.write else "read-only",
+                            "sandbox": job.sandbox_mode,
                         }
                         if job.approvals_reviewer:
                             thread_params["approvalsReviewer"] = job.approvals_reviewer
@@ -1200,14 +1245,19 @@ class Orchestrator:
                             "approvalPolicy": job.approval_policy,
                         }
                         if job.artifact_contract and job.managed_output_dir:
-                            writable_roots = [job.managed_output_dir]
-                            if job.write:
-                                writable_roots.insert(0, job.cwd)
-                            turn_params["sandboxPolicy"] = {
-                                "type": "workspaceWrite",
-                                "writableRoots": writable_roots,
-                                "networkAccess": False,
-                            }
+                            if job.sandbox_mode == "danger-full-access":
+                                turn_params["sandboxPolicy"] = {
+                                    "type": "dangerFullAccess"
+                                }
+                            else:
+                                writable_roots = [job.managed_output_dir]
+                                if job.write:
+                                    writable_roots.insert(0, job.cwd)
+                                turn_params["sandboxPolicy"] = {
+                                    "type": "workspaceWrite",
+                                    "writableRoots": writable_roots,
+                                    "networkAccess": False,
+                                }
                         if job.approvals_reviewer:
                             turn_params["approvalsReviewer"] = job.approvals_reviewer
                         if job.output_schema is not None:
@@ -1423,11 +1473,15 @@ class Orchestrator:
             )
 
         allowed_sandboxes = normalized(requirements.get("allowedSandboxModes"))
-        required_sandbox = "workspacewrite" if job.write else "readonly"
+        required_sandbox = "".join(
+            character
+            for character in job.sandbox_mode.lower()
+            if character.isalnum()
+        )
         if allowed_sandboxes is not None and required_sandbox not in allowed_sandboxes:
             raise PermissionError(
                 f"执行机管理策略不允许权限档位 {job.permission_profile or '当前任务'} "
-                f"使用沙箱 {'workspace-write' if job.write else 'read-only'}。"
+                f"使用沙箱 {job.sandbox_mode}。"
             )
 
     @staticmethod

@@ -77,11 +77,45 @@ class RemotePathTests(unittest.TestCase):
                 "allow_write": True,
             },
         )
+        full_access = AgentConfig.from_dict(
+            "remote",
+            {
+                "url": "ws://127.0.0.1:4500",
+                "cwd": "/srv/work",
+                "allow_write": True,
+                "allow_full_access": True,
+            },
+        )
         self.assertEqual(read_only.public_dict()["permission_profiles"], ["read_only"])
         self.assertEqual(
             writable.public_dict()["permission_profiles"],
             ["read_only", "workspace_write", "auto_review"],
         )
+        self.assertEqual(
+            full_access.public_dict()["permission_profiles"],
+            ["read_only", "workspace_write", "auto_review", "full_access"],
+        )
+
+    def test_full_access_requires_explicit_write_cap(self) -> None:
+        with self.assertRaisesRegex(ValueError, "必须同时启用 allow_write"):
+            AgentConfig.from_dict(
+                "remote",
+                {
+                    "url": "ws://127.0.0.1:4500",
+                    "cwd": "/srv/work",
+                    "allow_full_access": True,
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "allow_full_access 必须是布尔值"):
+            AgentConfig.from_dict(
+                "remote",
+                {
+                    "url": "ws://127.0.0.1:4500",
+                    "cwd": "/srv/work",
+                    "allow_write": True,
+                    "allow_full_access": "true",
+                },
+            )
 
     def test_agent_capability_defaults_and_fixed_supervisor_capacity(self) -> None:
         local = AgentConfig.from_dict(
@@ -207,12 +241,14 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         token_file: str | None = None,
         artifact_root: str | None = None,
         allow_write: bool = False,
+        allow_full_access: bool = False,
     ) -> Path:
         agent: dict[str, object] = {
             "url": url,
             "cwd": cwd,
             "allow_cwd_override": True,
             "allow_write": allow_write,
+            "allow_full_access": allow_full_access,
         }
         if token_env:
             agent["token_env"] = token_env
@@ -590,6 +626,40 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(turn["sandboxPolicy"]["networkAccess"])
                 self.assertEqual(turn["approvalsReviewer"], "auto_review")
 
+    async def test_full_access_file_handoff_keeps_full_access_turn_policy(self) -> None:
+        async with MockAppServer() as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(
+                        directory,
+                        server.url,
+                        artifact_root=str(Path(directory, "artifacts")),
+                        allow_write=True,
+                        allow_full_access=True,
+                    )
+                )
+                job = await self._dispatch(
+                    orchestrator,
+                    write=True,
+                    permission_profile="full_access",
+                    artifact_handoff={
+                        "workflowId": "workflow-full-access",
+                        "nodeId": "step-1",
+                        "stepNumber": 1,
+                        "steps": [],
+                    },
+                )
+                await orchestrator.wait(job.job_id, 2)
+
+                turn = next(
+                    request
+                    for request in server.requests
+                    if request.get("method") == "turn/start"
+                )["params"]
+                self.assertEqual(
+                    turn["sandboxPolicy"], {"type": "dangerFullAccess"}
+                )
+
     async def test_multiple_output_files_fail_validation(self) -> None:
         async with MockAppServer() as server:
             with tempfile.TemporaryDirectory() as directory:
@@ -824,6 +894,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
             ("read_only", False, "read-only", "never", None),
             ("workspace_write", True, "workspace-write", "never", None),
             ("auto_review", True, "workspace-write", "on-request", "auto_review"),
+            ("full_access", True, "danger-full-access", "never", None),
         )
         for profile, write, sandbox, approval, reviewer in cases:
             with self.subTest(profile=profile):
@@ -831,7 +902,10 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                     with tempfile.TemporaryDirectory() as directory:
                         orchestrator = Orchestrator(
                             self._write_config(
-                                directory, server.url, allow_write=True
+                                directory,
+                                server.url,
+                                allow_write=True,
+                                allow_full_access=profile == "full_access",
                             )
                         )
                         job = await self._dispatch(
@@ -873,6 +947,15 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                         write=False,
                         permission_profile="auto_review",
                     )
+                writable = Orchestrator(
+                    self._write_config(directory, server.url, allow_write=True)
+                )
+                with self.assertRaisesRegex(PermissionError, "未启用完全访问权限"):
+                    await self._dispatch(
+                        writable,
+                        write=True,
+                        permission_profile="full_access",
+                    )
 
     async def test_managed_config_requirements_can_reject_profile_before_thread(self) -> None:
         async with MockAppServer(
@@ -894,6 +977,35 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(final.status, "failed")
                 self.assertEqual(final.error_stage, "permission/check")
                 self.assertIn("执行机管理策略不允许", final.error or "")
+                self.assertFalse(
+                    any(request["method"] == "thread/start" for request in server.requests)
+                )
+
+    async def test_managed_config_requirements_can_reject_full_access_sandbox(self) -> None:
+        async with MockAppServer(
+            config_requirements={
+                "allowedApprovalPolicies": ["never"],
+                "allowedSandboxModes": ["readOnly", "workspaceWrite"],
+            }
+        ) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = Orchestrator(
+                    self._write_config(
+                        directory,
+                        server.url,
+                        allow_write=True,
+                        allow_full_access=True,
+                    )
+                )
+                job = await self._dispatch(
+                    orchestrator,
+                    write=True,
+                    permission_profile="full_access",
+                )
+                final = await orchestrator.wait(job.job_id, 1)
+                self.assertEqual(final.status, "failed")
+                self.assertEqual(final.error_stage, "permission/check")
+                self.assertIn("danger-full-access", final.error or "")
                 self.assertFalse(
                     any(request["method"] == "thread/start" for request in server.requests)
                 )

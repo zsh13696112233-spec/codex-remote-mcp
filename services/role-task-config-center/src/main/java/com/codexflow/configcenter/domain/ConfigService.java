@@ -28,7 +28,7 @@ public class ConfigService {
   private static final Set<String> ADVANCE_MODES = Set.of("automatic", "semi_automatic");
   private static final Set<String> HANDOFF_MODES = Set.of("legacy_text", "cumulative_files");
   private static final Set<String> PERMISSION_PROFILES =
-      Set.of("read_only", "workspace_write", "auto_review");
+      Set.of("read_only", "workspace_write", "auto_review", "full_access");
   private static final Set<String> SCHEDULE_MODES = Set.of("daily", "interval");
   private static final String DEFAULT_EXPECTED_OUTPUT = "完成本步骤，并返回清晰、完整且可验证的结果。";
 
@@ -286,7 +286,7 @@ public class ConfigService {
     }
     if (!PERMISSION_PROFILES.contains(step.permissionProfile)) {
       throw new IllegalArgumentException(
-          "permissionProfile 只能是 read_only、workspace_write 或 auto_review。");
+          "permissionProfile 只能是 read_only、workspace_write、auto_review 或 full_access。");
     }
     step.writeEnabled = !"read_only".equals(step.permissionProfile);
     if (body.writeEnabled() != null && body.writeEnabled() != step.writeEnabled) {

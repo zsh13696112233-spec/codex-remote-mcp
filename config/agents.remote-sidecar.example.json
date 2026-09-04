@@ -7,6 +7,7 @@
       "capabilities": ["supervisor", "executor"],
       "capacity": 1,
       "allow_write": true,
+      "allow_full_access": false,
       "allow_cwd_override": true
     },
     "shared-executor": {
@@ -16,6 +17,7 @@
       "capabilities": ["executor"],
       "token_env": "SHARED_EXECUTOR_APP_SERVER_TOKEN",
       "allow_write": true,
+      "allow_full_access": false,
       "allow_cwd_override": true
     }
   }

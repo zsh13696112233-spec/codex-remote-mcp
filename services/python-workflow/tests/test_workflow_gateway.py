@@ -140,15 +140,18 @@ class SupervisorPromptTests(unittest.TestCase):
                     "agent_id": "local", "url": "ws://secret", "cwd": "/work",
                     "authenticated": True, "token_env": "SECRET_TOKEN",
                     "allow_write": True, "allow_cwd_override": False, "model": "gpt-5.6-sol",
-                    "permission_profiles": ["read_only", "workspace_write", "auto_review"],
+                    "permission_profiles": [
+                        "read_only", "workspace_write", "auto_review", "full_access",
+                    ],
                 }]
 
         gateway = WorkflowGateway(None, FakeOrchestrator())
         value = gateway.public_agents()[0]
         self.assertEqual(value["agentId"], "local")
         self.assertEqual(value["permissionProfiles"], [
-            "read_only", "workspace_write", "auto_review",
+            "read_only", "workspace_write", "auto_review", "full_access",
         ])
+        self.assertTrue(value["allowFullAccess"])
         self.assertTrue(value["enabled"])
         self.assertEqual(value["capabilities"], ["supervisor", "executor"])
         self.assertEqual(value["supervisorCapacity"], 1)

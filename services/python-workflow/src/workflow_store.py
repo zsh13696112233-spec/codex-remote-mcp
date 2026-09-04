@@ -47,7 +47,7 @@ LEGACY_IMAGE_LINK_PATTERN = re.compile(
     r"\[[^\]]*\]\((?P<path>[^)]+\.(?:png|jpe?g|gif|webp))\)", re.IGNORECASE
 )
 LOGGER = logging.getLogger(__name__)
-PERMISSION_PROFILES = {"read_only", "workspace_write", "auto_review"}
+PERMISSION_PROFILES = {"read_only", "workspace_write", "auto_review", "full_access"}
 
 
 def utc_now() -> str:
@@ -653,7 +653,7 @@ class WorkflowStore:
                 if permission_profile not in PERMISSION_PROFILES:
                     raise ValueError(
                         f"节点 {node_id} 的 permissionProfile 只能是 "
-                        "read_only、workspace_write 或 auto_review。"
+                        "read_only、workspace_write、auto_review 或 full_access。"
                     )
                 profile_write = permission_profile != "read_only"
                 if has_legacy_write and legacy_write != profile_write:

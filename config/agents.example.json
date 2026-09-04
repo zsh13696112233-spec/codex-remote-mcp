@@ -8,6 +8,7 @@
       "capacity": 1,
       "artifact_root": "C:\\codex-workflow-artifacts",
       "allow_write": true,
+      "allow_full_access": true,
       "allow_cwd_override": true
     },
     "supervisor-b": {
@@ -20,6 +21,7 @@
       "orchestration_mode": "remote_sidecar",
       "sidecar_token_env": "SUPERVISOR_B_SIDECAR_TOKEN",
       "allow_write": false,
+      "allow_full_access": false,
       "allow_cwd_override": false
     },
     "remote-build": {
@@ -29,6 +31,7 @@
       "capabilities": ["executor"],
       "token_env": "REMOTE_CODEX_TOKEN",
       "allow_write": false,
+      "allow_full_access": false,
       "allow_cwd_override": false
     }
   }

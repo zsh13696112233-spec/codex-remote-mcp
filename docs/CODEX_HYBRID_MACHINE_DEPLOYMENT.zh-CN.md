@@ -150,6 +150,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent '<SIDECAR_TOKEN_FI
       "capacity": 1,
       "token_file": "<APP_SERVER_TOKEN_FILE>",
       "allow_write": true,
+      "allow_full_access": false,
       "allow_cwd_override": true
     }
   }
@@ -206,11 +207,12 @@ default_tools_approval_mode = "approve"
   "orchestration_mode": "remote_sidecar",
   "sidecar_token_file": "<中央机上的本agent专属Sidecar令牌文件绝对路径>",
   "allow_write": true,
+  "allow_full_access": false,
   "allow_cwd_override": true
 }
 ```
 
-其中 `cwd` 是目标远程机器上的路径，网关只把它作为执行参数发送给 app-server，不会在中央机本地访问该目录。两个 `*_token_file` 则必须是中央网关进程所在机器能读取的中央机本地路径。
+其中 `cwd` 是目标远程机器上的路径，网关只把它作为执行参数发送给 app-server，不会在中央机本地访问该目录。两个 `*_token_file` 则必须是中央网关进程所在机器能读取的中央机本地路径。`allow_full_access` 默认保持 `false`；只有确需取消目标机器文件系统和网络沙箱时，才在 `allow_write: true` 的同时显式开启。
 
 如果当前 Codex 不能访问中央机，它必须输出不含秘密的待办清单并停止在本节，等待中央管理员完成登记、同步 Sidecar Token并重启网关。不得假设中央配置已经生效。
 

@@ -285,6 +285,8 @@ class WorkflowGateway:
                     )
                 ),
                 "allowWrite": bool(item.get("allow_write")),
+                "allowFullAccess": "full_access"
+                in set(item.get("permission_profiles") or []),
                 "allowCwdOverride": bool(item.get("allow_cwd_override")),
                 "permissionProfiles": list(item.get("permission_profiles") or []),
             }

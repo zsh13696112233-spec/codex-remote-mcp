@@ -262,7 +262,7 @@ Skill 和 MCP 在第一版只保存和展示，具体限制如下：
 - 每个 SOP 步骤转换为一个 node。
 - node 的 `model` 优先使用步骤覆盖模型；步骤没有覆盖时，使用 SOP 默认模型 `gpt-5.6-sol`。
 - 第一步没有依赖，后续每一步只依赖它的前一步。
-- 执行位置、执行机、工作目录、权限档位和超时时间来自 SOP 步骤配置。权限档位固定为 `read_only`、`workspace_write`、`auto_review`，新步骤默认只读，不提供完全访问和人工审批。
+- 执行位置、执行机、工作目录、权限档位和超时时间来自 SOP 步骤配置。权限档位为 `read_only`、`workspace_write`、`auto_review`、`full_access`，新步骤默认只读，不提供人工审批。`full_access` 只有在执行机显式开启完全访问上限时可选。
 
 ## 四、步骤产物交接
 

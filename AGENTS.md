@@ -102,6 +102,8 @@ Python（从仓库根目录）：
   -t services/python-workflow -v
 ```
 
+仅限 Windows：如果根目录 `.venv\Scripts\python.exe` 存在，但 Codex 沙箱因无法执行用户 `AppData` 下的基础 Python 而报“拒绝访问”或 `Unable to create process`，应申请在沙箱外执行同一条 `.venv` 命令。不要把 Codex 缓存目录中的内置 Python 路径写死到项目文档或脚本中。此规则不适用于 macOS；macOS 继续使用其本机项目环境和下述跨平台回退方式。
+
 只有根目录 `.venv` 不存在或不可用时，才回退到以下跨平台 `uv` 命令；不要仅为了运行测试擅自安装 `uv` 或重建虚拟环境：
 
 ```sh
