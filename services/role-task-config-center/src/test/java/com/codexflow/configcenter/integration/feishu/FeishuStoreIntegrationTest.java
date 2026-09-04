@@ -1,8 +1,11 @@
 package com.codexflow.configcenter.integration.feishu;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.codexflow.configcenter.domain.ConfigService;
+import com.codexflow.configcenter.domain.ConflictFailure;
+import com.codexflow.configcenter.domain.TaskLaunchStore;
 import com.codexflow.configcenter.dto.FeishuConfigSaveRequest;
 import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
@@ -30,6 +33,7 @@ class FeishuStoreIntegrationTest {
   @Autowired JdbcTemplate jdbc;
   @Autowired ObjectMapper objectMapper;
   @Autowired FeishuBotAdminService adminService;
+  @Autowired TaskLaunchStore taskLaunches;
 
   @Test
   void pageSettingsPersistWithoutReturningTheSecret() {
@@ -94,7 +98,8 @@ class FeishuStoreIntegrationTest {
           .isEqualTo(started.workflowId());
       String triggerMessageId =
           jdbc.queryForObject(
-              "select trigger_message_id from codex_sop_feishu_workflow_bindings where workflow_id = ?",
+              "select trigger_message_id from codex_sop_feishu_workflow_bindings where workflow_id"
+                  + " = ?",
               String.class,
               started.workflowId());
       assertThat(store.reserveStart(appId, taskId, message(triggerMessageId)).outcome())
@@ -173,6 +178,29 @@ class FeishuStoreIntegrationTest {
         .extracting(FeishuModels.Binding::status)
         .isEqualTo("terminal");
     assertThat(store.conversation(appId, question)).isPresent();
+    assertThat(taskLaunches.activeWorkflowId(taskId)).isEmpty();
+  }
+
+  @Test
+  void feishuAndWebShareTheSameTaskDefinitionSlot() {
+    String taskId = createTask();
+    String appId = "app-" + UUID.randomUUID();
+    store.initialize(appId);
+
+    TaskLaunchStore.LaunchReservation web = taskLaunches.reserveLatest(taskId);
+    FeishuModels.StartReservation blockedByWeb =
+        store.reserveStart(appId, taskId, message("blocked-by-web"));
+    assertThat(blockedByWeb.outcome()).isEqualTo("busy");
+    assertThat(blockedByWeb.workflowId()).isEqualTo(web.prepared().workflowId());
+    taskLaunches.release(web.prepared().workflowId());
+
+    FeishuModels.StartReservation feishu =
+        store.reserveStart(appId, taskId, message("started-by-feishu"));
+    assertThat(feishu.outcome()).isEqualTo("started");
+    assertThat(taskLaunches.activeWorkflowId(taskId)).contains(feishu.workflowId());
+    assertThatThrownBy(() -> taskLaunches.reserveLatest(taskId))
+        .isInstanceOf(ConflictFailure.class)
+        .hasMessageContaining("当前任务仍在运行");
   }
 
   private String createTask() {

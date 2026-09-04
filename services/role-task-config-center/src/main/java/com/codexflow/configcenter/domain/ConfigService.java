@@ -4,6 +4,9 @@ import com.codexflow.configcenter.dto.RoleSaveRequest;
 import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
 import com.codexflow.configcenter.dto.TaskDefinitionSaveRequest;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -175,7 +178,7 @@ public class ConfigService {
   /** 更新未软删除的任务定义。 */
   @Transactional
   public ObjectNode updateTask(String id, TaskDefinitionSaveRequest body) {
-    TaskDefinitionEntity task = findTask(id, false);
+    TaskDefinitionEntity task = findTaskForUpdate(id);
     applyTask(task, body);
     return json.task(tasks.save(task));
   }
@@ -190,6 +193,9 @@ public class ConfigService {
     copy.objective = source.objective;
     copy.sop = source.sop;
     copy.additionalNotes = source.additionalNotes;
+    copy.scheduleTime = source.scheduleTime;
+    copy.scheduleEnabled = false;
+    copy.notifyDingTalk = false;
     copy.enabled = false;
     return json.task(tasks.save(copy));
   }
@@ -197,12 +203,13 @@ public class ConfigService {
   /** 通过设置删除标记和停用标记软删除任务定义。 */
   @Transactional
   public void deleteTask(String id) {
-    TaskDefinitionEntity task = findTask(id, false);
-    if (task.dingtalkActiveWorkflowId != null) {
-      throw new ConflictFailure("当前钉钉任务仍在运行，不能删除任务定义。");
+    TaskDefinitionEntity task = findTaskForUpdate(id);
+    if (task.activeWorkflowId != null || task.dingtalkActiveWorkflowId != null) {
+      throw new ConflictFailure("当前任务仍在运行，不能删除任务定义。");
     }
     task.deleted = true;
     task.enabled = false;
+    task.scheduleEnabled = false;
     task.dingtalkTarget = null;
     tasks.save(task);
   }
@@ -297,11 +304,43 @@ public class ConfigService {
     String targetId = normalizeNullable(body.dingtalkTargetId());
     String currentTargetId = task.dingtalkTarget == null ? null : task.dingtalkTarget.id;
     if (!java.util.Objects.equals(currentTargetId, targetId)) {
-      if (task.dingtalkActiveWorkflowId != null) {
+      if (task.activeWorkflowId != null || task.dingtalkActiveWorkflowId != null) {
         throw new ConflictFailure("当前钉钉任务仍在运行，不能解除或更换通知对象。");
       }
       task.dingtalkTarget =
           targetId == null ? null : dingtalkTargets.requiredSelectable(targetId, task.id);
+    }
+    if (body.scheduleEnabled() != null) {
+      task.scheduleEnabled = body.scheduleEnabled();
+      if (body.scheduleEnabled() && body.scheduleTime() == null) {
+        task.scheduleTime = null;
+      }
+    }
+    if (body.scheduleTime() != null) {
+      LocalTime scheduleTime = parseScheduleTime(body.scheduleTime());
+      if (!java.util.Objects.equals(task.scheduleTime, scheduleTime)) {
+        task.scheduleTime = scheduleTime;
+        task.lastScheduleDate = null;
+      }
+    }
+    if (body.notifyDingTalk() != null) task.notifyDingTalk = body.notifyDingTalk();
+    if (task.scheduleEnabled && task.scheduleTime == null) {
+      throw new IllegalArgumentException("启用定时运行时必须填写每天执行时间。");
+    }
+    if (task.notifyDingTalk) {
+      if (task.dingtalkTarget == null) {
+        throw new IllegalArgumentException("启用钉钉通知时必须选择钉钉通知对象。");
+      }
+      task.dingtalkTarget = dingtalkTargets.requiredSelectable(task.dingtalkTarget.id, task.id);
+    }
+  }
+
+  /** 解析页面提交的每日执行时间，并拒绝秒级或非标准格式。 */
+  private static LocalTime parseScheduleTime(String value) {
+    try {
+      return LocalTime.parse(value.trim(), DateTimeFormatter.ofPattern("HH:mm"));
+    } catch (DateTimeParseException error) {
+      throw new IllegalArgumentException("scheduleTime 必须使用 HH:mm 格式。");
     }
   }
 
@@ -330,6 +369,14 @@ public class ConfigService {
     if (task.deleted && !includeDeleted) {
       throw new NotFoundFailure("找不到任务定义：" + id);
     }
+    return task;
+  }
+
+  /** 锁定未删除任务定义，避免配置保存覆盖并发写入的运行槽或定时领取日期。 */
+  private TaskDefinitionEntity findTaskForUpdate(String id) {
+    TaskDefinitionEntity task =
+        tasks.findForUpdate(id).orElseThrow(() -> new NotFoundFailure("找不到任务定义：" + id));
+    if (task.deleted) throw new NotFoundFailure("找不到任务定义：" + id);
     return task;
   }
 

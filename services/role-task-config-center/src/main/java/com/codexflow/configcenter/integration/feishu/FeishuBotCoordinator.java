@@ -239,8 +239,10 @@ class FeishuBotCoordinator implements SmartLifecycle {
           "任务已启动。后续可在本话题中向任务助手询问状态或发出控制指令。",
           "start-card:" + reservation.workflowId());
     } catch (RuntimeException error) {
-      store.markSubmissionFailed(
-          properties.getAppId(), reservation.workflowId(), "任务启动失败，请稍后重新 @机器人运行。");
+      if ("submit_failed".equals(workflowRunStore.runStatus(reservation.workflowId()))) {
+        store.markSubmissionFailed(
+            properties.getAppId(), reservation.workflowId(), "任务启动失败，请稍后重新 @机器人运行。");
+      }
     }
   }
 
@@ -405,8 +407,10 @@ class FeishuBotCoordinator implements SmartLifecycle {
           binding.workflowId(), "服务恢复后已继续提交任务。", "recovered-card:" + binding.workflowId());
       return true;
     } catch (RuntimeException error) {
-      store.markSubmissionFailed(
-          properties.getAppId(), binding.workflowId(), "任务启动失败，请稍后重新 @机器人运行。");
+      if ("submit_failed".equals(workflowRunStore.runStatus(binding.workflowId()))) {
+        store.markSubmissionFailed(
+            properties.getAppId(), binding.workflowId(), "任务启动失败，请稍后重新 @机器人运行。");
+      }
       return false;
     }
   }

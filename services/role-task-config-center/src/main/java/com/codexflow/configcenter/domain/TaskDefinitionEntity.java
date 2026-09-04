@@ -7,6 +7,8 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import java.time.LocalDate;
+import java.time.LocalTime;
 
 /** 可重复运行的任务定义实体，对应数据库表 {@code codex_sop_task_definitions}。 */
 @Entity
@@ -41,6 +43,26 @@ class TaskDefinitionEntity extends Timestamped {
   /** 该钉钉任务绑定当前占用的工作流；不同任务定义之间可以并行。 */
   @Column(name = "dingtalk_active_workflow_id", length = 128)
   String dingtalkActiveWorkflowId;
+
+  /** 是否按北京时间每天自动运行一次。 */
+  @Column(name = "schedule_enabled", nullable = false)
+  boolean scheduleEnabled;
+
+  /** 每日运行时间，仅保存小时和分钟。 */
+  @Column(name = "schedule_time")
+  LocalTime scheduleTime;
+
+  /** 网页和定时运行是否主动推送到任务绑定的钉钉对象。 */
+  @Column(name = "notify_dingtalk", nullable = false)
+  boolean notifyDingTalk;
+
+  /** 最近一次已经处理的定时日期，用于避免同一分钟重复触发。 */
+  @Column(name = "last_schedule_date")
+  LocalDate lastScheduleDate;
+
+  /** 当前占用该任务定义的工作流；所有启动来源共用一个运行槽。 */
+  @Column(name = "active_workflow_id", length = 128)
+  String activeWorkflowId;
 
   /** 任务定义是否允许发起新的运行。 */
   @Column(nullable = false)

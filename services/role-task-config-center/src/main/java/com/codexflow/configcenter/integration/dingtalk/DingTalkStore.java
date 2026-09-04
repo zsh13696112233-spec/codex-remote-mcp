@@ -75,6 +75,7 @@ class DingTalkStore {
     binding.clientId = clientId;
     binding.taskDefinitionId = route.taskDefinitionId();
     binding.triggerMessageId = message.messageId();
+    binding.triggerSource = "dingtalk";
     binding.conversationId = message.conversationId();
     binding.targetType = target.targetType();
     binding.targetExternalId = target.externalId();
@@ -87,6 +88,28 @@ class DingTalkStore {
     bindings.saveAndFlush(binding);
     return new DingTalkModels.StartReservation(
         "started", route.workflowId(), route.prepared().payload());
+  }
+
+  /** 为没有钉钉入站消息的网页或定时运行创建主动通知绑定。 */
+  @Transactional
+  public void reserveProactive(
+      String clientId, String taskId, String workflowId, String triggerSource) {
+    DingTalkTargetDirectory.TargetView target =
+        taskBindings.reserveProactive(taskId, workflowId, clientId);
+    Instant now = Instant.now();
+    DingTalkWorkflowBindingEntity binding = new DingTalkWorkflowBindingEntity();
+    binding.workflowId = workflowId;
+    binding.clientId = clientId;
+    binding.taskDefinitionId = taskId;
+    binding.triggerSource = triggerSource;
+    binding.conversationId = target.externalId();
+    binding.targetType = target.targetType();
+    binding.targetExternalId = target.externalId();
+    binding.targetName = target.displayName();
+    binding.status = "submitting";
+    binding.createdAt = now;
+    binding.updatedAt = now;
+    bindings.saveAndFlush(binding);
   }
 
   @Transactional
@@ -104,6 +127,11 @@ class DingTalkStore {
   @Transactional(readOnly = true)
   public boolean hasActive(String clientId) {
     return taskBindings.hasActive(clientId);
+  }
+
+  @Transactional
+  public void releaseFinished(String workflowId) {
+    taskBindings.releaseFinished(workflowId);
   }
 
   @Transactional(readOnly = true)
@@ -515,6 +543,7 @@ class DingTalkStore {
         binding.targetExternalId == null ? binding.conversationId : binding.targetExternalId,
         binding.targetName == null ? "群聊" : binding.targetName,
         binding.rootMessageId,
+        binding.triggerSource == null ? "dingtalk" : binding.triggerSource,
         binding.status,
         binding.eventCursor,
         binding.progressCardInstanceId,

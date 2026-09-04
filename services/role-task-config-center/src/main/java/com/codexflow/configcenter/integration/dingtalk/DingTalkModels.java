@@ -60,10 +60,36 @@ final class DingTalkModels {
       String targetExternalId,
       String targetName,
       String rootMessageId,
+      String triggerSource,
       String status,
       long eventCursor,
       String progressCardInstanceId,
       boolean waitingAssistant) {
+
+    Binding(
+        String workflowId,
+        String conversationId,
+        String targetType,
+        String targetExternalId,
+        String targetName,
+        String rootMessageId,
+        String status,
+        long eventCursor,
+        String progressCardInstanceId,
+        boolean waitingAssistant) {
+      this(
+          workflowId,
+          conversationId,
+          targetType,
+          targetExternalId,
+          targetName,
+          rootMessageId,
+          "dingtalk",
+          status,
+          eventCursor,
+          progressCardInstanceId,
+          waitingAssistant);
+    }
 
     Binding(
         String workflowId,
@@ -80,6 +106,7 @@ final class DingTalkModels {
           conversationId,
           "群聊",
           rootMessageId,
+          "dingtalk",
           status,
           eventCursor,
           progressCardInstanceId,

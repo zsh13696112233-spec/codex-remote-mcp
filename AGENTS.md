@@ -110,20 +110,20 @@ uv run --project services/python-workflow \
 Java 监控中心：
 
 ```sh
-mvn -f services/workflow-console/pom.xml test
+mvnd -f services/workflow-console/pom.xml test
 ```
 
 Java 配置中心：
 
 ```sh
-mvn -f services/role-task-config-center/pom.xml test
+mvnd -f services/role-task-config-center/pom.xml test
 ```
 
 Java 构建会在 `validate` 阶段检查格式。仅格式化实际修改过的 Java 模块：
 
 ```sh
-mvn -f services/workflow-console/pom.xml fmt:format
-mvn -f services/role-task-config-center/pom.xml fmt:format
+mvnd -f services/workflow-console/pom.xml fmt:format
+mvnd -f services/role-task-config-center/pom.xml fmt:format
 ```
 
 不要为了通过格式检查而格式化整个仓库或改动无关文件。需要真实 MySQL、Codex app-server 或远程执行机的测试，如果环境不可用，应明确说明未运行原因，不能声称已验证。

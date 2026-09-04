@@ -9,11 +9,11 @@ import org.springframework.transaction.annotation.Transactional;
 public class DingTalkTaskBindingDirectory {
 
   private final TaskDefinitionRepository tasks;
-  private final WorkflowRunStore workflowRuns;
+  private final TaskLaunchStore taskLaunches;
 
-  DingTalkTaskBindingDirectory(TaskDefinitionRepository tasks, WorkflowRunStore workflowRuns) {
+  DingTalkTaskBindingDirectory(TaskDefinitionRepository tasks, TaskLaunchStore taskLaunches) {
     this.tasks = tasks;
-    this.workflowRuns = workflowRuns;
+    this.taskLaunches = taskLaunches;
   }
 
   @Transactional
@@ -23,10 +23,14 @@ public class DingTalkTaskBindingDirectory {
     if (candidate.isEmpty()) return new StartRoute("unauthorized", null, null, null, null);
     TaskDefinitionEntity task = candidate.get();
     validateStartable(task, clientId);
-    if (task.dingtalkActiveWorkflowId != null) {
-      return new StartRoute("busy", task.id, task.dingtalkActiveWorkflowId, view(task), null);
+    if (task.dingtalkActiveWorkflowId != null || task.activeWorkflowId != null) {
+      String active =
+          task.dingtalkActiveWorkflowId == null
+              ? task.activeWorkflowId
+              : task.dingtalkActiveWorkflowId;
+      return new StartRoute("busy", task.id, active, view(task), null);
     }
-    PreparedRun prepared = workflowRuns.prepareLatest(task.id);
+    PreparedRun prepared = taskLaunches.reserveLatest(task.id).prepared();
     task.dingtalkActiveWorkflowId = prepared.workflowId();
     tasks.saveAndFlush(task);
     return new StartRoute("started", task.id, prepared.workflowId(), view(task), prepared);
@@ -43,26 +47,60 @@ public class DingTalkTaskBindingDirectory {
   @Transactional
   public Optional<String> acquireForRestart(String taskId, String workflowId) {
     TaskDefinitionEntity task = requiredForUpdate(taskId);
-    if (task.dingtalkActiveWorkflowId != null
-        && !workflowId.equals(task.dingtalkActiveWorkflowId)) {
-      return Optional.of(task.dingtalkActiveWorkflowId);
+    String active =
+        task.dingtalkActiveWorkflowId == null
+            ? task.activeWorkflowId
+            : task.dingtalkActiveWorkflowId;
+    if (active != null && !workflowId.equals(active)) {
+      return Optional.of(active);
     }
     task.dingtalkActiveWorkflowId = workflowId;
+    task.activeWorkflowId = workflowId;
     return Optional.empty();
+  }
+
+  /** 为网页或定时启动占用钉钉通知槽，并返回冻结目标。 */
+  @Transactional
+  public DingTalkTargetDirectory.TargetView reserveProactive(
+      String taskId, String workflowId, String clientId) {
+    TaskDefinitionEntity task = requiredForUpdate(taskId);
+    validateStartable(task, clientId);
+    if (!workflowId.equals(task.activeWorkflowId)) {
+      throw new ConflictFailure("当前任务运行状态已变化，请稍后重试。");
+    }
+    if (task.dingtalkActiveWorkflowId != null
+        && !workflowId.equals(task.dingtalkActiveWorkflowId)) {
+      throw new ConflictFailure("当前任务已有钉钉通知运行，请等待完成后再次运行。");
+    }
+    task.dingtalkActiveWorkflowId = workflowId;
+    return view(task);
+  }
+
+  /** 校验任务当前绑定的通知对象可用于指定钉钉应用。 */
+  @Transactional(readOnly = true)
+  public void validateProactive(String taskId, String clientId) {
+    TaskDefinitionEntity task =
+        tasks.findById(taskId).orElseThrow(() -> new NotFoundFailure("找不到任务定义：" + taskId));
+    validateStartable(task, clientId);
   }
 
   @Transactional
   public boolean reconcile(String taskId, String workflowId, boolean active) {
     TaskDefinitionEntity task = requiredForUpdate(taskId);
     if (active) {
-      if (task.dingtalkActiveWorkflowId == null
-          || workflowId.equals(task.dingtalkActiveWorkflowId)) {
-        task.dingtalkActiveWorkflowId = workflowId;
-        return true;
+      if ((task.dingtalkActiveWorkflowId != null
+              && !workflowId.equals(task.dingtalkActiveWorkflowId))
+          || (task.activeWorkflowId != null && !workflowId.equals(task.activeWorkflowId))) {
+        return false;
       }
-      return false;
+      task.dingtalkActiveWorkflowId = workflowId;
+      task.activeWorkflowId = workflowId;
+      return true;
     } else if (workflowId.equals(task.dingtalkActiveWorkflowId)) {
       task.dingtalkActiveWorkflowId = null;
+    }
+    if (!active && workflowId.equals(task.activeWorkflowId)) {
+      task.activeWorkflowId = null;
     }
     return true;
   }
@@ -70,6 +108,12 @@ public class DingTalkTaskBindingDirectory {
   @Transactional(readOnly = true)
   public boolean hasActive(String clientId) {
     return tasks.existsActiveDingTalkBinding(clientId);
+  }
+
+  /** 清理由网关确认已结束、但本地尚未来得及释放的任务占用。 */
+  @Transactional
+  public void releaseFinished(String workflowId) {
+    tasks.releaseWorkflow(workflowId);
   }
 
   private TaskDefinitionEntity requiredForUpdate(String taskId) {

@@ -33,11 +33,15 @@ class DingTalkV14MigrationTest {
     try (Connection connection = DriverManager.getConnection(url, "sa", "");
         Statement statement = connection.createStatement()) {
       statement.executeUpdate(
-          "INSERT INTO codex_sop_dingtalk_targets(id,client_id,target_type,external_id,display_name,source,available,enabled,deleted) VALUES ('"
+          "INSERT INTO"
+              + " codex_sop_dingtalk_targets(id,client_id,target_type,external_id,display_name,source,available,enabled,deleted)"
+              + " VALUES ('"
               + targetId
               + "','client-v1','GROUP','chat-v1','历史群','OBSERVED',TRUE,TRUE,FALSE)");
       statement.executeUpdate(
-          "INSERT INTO codex_sop_sops(id,name,supervisor_agent_id,failure_policy,supervisor_timeout_sec,max_retry_count,advance_mode,handoff_mode,default_step_model,enabled,deleted) VALUES ('"
+          "INSERT INTO"
+              + " codex_sop_sops(id,name,supervisor_agent_id,failure_policy,supervisor_timeout_sec,max_retry_count,advance_mode,handoff_mode,default_step_model,enabled,deleted)"
+              + " VALUES ('"
               + sopId
               + "','历史SOP','local','stop',7200,10,'automatic','legacy_text','gpt-5.6-sol',TRUE,FALSE)");
       statement.executeUpdate(
@@ -47,17 +51,21 @@ class DingTalkV14MigrationTest {
               + sopId
               + "'");
       statement.executeUpdate(
-          "INSERT INTO codex_sop_task_definitions(id,name,objective,sop_id,enabled,deleted) VALUES ('"
+          "INSERT INTO codex_sop_task_definitions(id,name,objective,sop_id,enabled,deleted) VALUES"
+              + " ('"
               + taskId
               + "','历史任务','验证升级','"
               + sopId
               + "',TRUE,FALSE)");
       statement.executeUpdate(
-          "INSERT INTO codex_sop_dingtalk_bot_settings(id,enabled,client_id,client_secret,task_definition_id,card_template_id,event_poll_interval_ms,version) VALUES (1,TRUE,'client-v1','secret','"
+          "INSERT INTO"
+              + " codex_sop_dingtalk_bot_settings(id,enabled,client_id,client_secret,task_definition_id,card_template_id,event_poll_interval_ms,version)"
+              + " VALUES (1,TRUE,'client-v1','secret','"
               + taskId
               + "','',1000,0)");
       statement.executeUpdate(
-          "INSERT INTO codex_sop_dingtalk_bot_state(client_id,active_workflow_id,version) VALUES ('client-v1','"
+          "INSERT INTO codex_sop_dingtalk_bot_state(client_id,active_workflow_id,version) VALUES"
+              + " ('client-v1','"
               + workflowId
               + "',0)");
     }
@@ -72,12 +80,14 @@ class DingTalkV14MigrationTest {
         Statement statement = connection.createStatement()) {
       try (ResultSet result =
           statement.executeQuery(
-              "SELECT dingtalk_target_id,dingtalk_active_workflow_id FROM codex_sop_task_definitions WHERE id='"
+              "SELECT dingtalk_target_id,dingtalk_active_workflow_id,active_workflow_id FROM"
+                  + " codex_sop_task_definitions WHERE id='"
                   + taskId
                   + "'")) {
         assertThat(result.next()).isTrue();
         assertThat(result.getString("dingtalk_target_id")).isEqualTo(targetId);
         assertThat(result.getString("dingtalk_active_workflow_id")).isEqualTo(workflowId);
+        assertThat(result.getString("active_workflow_id")).isEqualTo(workflowId);
       }
       assertThat(singleValue(statement, "SELECT dingtalk_target_id FROM codex_sop_sops")).isNull();
       assertThat(

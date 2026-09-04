@@ -1,7 +1,7 @@
 package com.codexflow.configcenter.integration.feishu;
 
 import com.codexflow.configcenter.domain.PreparedRun;
-import com.codexflow.configcenter.domain.WorkflowRunStore;
+import com.codexflow.configcenter.domain.TaskLaunchStore;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -26,7 +26,7 @@ class FeishuStore {
   private final FeishuWorkflowBindingRepository bindings;
   private final FeishuInboundMessageRepository inboundMessages;
   private final FeishuOutboxRepository outbox;
-  private final WorkflowRunStore workflowRuns;
+  private final TaskLaunchStore taskLaunches;
   private final ObjectMapper objectMapper;
 
   FeishuStore(
@@ -34,13 +34,13 @@ class FeishuStore {
       FeishuWorkflowBindingRepository bindings,
       FeishuInboundMessageRepository inboundMessages,
       FeishuOutboxRepository outbox,
-      WorkflowRunStore workflowRuns,
+      TaskLaunchStore taskLaunches,
       ObjectMapper objectMapper) {
     this.states = states;
     this.bindings = bindings;
     this.inboundMessages = inboundMessages;
     this.outbox = outbox;
-    this.workflowRuns = workflowRuns;
+    this.taskLaunches = taskLaunches;
     this.objectMapper = objectMapper;
   }
 
@@ -70,7 +70,11 @@ class FeishuStore {
       return new FeishuModels.StartReservation("busy", state.activeWorkflowId, null);
     }
 
-    PreparedRun prepared = workflowRuns.prepareLatest(taskDefinitionId);
+    TaskLaunchStore.LaunchAttempt attempt = taskLaunches.reserveLatestOrActive(taskDefinitionId);
+    if (attempt.activeWorkflowId() != null) {
+      return new FeishuModels.StartReservation("busy", attempt.activeWorkflowId(), null);
+    }
+    PreparedRun prepared = attempt.reservation().prepared();
     Instant now = Instant.now();
     FeishuWorkflowBindingEntity binding = new FeishuWorkflowBindingEntity();
     binding.workflowId = prepared.workflowId();
@@ -127,13 +131,15 @@ class FeishuStore {
 
   @Transactional
   public Optional<String> acquireForRestart(String appId, String workflowId) {
+    FeishuWorkflowBindingEntity binding = requiredBinding(workflowId);
     FeishuBotStateEntity state = states.findForUpdate(appId).orElseThrow();
     if (state.activeWorkflowId != null && !workflowId.equals(state.activeWorkflowId)) {
       return Optional.of(state.activeWorkflowId);
     }
+    Optional<String> taskBusy = taskLaunches.acquireExisting(binding.taskDefinitionId, workflowId);
+    if (taskBusy.isPresent()) return taskBusy;
     state.activeWorkflowId = workflowId;
     state.updatedAt = Instant.now();
-    FeishuWorkflowBindingEntity binding = requiredBinding(workflowId);
     binding.status = "active";
     binding.updatedAt = Instant.now();
     return Optional.empty();
@@ -157,6 +163,9 @@ class FeishuStore {
     } else if (List.of("queued", "running", "cancelling").contains(runtimeStatus)) {
       FeishuBotStateEntity state = states.findForUpdate(appId).orElseThrow();
       if (state.activeWorkflowId == null || workflowId.equals(state.activeWorkflowId)) {
+        Optional<String> taskBusy =
+            taskLaunches.acquireExisting(binding.taskDefinitionId, workflowId);
+        if (taskBusy.isPresent()) return;
         state.activeWorkflowId = workflowId;
         state.updatedAt = Instant.now();
         binding.status = "active";
@@ -360,6 +369,7 @@ class FeishuStore {
       state.activeWorkflowId = null;
       state.updatedAt = Instant.now();
     }
+    taskLaunches.release(workflowId);
   }
 
   private FeishuWorkflowBindingEntity requiredBinding(String workflowId) {

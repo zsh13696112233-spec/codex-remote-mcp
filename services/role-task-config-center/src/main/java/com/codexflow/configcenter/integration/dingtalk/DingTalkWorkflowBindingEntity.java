@@ -21,8 +21,11 @@ class DingTalkWorkflowBindingEntity {
   @Column(name = "task_definition_id", nullable = false, length = 36)
   String taskDefinitionId;
 
-  @Column(name = "trigger_message_id", nullable = false, length = 256)
+  @Column(name = "trigger_message_id", length = 256)
   String triggerMessageId;
+
+  @Column(name = "trigger_source", nullable = false, length = 16)
+  String triggerSource = "dingtalk";
 
   @Column(name = "conversation_id", nullable = false, length = 256)
   String conversationId;
@@ -36,10 +39,10 @@ class DingTalkWorkflowBindingEntity {
   @Column(name = "target_name", length = 160)
   String targetName;
 
-  @Column(name = "root_message_id", nullable = false, length = 256)
+  @Column(name = "root_message_id", length = 256)
   String rootMessageId;
 
-  @Column(name = "initiator_user_id", nullable = false, length = 256)
+  @Column(name = "initiator_user_id", length = 256)
   String initiatorUserId;
 
   @Column(nullable = false, length = 32)

@@ -1,6 +1,9 @@
 package com.codexflow.configcenter.domain;
 
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Collection;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -11,6 +14,12 @@ import tools.jackson.databind.node.ObjectNode;
 /** 将持久化实体转换为 Web 前端使用的稳定 JSON 响应结构。 */
 @Component
 class DomainJsonMapper {
+
+  private static final ZoneId SCHEDULE_ZONE = ZoneId.of("Asia/Shanghai");
+  private static final DateTimeFormatter SCHEDULE_TIME_FORMAT =
+      DateTimeFormatter.ofPattern("HH:mm");
+  private static final DateTimeFormatter SCHEDULE_DATE_TIME_FORMAT =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX");
 
   private final ObjectMapper objectMapper;
   private final String monitorUrl;
@@ -103,10 +112,37 @@ class DomainJsonMapper {
       target.put("enabled", task.dingtalkTarget.enabled);
     }
     putNullable(result, "dingtalkActiveWorkflowId", task.dingtalkActiveWorkflowId);
+    result.put("scheduleEnabled", task.scheduleEnabled);
+    if (task.scheduleTime == null) result.putNull("scheduleTime");
+    else result.put("scheduleTime", task.scheduleTime.format(SCHEDULE_TIME_FORMAT));
+    result.put("notifyDingTalk", task.notifyDingTalk);
+    if (task.lastScheduleDate == null) result.putNull("lastScheduleDate");
+    else result.put("lastScheduleDate", task.lastScheduleDate.toString());
+    putNullable(result, "activeWorkflowId", task.activeWorkflowId);
+    putNextScheduleAt(result, task);
     result.put("enabled", task.enabled);
     result.put("deleted", task.deleted);
     addTimes(result, task.createdAt, task.updatedAt);
     return result;
+  }
+
+  /** 根据北京时间计算页面展示用的下一次计划时间；该值不参与调度判断。 */
+  private static void putNextScheduleAt(ObjectNode result, TaskDefinitionEntity task) {
+    if (!task.scheduleEnabled
+        || task.scheduleTime == null
+        || !task.enabled
+        || task.deleted
+        || !task.sop.enabled
+        || task.sop.deleted) {
+      result.putNull("nextScheduleAt");
+      return;
+    }
+    ZonedDateTime now = ZonedDateTime.now(SCHEDULE_ZONE);
+    ZonedDateTime next = now.toLocalDate().atTime(task.scheduleTime).atZone(SCHEDULE_ZONE);
+    if (!next.isAfter(now) || now.toLocalDate().equals(task.lastScheduleDate)) {
+      next = next.plusDays(1);
+    }
+    result.put("nextScheduleAt", next.format(SCHEDULE_DATE_TIME_FORMAT));
   }
 
   /** 将运行记录及其快照字段转换为运行响应 JSON。 */

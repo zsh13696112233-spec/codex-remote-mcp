@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.codexflow.configcenter.domain.ConfigService;
 import com.codexflow.configcenter.domain.ConflictFailure;
 import com.codexflow.configcenter.domain.DingTalkTargetDirectory;
+import com.codexflow.configcenter.domain.TaskLaunchStore;
 import com.codexflow.configcenter.dto.DingTalkConfigSaveRequest;
 import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
@@ -34,6 +35,7 @@ class DingTalkStoreIntegrationTest {
   @Autowired ObjectMapper objectMapper;
   @Autowired DingTalkBotAdminService adminService;
   @Autowired DingTalkTargetDirectory targets;
+  @Autowired TaskLaunchStore taskLaunches;
 
   @Test
   void pageSettingsPersistWithoutReturningTheSecret() {
@@ -180,6 +182,40 @@ class DingTalkStoreIntegrationTest {
     assertThat(item.payload().path("title").asText()).isEqualTo("任务进度");
     assertThat(item.payload().path("text").asText()).isEqualTo("**状态：** 运行中");
     store.markOutboxSent(item.id(), "markdown-message-1");
+  }
+
+  @Test
+  void proactiveWebBindingHasNoInboundRootAndUsesTheFrozenTarget() {
+    String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
+    TaskLaunchStore.LaunchReservation launch = taskLaunches.reserveLatest(taskId);
+
+    store.reserveProactive(clientId, taskId, launch.prepared().workflowId(), "web");
+    DingTalkModels.Binding binding = store.binding(launch.prepared().workflowId()).orElseThrow();
+
+    assertThat(binding.triggerSource()).isEqualTo("web");
+    assertThat(binding.rootMessageId()).isNull();
+    assertThat(binding.targetType()).isEqualTo("GROUP");
+    assertThat(binding.targetExternalId()).isEqualTo("chat-1");
+
+    store.markSubmitted(binding.workflowId());
+    store.enqueueProgressMarkdown(
+        "proactive-progress-" + binding.workflowId(), binding.workflowId(), "任务进度", "**状态：** 等待开始");
+    DingTalkModels.Outbox outgoing =
+        store.claimDue().stream()
+            .filter(item -> binding.workflowId().equals(item.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(outgoing.replyToMessageId()).isNull();
+    store.markOutboxSent(outgoing.id(), "proactive-message-1");
+
+    store.recordEvent(clientId, binding.workflowId(), 1, null, null, null, null, true);
+    assertThat(
+            jdbc.queryForObject(
+                "select active_workflow_id from codex_sop_task_definitions where id = ?",
+                String.class,
+                taskId))
+        .isNull();
   }
 
   @Test

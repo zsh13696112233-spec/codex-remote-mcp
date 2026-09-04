@@ -56,6 +56,24 @@ public class WorkflowRunStore {
     return new PreparedRun(workflowId, (ObjectNode) json.read(run.submittedJson));
   }
 
+  /** 返回运行所属的任务定义 ID。 */
+  @Transactional(readOnly = true)
+  public String taskDefinitionId(String workflowId) {
+    return findRun(workflowId).taskDefinition.id;
+  }
+
+  /** 返回任务定义是否要求网页和定时运行主动通知钉钉。 */
+  @Transactional(readOnly = true)
+  public boolean notifyDingTalk(String taskId) {
+    return findTask(taskId, false).notifyDingTalk;
+  }
+
+  /** 返回运行记录最近一次已知状态。 */
+  @Transactional(readOnly = true)
+  public String runStatus(String workflowId) {
+    return findRun(workflowId).status;
+  }
+
   /** 查询指定任务的历史运行列表。 */
   @Transactional(readOnly = true)
   public List<ObjectNode> listRuns(String taskId) {

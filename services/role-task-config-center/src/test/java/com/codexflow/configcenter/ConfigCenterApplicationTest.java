@@ -137,6 +137,10 @@ class ConfigCenterApplicationTest {
 
     assertThat(index).contains("data-page=\"dingtalk-targets\">钉钉通知对象");
     assertThat(index).contains("name=\"dingtalkTargetId\"");
+    assertThat(index)
+        .contains("name=\"scheduleEnabled\"")
+        .contains("name=\"scheduleTime\"")
+        .contains("name=\"notifyDingTalk\"");
     assertThat(script)
         .contains("/api/dingtalk/targets/sync-people")
         .contains("/api/dingtalk/targets/directory")
@@ -145,6 +149,8 @@ class ConfigCenterApplicationTest {
         .contains("finally{if(document.body.contains(sync))sync.disabled=false}")
         .contains("人员启用状态已自动保存")
         .contains("dingtalkTargetId:f.dingtalkTargetId.value||null")
+        .contains("scheduleEnabled:f.scheduleEnabled.checked")
+        .contains("notifyDingTalk:f.notifyDingTalk.checked")
         .contains("首次同步的人员默认停用");
   }
 

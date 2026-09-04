@@ -242,6 +242,11 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         return;
       }
       String workflowId = reservation.workflowId();
+      if ("busy".equals(reservation.outcome()) && workflowFinished(workflowId)) {
+        store.releaseFinished(workflowId);
+        startOrReport(message);
+        return;
+      }
       String text =
           "duplicate".equals(reservation.outcome())
               ? "这条启动消息已经处理，任务编号：" + workflowId
@@ -269,10 +274,14 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       enqueueCurrentProgress(
           reservation.workflowId(), startedNotice, "start-card:" + reservation.workflowId());
     } catch (RuntimeException error) {
-      store.markSubmissionFailed(
-          properties.getClientId(),
-          reservation.workflowId(),
-          "2".equals(message.conversationType()) ? "任务启动失败，请稍后重新 @机器人运行。" : "任务启动失败，请稍后重新发送“运行”。");
+      if ("submit_failed".equals(workflowRunStore.runStatus(reservation.workflowId()))) {
+        store.markSubmissionFailed(
+            properties.getClientId(),
+            reservation.workflowId(),
+            "2".equals(message.conversationType())
+                ? "任务启动失败，请稍后重新 @机器人运行。"
+                : "任务启动失败，请稍后重新发送“运行”。");
+      }
     }
   }
 
@@ -351,6 +360,15 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     try {
       String status = gateway.get("/workflows/" + workflowId).path("status").asText();
       return Set.of("queued", "running", "cancelling").contains(status);
+    } catch (RuntimeException ignored) {
+      return false;
+    }
+  }
+
+  private boolean workflowFinished(String workflowId) {
+    try {
+      String status = gateway.get("/workflows/" + workflowId).path("status").asText();
+      return Set.of("completed", "failed", "cancelled").contains(status);
     } catch (RuntimeException ignored) {
       return false;
     }
@@ -501,8 +519,10 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           binding.workflowId(), "服务恢复后已继续提交任务。", "recovered-card:" + binding.workflowId());
       return true;
     } catch (RuntimeException error) {
-      store.markSubmissionFailed(
-          properties.getClientId(), binding.workflowId(), "任务启动失败，请稍后重新 @机器人运行。");
+      if ("submit_failed".equals(workflowRunStore.runStatus(binding.workflowId()))) {
+        store.markSubmissionFailed(
+            properties.getClientId(), binding.workflowId(), "任务启动失败，请稍后重新 @机器人运行。");
+      }
       return false;
     }
   }
