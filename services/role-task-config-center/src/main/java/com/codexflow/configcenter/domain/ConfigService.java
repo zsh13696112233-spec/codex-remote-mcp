@@ -4,9 +4,11 @@ import com.codexflow.configcenter.dto.RoleSaveRequest;
 import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
 import com.codexflow.configcenter.dto.TaskDefinitionSaveRequest;
+import java.time.Instant;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -27,6 +29,7 @@ public class ConfigService {
   private static final Set<String> HANDOFF_MODES = Set.of("legacy_text", "cumulative_files");
   private static final Set<String> PERMISSION_PROFILES =
       Set.of("read_only", "workspace_write", "auto_review");
+  private static final Set<String> SCHEDULE_MODES = Set.of("daily", "interval");
   private static final String DEFAULT_EXPECTED_OUTPUT = "完成本步骤，并返回清晰、完整且可验证的结果。";
 
   private final RoleRepository roles;
@@ -193,7 +196,9 @@ public class ConfigService {
     copy.objective = source.objective;
     copy.sop = source.sop;
     copy.additionalNotes = source.additionalNotes;
+    copy.scheduleMode = source.scheduleMode;
     copy.scheduleTime = source.scheduleTime;
+    copy.scheduleIntervalMinutes = source.scheduleIntervalMinutes;
     copy.scheduleEnabled = false;
     copy.notifyDingTalk = false;
     copy.enabled = false;
@@ -210,6 +215,7 @@ public class ConfigService {
     task.deleted = true;
     task.enabled = false;
     task.scheduleEnabled = false;
+    task.nextIntervalAt = null;
     task.dingtalkTarget = null;
     tasks.save(task);
   }
@@ -296,6 +302,10 @@ public class ConfigService {
 
   /** 将任务定义请求字段应用到实体，并解析其关联 SOP。 */
   private void applyTask(TaskDefinitionEntity task, TaskDefinitionSaveRequest body) {
+    boolean wasEnabled = task.enabled;
+    boolean wasScheduleEnabled = task.scheduleEnabled;
+    String previousScheduleMode = task.scheduleMode;
+    Integer previousIntervalMinutes = task.scheduleIntervalMinutes;
     task.name = body.name().trim();
     task.objective = body.objective().trim();
     task.sop = findSop(body.sopId().trim());
@@ -312,9 +322,11 @@ public class ConfigService {
     }
     if (body.scheduleEnabled() != null) {
       task.scheduleEnabled = body.scheduleEnabled();
-      if (body.scheduleEnabled() && body.scheduleTime() == null) {
-        task.scheduleTime = null;
-      }
+    }
+    if (body.scheduleMode() != null) task.scheduleMode = body.scheduleMode().trim();
+    if (task.scheduleMode == null) task.scheduleMode = "daily";
+    if (!SCHEDULE_MODES.contains(task.scheduleMode)) {
+      throw new IllegalArgumentException("scheduleMode 只能是 daily 或 interval。");
     }
     if (body.scheduleTime() != null) {
       LocalTime scheduleTime = parseScheduleTime(body.scheduleTime());
@@ -323,9 +335,37 @@ public class ConfigService {
         task.lastScheduleDate = null;
       }
     }
+    if (body.scheduleIntervalMinutes() != null) {
+      task.scheduleIntervalMinutes = body.scheduleIntervalMinutes();
+    }
     if (body.notifyDingTalk() != null) task.notifyDingTalk = body.notifyDingTalk();
-    if (task.scheduleEnabled && task.scheduleTime == null) {
-      throw new IllegalArgumentException("启用定时运行时必须填写每天执行时间。");
+    if ("daily".equals(task.scheduleMode)) {
+      task.scheduleIntervalMinutes = null;
+      task.nextIntervalAt = null;
+      if (task.scheduleEnabled && body.scheduleTime() == null) {
+        task.scheduleTime = null;
+        throw new IllegalArgumentException("每天一次模式必须填写每天执行时间。");
+      }
+    } else {
+      task.scheduleTime = null;
+      task.lastScheduleDate = null;
+      if (task.scheduleEnabled
+          && (body.scheduleIntervalMinutes() == null
+              || task.scheduleIntervalMinutes == null
+              || task.scheduleIntervalMinutes < 5
+              || task.scheduleIntervalMinutes > 1440)) {
+        throw new IllegalArgumentException("间隔运行分钟数必须在 5 到 1440 之间。");
+      }
+      boolean intervalConfigurationChanged =
+          !"interval".equals(previousScheduleMode)
+              || !java.util.Objects.equals(previousIntervalMinutes, task.scheduleIntervalMinutes)
+              || (!wasScheduleEnabled && task.scheduleEnabled)
+              || (!wasEnabled && task.enabled);
+      if (!task.scheduleEnabled || !task.enabled) {
+        task.nextIntervalAt = null;
+      } else if (intervalConfigurationChanged || task.nextIntervalAt == null) {
+        task.nextIntervalAt = Instant.now().plus(task.scheduleIntervalMinutes, ChronoUnit.MINUTES);
+      }
     }
     if (task.notifyDingTalk) {
       if (task.dingtalkTarget == null) {

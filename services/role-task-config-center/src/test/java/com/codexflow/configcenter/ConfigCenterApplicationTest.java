@@ -64,6 +64,13 @@ class ConfigCenterApplicationTest {
         .isEqualTo(1);
     assertThat(
             jdbc.queryForObject(
+                "select count(*) from information_schema.columns where table_name ="
+                    + " 'codex_sop_task_definitions' and column_name in ('schedule_mode',"
+                    + " 'schedule_interval_minutes', 'next_interval_at')",
+                Integer.class))
+        .isEqualTo(3);
+    assertThat(
+            jdbc.queryForObject(
                 "select count(*) from information_schema.tables "
                     + "where table_name in ('codex_sop_feishu_bot_state', "
                     + "'codex_sop_feishu_workflow_bindings', "
@@ -139,7 +146,9 @@ class ConfigCenterApplicationTest {
     assertThat(index).contains("name=\"dingtalkTargetId\"");
     assertThat(index)
         .contains("name=\"scheduleEnabled\"")
+        .contains("name=\"scheduleMode\"")
         .contains("name=\"scheduleTime\"")
+        .contains("name=\"scheduleIntervalMinutes\"")
         .contains("name=\"notifyDingTalk\"");
     assertThat(script)
         .contains("/api/dingtalk/targets/sync-people")
@@ -150,6 +159,8 @@ class ConfigCenterApplicationTest {
         .contains("人员启用状态已自动保存")
         .contains("dingtalkTargetId:f.dingtalkTargetId.value||null")
         .contains("scheduleEnabled:f.scheduleEnabled.checked")
+        .contains("scheduleMode:f.scheduleMode.value")
+        .contains("scheduleIntervalMinutes:interval")
         .contains("notifyDingTalk:f.notifyDingTalk.checked")
         .contains("首次同步的人员默认停用");
   }

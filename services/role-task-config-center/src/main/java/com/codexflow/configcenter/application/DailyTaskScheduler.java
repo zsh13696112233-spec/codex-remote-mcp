@@ -1,16 +1,14 @@
 package com.codexflow.configcenter.application;
 
 import com.codexflow.configcenter.domain.TaskScheduleStore;
-import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
-import java.time.temporal.ChronoUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-/** 每 30 秒检查一次北京时间下恰好到达当前分钟的每日任务。 */
+/** 每 30 秒检查一次北京时间下到达触发点的每日或间隔任务。 */
 @Component
 class DailyTaskScheduler {
 
@@ -33,8 +31,7 @@ class DailyTaskScheduler {
 
   /** 接受显式时间以便测试每日触发、重复扫描和错过不补跑语义。 */
   void runAt(ZonedDateTime now) {
-    LocalTime minute = now.toLocalTime().truncatedTo(ChronoUnit.MINUTES);
-    for (String taskId : schedules.claim(now.toLocalDate(), minute)) {
+    for (String taskId : schedules.claim(now)) {
       try {
         workflowRuns.runScheduled(taskId);
       } catch (RuntimeException error) {

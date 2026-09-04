@@ -1,5 +1,6 @@
 package com.codexflow.configcenter.domain;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.List;
@@ -71,6 +72,14 @@ interface TaskDefinitionRepository extends JpaRepository<TaskDefinitionEntity, S
       nativeQuery = true)
   List<TaskDefinitionEntity> findDueSchedulesForUpdate(
       @Param("scheduleDate") LocalDate scheduleDate, @Param("scheduleTime") LocalTime scheduleTime);
+
+  @Query(
+      value =
+          "SELECT task.* FROM codex_sop_task_definitions task WHERE task.deleted = FALSE AND"
+              + " task.enabled = TRUE AND task.schedule_enabled = TRUE AND task.schedule_mode ="
+              + " 'interval' AND task.next_interval_at <= :now FOR UPDATE",
+      nativeQuery = true)
+  List<TaskDefinitionEntity> findDueIntervalSchedulesForUpdate(@Param("now") Instant now);
 
   @Query(
       "SELECT COUNT(task) > 0 FROM TaskDefinitionEntity task WHERE task.deleted = false AND"

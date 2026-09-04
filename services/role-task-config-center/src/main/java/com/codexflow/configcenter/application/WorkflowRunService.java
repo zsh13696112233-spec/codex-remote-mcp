@@ -43,7 +43,7 @@ public class WorkflowRunService {
     return launchLatest(taskId, "web", "任务已从网页启动。");
   }
 
-  /** 使用任务定义的最新配置执行一次每日定时运行。 */
+  /** 使用任务定义的最新配置执行一次定时运行。 */
   public ObjectNode runScheduled(String taskId) {
     return launchLatest(taskId, "schedule", "定时任务已启动。");
   }

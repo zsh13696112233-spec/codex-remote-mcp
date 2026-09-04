@@ -6,8 +6,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
 import com.codexflow.configcenter.dto.TaskDefinitionSaveRequest;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -17,7 +21,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import tools.jackson.databind.node.ObjectNode;
 
-/** 验证每日时间配置、同日幂等领取和任务级单实例占用。 */
+/** 验证每日与间隔配置、幂等领取和任务级单实例占用。 */
 @SpringBootTest
 class TaskScheduleIntegrationTest {
 
@@ -55,6 +59,128 @@ class TaskScheduleIntegrationTest {
     assertThat(schedules.claim(firstDate, LocalTime.of(3, 18))).isEmpty();
     assertThat(schedules.claim(firstDate.plusDays(1), LocalTime.of(3, 17)))
         .containsExactly(task.path("id").asText());
+  }
+
+  @Test
+  void intervalScheduleUsesPersistedCadenceAndSkipsMissedMinutes() {
+    ObjectNode task = createIntervalTask(true, 15);
+    String taskId = task.path("id").asText();
+    jdbc.update(
+        "update codex_sop_task_definitions set schedule_enabled = false where id <> ?", taskId);
+    ZoneId zone = ZoneId.of("Asia/Shanghai");
+    ZonedDateTime due = ZonedDateTime.of(2026, 9, 4, 3, 17, 20, 0, zone);
+    jdbc.update(
+        "update codex_sop_task_definitions set next_interval_at = ? where id = ?",
+        due.toInstant(),
+        taskId);
+
+    assertThat(task.path("scheduleMode").asText()).isEqualTo("interval");
+    assertThat(task.path("scheduleIntervalMinutes").asInt()).isEqualTo(15);
+    assertThat(task.path("scheduleTime").isNull()).isTrue();
+    assertThat(task.path("nextScheduleAt").asText()).isNotBlank();
+    assertThat(schedules.claim(due.minusSeconds(10))).isEmpty();
+    assertThat(schedules.claim(due.plusSeconds(45))).containsExactly(taskId);
+    assertThat(schedules.claim(due.plusSeconds(50))).isEmpty();
+    assertThat(
+            jdbc.queryForObject(
+                "select next_interval_at from codex_sop_task_definitions where id = ?",
+                Instant.class,
+                taskId))
+        .isEqualTo(due.plusMinutes(15).toInstant());
+
+    ZonedDateTime missed = due.plusHours(2);
+    jdbc.update(
+        "update codex_sop_task_definitions set next_interval_at = ? where id = ?",
+        due.toInstant(),
+        taskId);
+    assertThat(schedules.claim(missed)).isEmpty();
+    assertThat(
+            jdbc.queryForObject(
+                "select next_interval_at from codex_sop_task_definitions where id = ?",
+                Instant.class,
+                taskId))
+        .isAfter(missed.toInstant());
+  }
+
+  @Test
+  void intervalScheduleResetsOnlyWhenSchedulingConfigurationChanges() {
+    ObjectNode task = createIntervalTask(true, 30);
+    String taskId = task.path("id").asText();
+    Instant firstNext = OffsetDateTime.parse(task.path("nextScheduleAt").asText()).toInstant();
+    TaskDefinitionSaveRequest unchanged =
+        new TaskDefinitionSaveRequest(
+            "修改后的名称",
+            task.path("objective").asText(),
+            task.path("sopId").asText(),
+            null,
+            true,
+            null,
+            true,
+            "interval",
+            null,
+            30,
+            false);
+
+    ObjectNode renamed = config.updateTask(taskId, unchanged);
+    assertThat(OffsetDateTime.parse(renamed.path("nextScheduleAt").asText()).toInstant())
+        .isEqualTo(firstNext);
+
+    ObjectNode changed =
+        config.updateTask(
+            taskId,
+            new TaskDefinitionSaveRequest(
+                "修改后的名称",
+                task.path("objective").asText(),
+                task.path("sopId").asText(),
+                null,
+                true,
+                null,
+                true,
+                "interval",
+                null,
+                45,
+                false));
+    assertThat(OffsetDateTime.parse(changed.path("nextScheduleAt").asText()).toInstant())
+        .isAfter(firstNext);
+
+    ObjectNode disabled =
+        config.updateTask(
+            taskId,
+            new TaskDefinitionSaveRequest(
+                "修改后的名称",
+                task.path("objective").asText(),
+                task.path("sopId").asText(),
+                null,
+                true,
+                null,
+                false,
+                "interval",
+                null,
+                45,
+                false));
+    assertThat(disabled.path("nextScheduleAt").isNull()).isTrue();
+    ObjectNode reenabled =
+        config.updateTask(
+            taskId,
+            new TaskDefinitionSaveRequest(
+                "修改后的名称",
+                task.path("objective").asText(),
+                task.path("sopId").asText(),
+                null,
+                true,
+                null,
+                true,
+                "interval",
+                null,
+                45,
+                false));
+    assertThat(reenabled.path("nextScheduleAt").isTextual()).isTrue();
+
+    ObjectNode copy = config.copyTask(taskId);
+    assertThat(copy.path("scheduleEnabled").asBoolean()).isFalse();
+    assertThat(copy.path("scheduleMode").asText()).isEqualTo("interval");
+    assertThat(copy.path("scheduleIntervalMinutes").asInt()).isEqualTo(45);
+    assertThat(copy.path("nextScheduleAt").isNull()).isTrue();
   }
 
   @Test
@@ -103,8 +229,49 @@ class TaskScheduleIntegrationTest {
     ObjectNode copy = config.copyTask(taskId);
     assertThat(copy.path("scheduleTime").asText()).isEqualTo("08:45");
     assertThat(copy.path("scheduleEnabled").asBoolean()).isFalse();
+    assertThat(copy.path("scheduleMode").asText()).isEqualTo("daily");
     assertThat(copy.path("notifyDingTalk").asBoolean()).isFalse();
     assertThat(copy.path("dingtalkTargetId").isNull()).isTrue();
+  }
+
+  @Test
+  void enabledIntervalRequiresMinutesWithinSupportedRange() {
+    String suffix = UUID.randomUUID().toString();
+    String sopId = createSop(suffix);
+    assertThatThrownBy(
+            () ->
+                config.createTask(
+                    new TaskDefinitionSaveRequest(
+                        "缺少间隔-" + suffix,
+                        "验证间隔校验",
+                        sopId,
+                        null,
+                        true,
+                        null,
+                        true,
+                        "interval",
+                        null,
+                        null,
+                        false)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("5 到 1440");
+    assertThatThrownBy(
+            () ->
+                config.createTask(
+                    new TaskDefinitionSaveRequest(
+                        "非法间隔-" + suffix,
+                        "验证间隔校验",
+                        sopId,
+                        null,
+                        true,
+                        null,
+                        true,
+                        "interval",
+                        null,
+                        1441,
+                        false)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("5 到 1440");
   }
 
   private ObjectNode createTask(
@@ -121,6 +288,23 @@ class TaskScheduleIntegrationTest {
             scheduleEnabled,
             scheduleTime,
             notifyDingTalk));
+  }
+
+  private ObjectNode createIntervalTask(boolean scheduleEnabled, Integer intervalMinutes) {
+    String suffix = UUID.randomUUID().toString();
+    return config.createTask(
+        new TaskDefinitionSaveRequest(
+            "间隔任务-" + suffix,
+            "验证间隔定时运行",
+            createSop(suffix),
+            null,
+            true,
+            null,
+            scheduleEnabled,
+            "interval",
+            null,
+            intervalMinutes,
+            false));
   }
 
   private String createSop(String suffix) {

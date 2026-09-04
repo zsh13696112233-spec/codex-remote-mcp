@@ -7,6 +7,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 
@@ -44,13 +45,25 @@ class TaskDefinitionEntity extends Timestamped {
   @Column(name = "dingtalk_active_workflow_id", length = 128)
   String dingtalkActiveWorkflowId;
 
-  /** 是否按北京时间每天自动运行一次。 */
+  /** 是否启用服务端定时运行。 */
   @Column(name = "schedule_enabled", nullable = false)
   boolean scheduleEnabled;
 
   /** 每日运行时间，仅保存小时和分钟。 */
   @Column(name = "schedule_time")
   LocalTime scheduleTime;
+
+  /** 定时模式：每天固定时间或按分钟间隔执行。 */
+  @Column(name = "schedule_mode", nullable = false, length = 16)
+  String scheduleMode = "daily";
+
+  /** 间隔模式的分钟数，允许范围为 5–1440。 */
+  @Column(name = "schedule_interval_minutes")
+  Integer scheduleIntervalMinutes;
+
+  /** 间隔模式下一次计划触发的绝对时间。 */
+  @Column(name = "next_interval_at")
+  Instant nextIntervalAt;
 
   /** 网页和定时运行是否主动推送到任务绑定的钉钉对象。 */
   @Column(name = "notify_dingtalk", nullable = false)

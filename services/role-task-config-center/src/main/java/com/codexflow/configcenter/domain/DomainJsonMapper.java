@@ -113,8 +113,11 @@ class DomainJsonMapper {
     }
     putNullable(result, "dingtalkActiveWorkflowId", task.dingtalkActiveWorkflowId);
     result.put("scheduleEnabled", task.scheduleEnabled);
+    result.put("scheduleMode", task.scheduleMode);
     if (task.scheduleTime == null) result.putNull("scheduleTime");
     else result.put("scheduleTime", task.scheduleTime.format(SCHEDULE_TIME_FORMAT));
+    if (task.scheduleIntervalMinutes == null) result.putNull("scheduleIntervalMinutes");
+    else result.put("scheduleIntervalMinutes", task.scheduleIntervalMinutes);
     result.put("notifyDingTalk", task.notifyDingTalk);
     if (task.lastScheduleDate == null) result.putNull("lastScheduleDate");
     else result.put("lastScheduleDate", task.lastScheduleDate.toString());
@@ -129,11 +132,23 @@ class DomainJsonMapper {
   /** 根据北京时间计算页面展示用的下一次计划时间；该值不参与调度判断。 */
   private static void putNextScheduleAt(ObjectNode result, TaskDefinitionEntity task) {
     if (!task.scheduleEnabled
-        || task.scheduleTime == null
         || !task.enabled
         || task.deleted
         || !task.sop.enabled
         || task.sop.deleted) {
+      result.putNull("nextScheduleAt");
+      return;
+    }
+    if ("interval".equals(task.scheduleMode)) {
+      if (task.nextIntervalAt == null) result.putNull("nextScheduleAt");
+      else {
+        result.put(
+            "nextScheduleAt",
+            task.nextIntervalAt.atZone(SCHEDULE_ZONE).format(SCHEDULE_DATE_TIME_FORMAT));
+      }
+      return;
+    }
+    if (task.scheduleTime == null) {
       result.putNull("nextScheduleAt");
       return;
     }

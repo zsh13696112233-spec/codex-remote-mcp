@@ -10,7 +10,7 @@ import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 
-/** 验证升级到 V17 时把飞书活动运行迁入统一任务槽。 */
+/** 验证升级后把飞书活动运行迁入统一任务槽，并保留历史任务的每日定时默认值。 */
 class FeishuV17MigrationTest {
 
   @Test
@@ -77,11 +77,12 @@ class FeishuV17MigrationTest {
         Statement statement = connection.createStatement();
         ResultSet result =
             statement.executeQuery(
-                "SELECT active_workflow_id FROM codex_sop_task_definitions WHERE id='"
+                "SELECT active_workflow_id,schedule_mode FROM codex_sop_task_definitions WHERE id='"
                     + taskId
                     + "'")) {
       assertThat(result.next()).isTrue();
       assertThat(result.getString("active_workflow_id")).isEqualTo(workflowId);
+      assertThat(result.getString("schedule_mode")).isEqualTo("daily");
     }
   }
 }
