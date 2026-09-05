@@ -1,4 +1,4 @@
-const state={page:"roles",roles:[],sops:[],tasks:[],agents:[],feishu:null,dingtalk:null,dingtalkTargets:[],dingtalkDirectory:{departments:[],people:[]},dingtalkTargetType:"GROUP",dingtalkDepartmentId:"__all__",dingtalkCollapsedDepartments:new Set(),dingtalkPersonSearch:"",gatewayOnline:false,agentsAvailable:false,agentRefreshInFlight:false,lastRuntimeRefreshAt:null,sop:{draft:null,baseline:"",selectedNodeId:null,tab:"workflow",drag:null}};
+const state={page:"roles",roles:[],sops:[],tasks:[],agents:[],dingtalk:null,dingtalkTargets:[],dingtalkDirectory:{departments:[],people:[]},dingtalkTargetType:"GROUP",dingtalkDepartmentId:"__all__",dingtalkCollapsedDepartments:new Set(),dingtalkPersonSearch:"",gatewayOnline:false,agentsAvailable:false,agentRefreshInFlight:false,lastRuntimeRefreshAt:null,sop:{draft:null,baseline:"",selectedNodeId:null,tab:"workflow",drag:null}};
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uid=()=>`node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
@@ -54,40 +54,17 @@ async function loadBase(){
 function roleCard(x){return `<article class="card"><div><h3>${esc(x.name)} ${status(x)}</h3><p>${esc(x.duty)}</p><span class="meta">版本 ${x.version} · 更新于 ${time(x.updatedAt)}</span></div><div class="actions"><button data-action="edit-role" data-id="${x.id}">编辑</button><button data-action="delete-role" data-id="${x.id}">删除</button></div></article>`}
 function taskCard(x){const binding=x.dingtalkTarget?` · 钉钉：${targetTypeLabel(x.dingtalkTarget.targetType)} ${esc(x.dingtalkTarget.displayName)}${x.activeWorkflowId?"（运行中）":""}`:"",scheduleLabel=x.scheduleMode==="interval"?`每隔 ${Number(x.scheduleIntervalMinutes)||"—"} 分钟`:`每天 ${esc(x.scheduleTime||"—")}`,schedule=x.scheduleEnabled?` · ${scheduleLabel}运行 · 下次 ${time(x.nextScheduleAt)}`:" · 未启用定时";return `<article class="card"><div><h3>${esc(x.name)} ${status(x)}</h3><p>${esc(x.objective)}</p><span class="meta">SOP：${esc(x.sopName)}${binding}${schedule} · 更新于 ${time(x.updatedAt)}</span></div><div class="actions"><button class="primary" data-action="run-task" data-id="${x.id}">运行</button><button data-action="runs" data-id="${x.id}" data-name="${esc(x.name)}">记录</button><button data-action="edit-task" data-id="${x.id}">编辑</button><button data-action="copy-task" data-id="${x.id}">复制</button><button data-action="delete-task" data-id="${x.id}">删除</button></div></article>`}
 
-function feishuStatus(value){
+function connectionStatus(value){
   const map={connected:["已连接","online"],failed:["连接失败","offline"],disconnected:["未连接","offline"],disabled:["未启用","off"]};
   const item=map[value]||["未知","off"];
   return `<span class="connection-status ${item[1]}"><i></i>${item[0]}</span>`;
 }
-function renderFeishuConfig(){
-  const x=state.feishu||{enabled:false,appId:"",secretConfigured:false,taskDefinitionId:"",eventPollIntervalMs:1000,connectionStatus:"disabled"};
-  const tasks=state.tasks.filter(t=>t.enabled&&!t.deleted);
-  $("#content").className="content";
-  $("#content").innerHTML=`<section class="settings-panel">
-    <div class="settings-heading"><div><h2>飞书机器人配置</h2><p>通过官方 SDK 长连接接收群聊消息，无需开放公网回调地址。</p></div>${feishuStatus(x.connectionStatus)}</div>
-    <form id="feishuForm">
-      <label class="check"><input name="enabled" type="checkbox" ${x.enabled?"checked":""}> 启用飞书机器人长连接</label>
-      <div class="grid"><label>App ID<input name="appId" maxlength="128" required value="${esc(x.appId)}" placeholder="cli_xxxxxxxxxxxxxxxx"></label>
-      <label>App Secret<input name="appSecret" type="password" maxlength="512" placeholder="${x.secretConfigured?"已保存；留空表示不修改":"请输入 App Secret"}"></label></div>
-      <label>固定任务定义<select name="taskDefinitionId" required><option value="">请选择任务</option>${tasks.map(t=>`<option value="${t.id}" ${t.id===x.taskDefinitionId?"selected":""}>${esc(t.name)}</option>`).join("")}</select></label>
-      <label>事件轮询间隔（毫秒）<input name="eventPollIntervalMs" type="number" min="250" max="60000" required value="${Number(x.eventPollIntervalMs)||1000}"></label>
-      <p class="hint">App Secret 会保存在配置中心 MySQL 中，但不会通过接口或页面回显。任务运行期间不能停用机器人或切换应用、密钥和固定任务。</p>
-      <div id="feishuTestResult" class="test-result"></div>
-      <footer><button type="button" data-feishu-test>测试连接</button><button class="primary" type="submit">保存配置</button></footer>
-    </form>
-  </section>`;
-}
-function feishuPayload(){
-  const f=$("#feishuForm");
-  return {enabled:f.enabled.checked,appId:f.appId.value.trim(),appSecret:f.appSecret.value.trim(),taskDefinitionId:f.taskDefinitionId.value,eventPollIntervalMs:Number(f.eventPollIntervalMs.value)};
-}
-
 function renderDingTalkConfig(){
   const x=state.dingtalk||{enabled:false,clientId:"",secretConfigured:false,cardTemplateId:"",eventPollIntervalMs:1000,connectionStatus:"disabled"};
   const bindings=state.tasks.filter(t=>t.dingtalkTarget);
   $("#content").className="content";
   $("#content").innerHTML=`<section class="settings-panel">
-    <div class="settings-heading"><div><h2>钉钉机器人配置</h2><p>通过官方 Stream SDK 接收群聊和卡片回调，无需开放公网地址。</p></div>${feishuStatus(x.connectionStatus)}</div>
+    <div class="settings-heading"><div><h2>钉钉机器人配置</h2><p>通过官方 Stream SDK 接收群聊和卡片回调，无需开放公网地址。</p></div>${connectionStatus(x.connectionStatus)}</div>
     <form id="dingtalkForm">
       <label class="check"><input name="enabled" type="checkbox" ${x.enabled?"checked":""}> 启用钉钉机器人 Stream 长连接</label>
       <div class="grid"><label>Client ID<input name="clientId" maxlength="128" required value="${esc(x.clientId)}" placeholder="dingxxxxxxxxxxxxxxxx"></label>
@@ -175,11 +152,6 @@ function renderRuntimeStatus(){
 
 async function render({reload=true}={}){
   if(reload){if(state.page==="runtime")await loadRuntime();else await loadBase()}
-  if(state.page==="feishu"){
-    $("#search").closest(".toolbar").classList.add("hidden");
-    state.feishu=await api("/api/feishu/config");
-    renderFeishuConfig();return;
-  }
   if(state.page==="dingtalk"){
     $("#search").closest(".toolbar").classList.add("hidden");
     state.dingtalk=await api("/api/dingtalk/config");
@@ -428,8 +400,6 @@ $("#content").addEventListener("click",async e=>{
       const step=selectedStep();if(agentChoice.dataset.agentChoice==="executor"&&step){step.agentId=agentChoice.dataset.agentId;if(!agentPermissionProfiles(step.agentId).includes(step.permissionProfile)){step.permissionProfile="read_only";step.writeEnabled=false}renderSopWorkspace();return}
     }
     if(!e.target.closest(".agent-picker")){document.querySelectorAll(".agent-picker-menu").forEach(item=>item.hidden=true);document.querySelectorAll("[data-agent-menu-toggle]").forEach(item=>item.setAttribute("aria-expanded","false"))}
-    const test=e.target.closest("[data-feishu-test]");
-    if(test){botTestButton=test;test.disabled=true;const result=await api("/api/feishu/config/test",{method:"POST",body:JSON.stringify(feishuPayload())});const output=$("#feishuTestResult");output.className=`test-result ${result.success?"success":"error"}`;output.textContent=result.message;test.disabled=false;return}
     const dingtalkTest=e.target.closest("[data-dingtalk-test]");
     if(dingtalkTest){botTestButton=dingtalkTest;dingtalkTest.disabled=true;const result=await api("/api/dingtalk/config/test",{method:"POST",body:JSON.stringify(dingtalkPayload())});const output=$("#dingtalkTestResult");output.className=`test-result ${result.success?"success":"error"}`;output.textContent=result.message;dingtalkTest.disabled=false;return}
     const targetType=e.target.closest("[data-target-type]");if(targetType){state.dingtalkTargetType=targetType.dataset.targetType;renderDingTalkTargets();return}
@@ -464,11 +434,10 @@ $("#content").addEventListener("click",async e=>{
   }catch(x){if(botTestButton)botTestButton.disabled=false;toast(x.message)}
 });
 $("#content").addEventListener("submit",async e=>{
-  if(!["feishuForm","dingtalkForm"].includes(e.target.id))return;e.preventDefault();
+  if(e.target.id!=="dingtalkForm")return;e.preventDefault();
   const submit=e.target.querySelector('button[type="submit"]');submit.disabled=true;
   try{
-    if(e.target.id==="feishuForm"){state.feishu=await api("/api/feishu/config",{method:"PUT",body:JSON.stringify(feishuPayload())});toast(state.feishu.message||"飞书配置已保存");renderFeishuConfig()}
-    else{state.dingtalk=await api("/api/dingtalk/config",{method:"PUT",body:JSON.stringify(dingtalkPayload())});toast(state.dingtalk.message||"钉钉配置已保存");renderDingTalkConfig()}
+    state.dingtalk=await api("/api/dingtalk/config",{method:"PUT",body:JSON.stringify(dingtalkPayload())});toast(state.dingtalk.message||"钉钉配置已保存");renderDingTalkConfig();
   }catch(x){toast(x.message);submit.disabled=false}
 });
 $("#content").addEventListener("input",e=>{
@@ -582,9 +551,9 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   if(b.dataset.page===state.page)return;
   if(state.page==="sops"){const dirty=isSopDirty();if(!confirmDiscard())return;if(dirty)discardSopChanges()}
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
-  const map={roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、钉钉绑定、运行并追溯不可变快照。","＋ 新建任务"],runtime:["运行状态","查看 Python 网关和全部主监督执行机的实时状态。",""],feishu:["飞书机器人","配置长连接、固定任务和运行状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接并查看任务绑定。",""],"dingtalk-targets":["钉钉通知对象","维护任务定义可选择的人员或群聊。",""]};
+  const map={roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、钉钉绑定、运行并追溯不可变快照。","＋ 新建任务"],runtime:["运行状态","查看 Python 网关和全部主监督执行机的实时状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接并查看任务绑定。",""],"dingtalk-targets":["钉钉通知对象","维护任务定义可选择的人员或群聊。",""]};
   [$("#title").textContent,$("#subtitle").textContent,$("#create").textContent]=map[state.page];
-  $("#create").classList.toggle("hidden",["runtime","feishu","dingtalk","dingtalk-targets"].includes(state.page));
+  $("#create").classList.toggle("hidden",["runtime","dingtalk","dingtalk-targets"].includes(state.page));
   try{await render()}catch(e){toast(e.message)}
 });
 $("#create").onclick=()=>state.page==="roles"?openRole():state.page==="sops"?startNewSop():state.page==="tasks"?openTask():null;

@@ -17,10 +17,12 @@ import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 import tools.jackson.databind.node.ObjectNode;
 
 /** 验证配置中心的数据库迁移、JPA 关系加载和请求参数校验。 */
@@ -30,6 +32,20 @@ class ConfigCenterApplicationTest {
   @Autowired ConfigService service;
   @Autowired WorkflowRunStore runStore;
   @Autowired Validator validator;
+
+  @Autowired
+  @Qualifier("requestMappingHandlerMapping")
+  RequestMappingHandlerMapping mappings;
+
+  @Test
+  void onlyDingTalkRobotConfigurationRoutesRemain() {
+    var routes =
+        mappings.getHandlerMethods().keySet().stream()
+            .flatMap(mapping -> mapping.getPatternValues().stream())
+            .toList();
+    assertThat(routes).noneMatch(route -> route.startsWith("/api/feishu"));
+    assertThat(routes).contains("/api/dingtalk/config", "/api/dingtalk/config/test");
+  }
 
   /** 确认 Flyway 建表成功、默认角色已初始化且运行记录表初始为空。 */
   @Test
@@ -142,7 +158,9 @@ class ConfigCenterApplicationTest {
     String index = readClasspath("static/index.html");
     String script = readClasspath("static/app.js");
 
-    assertThat(index).contains("data-page=\"dingtalk-targets\">钉钉通知对象");
+    assertThat(index)
+        .contains("data-page=\"dingtalk-targets\">钉钉通知对象")
+        .doesNotContain("data-page=\"feishu\"");
     assertThat(index)
         .contains("name=\"dingtalkTargetId\"")
         .contains("name=\"dingtalkTargetType\" value=\"NONE\"")
@@ -152,7 +170,7 @@ class ConfigCenterApplicationTest {
         .contains("styles.css?v=20260904-dialog-cancel")
         .contains("sync-wait.css?v=20260905")
         .contains("id=\"syncWait\"")
-        .contains("app.js?v=20260905-sync-wait")
+        .contains("app.js?v=20260905-dingtalk-only")
         .contains("任务目标")
         .contains("发送给所有步骤")
         .contains("type=\"hidden\" name=\"additionalNotes\"");

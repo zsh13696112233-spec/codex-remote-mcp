@@ -6,7 +6,6 @@ import com.codexflow.configcenter.client.GatewayClient;
 import com.codexflow.configcenter.client.GatewayFailure;
 import com.codexflow.configcenter.domain.PreparedRun;
 import com.codexflow.configcenter.domain.WorkflowRunStore;
-import com.codexflow.configcenter.integration.bot.BotPlatformGuard;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -55,7 +54,6 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   private final WorkflowRunStore workflowRunStore;
   private final GatewayClient gateway;
   private final DingTalkProgressCard progressCard;
-  private final BotPlatformGuard platformGuard;
   private final ObjectMapper objectMapper;
   private final BoundedWork eventWorkers = new BoundedWork("dingtalk-events", 4, 4);
   private final BoundedWork outboxWorker = new BoundedWork("dingtalk-outbox", 1, 1);
@@ -76,8 +74,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       WorkflowRunStore workflowRunStore,
       GatewayClient gateway,
       DingTalkProgressCard progressCard,
-      ObjectMapper objectMapper,
-      BotPlatformGuard platformGuard) {
+      ObjectMapper objectMapper) {
     this.properties = properties;
     this.settings = settings;
     this.transport = transport;
@@ -87,7 +84,6 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     this.gateway = gateway;
     this.progressCard = progressCard;
     this.objectMapper = objectMapper;
-    this.platformGuard = platformGuard;
   }
 
   @Override
@@ -99,7 +95,6 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       return;
     }
     try {
-      platformGuard.assertCanEnable("dingtalk", true);
       properties.validateEnabledConfiguration();
       store.initialize(properties.getClientId());
       handlers = Executors.newFixedThreadPool(4);

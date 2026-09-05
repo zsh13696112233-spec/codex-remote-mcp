@@ -32,20 +32,6 @@ public class TaskLaunchStore {
     return new LaunchReservation(task.id, prepared, task.notifyDingTalk);
   }
 
-  /** 锁定任务定义；空闲时创建运行，否则返回当前占用者。 */
-  @Transactional
-  public LaunchAttempt reserveLatestOrActive(String taskId) {
-    TaskDefinitionEntity task = requiredTaskForUpdate(taskId);
-    validateStartable(task);
-    if (task.activeWorkflowId != null) {
-      return new LaunchAttempt(task.activeWorkflowId, null);
-    }
-    PreparedRun prepared = workflowRuns.prepareLatest(taskId);
-    task.activeWorkflowId = prepared.workflowId();
-    tasks.saveAndFlush(task);
-    return new LaunchAttempt(null, new LaunchReservation(task.id, prepared, task.notifyDingTalk));
-  }
-
   /** 按历史快照创建重试运行，并占用来源任务的运行槽。 */
   @Transactional
   public LaunchReservation reserveRetry(String sourceWorkflowId) {
@@ -110,9 +96,6 @@ public class TaskLaunchStore {
   /** 一次已持久化且已占用任务运行槽的启动准备结果。 */
   public record LaunchReservation(
       String taskDefinitionId, PreparedRun prepared, boolean notifyDingTalk) {}
-
-  /** 飞书等消息入口使用的空闲预约或当前占用结果。 */
-  public record LaunchAttempt(String activeWorkflowId, LaunchReservation reservation) {}
 
   /** 当前活动任务占用的只读快照。 */
   public record ActiveLaunch(String taskDefinitionId, String workflowId) {}

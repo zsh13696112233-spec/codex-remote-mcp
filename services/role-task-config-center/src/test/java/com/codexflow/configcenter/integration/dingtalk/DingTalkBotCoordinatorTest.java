@@ -11,7 +11,6 @@ import static org.mockito.Mockito.when;
 import com.codexflow.configcenter.application.WorkflowRunService;
 import com.codexflow.configcenter.client.GatewayClient;
 import com.codexflow.configcenter.domain.WorkflowRunStore;
-import com.codexflow.configcenter.integration.bot.BotPlatformGuard;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -66,8 +65,7 @@ class DingTalkBotCoordinatorTest {
             runStore,
             gateway,
             cards,
-            objectMapper,
-            mock(BotPlatformGuard.class));
+            objectMapper);
   }
 
   @Test

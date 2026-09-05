@@ -1,4 +1,4 @@
-package com.codexflow.configcenter.integration.feishu;
+package com.codexflow.configcenter.domain;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -11,7 +11,7 @@ import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 
 /** 验证升级后把飞书活动运行迁入统一任务槽，并保留历史任务的每日定时默认值。 */
-class FeishuV17MigrationTest {
+class TaskLaunchV17MigrationTest {
 
   @Test
   void migratesActiveFeishuWorkflowToTaskDefinitionSlot() throws Exception {

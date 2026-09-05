@@ -1,7 +1,6 @@
 package com.codexflow.configcenter.integration.dingtalk;
 
 import com.codexflow.configcenter.dto.DingTalkConfigSaveRequest;
-import com.codexflow.configcenter.integration.bot.BotPlatformGuard;
 import java.time.Instant;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -14,15 +13,10 @@ class DingTalkSettingsStore {
 
   private final DingTalkSettingsRepository repository;
   private final DingTalkProperties properties;
-  private final BotPlatformGuard platformGuard;
 
-  DingTalkSettingsStore(
-      DingTalkSettingsRepository repository,
-      DingTalkProperties properties,
-      BotPlatformGuard platformGuard) {
+  DingTalkSettingsStore(DingTalkSettingsRepository repository, DingTalkProperties properties) {
     this.repository = repository;
     this.properties = properties;
-    this.platformGuard = platformGuard;
   }
 
   @Transactional(readOnly = true)
@@ -40,7 +34,6 @@ class DingTalkSettingsStore {
 
   @Transactional
   public Settings save(DingTalkConfigSaveRequest request) {
-    platformGuard.assertCanEnable("dingtalk", request.enabled());
     Settings previous = current();
     String secret = normalized(request.clientSecret());
     if (secret.isBlank()) secret = previous.clientSecret();
