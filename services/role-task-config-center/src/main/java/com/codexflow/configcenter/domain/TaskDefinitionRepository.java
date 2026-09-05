@@ -6,7 +6,6 @@ import java.time.LocalTime;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -50,18 +49,17 @@ interface TaskDefinitionRepository extends JpaRepository<TaskDefinitionEntity, S
       nativeQuery = true)
   Optional<TaskDefinitionEntity> findForUpdate(@Param("id") String id);
 
-  List<TaskDefinitionEntity> findByActiveWorkflowIdIsNotNull();
+  @Query(
+      "SELECT task FROM TaskDefinitionEntity task WHERE task.activeWorkflowId IS NOT NULL OR"
+          + " task.dingtalkActiveWorkflowId IS NOT NULL")
+  List<TaskDefinitionEntity> findOccupiedTasks();
 
-  @Modifying(flushAutomatically = true)
   @Query(
       value =
-          "UPDATE codex_sop_task_definitions SET active_workflow_id = CASE WHEN active_workflow_id"
-              + " = :workflowId THEN NULL ELSE active_workflow_id END, dingtalk_active_workflow_id"
-              + " = CASE WHEN dingtalk_active_workflow_id = :workflowId THEN NULL ELSE"
-              + " dingtalk_active_workflow_id END, updated_at = CURRENT_TIMESTAMP(6) WHERE"
-              + " active_workflow_id = :workflowId OR dingtalk_active_workflow_id = :workflowId",
+          "SELECT * FROM codex_sop_task_definitions WHERE active_workflow_id = :workflowId OR"
+              + " dingtalk_active_workflow_id = :workflowId FOR UPDATE",
       nativeQuery = true)
-  int releaseWorkflow(@Param("workflowId") String workflowId);
+  List<TaskDefinitionEntity> findOccupantsForUpdate(@Param("workflowId") String workflowId);
 
   @Query(
       value =

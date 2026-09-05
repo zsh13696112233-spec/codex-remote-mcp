@@ -50,9 +50,8 @@ public class TaskLaunchStore {
   @Transactional
   public Optional<String> acquireExisting(String taskId, String workflowId) {
     TaskDefinitionEntity task = requiredTaskForUpdate(taskId);
-    if (task.activeWorkflowId != null && !workflowId.equals(task.activeWorkflowId)) {
-      return Optional.of(task.activeWorkflowId);
-    }
+    String busy = conflictingWorkflowId(task, workflowId);
+    if (busy != null) return Optional.of(busy);
     task.activeWorkflowId = workflowId;
     tasks.saveAndFlush(task);
     return Optional.empty();
@@ -61,21 +60,26 @@ public class TaskLaunchStore {
   /** 返回任务当前占用的工作流 ID。 */
   @Transactional(readOnly = true)
   public Optional<String> activeWorkflowId(String taskId) {
-    return tasks.findById(taskId).map(task -> task.activeWorkflowId).filter(value -> value != null);
+    return tasks.findById(taskId).map(task -> conflictingWorkflowId(task, null));
   }
 
   /** 返回所有待确认终态的任务占用快照。 */
   @Transactional(readOnly = true)
   public List<ActiveLaunch> activeLaunches() {
-    return tasks.findByActiveWorkflowIdIsNotNull().stream()
-        .map(task -> new ActiveLaunch(task.id, task.activeWorkflowId))
+    return tasks.findOccupiedTasks().stream()
+        .map(task -> new ActiveLaunch(task.id, conflictingWorkflowId(task, null)))
         .toList();
   }
 
   /** 仅当工作流仍是当前占用者时释放运行槽。 */
   @Transactional
   public void release(String workflowId) {
-    tasks.releaseWorkflow(workflowId);
+    // 使用同一套行锁和受管实体，避免批量 SQL 释放后持久化上下文仍保留旧占用。
+    for (TaskDefinitionEntity task : tasks.findOccupantsForUpdate(workflowId)) {
+      if (workflowId.equals(task.activeWorkflowId)) task.activeWorkflowId = null;
+      if (workflowId.equals(task.dingtalkActiveWorkflowId)) task.dingtalkActiveWorkflowId = null;
+    }
+    tasks.flush();
   }
 
   private TaskDefinitionEntity requiredTaskForUpdate(String taskId) {
@@ -88,9 +92,21 @@ public class TaskLaunchStore {
   }
 
   private static void requireIdle(TaskDefinitionEntity task) {
-    if (task.activeWorkflowId != null) {
+    if (conflictingWorkflowId(task, null) != null) {
       throw new ConflictFailure("当前任务仍在运行，请等待完成后再次运行。");
     }
+  }
+
+  /** 通用任务占用优先；尚未对账的钉钉通知关联也须保守保护，不能覆盖另一运行。 */
+  private static String conflictingWorkflowId(TaskDefinitionEntity task, String workflowId) {
+    if (task.activeWorkflowId != null && !task.activeWorkflowId.equals(workflowId)) {
+      return task.activeWorkflowId;
+    }
+    if (task.dingtalkActiveWorkflowId != null
+        && !task.dingtalkActiveWorkflowId.equals(workflowId)) {
+      return task.dingtalkActiveWorkflowId;
+    }
+    return null;
   }
 
   /** 一次已持久化且已占用任务运行槽的启动准备结果。 */

@@ -18,10 +18,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
@@ -36,6 +39,187 @@ class DingTalkStoreIntegrationTest {
   @Autowired DingTalkBotAdminService adminService;
   @Autowired DingTalkTargetDirectory targets;
   @Autowired TaskLaunchStore taskLaunches;
+  @Autowired PlatformTransactionManager transactions;
+
+  @Test
+  void staleDingTalkPointerCannotOverwriteANewerWebRunOnRestart() {
+    String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
+    String oldId = store.reserveStart(clientId, message("old-start")).workflowId();
+    store.reconcileRuntimeStatus(clientId, oldId, "completed");
+    String currentId = taskLaunches.reserveLatest(taskId).prepared().workflowId();
+    jdbc.update(
+        "update codex_sop_task_definitions set dingtalk_active_workflow_id = ? where id = ?",
+        oldId,
+        taskId);
+
+    assertThat(store.acquireForRestart(clientId, oldId)).contains(currentId);
+    assertThat(taskLaunches.activeWorkflowId(taskId)).contains(currentId);
+    assertThat(store.binding(oldId).orElseThrow().status()).isEqualTo("terminal");
+    store.reconcileRuntimeStatus(clientId, oldId, "completed");
+    assertThat(taskLaunches.activeWorkflowId(taskId)).contains(currentId);
+    assertThat(store.active(clientId, message("check"))).isEmpty();
+  }
+
+  @Test
+  void acquiringAnExistingRunAlsoProtectsAnUnreconciledDingTalkOwner() {
+    String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
+    String oldId = store.reserveStart(clientId, message("old-start")).workflowId();
+    store.reconcileRuntimeStatus(clientId, oldId, "completed");
+    String currentId = store.reserveStart(clientId, message("new-start")).workflowId();
+    jdbc.update(
+        "update codex_sop_task_definitions set active_workflow_id = null where id = ?", taskId);
+
+    assertThat(taskLaunches.acquireExisting(taskId, oldId)).contains(currentId);
+    assertThat(taskLaunches.activeWorkflowId(taskId)).contains(currentId);
+    assertThat(taskLaunches.activeLaunches())
+        .contains(new TaskLaunchStore.ActiveLaunch(taskId, currentId));
+    assertThatThrownBy(() -> taskLaunches.reserveLatest(taskId))
+        .isInstanceOf(ConflictFailure.class);
+  }
+
+  @Test
+  void releasingAndReservingInOneTransactionDoesNotReuseStaleJpaState() {
+    String taskId = createTask("app-" + UUID.randomUUID());
+    String currentId =
+        new TransactionTemplate(transactions)
+            .execute(
+                status -> {
+                  String oldId = taskLaunches.reserveLatest(taskId).prepared().workflowId();
+                  taskLaunches.release(oldId);
+                  String nextId = taskLaunches.reserveLatest(taskId).prepared().workflowId();
+                  assertThat(nextId).isNotEqualTo(oldId);
+                  return nextId;
+                });
+    assertThat(taskLaunches.activeWorkflowId(taskId)).contains(currentId);
+  }
+
+  @Test
+  void concurrentWebAndDingTalkStartsShareOneTaskReservation() throws Exception {
+    String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
+    CountDownLatch start = new CountDownLatch(1);
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    try {
+      Future<String> web =
+          executor.submit(
+              () -> {
+                start.await();
+                try {
+                  return taskLaunches.reserveLatest(taskId).prepared().workflowId();
+                } catch (ConflictFailure busy) {
+                  return null;
+                }
+              });
+      Future<DingTalkModels.StartReservation> bot =
+          executor.submit(
+              () -> {
+                start.await();
+                return store.reserveStart(clientId, message("concurrent-start"));
+              });
+      start.countDown();
+      String webId = web.get(10, TimeUnit.SECONDS);
+      DingTalkModels.StartReservation botRun = bot.get(10, TimeUnit.SECONDS);
+      assertThat(botRun.outcome()).isEqualTo(webId == null ? "started" : "busy");
+      String owner = webId == null ? botRun.workflowId() : webId;
+      assertThat(taskLaunches.activeWorkflowId(taskId)).contains(owner);
+      assertThat(
+              jdbc.queryForObject(
+                  "select count(*) from codex_sop_task_runs where task_definition_id = ?",
+                  Integer.class,
+                  taskId))
+          .isEqualTo(1);
+      if (webId != null) assertThat(store.active(clientId, message("check"))).isEmpty();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void lateTerminalAndActiveReconciliationCannotReplaceANewerRun() {
+    String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
+    String oldId = store.reserveStart(clientId, message("old-start")).workflowId();
+    store.reconcileRuntimeStatus(clientId, oldId, "completed");
+    String currentId = store.reserveStart(clientId, message("new-start")).workflowId();
+
+    store.reconcileRuntimeStatus(clientId, oldId, "running");
+    assertThat(store.binding(oldId).orElseThrow().status()).isEqualTo("terminal");
+    store.reconcileRuntimeStatus(clientId, oldId, "completed");
+    taskLaunches.release(oldId);
+
+    assertThat(taskLaunches.activeWorkflowId(taskId)).contains(currentId);
+    assertThat(store.active(clientId, message("check")))
+        .get()
+        .extracting(DingTalkModels.Binding::workflowId)
+        .isEqualTo(currentId);
+  }
+
+  @Test
+  void restartAndNewWebRunCannotBothAcquireTheTask() throws Exception {
+    String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
+    String oldId = store.reserveStart(clientId, message("restart-source")).workflowId();
+    store.reconcileRuntimeStatus(clientId, oldId, "completed");
+    CountDownLatch start = new CountDownLatch(1);
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    try {
+      Future<Boolean> restarted =
+          executor.submit(
+              () -> {
+                start.await();
+                return store.acquireForRestart(clientId, oldId).isEmpty();
+              });
+      Future<String> web =
+          executor.submit(
+              () -> {
+                start.await();
+                try {
+                  return taskLaunches.reserveLatest(taskId).prepared().workflowId();
+                } catch (ConflictFailure busy) {
+                  return null;
+                }
+              });
+      start.countDown();
+      boolean acquired = restarted.get(10, TimeUnit.SECONDS);
+      String webId = web.get(10, TimeUnit.SECONDS);
+      assertThat(acquired).isEqualTo(webId == null);
+      assertThat(taskLaunches.activeWorkflowId(taskId)).contains(acquired ? oldId : webId);
+      if (acquired) {
+        assertThat(store.acquireForRestart(clientId, oldId)).isEmpty();
+        store.releaseRestartReservation(clientId, oldId);
+        assertThat(taskLaunches.activeWorkflowId(taskId)).isEmpty();
+        assertThat(store.active(clientId, message("check"))).isEmpty();
+      } else {
+        assertThat(store.active(clientId, message("check"))).isEmpty();
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void rolledBackBotStartLeavesNeitherTaskOccupancyNorNotificationBinding() {
+    String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
+    new TransactionTemplate(transactions)
+        .executeWithoutResult(
+            status -> {
+              assertThat(store.reserveStart(clientId, message("rolled-back")).outcome())
+                  .isEqualTo("started");
+              status.setRollbackOnly();
+            });
+
+    assertThat(taskLaunches.activeWorkflowId(taskId)).isEmpty();
+    assertThat(store.active(clientId, message("check"))).isEmpty();
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_task_runs where task_definition_id = ?",
+                Integer.class,
+                taskId))
+        .isZero();
+  }
 
   @Test
   void pageSettingsPersistWithoutReturningTheSecret() {
