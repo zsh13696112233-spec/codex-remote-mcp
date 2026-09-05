@@ -9,6 +9,7 @@ python-workflow/
 ├── src/
 │   ├── workflow_gateway.py        HTTP、SSE、主监督和独立任务助手会话
 │   ├── codex_orchestrator_mcp.py  MCP 工具及 app-server 客户端
+│   ├── workflow_event_batcher.py  本地与远程共用的异步事件批处理
 │   ├── workflow_runtime_client.py 远程 Sidecar 到中央内部 API 的客户端
 │   ├── workflow_sidecar.py        Streamable HTTP MCP 与权威心跳入口
 │   └── workflow_store.py          SQLite 状态与事件存储
@@ -24,6 +25,8 @@ python-workflow/
 - `GET /workflows/{workflowId}` 返回 `revision` 和各步骤 `resultRevision`。可携带 `knownRevision` 与 JSON 数组形式的 `knownResults`（按步骤顺序，最多 100 项）。无状态变化时返回 `{unchanged: true, revision, lastEventSequence}`；步骤结果版本相同时省略该步骤的 `response/error/artifacts` 并返回 `resultUnchanged: true`，调用方复用缓存。缺省参数仍返回完整状态。
 - 历史事件支持 `view=all|monitor|bot`，缺省仍为完整审计事件。`after` 向后增量读取，`tail=true` 取最近一页，`before` 向前回看；不能混用方向。响应增加 `nextCursor/hasMore/oldestCursor/hasOlder`，事件始终按序号升序返回。增量调用必须使用 `nextCursor`，即使过滤后为空也可前进，且不会越过尚未交付的符合条件事件。
 - 较大的新事件正文采用透明无损压缩；旧数据库兼容升级，旧正文仍可读取。SQLite 操作在网关后台线程执行，避免写锁等待阻塞消息和心跳处理。升级时网关与本机 MCP 必须同步更新，旧版本无法读取新的压缩正文。
+
+本机 MCP、网关和远程 Sidecar 共用事件批处理器：每批最多 64 条且只属于一个工作流，按入队顺序提交；事件编号与时间在入队时固定，失败重试复用编号。取消等待会先等待已开始的写入结束，关闭时刷新剩余事件；远程认证和租约校验仍由内部 API 客户端负责。
 
 历史事件维护见部署指南，默认只统计、不删除数据。事件、步骤尝试和附件的审计保留语义不变。
 

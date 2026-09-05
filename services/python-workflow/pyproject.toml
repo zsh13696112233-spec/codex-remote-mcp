@@ -23,6 +23,7 @@ package-dir = {"" = "src"}
 py-modules = [
   "codex_orchestrator_mcp",
   "workflow_gateway",
+  "workflow_event_batcher",
   "workflow_runtime_client",
   "workflow_sidecar",
   "workflow_store",

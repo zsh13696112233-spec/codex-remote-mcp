@@ -28,8 +28,9 @@ from mcp.server.fastmcp import FastMCP
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
-from workflow_store import ARTIFACT_LIMIT, AsyncEventBatcher, WorkflowStore
-from workflow_runtime_client import InternalApiClient, RemoteEventBatcher
+from workflow_event_batcher import AsyncEventBatcher
+from workflow_store import ARTIFACT_LIMIT, WorkflowStore
+from workflow_runtime_client import InternalApiClient
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "agents.json"
@@ -1744,7 +1745,7 @@ class Orchestrator:
 
 orchestrator = Orchestrator(CONFIG_PATH)
 _workflow_store: WorkflowStore | InternalApiClient | None = None
-_workflow_event_batcher: AsyncEventBatcher | RemoteEventBatcher | None = None
+_workflow_event_batcher: AsyncEventBatcher | None = None
 _workflow_monitors: set[asyncio.Task[None]] = set()
 
 
@@ -1764,15 +1765,11 @@ def get_workflow_store() -> WorkflowStore | InternalApiClient:
     return _workflow_store
 
 
-def get_workflow_event_batcher() -> AsyncEventBatcher | RemoteEventBatcher:
+def get_workflow_event_batcher() -> AsyncEventBatcher:
     global _workflow_event_batcher
     store = get_workflow_store()
     if _workflow_event_batcher is None or _workflow_event_batcher.store is not store:
-        _workflow_event_batcher = (
-            RemoteEventBatcher(store)
-            if isinstance(store, InternalApiClient)
-            else AsyncEventBatcher(store)
-        )
+        _workflow_event_batcher = AsyncEventBatcher(store)
     return _workflow_event_batcher
 
 

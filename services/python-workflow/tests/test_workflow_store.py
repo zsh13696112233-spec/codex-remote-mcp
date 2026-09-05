@@ -7,10 +7,11 @@ import unittest
 import uuid
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
+from workflow_event_batcher import AsyncEventBatcher
 from workflow_store import (
     SINGLE_OUTPUT_CONSTRAINT,
-    AsyncEventBatcher,
     WorkflowStore,
     utc_now,
 )
@@ -962,6 +963,34 @@ class WorkflowStoreTests(unittest.TestCase):
 
 
 class AsyncEventBatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_after_commit_does_not_duplicate_local_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkflowStore(Path(directory, "workflows.db"))
+            store.create_workflow(serial_workflow())
+            batcher = AsyncEventBatcher(store, flush_interval=60)
+            write = store.add_events
+
+            def commit_then_fail(events):
+                write(events)
+                raise RuntimeError("result unavailable after commit")
+
+            await batcher.add(
+                "serial-demo",
+                node_id=None,
+                source="test",
+                event_type="test.retry",
+                payload={"index": 1},
+            )
+            with patch.object(store, "add_events", side_effect=commit_then_fail):
+                with self.assertRaisesRegex(RuntimeError, "after commit"):
+                    await batcher.flush()
+            await batcher.close()
+            events = [
+                event for event in store.list_events("serial-demo")
+                if event["type"] == "test.retry"
+            ]
+            self.assertEqual(len(events), 1)
+
     async def test_events_are_flushed_in_one_transaction_batch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = WorkflowStore(Path(directory, "workflows.db"))

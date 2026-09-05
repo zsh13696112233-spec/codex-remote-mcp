@@ -10,7 +10,8 @@ from unittest.mock import patch
 from codex_orchestrator_mcp import AgentConfig, Orchestrator
 from starlette.testclient import TestClient
 from workflow_gateway import WorkflowGateway, create_app
-from workflow_runtime_client import InternalApiClient, RemoteEventBatcher, resolve_token
+from workflow_runtime_client import InternalApiClient, resolve_token
+from workflow_event_batcher import AsyncEventBatcher
 from workflow_store import WorkflowStore, utc_now
 
 
@@ -459,37 +460,38 @@ class RemoteSidecarSchedulingTests(unittest.IsolatedAsyncioTestCase):
             await gateway.event_batcher.close()
 
 
-class RemoteEventBatcherTests(unittest.IsolatedAsyncioTestCase):
+class RemoteEventBatchingTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_batch_retries_with_the_same_event_id(self) -> None:
-        class FlakyStore:
-            def __init__(self) -> None:
-                self.calls = []
-
-            def add_events(self, events):
-                self.calls.append([dict(event) for event in events])
-                if len(self.calls) == 1:
-                    raise RuntimeError("temporary failure")
-                return [1]
-
-        store = FlakyStore()
-        batcher = RemoteEventBatcher(store, flush_interval=60)
-        await batcher.add(
-            "retry-events",
-            node_id="a",
-            source="worker",
-            event_type="appserver.turn/completed",
-            payload={"ok": True},
+        store = InternalApiClient(
+            "http://gateway.test:8080",
+            "supervisor-a",
+            token_env="TEST_SIDECAR_TOKEN",
+            started_at=utc_now(),
         )
-        with self.assertRaisesRegex(RuntimeError, "temporary"):
+        batcher = AsyncEventBatcher(store, flush_interval=60)
+        with patch.object(
+            store,
+            "_lease_request",
+            side_effect=[RuntimeError("temporary failure"), {"sequences": [1]}],
+        ) as request:
+            await batcher.add(
+                "retry-events",
+                node_id="a",
+                source="worker",
+                event_type="appserver.turn/completed",
+                payload={"ok": True},
+            )
+            with self.assertRaisesRegex(RuntimeError, "temporary"):
+                await batcher.flush()
             await batcher.flush()
-        await batcher.flush()
-        await batcher.close()
+            await batcher.close()
 
-        self.assertEqual(len(store.calls), 2)
-        self.assertEqual(
-            store.calls[0][0]["external_event_id"],
-            store.calls[1][0]["external_event_id"],
-        )
+        self.assertEqual(request.call_count, 2)
+        first, retry = request.call_args_list
+        self.assertEqual(first, retry)
+        self.assertEqual(first.args[1], "retry-events")
+        self.assertTrue(first.args[3]["events"][0]["eventId"])
+        self.assertTrue(first.args[3]["events"][0]["createdAt"])
 
 
 if __name__ == "__main__":

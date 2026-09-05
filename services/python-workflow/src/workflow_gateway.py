@@ -22,9 +22,9 @@ from codex_orchestrator_mcp import (
     Orchestrator,
     utc_now,
 )
+from workflow_event_batcher import AsyncEventBatcher
 from workflow_store import (
     REVISION_INSTRUCTION_LIMIT,
-    AsyncEventBatcher,
     WorkflowStore,
 )
 
