@@ -48,6 +48,15 @@ LEGACY_IMAGE_LINK_PATTERN = re.compile(
 )
 LOGGER = logging.getLogger(__name__)
 PERMISSION_PROFILES = {"read_only", "workspace_write", "auto_review", "full_access"}
+MONITOR_EVENTS_SQL = """(source = 'chat' OR (source = 'supervisor' AND
+    (event_type IN ('appserver.item/agentMessage/delta', 'appserver.item/completed')
+     OR event_type NOT LIKE 'appserver.%')))"""
+BOT_EVENTS_SQL = """event_type IN (
+    'chat.assistant.completed', 'chat.message.failed',
+    'node.started', 'node.completed', 'node.failed', 'node.cancelled', 'node.timed_out',
+    'step.advance.waiting', 'step.advance.held', 'step.advance.confirmed',
+    'step.advance.resumed', 'step.advance.timed_out',
+    'workflow.completed', 'workflow.failed', 'workflow.cancelled')"""
 
 
 def utc_now() -> str:
@@ -451,6 +460,52 @@ class WorkflowStore:
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(workflow_nodes)").fetchall()
             }
+            event_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflow_events)")}
+            if "payload_zlib" not in event_columns:
+                connection.execute("ALTER TABLE workflow_events ADD COLUMN payload_zlib BLOB")
+            connection.execute("""CREATE TABLE IF NOT EXISTS workflow_task_bindings (
+                workflow_id TEXT PRIMARY KEY REFERENCES workflows(workflow_id) ON DELETE CASCADE,
+                task_definition_id TEXT NOT NULL)""")
+            connection.execute("CREATE INDEX IF NOT EXISTS workflow_task_binding_lookup "
+                               "ON workflow_task_bindings(task_definition_id, workflow_id)")
+            for view, predicate in (("monitor", MONITOR_EVENTS_SQL), ("bot", BOT_EVENTS_SQL)):
+                connection.execute(f"CREATE INDEX IF NOT EXISTS workflow_events_{view} "
+                                   f"ON workflow_events(workflow_id, sequence) WHERE {predicate}")
+            connection.execute("CREATE TABLE IF NOT EXISTS workflow_revisions ("
+                               "workflow_id TEXT PRIMARY KEY REFERENCES workflows(workflow_id) "
+                               "ON DELETE CASCADE, revision INTEGER NOT NULL DEFAULT 0)")
+            connection.execute("INSERT OR IGNORE INTO workflow_revisions(workflow_id) "
+                               "SELECT workflow_id FROM workflows")
+            connection.execute("CREATE TABLE IF NOT EXISTS workflow_node_revisions ("
+                               "workflow_id TEXT NOT NULL, node_id TEXT NOT NULL, revision INTEGER NOT NULL, "
+                               "PRIMARY KEY(workflow_id, node_id), FOREIGN KEY(workflow_id, node_id) "
+                               "REFERENCES workflow_nodes(workflow_id, node_id) ON DELETE CASCADE)")
+            connection.execute("INSERT OR IGNORE INTO workflow_node_revisions "
+                               "SELECT workflow_id, node_id, 0 FROM workflow_nodes")
+            for table in ("workflow_nodes", "workflow_artifacts"):
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    row = "OLD" if operation == "DELETE" else "NEW"
+                    connection.execute(f"""CREATE TRIGGER IF NOT EXISTS node_revision_{table}_{operation}
+                        AFTER {operation} ON {table}
+                        WHEN EXISTS (SELECT 1 FROM workflow_nodes WHERE workflow_id = {row}.workflow_id
+                                     AND node_id = {row}.node_id)
+                        BEGIN
+                          INSERT INTO workflow_node_revisions VALUES ({row}.workflow_id, {row}.node_id, 1)
+                          ON CONFLICT(workflow_id, node_id) DO UPDATE SET revision = revision + 1;
+                        END""")
+            for table in ("workflows", "workflow_nodes", "workflow_artifacts",
+                          "workflow_chat_messages", "workflow_control_actions", "workflow_advance_gates"):
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    if table == "workflows" and operation == "DELETE":
+                        continue
+                    row = "OLD" if operation == "DELETE" else "NEW"
+                    connection.execute(f"""CREATE TRIGGER IF NOT EXISTS revision_{table}_{operation}
+                        AFTER {operation} ON {table}
+                        WHEN EXISTS (SELECT 1 FROM workflows WHERE workflow_id = {row}.workflow_id)
+                        BEGIN
+                          INSERT INTO workflow_revisions(workflow_id, revision) VALUES ({row}.workflow_id, 1)
+                          ON CONFLICT(workflow_id) DO UPDATE SET revision = revision + 1;
+                        END""")
             for name, definition in {
                 "display_name": "TEXT",
                 "role_name": "TEXT",
@@ -582,6 +637,11 @@ class WorkflowStore:
             raise ValueError("单个工作流最多允许 100 个节点。")
 
         workflow_id = str(value.get("workflowId") or uuid.uuid4().hex).strip()
+        task_id = value.get("taskDefinitionId")
+        if task_id is not None and (
+            not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 128
+        ):
+            raise ValueError("taskDefinitionId 必须是 1 到 128 个字符。")
         if not workflow_id or len(workflow_id) > 128:
             raise ValueError("workflowId 必须是 1 到 128 个字符。")
         supervisor_agent_id = str(
@@ -710,6 +770,7 @@ class WorkflowStore:
 
         return {
             "workflowId": workflow_id,
+            "taskDefinitionId": task_id.strip() if task_id is not None else None,
             "name": value.get("name"),
             "failurePolicy": failure_policy,
             "supervisorAgentId": supervisor_agent_id,
@@ -750,6 +811,9 @@ class WorkflowStore:
             separators=(",", ":"),
         )
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if spec.get("taskDefinitionId"):
+                self._require_task_idle(connection, spec["taskDefinitionId"], spec["workflowId"])
             try:
                 connection.execute(
                     """
@@ -775,6 +839,9 @@ class WorkflowStore:
                 )
             except sqlite3.IntegrityError as error:
                 raise ValueError(f"工作流已存在：{spec['workflowId']}") from error
+            if spec.get("taskDefinitionId"):
+                connection.execute("INSERT INTO workflow_task_bindings VALUES (?, ?)",
+                                   (spec["workflowId"], spec["taskDefinitionId"]))
             for node in spec["nodes"]:
                 connection.execute(
                     """
@@ -814,6 +881,41 @@ class WorkflowStore:
                 timestamp,
             )
         return self.get_workflow(spec["workflowId"])
+
+    @staticmethod
+    def _require_task_idle(connection: sqlite3.Connection, task_id: str, workflow_id: str) -> None:
+        active = connection.execute(
+            "SELECT 1 FROM workflow_task_bindings b JOIN workflows w USING(workflow_id) "
+            "WHERE b.task_definition_id = ? AND w.workflow_id <> ? "
+            "AND w.status IN ('queued', 'running', 'cancelling') LIMIT 1",
+            (task_id, workflow_id),
+        ).fetchone()
+        if active is not None:
+            raise ValueError("当前任务已有其他运行，暂不能启动或返工。")
+
+    def register_task_bindings(self, task_id: str, workflow_ids: list[str]) -> None:
+        """配置中心升级时补齐历史归属，不修改冻结快照，也不复活已丢失的运行。"""
+        if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 128:
+            raise ValueError("taskDefinitionId 必须是 1 到 128 个字符。")
+        if not isinstance(workflow_ids, list) or not 1 <= len(workflow_ids) <= 200:
+            raise ValueError("每批必须包含 1 到 200 个工作流编号。")
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 128
+               for value in workflow_ids):
+            raise ValueError("工作流编号必须是 1 到 128 个字符。")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for workflow_id in workflow_ids:
+                existing = connection.execute(
+                    "SELECT task_definition_id FROM workflow_task_bindings WHERE workflow_id = ?",
+                    (workflow_id,),
+                ).fetchone()
+                if existing is not None and existing[0] != task_id:
+                    raise ValueError("运行的任务归属不能修改。")
+                connection.execute(
+                    "INSERT OR IGNORE INTO workflow_task_bindings "
+                    "SELECT workflow_id, ? FROM workflows WHERE workflow_id = ?",
+                    (task_id, workflow_id),
+                )
 
     def recover_active_workflows_after_restart(self) -> list[str]:
         """阶段 A 不重新附着旧会话，网关重启后直接终止遗留运行。"""
@@ -1318,8 +1420,43 @@ class WorkflowStore:
             return json.loads(zlib.decompress(row["spec_zlib"]).decode("utf-8"))
         return json.loads(row["spec_json"])
 
-    def get_workflow(self, workflow_id: str) -> dict[str, Any]:
+    def poll_workflow(self, workflow_id: str, known_revision: str | None = None,
+                      known_results: list[int] | None = None) -> dict[str, Any]:
+        """无变化时只查询版本与事件游标，不加载步骤正文及附件元数据。"""
         with self._connect() as connection:
+            row = connection.execute(
+                "SELECT r.revision, (SELECT COALESCE(MAX(sequence), 0) FROM workflow_events "
+                "WHERE workflow_id = r.workflow_id) FROM workflow_revisions r WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("找不到工作流。")
+        if known_results is not None and (not isinstance(known_results, list)
+            or len(known_results) > 100 or any(type(value) is not int or value < 0 for value in known_results)):
+            raise ValueError("步骤结果版本无效。")
+        revision = str(row[0])
+        if revision == known_revision:
+            return {"unchanged": True, "revision": revision, "lastEventSequence": row[1]}
+        # 先读版本再读快照；并发写入最多导致下一次多取一次，不会遗漏变化。
+        snapshot = self.get_workflow(workflow_id, known_results=known_results)
+        snapshot["revision"] = revision
+        return snapshot
+
+    def workflow_statuses(self, workflow_ids: list[str]) -> dict[str, str]:
+        if not isinstance(workflow_ids, list) or not 1 <= len(workflow_ids) <= 200:
+            raise ValueError("每批必须包含 1 到 200 个工作流编号。")
+        if any(not isinstance(value, str) or not value or len(value) > 128 for value in workflow_ids):
+            raise ValueError("工作流编号无效。")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT workflow_id, status FROM workflows WHERE workflow_id IN ("
+                + ",".join("?" for _ in workflow_ids) + ")", workflow_ids,
+            ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def get_workflow(self, workflow_id: str, *, known_results: list[int] | None = None) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN")
             workflow = connection.execute(
                 """
                 SELECT workflow_id, name, status, failure_policy,
@@ -1340,20 +1477,36 @@ class WorkflowStore:
                 """
                 SELECT workflow_id, node_id, position, agent_id, executor_type,
                        display_name, role_name, depends_on_json, status, job_id,
-                       thread_id, turn_id, response, error, started_at,
+                       thread_id, turn_id,
+                       CASE WHEN ? THEN NULL ELSE response END AS response,
+                       CASE WHEN ? THEN NULL ELSE error END AS error, started_at,
                        finished_at, attempt_count
                 FROM workflow_nodes
                 WHERE workflow_id = ? ORDER BY position
                 """,
-                (workflow_id,),
+                (known_results is not None, known_results is not None, workflow_id),
             ).fetchall()
+            revisions = {row["node_id"]: row["revision"] for row in connection.execute(
+                "SELECT node_id, revision FROM workflow_node_revisions WHERE workflow_id = ?", (workflow_id,)
+            ).fetchall()}
+            unchanged = {row["node_id"] for row in node_rows if known_results is not None
+                         and row["position"] < len(known_results)
+                         and known_results[row["position"]] == revisions.get(row["node_id"], 0)}
+            changed = [row["node_id"] for row in node_rows if row["node_id"] not in unchanged]
+            placeholders = ",".join("?" for _ in changed) or "NULL"
+            bodies = {}
+            if known_results is not None and changed:
+                bodies = {row["node_id"]: row for row in connection.execute(
+                    f"SELECT node_id, response, error FROM workflow_nodes WHERE workflow_id = ? "
+                    f"AND node_id IN ({placeholders})", (workflow_id, *changed),
+                ).fetchall()}
             artifact_rows = connection.execute(
-                """
+                f"""
                 SELECT artifact_id, node_id, media_type, filename, byte_size, created_at
                 FROM workflow_artifacts
-                WHERE workflow_id = ? ORDER BY created_at, artifact_id
+                WHERE workflow_id = ? AND node_id IN ({placeholders}) ORDER BY created_at, artifact_id
                 """,
-                (workflow_id,),
+                (workflow_id, *changed),
             ).fetchall()
             last_sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) FROM workflow_events WHERE workflow_id = ?",
@@ -1398,7 +1551,16 @@ class WorkflowStore:
             )
         nodes = [self._node_snapshot(row) for row in node_rows]
         for node in nodes:
-            node["artifacts"] = artifacts_by_node.get(str(node["id"]), [])
+            node["resultRevision"] = revisions.get(node["id"], 0)
+            if node["id"] in unchanged:
+                node.pop("response", None)
+                node.pop("error", None)
+                node["resultUnchanged"] = True
+            else:
+                if node["id"] in bodies:
+                    node["response"] = bodies[node["id"]]["response"]
+                    node["error"] = bodies[node["id"]]["error"]
+                node["artifacts"] = artifacts_by_node.get(str(node["id"]), [])
         current_nodes = [node["id"] for node in nodes if node["status"] in ACTIVE_NODE_STATUSES]
         completed_count = sum(node["status"] == "completed" for node in nodes)
         return {
@@ -2304,6 +2466,21 @@ class WorkflowStore:
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            binding = connection.execute(
+                "SELECT task_definition_id FROM workflow_task_bindings WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if binding is not None:
+                self._require_task_idle(connection, binding[0], workflow_id)
+            else:
+                legacy = connection.execute(
+                    "SELECT spec_json, spec_zlib FROM workflows WHERE workflow_id = ?", (workflow_id,)
+                ).fetchone()
+                if legacy is not None:
+                    legacy_spec = json.loads(zlib.decompress(legacy["spec_zlib"]).decode("utf-8")
+                                             if legacy["spec_zlib"] is not None else legacy["spec_json"])
+                    if "taskDefinitionId" not in legacy_spec:
+                        raise ValueError("历史运行尚未完成升级登记，请等待配置中心完成登记后重试。")
             row = connection.execute(
                 "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
                 (workflow_id, node_id),
@@ -3371,6 +3548,13 @@ class WorkflowStore:
                     state_version = state_version + CASE
                         WHEN supervisor_status <> ? THEN 1 ELSE 0 END
                 WHERE workflow_id = ?
+                  AND (supervisor_job_id IS NOT COALESCE(?1, supervisor_job_id)
+                    OR supervisor_thread_id IS NOT COALESCE(?2, supervisor_thread_id)
+                    OR supervisor_turn_id IS NOT COALESCE(?3, supervisor_turn_id)
+                    OR supervisor_status IS NOT ?4 OR status = 'queued'
+                    OR started_at IS NULL
+                    OR response IS NOT COALESCE(?6, response)
+                    OR error IS NOT COALESCE(?7, error))
                 """,
                 (
                     snapshot.get("job_id"),
@@ -3398,6 +3582,10 @@ class WorkflowStore:
                     assistant_turn_id = COALESCE(?, assistant_turn_id),
                     assistant_status = ?
                 WHERE workflow_id = ?
+                  AND (assistant_job_id IS NOT COALESCE(?1, assistant_job_id)
+                    OR assistant_thread_id IS NOT COALESCE(?2, assistant_thread_id)
+                    OR assistant_turn_id IS NOT COALESCE(?3, assistant_turn_id)
+                    OR assistant_status IS NOT ?4)
                 """,
                 (
                     snapshot.get("job_id"),
@@ -3586,12 +3774,15 @@ class WorkflowStore:
             encoded = json.dumps(
                 {"truncated": True, "preview": encoded[:262_000]}, ensure_ascii=False
             )
+        compressed = zlib.compress(encoded.encode("utf-8"), level=3) if len(encoded) >= 1024 else None
+        if compressed is not None and len(compressed) >= len(encoded.encode("utf-8")) * 0.75:
+            compressed = None
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO workflow_events (
                 workflow_id, node_id, source, event_type, external_event_id,
-                payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                payload_json, created_at, payload_zlib
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 workflow_id,
@@ -3599,8 +3790,9 @@ class WorkflowStore:
                 source,
                 event_type,
                 external_event_id,
-                encoded,
+                "{}" if compressed is not None else encoded,
                 created_at,
+                compressed,
             ),
         )
         if cursor.rowcount == 0 and external_event_id:
@@ -3612,6 +3804,78 @@ class WorkflowStore:
             if existing is not None:
                 return int(existing["sequence"])
         return int(cursor.lastrowid)
+
+    def event_page(
+        self, workflow_id: str, *, after: int = 0, limit: int = 200,
+        view: str = "all", before: int | None = None, tail: bool = False,
+    ) -> dict[str, Any]:
+        if view not in {"all", "monitor", "bot"}:
+            raise ValueError("事件视图无效。")
+        if after < 0 or not 1 <= limit <= 1000 or (before is not None and before <= 0):
+            raise ValueError("事件游标或分页大小无效。")
+        if (tail or before is not None) and after:
+            raise ValueError("向前和向后游标不能同时使用。")
+        predicate = {"all": "1 = 1", "monitor": MONITOR_EVENTS_SQL, "bot": BOT_EVENTS_SQL}[view]
+        descending = tail or before is not None
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            if connection.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (workflow_id,)).fetchone() is None:
+                raise ValueError("找不到工作流。")
+            watermark = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM workflow_events WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()[0]
+            rows = connection.execute(
+                f"SELECT * FROM workflow_events WHERE workflow_id = ? AND {predicate} "
+                f"AND sequence > ? AND sequence <= ? AND sequence < ? ORDER BY sequence "
+                f"{'DESC' if descending else 'ASC'} LIMIT ?",
+                (workflow_id, after, watermark, before if before is not None else watermark + 1, limit + 1),
+            ).fetchall()
+        more = len(rows) > limit
+        rows = rows[:limit]
+        if descending:
+            rows.reverse()
+        events = [self._event_snapshot(row) for row in rows]
+        next_cursor = (rows[-1]["sequence"] if more and not descending and rows else watermark)
+        return {"events": events, "nextCursor": next_cursor,
+                "hasMore": more if not descending else False,
+                "hasOlder": more if descending else False,
+                "oldestCursor": rows[0]["sequence"] if rows else before}
+
+    @staticmethod
+    def _event_snapshot(row: sqlite3.Row) -> dict[str, Any]:
+        return {"sequence": row["sequence"], "workflowId": row["workflow_id"],
+                "nodeId": row["node_id"], "source": row["source"], "type": row["event_type"],
+                "payload": json.loads(zlib.decompress(row["payload_zlib"]).decode("utf-8")
+                                      if row["payload_zlib"] is not None else row["payload_json"]),
+                "createdAt": row["created_at"]}
+
+    def compact_terminal_events(self, before: str, *, after: int = 0, limit: int = 100) -> dict[str, int]:
+        """分批无损压缩已结束运行的旧事件，游标和公开查询结果保持不变。"""
+        parsed = datetime.fromisoformat(before)
+        if parsed.tzinfo is None or after < 0 or not 1 <= limit <= 100:
+            raise ValueError("压缩截止时间、游标或批量大小无效。")
+        before = parsed.astimezone(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT e.sequence, e.payload_json FROM workflow_events e JOIN workflows w USING(workflow_id) "
+                "WHERE e.sequence > ? AND e.payload_zlib IS NULL AND LENGTH(e.payload_json) >= 1024 "
+                "AND w.status IN ('completed', 'failed', 'cancelled') AND w.finished_at < ? "
+                "ORDER BY e.sequence LIMIT ?", (after, before, limit),
+            ).fetchall()
+            saved = 0
+            compacted = 0
+            for row in rows:
+                original = row["payload_json"].encode("utf-8")
+                packed = zlib.compress(original, level=3)
+                if len(packed) < len(original) * 0.75:
+                    connection.execute("UPDATE workflow_events SET payload_json = '{}', payload_zlib = ? "
+                                       "WHERE sequence = ?", (packed, row["sequence"]))
+                    compacted += 1
+                    saved += len(original) - len(packed) - 2
+        return {"scanned": len(rows), "compacted": compacted, "savedBytes": saved,
+                "nextCursor": rows[-1]["sequence"] if rows else after}
 
     def list_events(
         self, workflow_id: str, *, after: int = 0, limit: int = 200
@@ -3632,15 +3896,4 @@ class WorkflowStore:
                 """,
                 (workflow_id, after, limit),
             ).fetchall()
-        return [
-            {
-                "sequence": row["sequence"],
-                "workflowId": row["workflow_id"],
-                "nodeId": row["node_id"],
-                "source": row["source"],
-                "type": row["event_type"],
-                "payload": json.loads(row["payload_json"]),
-                "createdAt": row["created_at"],
-            }
-            for row in rows
-        ]
+        return [self._event_snapshot(row) for row in rows]

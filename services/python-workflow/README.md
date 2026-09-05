@@ -17,7 +17,19 @@ python-workflow/
 └── uv.lock
 ```
 
-## 配置
+## 增量查询与任务互斥
+
+- 配置中心提交携带可选 `taskDefinitionId`。中央运行库在同一写事务中校验同一任务只能有一个 `queued/running/cancelling` 运行；从监控页或机器人确认返工也遵守此约束，不依赖主监督是否相同。
+- `POST /workflow-task-bindings` 接收 `taskDefinitionId` 和最多 200 个 `workflowIds`，只用于配置中心补齐历史归属。重复绑定幂等、归属不可改、缺失运行不创建；原始快照不变。`POST /workflow-statuses` 按最多 200 个 `workflowIds` 批量返回 `{statuses: {workflowId: status}}`，不加载结果和提示词。
+- `GET /workflows/{workflowId}` 返回 `revision` 和各步骤 `resultRevision`。可携带 `knownRevision` 与 JSON 数组形式的 `knownResults`（按步骤顺序，最多 100 项）。无状态变化时返回 `{unchanged: true, revision, lastEventSequence}`；步骤结果版本相同时省略该步骤的 `response/error/artifacts` 并返回 `resultUnchanged: true`，调用方复用缓存。缺省参数仍返回完整状态。
+- 历史事件支持 `view=all|monitor|bot`，缺省仍为完整审计事件。`after` 向后增量读取，`tail=true` 取最近一页，`before` 向前回看；不能混用方向。响应增加 `nextCursor/hasMore/oldestCursor/hasOlder`，事件始终按序号升序返回。增量调用必须使用 `nextCursor`，即使过滤后为空也可前进，且不会越过尚未交付的符合条件事件。
+- 较大的新事件正文采用透明无损压缩；旧数据库兼容升级，旧正文仍可读取。SQLite 操作在网关后台线程执行，避免写锁等待阻塞消息和心跳处理。升级时网关与本机 MCP 必须同步更新，旧版本无法读取新的压缩正文。
+
+历史事件维护见部署指南，默认只统计、不删除数据。事件、步骤尝试和附件的审计保留语义不变。
+
+升级前缺少任务归属的运行，在配置中心后台登记完成前拒绝返工，防止两个旧监控页绕过互斥。配置中心每 15 秒处理一批未登记历史运行；提交入口不承担历史迁移，该任务尚有待登记历史时保留原编号和占用，登记完成后由后台对账补交。不经配置中心创建的旧独立工作流，需要维护人员通过归属登记接口为其登记独立任务编号后才能返工。新独立工作流可不传 `taskDefinitionId`，继续按原方式使用。
+
+## 执行机配置
 
 | 环境变量 | 说明 |
 | --- | --- |

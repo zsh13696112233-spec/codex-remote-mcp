@@ -36,8 +36,17 @@ public class WorkflowController {
 
   /** 查询指定工作流的当前状态。 */
   @GetMapping("/workflows/{workflowId}")
-  public JsonNode status(@PathVariable String workflowId) {
-    return gatewayClient.status(workflowId);
+  public JsonNode status(
+      @PathVariable String workflowId,
+      @RequestParam(required = false) String knownRevision,
+      @RequestParam(required = false) String knownResults) {
+    if (knownRevision != null && knownRevision.length() > 128) {
+      throw new IllegalArgumentException("查询版本过长。");
+    }
+    if (knownResults != null && knownResults.length() > 2400) {
+      throw new IllegalArgumentException("步骤结果版本过长。");
+    }
+    return gatewayClient.status(workflowId, knownRevision, knownResults);
   }
 
   /** 按游标增量查询指定工作流事件，并校验分页参数。 */
@@ -45,14 +54,22 @@ public class WorkflowController {
   public JsonNode events(
       @PathVariable String workflowId,
       @RequestParam(defaultValue = "0") long after,
-      @RequestParam(defaultValue = "200") int limit) {
+      @RequestParam(defaultValue = "200") int limit,
+      @RequestParam(defaultValue = "all") String view,
+      @RequestParam(required = false) Long before,
+      @RequestParam(defaultValue = "false") boolean tail) {
     if (after < 0) {
       throw new IllegalArgumentException("after 不能小于 0。");
     }
     if (limit < 1 || limit > 1000) {
       throw new IllegalArgumentException("limit 必须在 1 到 1000 之间。");
     }
-    return gatewayClient.events(workflowId, after, limit);
+    if (!java.util.Set.of("all", "monitor").contains(view)
+        || (before != null && before <= 0)
+        || ((before != null || tail) && after != 0)) {
+      throw new IllegalArgumentException("事件查询参数无效。");
+    }
+    return gatewayClient.events(workflowId, after, limit, view, before, tail);
   }
 
   /** 代理读取工作流文件，浏览器不直接访问 Python 网关或执行机路径。 */

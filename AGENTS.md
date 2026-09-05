@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件适用于整个仓库，供 Codex 在本项目中进行分析、修改和验证时使用。进入子模块后，还应先阅读该模块的 `README.md`；如果任务涉及业务边界或协议，继续阅读 `docs/` 中对应文档。
+本文件适用于整个仓库，供 Codex 在本项目中进行分析、修改和验证时使用。进入子模块后，还应先阅读该模块的 `README.md`；业务边界和协议以本文件、根 README 及对应模块 README 为入口，部署与升级说明位于 `docs/`。
 
 ## 项目概览
 
@@ -13,7 +13,7 @@
 其他目录：
 
 - `config/`：执行机配置模板；`agents.json` 是本机私有配置，不得提交。
-- `docs/`：架构、协议、业务边界和验收要求。
+- `docs/`：仅保留部署与升级文档。
 - `scripts/`：端到端验证和运维辅助脚本。
 - `prototypes/`：历史交互原型，不参与正式运行或构建。正式页面位于两个 Java 模块的 `src/main/resources/static/`。
 
@@ -21,8 +21,8 @@
 
 1. 先运行 `git status --short`，把已有改动视为用户工作；不得覆盖、回退或顺手格式化无关文件。
 2. 阅读根 `README.md` 和目标模块的 `README.md`。
-3. 涉及工作流协议、状态、恢复或消息时，阅读 `docs/WORKFLOW_GUIDE.zh-CN.md`。
-4. 涉及两个 Java 系统的职责、数据或页面能力时，阅读 `docs/TWO_JAVA_WEB_SYSTEMS_REQUIREMENTS.zh-CN.md`。
+3. 涉及工作流协议、状态、恢复或消息时，阅读 `services/python-workflow/README.md`，并核对实现和对应测试。
+4. 涉及两个 Java 系统的职责、数据或页面能力时，阅读两个 Java 模块的 `README.md`，并遵守下述架构边界。
 5. 先定位调用方、实现和测试，再修改跨服务接口。不要只改一端。
 
 ## 不可破坏的架构边界

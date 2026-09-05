@@ -71,7 +71,7 @@ SOP 还可选择全自动或半自动流转。全自动保持步骤成功后立�
 │   ├── workflow-console/         Java 任务运行监控中心
 │   └── role-task-config-center/  Java 角色任务配置中心
 ├── config/                       执行机配置示例和本机配置
-├── docs/                         架构、协议和部署文档
+├── docs/                         部署与升级文档
 ├── prototypes/                   不参与运行的历史交互原型
 └── scripts/                      运维和端到端验证脚本
 ```
@@ -83,8 +83,6 @@ SOP 还可选择全自动或半自动流转。全自动保持步骤成功后立�
 - [角色任务配置中心](services/role-task-config-center/README.md)
 - [完整部署指南](docs/DEPLOYMENT_GUIDE.zh-CN.md)
 - [Codex 远程混合机部署与旧版升级执行手册](docs/CODEX_HYBRID_MACHINE_DEPLOYMENT.zh-CN.md)
-- [完整工作流指南](docs/WORKFLOW_GUIDE.zh-CN.md)
-- [多主监督机工作流设计](docs/MULTI_SUPERVISOR_WORKFLOW_DESIGN.zh-CN.md)
 
 ## 快速启动
 

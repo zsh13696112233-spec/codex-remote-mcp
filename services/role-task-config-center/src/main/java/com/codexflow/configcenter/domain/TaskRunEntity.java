@@ -19,6 +19,10 @@ class TaskRunEntity {
   @Column(name = "workflow_id")
   String workflowId;
 
+  /** 是否已向运行时补齐该运行的任务归属。 */
+  @Column(name = "runtime_scope_registered", nullable = false)
+  boolean runtimeScopeRegistered;
+
   /** 本次运行来源的任务定义；历史查询需要任务信息，因此采用立即加载。 */
   @ManyToOne(fetch = FetchType.EAGER, optional = false)
   @JoinColumn(name = "task_definition_id")

@@ -9,7 +9,8 @@ const state = {
   workflowId: new URLSearchParams(location.search).get("workflowId")?.trim() || "",
   cursor: 0, timer: null, durationTimer: null, messages: [], snapshot: null,
   refreshError: null, refreshRetrying: false, refreshing: false, sending: false,
-  advanceAction: null
+  advanceAction: null, revision: null, eventsLoaded: false, oldestCursor: null,
+  historyEvents: new Map(), loadingOlder: false, messageRows: new Map(), stepRows: new Map()
 };
 const $ = selector => document.querySelector(selector);
 const text = value => value == null ? "" : String(value);
@@ -84,19 +85,39 @@ async function refresh() {
   if (state.refreshing) return;
   state.refreshing = true;
   try {
-    const snapshot = await api(`/api/workflows/${encodeURIComponent(state.workflowId)}`);
-    state.snapshot = snapshot;
+    const query = new URLSearchParams();
+    if (state.revision) query.set("knownRevision", state.revision);
+    if (state.snapshot) query.set("knownResults", JSON.stringify(state.snapshot.nodes.map(node => node.resultRevision || 0)));
+    const response = await api(`/api/workflows/${encodeURIComponent(state.workflowId)}?${query}`);
+    const recovered = !!state.refreshError;
+    if (!response.unchanged) {
+      const previous = new Map((state.snapshot?.nodes || []).map(node => [node.id, node]));
+      response.nodes = (response.nodes || []).map(node => {
+        if (!node.resultUnchanged) return node;
+        const cached = previous.get(node.id);
+        const merged = {...cached, ...node};
+        delete merged.resultUnchanged;
+        return merged;
+      });
+      state.snapshot = response;
+    } else if (state.snapshot && response.lastEventSequence != null) {
+      state.snapshot.lastEventSequence = response.lastEventSequence;
+    }
+    state.revision = response.revision || null;
+    const snapshot = state.snapshot;
     state.refreshError = null;
     state.refreshRetrying = false;
-    render(snapshot);
+    if (!response.unchanged || recovered || isInitializing(snapshot)) render(snapshot);
     await events();
-    if (TERMINAL.has(snapshot.status) && Number(snapshot.pendingChatCount || 0) === 0 && !state.sending) stop();
+    const idle = TERMINAL.has(snapshot.status) && Number(snapshot.pendingChatCount || 0) === 0 && !state.sending;
+    scheduleRefresh(idle ? 15000 : 2000);
   } catch (error) {
     const firstFailure = !state.refreshError;
     state.refreshError = error.message;
     state.refreshRetrying = !error.status || error.status >= 500 || [408, 429].includes(error.status);
     renderRefreshError();
     if (state.refreshRetrying) {
+      scheduleRefresh(5000);
       if (firstFailure) toast("连接暂时中断，正在自动重试");
     } else {
       stop();
@@ -108,15 +129,65 @@ async function refresh() {
 }
 
 async function events() {
-  let more = true;
-  while (more) {
-    const batch = await api(`/api/workflows/${encodeURIComponent(state.workflowId)}/events?after=${state.cursor}&limit=200`);
+  let changed = false;
+  // 每轮只处理一页，历史按需回看，持续输出不能独占刷新循环。
+  if (!state.eventsLoaded || Number(state.snapshot?.lastEventSequence || 0) > state.cursor) {
+    const batch = await api(`/api/workflows/${encodeURIComponent(state.workflowId)}/events?view=monitor&limit=200&${state.eventsLoaded ? `after=${state.cursor}` : "tail=true"}`);
     const list = batch.events || [];
-    list.forEach(consume);
-    more = list.length === 200;
-    if (list.length) state.cursor = Math.max(...list.map(event => Number(event.sequence || 0)), state.cursor);
+    changed = list.length > 0;
+    list.forEach(event => {
+      if (!state.historyEvents.has(event.sequence)) consume(event);
+      state.historyEvents.set(event.sequence, event);
+    });
+    if (!state.eventsLoaded) {
+      state.oldestCursor = batch.oldestCursor;
+      $("#olderMessages").hidden = !batch.hasOlder;
+    }
+    state.eventsLoaded = true;
+    state.cursor = Number(batch.nextCursor ?? (list.at(-1)?.sequence || state.cursor));
+    // 保持长期打开页面的内存有界；较早事件仍可从数据库重新加载。
+    if (state.historyEvents.size > 2000 && !state.loadingOlder) {
+      const entries = [...state.historyEvents.entries()].sort((a, b) => a[0] - b[0]);
+      entries.slice(0, entries.length - 1000).forEach(([id]) => state.historyEvents.delete(id));
+      state.oldestCursor = entries[entries.length - 1000][0];
+      $("#olderMessages").hidden = false;
+      rebuildMessages();
+    }
   }
-  renderMessages();
+  if (changed || !state.messages.length || state.renderedMessageStatus !== state.snapshot?.status) {
+    renderMessages();
+    state.renderedMessageStatus = state.snapshot?.status;
+  }
+}
+
+function rebuildMessages() {
+  const local = state.messages.filter(message => message.role === "user"
+    && ["accepted", "failed"].includes(message.status));
+  state.messages = [];
+  [...state.historyEvents.values()].sort((a, b) => a.sequence - b.sequence).forEach(consume);
+  local.forEach(message => { if (!findMessage(message.id)) state.messages.push(message); });
+}
+
+async function loadOlderMessages() {
+  if (state.loadingOlder || !state.oldestCursor) return;
+  state.loadingOlder = true;
+  const button = $("#olderMessages");
+  button.disabled = true;
+  try {
+    const batch = await api(`/api/workflows/${encodeURIComponent(state.workflowId)}/events?view=monitor&limit=200&before=${state.oldestCursor}`);
+    (batch.events || []).forEach(event => state.historyEvents.set(event.sequence, event));
+    state.oldestCursor = batch.oldestCursor;
+    button.hidden = !batch.hasOlder;
+    const box = $("#messages"), previousHeight = box.scrollHeight, previousTop = box.scrollTop;
+    rebuildMessages();
+    renderMessages();
+    box.scrollTop = previousTop + box.scrollHeight - previousHeight;
+  } catch (error) { toast(error.message); }
+  finally { state.loadingOlder = false; button.disabled = false; }
+}
+
+function placeRow(parent, row, index) {
+  if (parent.children[index] !== row) parent.insertBefore(row, parent.children[index] || null);
 }
 
 function consume(event) {
@@ -212,8 +283,9 @@ function make(tag, className, value) {
 function renderMessages() {
   const box = $("#messages");
   const stayAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-  box.replaceChildren();
   if (!state.messages.length) {
+    box.replaceChildren();
+    state.messageRows.clear();
     const empty = make("div", "chat-empty");
     const message = state.refreshError
       ? state.refreshRetrying ? "连接暂时中断，正在自动重试" : "暂时无法读取任务信息"
@@ -225,6 +297,9 @@ function renderMessages() {
     return;
   }
   state.messages.forEach((message, index) => {
+    const signature = JSON.stringify([message, index === state.messages.length - 1, state.snapshot?.status]);
+    const cached = state.messageRows.get(message.id);
+    if (cached?.signature === signature) { placeRow(box, cached.row, index); return; }
     const row = make("article", `chat-row ${message.role || "progress"}${message.streaming ? " streaming" : ""}${message.status === "failed" ? " failed" : ""}`);
     const isUser = message.role === "user";
     const avatar = make("div", "avatar", isUser ? "我" : "AI");
@@ -245,8 +320,13 @@ function renderMessages() {
     }
     content.append(meta, bubble);
     row.append(avatar, content);
-    box.append(row);
+    if (cached?.row.parentNode === box) cached.row.remove();
+    state.messageRows.set(message.id, {signature, row});
+    placeRow(box, row, index);
   });
+  while (box.children.length > state.messages.length) box.lastElementChild.remove();
+  const ids = new Set(state.messages.map(message => message.id));
+  for (const id of state.messageRows.keys()) if (!ids.has(id)) state.messageRows.delete(id);
   if (stayAtBottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -318,8 +398,12 @@ function formatBytes(value) {
 
 function renderSteps(nodes, initializing = false) {
   const list = $("#steps");
-  list.replaceChildren();
   nodes.forEach((node, index) => {
+    const signature = JSON.stringify([node.resultRevision == null ? node : [node.id, node.resultRevision],
+      initializing ? initializationMessage(state.snapshot) : null,
+      state.snapshot?.pendingAdvance?.completedNodeId === node.id ? state.snapshot.pendingAdvance : null]);
+    const cached = state.stepRows.get(node.id);
+    if (cached?.signature === signature) { placeRow(list, cached.row, index); return; }
     const stateName = visualState(node.status);
     const row = make("article", `step ${stateName}`);
     const rail = make("div", "step-rail");
@@ -406,8 +490,13 @@ function renderSteps(nodes, initializing = false) {
       card.append(gate);
     }
     row.append(rail, card);
-    list.append(row);
+    if (cached?.row.parentNode === list) cached.row.remove();
+    state.stepRows.set(node.id, {signature, row});
+    placeRow(list, row, index);
   });
+  while (list.children.length > nodes.length) list.lastElementChild.remove();
+  const ids = new Set(nodes.map(node => node.id));
+  for (const id of state.stepRows.keys()) if (!ids.has(id)) state.stepRows.delete(id);
 }
 
 function render(snapshot) {
@@ -542,7 +631,7 @@ async function sendChatMessage(messageId, originalText) {
   const value = text(originalText ?? input.value).trim();
   if (!value) return;
   if (value.length > 4000) { toast("消息不能超过 4000 个字符"); return; }
-  const id = messageId || crypto.randomUUID();
+  const id = messageId || newMessageId();
   upsertMessage({id, role: "user", time: new Date().toISOString(), text: value,
     status: "accepted", streaming: false, error: null});
   renderMessages();
@@ -557,7 +646,7 @@ async function sendChatMessage(messageId, originalText) {
     });
     const message = findMessage(id);
     if (message) message.status = "accepted";
-    if (!state.timer) state.timer = setInterval(refresh, 2000);
+    scheduleRefresh(2000);
     if (!state.durationTimer) state.durationTimer = setInterval(renderDuration, 1000);
     await refresh();
   } catch (error) {
@@ -572,14 +661,28 @@ async function sendChatMessage(messageId, originalText) {
   }
 }
 
+function newMessageId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function scheduleRefresh(delay) {
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = setTimeout(refresh, document.hidden ? Math.max(delay, 15000) : delay);
+}
+
 function start() {
   stop();
   refresh();
-  state.timer = setInterval(refresh, 2000);
+  scheduleRefresh(2000);
   state.durationTimer = setInterval(renderDuration, 1000);
 }
 function stop() {
-  if (state.timer) clearInterval(state.timer);
+  if (state.timer) clearTimeout(state.timer);
   if (state.durationTimer) clearInterval(state.durationTimer);
   state.timer = null;
   state.durationTimer = null;
@@ -596,6 +699,11 @@ $("#chatForm").onsubmit = event => {
   sendChatMessage();
 };
 $("#chatInput").addEventListener("input", renderComposer);
+$("#olderMessages").onclick = loadOlderMessages;
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.workflowId) refresh();
+});
+window.addEventListener("focus", () => { if (state.workflowId) refresh(); });
 $("#chatInput").addEventListener("keydown", event => {
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
     event.preventDefault();

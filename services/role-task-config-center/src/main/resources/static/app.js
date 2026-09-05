@@ -16,6 +16,19 @@ async function api(path,options={}){
 function toast(s){const e=$("#toast");e.textContent=s;e.style.display="block";setTimeout(()=>e.style.display="none",3200)}
 function time(v){return v?new Date(v).toLocaleString("zh-CN",{hour12:false}):"—"}
 function status(x){return `<span class="badge ${x.enabled?"":"off"}">${x.enabled?"启用中":"已停用"}</span>`}
+let syncWaitFocus=null;
+function setSyncWait(visible){
+  const wait=$("#syncWait");
+  if(visible){
+    syncWaitFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;
+    document.querySelectorAll("aside,main").forEach(element=>element.inert=true);
+    wait.hidden=false;wait.focus();return;
+  }
+  wait.hidden=true;
+  document.querySelectorAll("aside,main").forEach(element=>element.inert=false);
+  if(syncWaitFocus&&document.body.contains(syncWaitFocus))syncWaitFocus.focus();
+  syncWaitFocus=null;
+}
 
 function showGatewayStatus(online){
   state.gatewayOnline=online;$("#gateway").className=`gateway ${online?"online":"offline"}`;$("#gateway").textContent=online?"● Python 网关正常":"● Python 网关不可用";
@@ -423,7 +436,7 @@ $("#content").addEventListener("click",async e=>{
     const departmentToggle=e.target.closest("[data-department-toggle]");if(departmentToggle){const id=departmentToggle.dataset.departmentToggle;if(state.dingtalkCollapsedDepartments.has(id))state.dingtalkCollapsedDepartments.delete(id);else state.dingtalkCollapsedDepartments.add(id);renderDingTalkTargets();return}
     const department=e.target.closest("[data-department-id]");if(department){state.dingtalkDepartmentId=department.dataset.departmentId;renderDingTalkTargets();return}
     const targetRefresh=e.target.closest("[data-target-refresh]");if(targetRefresh){targetRefresh.disabled=true;try{state.dingtalkTargets=await api("/api/dingtalk/targets");renderDingTalkTargets();toast("群聊列表已刷新")}finally{if(document.body.contains(targetRefresh))targetRefresh.disabled=false}return}
-    const sync=e.target.closest("[data-target-sync]");if(sync){sync.disabled=true;try{const result=await api("/api/dingtalk/targets/sync-people",{method:"POST"});[state.dingtalkTargets,state.dingtalkDirectory]=await Promise.all([api("/api/dingtalk/targets"),api("/api/dingtalk/targets/directory")]);state.dingtalkCollapsedDepartments=new Set((state.dingtalkDirectory.departments||[]).map(x=>x.externalId));renderDingTalkTargets();toast(`同步完成：新增 ${result.created}，更新 ${result.updated}，失效 ${result.unavailable}`)}finally{if(document.body.contains(sync))sync.disabled=false}return}
+    const sync=e.target.closest("[data-target-sync]");if(sync){sync.disabled=true;setSyncWait(true);try{const result=await api("/api/dingtalk/targets/sync-people",{method:"POST"});[state.dingtalkTargets,state.dingtalkDirectory]=await Promise.all([api("/api/dingtalk/targets"),api("/api/dingtalk/targets/directory")]);state.dingtalkCollapsedDepartments=new Set((state.dingtalkDirectory.departments||[]).map(x=>x.externalId));renderDingTalkTargets();toast(`同步完成：新增 ${result.created}，更新 ${result.updated}，失效 ${result.unavailable}`)}finally{if(document.body.contains(sync))sync.disabled=false;setSyncWait(false)}return}
     const targetAction=e.target.closest("[data-target-save],[data-target-test],[data-target-delete]");
     if(targetAction){const card=targetAction.closest("[data-target-id]"),id=card.dataset.targetId,target=state.dingtalkTargets.find(x=>x.id===id);if(targetAction.matches("[data-target-save]")){const nameInput=card.querySelector("[data-target-name]");await api(`/api/dingtalk/targets/${id}`,{method:"PUT",body:JSON.stringify({displayName:nameInput?nameInput.value.trim():target?.displayName||"",enabled:card.querySelector("[data-target-enabled]").checked})});toast("通知对象已保存")}else if(targetAction.matches("[data-target-test]")){await api(`/api/dingtalk/targets/${id}/test`,{method:"POST"});toast("测试消息已发送")}else{if(!confirm("确定删除这个通知对象？"))return;await api(`/api/dingtalk/targets/${id}`,{method:"DELETE"});toast("通知对象已删除")}state.dingtalkTargets=await api("/api/dingtalk/targets");renderDingTalkTargets();return}
     const action=e.target.closest("button[data-action]");
@@ -526,8 +539,44 @@ $("#content").addEventListener("pointerup",e=>{
 });
 $("#content").addEventListener("pointercancel",()=>{pointerDrag=null;document.querySelectorAll(".dragging,.drag-over,.drop-before,.drop-after").forEach(x=>x.classList.remove("dragging","drag-over","drop-before","drop-after"))});
 
-async function showRuns(id,name){const list=await api(`/api/task-definitions/${id}/runs`);$("#runsTitle").textContent=`${name} · 运行记录`;$("#runList").innerHTML=list.length?list.map(r=>`<div class="run"><b>${esc(r.workflowId)}</b> <span class="badge">${esc(r.status)}</span><p class="meta">${time(r.submittedAt)}${r.sourceWorkflowId?` · 重试自 ${esc(r.sourceWorkflowId)}`:""}</p><div class="actions"><button data-monitor="${esc(r.monitorUrl)}">查看监控</button><button data-retry="${r.workflowId}">按原快照重试</button>${["queued","running","submitting"].includes(r.status)?`<button data-cancel="${r.workflowId}">取消</button>`:""}</div></div>`).join(""):`<div class="empty">暂无运行记录</div>`;$("#runsDialog").showModal()}
-$("#runList").onclick=async e=>{const b=e.target.closest("button");if(!b)return;try{if(b.dataset.monitor)window.open(b.dataset.monitor,"_blank","noopener");if(b.dataset.retry){const r=await api(`/api/task-runs/${b.dataset.retry}/retry`,{method:"POST"});window.open(r.monitorUrl,"_blank","noopener");toast("已按原快照重试")}if(b.dataset.cancel){await api(`/api/task-runs/${b.dataset.cancel}/cancel`,{method:"POST"});toast("已请求取消")}}catch(x){toast(x.message)}};
+const runHistory = {id: null, name: "", page: 0, request: 0};
+async function showRuns(id, name, page = 0) {
+  const request = ++runHistory.request;
+  Object.assign(runHistory, {id, name, page});
+  $("#runsTitle").textContent = `${name} · 运行记录`;
+  $("#runList").innerHTML = '<div class="empty">正在加载…</div>';
+  if (!$("#runsDialog").open) $("#runsDialog").showModal();
+  try {
+    const list = await api(`/api/task-definitions/${encodeURIComponent(id)}/runs?summary=true&page=${page}&size=20`);
+    if (request !== runHistory.request) return;
+    const labels = {submitting:"正在提交",queued:"等待开始",running:"正在进行",cancelling:"正在停止",completed:"已完成",failed:"未完成",cancelled:"已停止",submit_failed:"提交失败"};
+    $("#runList").innerHTML = (list.length ? list.map(r => `<div class="run"><b>${esc(r.workflowId)}</b> <span class="badge">${esc(labels[r.status] || "状态未知")}</span><p class="meta">${time(r.submittedAt)}${r.sourceWorkflowId ? ` · 重试自 ${esc(r.sourceWorkflowId)}` : ""}</p><div class="actions"><button data-monitor="${esc(r.monitorUrl)}">查看监控</button><button data-retry="${esc(r.workflowId)}">按原快照重试</button>${["queued","running","submitting"].includes(r.status) ? `<button data-cancel="${esc(r.workflowId)}">取消</button>` : ""}</div></div>`).join("") : '<div class="empty">暂无运行记录</div>')
+      + `<div class="actions"><button data-history-page="${page - 1}" ${page === 0 ? "disabled" : ""}>上一页</button><span>第 ${page + 1} 页</span><button data-history-page="${page + 1}" ${list.length < 20 ? "disabled" : ""}>下一页</button></div>`;
+  } catch (error) {
+    if (request === runHistory.request) $("#runList").innerHTML = `<div class="empty">${esc(error.message)} <button data-history-page="${page}">重新加载</button></div>`;
+  }
+}
+$("#runList").onclick = async event => {
+  const button = event.target.closest("button");
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  try {
+    if (button.dataset.historyPage != null) await showRuns(runHistory.id, runHistory.name, Number(button.dataset.historyPage));
+    if (button.dataset.monitor) window.open(button.dataset.monitor, "_blank", "noopener");
+    if (button.dataset.retry) {
+      const result = await api(`/api/task-runs/${encodeURIComponent(button.dataset.retry)}/retry`, {method:"POST"});
+      window.open(result.monitorUrl, "_blank", "noopener");
+      toast("已按原快照重试");
+      await showRuns(runHistory.id, runHistory.name);
+    }
+    if (button.dataset.cancel) {
+      await api(`/api/task-runs/${encodeURIComponent(button.dataset.cancel)}/cancel`, {method:"POST"});
+      toast("已请求取消");
+      await showRuns(runHistory.id, runHistory.name, runHistory.page);
+    }
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+};
 
 document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   if(b.dataset.page===state.page)return;

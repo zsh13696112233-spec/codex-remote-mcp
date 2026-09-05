@@ -4,6 +4,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -15,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -85,6 +87,12 @@ class DingTalkBotCoordinatorTest {
 
     coordinator.safelyHandleMessage(message("ignored", "运行", false, null));
     verify(store, never()).reserveStart(eq("cli_test"), eq(message("ignored", "运行", false, null)));
+  }
+
+  @AfterEach
+  void close() {
+    coordinator.stop();
+    coordinator.closeWorkers();
   }
 
   @Test
@@ -190,16 +198,16 @@ class DingTalkBotCoordinatorTest {
         .put("type", "node.started")
         .putObject("payload");
     when(store.pollable("cli_test")).thenReturn(List.of(binding));
-    when(gateway.get("/workflows/" + WORKFLOW_2 + "/events/history?after=0&limit=200"))
+    when(gateway.get("/workflows/" + WORKFLOW_2 + "/events/history?after=0&limit=200&view=bot"))
         .thenReturn(history);
     when(gateway.get("/workflows/" + WORKFLOW_2)).thenReturn(snapshot("running"));
     when(cards.renderMarkdown(any(), any())).thenReturn("**任务：** 测试任务");
 
     coordinator.start();
-    coordinator.pollEvents();
+    coordinator.scheduleEvents();
 
     ArgumentCaptor<JsonNode> payload = ArgumentCaptor.forClass(JsonNode.class);
-    verify(store)
+    verify(store, timeout(2000))
         .recordEvent(
             eq("cli_test"),
             eq(WORKFLOW_2),
@@ -236,7 +244,7 @@ class DingTalkBotCoordinatorTest {
             Optional.of(
                 new DingTalkModels.Inbound(
                     "question-1", WORKFLOW_2, workflowMessageId, "accepted")));
-    when(gateway.get("/workflows/" + WORKFLOW_2 + "/events/history?after=0&limit=200"))
+    when(gateway.get("/workflows/" + WORKFLOW_2 + "/events/history?after=0&limit=200&view=bot"))
         .thenReturn(history);
     ObjectNode snapshot = snapshot("running");
     snapshot.put("workflowId", WORKFLOW_2);
@@ -245,11 +253,11 @@ class DingTalkBotCoordinatorTest {
         .thenReturn(Map.of("markdown", "含最新回复的卡片"));
 
     coordinator.start();
-    coordinator.pollEvents();
+    coordinator.scheduleEvents();
 
     ArgumentCaptor<JsonNode> textPayload = ArgumentCaptor.forClass(JsonNode.class);
     ArgumentCaptor<JsonNode> cardPayload = ArgumentCaptor.forClass(JsonNode.class);
-    verify(store)
+    verify(store, timeout(2000))
         .recordAssistantCompleted(
             eq(WORKFLOW_2),
             eq(2L),
@@ -263,7 +271,7 @@ class DingTalkBotCoordinatorTest {
         .isEqualTo("当前正在执行质量审查步骤。");
     org.assertj.core.api.Assertions.assertThat(cardPayload.getValue().path("markdown").asText())
         .isEqualTo("含最新回复的卡片");
-    verify(store).markInboundFinished(WORKFLOW_2, workflowMessageId, false);
+    verify(store, timeout(2000)).markInboundFinished(WORKFLOW_2, workflowMessageId, false);
     coordinator.stop();
   }
 
@@ -478,6 +486,46 @@ class DingTalkBotCoordinatorTest {
     snapshot.putObject("progress").put("completed", 0).put("total", 1);
     snapshot.putArray("nodes");
     return snapshot;
+  }
+
+  @Test
+  void filteredNoiseAdvancesCursorOnceAndOneSlowBindingDoesNotBlockAnother() throws Exception {
+    coordinator.start();
+    var slow = new DingTalkModels.Binding(WORKFLOW_1, "chat-1", "root-1", "active", 0, null, false);
+    var fast = new DingTalkModels.Binding(WORKFLOW_2, "chat-2", "root-2", "active", 0, null, false);
+    when(store.pollable("cli_test")).thenReturn(List.of(slow, fast));
+    var entered = new java.util.concurrent.CountDownLatch(1);
+    var release = new java.util.concurrent.CountDownLatch(1);
+    var empty = objectMapper.createObjectNode().put("nextCursor", 10000);
+    empty.putArray("events");
+    when(gateway.get("/workflows/" + WORKFLOW_1 + "/events/history?after=0&limit=200&view=bot"))
+        .thenAnswer(
+            invocation -> {
+              entered.countDown();
+              release.await();
+              return empty;
+            });
+    when(gateway.get("/workflows/" + WORKFLOW_2 + "/events/history?after=0&limit=200&view=bot"))
+        .thenReturn(empty);
+    try {
+      coordinator.scheduleEvents();
+      org.junit.jupiter.api.Assertions.assertTrue(
+          entered.await(2, java.util.concurrent.TimeUnit.SECONDS));
+      verify(store, org.mockito.Mockito.timeout(2000))
+          .recordEvent(
+              "cli_test",
+              WORKFLOW_2,
+              10000,
+              "cursor:" + WORKFLOW_2 + ":10000",
+              null,
+              null,
+              null,
+              false);
+    } finally {
+      release.countDown();
+      coordinator.closeWorkers();
+      coordinator.stop();
+    }
   }
 
   private static DingTalkModels.Message message(

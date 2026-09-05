@@ -29,6 +29,81 @@ class TaskScheduleIntegrationTest {
   @Autowired TaskScheduleStore schedules;
   @Autowired TaskLaunchStore launches;
   @Autowired JdbcTemplate jdbc;
+  @Autowired WorkflowRunStore workflowRuns;
+
+  @Test
+  void historyProjectionIsPagedAndSnapshotsAreLoadedOnlyOnDetail() {
+    String taskId = createTask(false, null, false).path("id").asText();
+    List<String> ids = new java.util.ArrayList<>();
+    for (int i = 0; i < 25; i++) ids.add(workflowRuns.prepareLatest(taskId).workflowId());
+    // 相同时间也必须以工作流编号稳定排序。
+    jdbc.update(
+        "update codex_sop_task_runs set submitted_at = ? where task_definition_id = ?",
+        Instant.parse("2026-09-05T00:00:00Z"),
+        taskId);
+    var first = workflowRuns.listRunSummaries(taskId, 0, 20);
+    var second = workflowRuns.listRunSummaries(taskId, 1, 20);
+    assertThat(first).hasSize(20);
+    assertThat(second).hasSize(5);
+    assertThat(first)
+        .allSatisfy(
+            row -> {
+              assertThat(row.has("snapshot")).isFalse();
+              assertThat(row.has("submittedJson")).isFalse();
+              assertThat(row.has("gatewayResponse")).isFalse();
+            });
+    var all =
+        java.util.stream.Stream.concat(first.stream(), second.stream())
+            .map(row -> row.path("workflowId").asText())
+            .toList();
+    assertThat(all)
+        .doesNotHaveDuplicates()
+        .containsExactlyElementsOf(
+            ids.stream().sorted(java.util.Comparator.reverseOrder()).toList());
+    assertThat(
+            workflowRuns
+                .runDetail(ids.get(0))
+                .path("submittedJson")
+                .path("taskDefinitionId")
+                .asText())
+        .isEqualTo(taskId);
+    assertThat(workflowRuns.pendingRuntimeScopes(taskId)).hasSize(25);
+    workflowRuns.markRuntimeScopes(ids);
+    assertThat(workflowRuns.pendingRuntimeScopes(taskId)).isEmpty();
+    assertThatThrownBy(() -> workflowRuns.listRunSummaries(taskId, -1, 20))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void pendingHistoryCheckExcludesCurrentRunAndOtherTasks() {
+    String taskId = createTask(false, null, false).path("id").asText();
+    String current = workflowRuns.prepareLatest(taskId).workflowId();
+    String otherTask = createTask(false, null, false).path("id").asText();
+    workflowRuns.prepareLatest(otherTask);
+    assertThat(workflowRuns.hasPendingRuntimeHistory(taskId, current)).isFalse();
+
+    String old = workflowRuns.prepareLatest(taskId).workflowId();
+    assertThat(workflowRuns.hasPendingRuntimeHistory(taskId, current)).isTrue();
+    workflowRuns.markRuntimeScopes(List.of(old));
+    assertThat(workflowRuns.hasPendingRuntimeHistory(taskId, current)).isFalse();
+    assertThat(workflowRuns.pendingRuntimeScopes(taskId)).containsExactly(current);
+  }
+
+  @Test
+  void schedulerDoesNotConsumeMoreDueTasksThanWorkerCapacity() {
+    String first = createTask(true, "06:42", false).path("id").asText();
+    String second = createTask(true, "06:42", false).path("id").asText();
+    var now = ZonedDateTime.of(2026, 9, 5, 6, 42, 0, 0, ZoneId.of("Asia/Shanghai"));
+    var claimed = schedules.claim(now, 1);
+    assertThat(claimed).hasSize(1);
+    assertThat(schedules.claim(now.plusSeconds(20), 1))
+        .hasSize(1)
+        .doesNotContainAnyElementsOf(claimed);
+    jdbc.update(
+        "update codex_sop_task_definitions set schedule_enabled = false where id in (?, ?)",
+        first,
+        second);
+  }
 
   @Test
   void dailyScheduleIsClaimedOncePerDateAndOnlyAtConfiguredMinute() {

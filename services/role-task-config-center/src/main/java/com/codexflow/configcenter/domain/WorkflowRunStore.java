@@ -3,6 +3,7 @@ package com.codexflow.configcenter.domain;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
@@ -42,6 +43,7 @@ public class WorkflowRunStore {
     ObjectNode payload = (ObjectNode) json.read(source.submittedJson);
     String workflowId = UUID.randomUUID().toString();
     payload.put("workflowId", workflowId);
+    payload.put("taskDefinitionId", source.taskDefinition.id);
     ObjectNode snapshot = (ObjectNode) json.read(source.snapshotJson);
     snapshot.put("workflowId", workflowId);
     snapshot.put("sourceWorkflowId", sourceWorkflowId);
@@ -81,6 +83,69 @@ public class WorkflowRunStore {
     return runs.findByTaskDefinitionIdOrderBySubmittedAtDesc(taskId).stream()
         .map(json::run)
         .toList();
+  }
+
+  @Transactional(readOnly = true)
+  public List<ObjectNode> listRunSummaries(String taskId, int page, int size) {
+    if (page < 0 || page > 100000 || size < 1 || size > 100) {
+      throw new IllegalArgumentException("运行历史页码或每页数量无效。");
+    }
+    findTask(taskId, true);
+    return runs.summaries(taskId, PageRequest.of(page, size)).stream()
+        .map(
+            row -> {
+              ObjectNode value = json.newObject();
+              value.put("workflowId", row.getWorkflowId());
+              value.put("taskDefinitionId", taskId);
+              value.put("monitorUrl", monitorUrl(row.getWorkflowId()));
+              value.put("sourceWorkflowId", row.getSourceWorkflowId());
+              value.put("status", row.getStatus());
+              value.put("submittedAt", row.getSubmittedAt().toString());
+              value.put("updatedAt", row.getUpdatedAt().toString());
+              return value;
+            })
+        .toList();
+  }
+
+  @Transactional(readOnly = true)
+  public ObjectNode runDetail(String workflowId) {
+    return json.run(findRun(workflowId));
+  }
+
+  @Transactional(readOnly = true)
+  public List<String> pendingRuntimeScopes(String taskId) {
+    return runs.pendingScopes(taskId, PageRequest.of(0, 200));
+  }
+
+  /** 仅检查其他历史运行；当前待提交运行会随提交原子登记，不应阻塞自身。 */
+  @Transactional(readOnly = true)
+  public boolean hasPendingRuntimeHistory(String taskId, String workflowId) {
+    return runs.existsByTaskDefinitionIdAndRuntimeScopeRegisteredFalseAndWorkflowIdNot(
+        taskId, workflowId);
+  }
+
+  @Transactional(readOnly = true)
+  public List<String> pendingRuntimeScopeTasks() {
+    return runs.pendingScopeTasks(PageRequest.of(0, 20));
+  }
+
+  @Transactional
+  public void markRuntimeScopes(List<String> ids) {
+    runs.markScopes(ids);
+  }
+
+  @Transactional
+  public void recordSummaryStatuses(JsonNode values) {
+    values
+        .properties()
+        .forEach(
+            entry -> {
+              if (java.util.Set.of(
+                      "queued", "running", "cancelling", "completed", "failed", "cancelled")
+                  .contains(entry.getValue().asText())) {
+                runs.updateStatus(entry.getKey(), entry.getValue().asText(), Instant.now());
+              }
+            });
   }
 
   /** 保存网关响应及其状态，并返回更新后的运行 JSON。 */
@@ -143,6 +208,7 @@ public class WorkflowRunStore {
     }
     ObjectNode root = json.newObject();
     root.put("workflowId", workflowId);
+    root.put("taskDefinitionId", task.id);
     root.put("name", task.name);
     root.put("supervisorAgentId", task.sop.supervisorAgentId);
     root.put("failurePolicy", "stop");

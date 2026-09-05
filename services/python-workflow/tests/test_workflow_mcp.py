@@ -61,6 +61,8 @@ class WorkflowMcpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNotNone(started["job_id"])
                     final = await service.wait_node("mcp-demo", "a", timeout_sec=1)
                     self.assertEqual(final["status"], "completed")
+                    # 等待后台落库完成后才能撤销临时存储替身。
+                    await asyncio.gather(*list(service._workflow_monitors))
 
                 snapshot = store.get_workflow("mcp-demo")
                 self.assertEqual(snapshot["nodes"][0]["status"], "completed")

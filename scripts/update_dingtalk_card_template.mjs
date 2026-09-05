@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const target = resolve(process.argv[2] ?? "docs/card_1787896598119.json");
+const target = resolve(process.argv[2] ?? "config/dingtalk-card-template.json");
 const outer = JSON.parse(readFileSync(target, "utf8"));
 const editor = JSON.parse(outer.editorData);
 const root = editor.schema?.componentsTree?.[0];

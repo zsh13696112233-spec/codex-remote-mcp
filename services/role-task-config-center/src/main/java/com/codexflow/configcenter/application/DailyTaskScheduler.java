@@ -17,6 +17,9 @@ class DailyTaskScheduler {
 
   private final TaskScheduleStore schedules;
   private final WorkflowRunService workflowRuns;
+  private final BoundedWork launches = new BoundedWork("scheduled-task", 4, 16);
+  private final BoundedWork reconciliation = new BoundedWork("workflow-reconciliation", 1, 1);
+  private final BoundedWork scopeSync = new BoundedWork("workflow-scope-upgrade", 1, 1);
 
   DailyTaskScheduler(TaskScheduleStore schedules, WorkflowRunService workflowRuns) {
     this.schedules = schedules;
@@ -25,18 +28,35 @@ class DailyTaskScheduler {
 
   @Scheduled(fixedDelay = 30_000)
   void tick() {
-    workflowRuns.reconcileActiveRuns();
-    runAt(ZonedDateTime.now(ZONE));
+    int available = launches.available();
+    if (available == 0) return;
+    for (String taskId : schedules.claim(ZonedDateTime.now(ZONE), available)) {
+      launches.submit(taskId, () -> launch(taskId));
+    }
   }
 
-  /** 接受显式时间以便测试每日触发、重复扫描和错过不补跑语义。 */
-  void runAt(ZonedDateTime now) {
-    for (String taskId : schedules.claim(now)) {
-      try {
-        workflowRuns.runScheduled(taskId);
-      } catch (RuntimeException error) {
-        LOGGER.warn("定时任务本次未启动，taskDefinitionId={}，原因={}。", taskId, error.getMessage());
-      }
+  @Scheduled(fixedDelay = 30_000)
+  void reconcile() {
+    reconciliation.submit("active-runs", workflowRuns::reconcileActiveRuns);
+  }
+
+  @jakarta.annotation.PreDestroy
+  void close() {
+    launches.close();
+    reconciliation.close();
+    scopeSync.close();
+  }
+
+  @Scheduled(fixedDelay = 15_000)
+  void synchronizeScopes() {
+    scopeSync.submit("scope-upgrade", workflowRuns::synchronizeRuntimeScopes);
+  }
+
+  private void launch(String taskId) {
+    try {
+      workflowRuns.runScheduled(taskId);
+    } catch (RuntimeException error) {
+      LOGGER.warn("定时任务本次未启动，taskDefinitionId={}，原因={}。", taskId, error.getMessage());
     }
   }
 }

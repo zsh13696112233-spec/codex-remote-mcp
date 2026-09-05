@@ -40,6 +40,25 @@ SIDECAR_WATCHDOG_INTERVAL_SEC = 1.0
 LOGGER = logging.getLogger(__name__)
 
 
+async def _database_call(function, *args, **kwargs):
+    """取消协程时先等待已经开始的数据库操作结束，避免旧写入污染下一次尝试。"""
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            # 下方统一取出异常；取消优先，但必须消费线程任务的异常。
+            break
+    if cancelled:
+        if not task.cancelled():
+            task.exception()
+        raise asyncio.CancelledError()
+    return task.result()
+
+
 class WorkflowGateway:
     def __init__(
         self,
@@ -62,6 +81,7 @@ class WorkflowGateway:
         self.event_batcher = AsyncEventBatcher(store)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._chat_tasks: dict[str, asyncio.Task[None]] = {}
+        self._chat_wakeups: set[str] = set()
         self._control_locks: dict[str, asyncio.Lock] = {}
         self._control_in_progress: set[str] = set()
         self._schedule_lock = asyncio.Lock()
@@ -71,19 +91,19 @@ class WorkflowGateway:
         self._closing = False
 
     async def start(self) -> None:
-        recovered = await asyncio.to_thread(
+        recovered = await _database_call(
             self.store.recover_active_workflows_after_restart
         )
         if recovered:
             LOGGER.warning("网关启动时已将 %s 个遗留运行标记为失败。", len(recovered))
-        self.store.recover_processing_chat_messages()
+        await _database_call(self.store.recover_processing_chat_messages)
         try:
-            imported = await asyncio.to_thread(self.store.import_legacy_generated_images)
+            imported = await _database_call(self.store.import_legacy_generated_images)
             if imported:
                 LOGGER.info("已回填 %s 个历史工作流图片附件。", imported)
         except Exception:
             LOGGER.exception("回填历史工作流图片附件失败。")
-        for workflow_id in self.store.list_chat_workflows():
+        for workflow_id in await _database_call(self.store.list_chat_workflows):
             self._ensure_chat_worker(workflow_id)
         await self._schedule_pending()
         self._supervisor_probe_task = asyncio.create_task(
@@ -105,7 +125,7 @@ class WorkflowGateway:
             self._sidecar_watchdog_task = None
         async with self._schedule_lock:
             pass
-        await asyncio.to_thread(self.store.recover_active_workflows_after_restart)
+        await _database_call(self.store.recover_active_workflows_after_restart)
         tasks = list(self._tasks.values()) + list(self._chat_tasks.values())
         for task in tasks:
             task.cancel()
@@ -172,9 +192,9 @@ class WorkflowGateway:
                     f"执行机 {node['agentId']} 不允许节点 {node['id']} 使用权限档位 {profile}。"
                 )
 
-        snapshot = await asyncio.to_thread(self.store.create_workflow, spec)
+        snapshot = await _database_call(self.store.create_workflow, spec)
         await self._schedule_pending()
-        return await asyncio.to_thread(
+        return await _database_call(
             self.store.get_workflow, str(snapshot["workflowId"])
         )
 
@@ -195,25 +215,25 @@ class WorkflowGateway:
                 if not bool(agent.get("enabled", True)) or "supervisor" not in capabilities:
                     continue
                 if agent.get("orchestration_mode") == "remote_sidecar":
-                    sidecar = await asyncio.to_thread(
+                    sidecar = await _database_call(
                         self.store.sidecar_status,
                         agent_id,
                         timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC,
                     )
                     if sidecar["connectionStatus"] != "online":
-                        while await asyncio.to_thread(
+                        while await _database_call(
                             self.store.fail_next_queued_for_offline_sidecar, agent_id
                         ):
                             pass
                         continue
-                    spec = await asyncio.to_thread(
+                    spec = await _database_call(
                         self.store.claim_next_workflow,
                         agent_id,
                         sidecar_instance_id=str(sidecar["instanceId"]),
                         lease_timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC,
                     )
                 else:
-                    spec = await asyncio.to_thread(
+                    spec = await _database_call(
                         self.store.claim_next_workflow, agent_id
                     )
                 if spec is None:
@@ -225,7 +245,7 @@ class WorkflowGateway:
                         name=f"workflow-supervisor:{workflow_id}",
                     )
                 except BaseException:
-                    await asyncio.to_thread(
+                    await _database_call(
                         self.store.release_supervisor_claim, workflow_id
                     )
                     raise
@@ -251,6 +271,7 @@ class WorkflowGateway:
     def _drop_chat_task(self, workflow_id: str, task: asyncio.Task[Any]) -> None:
         if self._chat_tasks.get(workflow_id) is task:
             self._chat_tasks.pop(workflow_id, None)
+            self._chat_wakeups.discard(workflow_id)
 
     def public_agents(self) -> list[dict[str, Any]]:
         leased_supervisors = (
@@ -379,7 +400,7 @@ class WorkflowGateway:
         """及时终止心跳过期的远程租约，并停止中央监督任务。"""
         while not self._closing:
             try:
-                expired = await asyncio.to_thread(self.store.expire_sidecar_leases)
+                expired = await _database_call(self.store.expire_sidecar_leases)
                 for item in expired:
                     task = self._tasks.get(item["workflowId"])
                     if task is not None and not task.done():
@@ -429,7 +450,7 @@ class WorkflowGateway:
             raise ValueError("startedAt 必须是 ISO-8601 时间。") from error
         if parsed_started_at.tzinfo is None:
             raise ValueError("startedAt 必须包含时区。")
-        result = await asyncio.to_thread(
+        result = await _database_call(
             self.store.record_sidecar_heartbeat,
             supervisor_id,
             instance_id,
@@ -454,7 +475,7 @@ class WorkflowGateway:
         consecutive_no_progress_turns = 0
         try:
             while True:
-                before = self.store.get_workflow(workflow_id)
+                before = await _database_call(self.store.get_workflow, workflow_id)
                 before_fingerprint = self._node_progress_fingerprint(before)
                 message_buffer = ""
                 last_message_flush_at = 0.0
@@ -476,7 +497,7 @@ class WorkflowGateway:
                             message_buffer = (message_buffer + delta)[-20_000:]
                             now = time.monotonic()
                             if now - last_message_flush_at >= 0.25:
-                                await asyncio.to_thread(
+                                await _database_call(
                                     self.store.set_supervisor_message,
                                     workflow_id,
                                     message_buffer,
@@ -486,7 +507,7 @@ class WorkflowGateway:
                         item = params.get("item") or {}
                         if item.get("type") == "agentMessage" and item.get("text"):
                             message_buffer = str(item["text"])[-20_000:]
-                            await asyncio.to_thread(
+                            await _database_call(
                                 self.store.set_supervisor_message,
                                 workflow_id,
                                 message_buffer,
@@ -510,11 +531,11 @@ class WorkflowGateway:
                     approvals_reviewer="auto_review",
                     event_callback=record,
                 )
-                self.store.update_supervisor(workflow_id, job.snapshot())
+                await _database_call(self.store.update_supervisor, workflow_id, job.snapshot())
                 last_supervisor_fingerprint = self._supervisor_job_fingerprint(
                     job.snapshot()
                 )
-                self.store.add_event(
+                await _database_call(self.store.add_event,
                     workflow_id,
                     node_id=None,
                     source="gateway",
@@ -527,7 +548,7 @@ class WorkflowGateway:
                         current_snapshot
                     )
                     if current_fingerprint != last_supervisor_fingerprint:
-                        self.store.update_supervisor(workflow_id, current_snapshot)
+                        await _database_call(self.store.update_supervisor, workflow_id, current_snapshot)
                         last_supervisor_fingerprint = current_fingerprint
                     try:
                         await asyncio.wait_for(job.completed.wait(), timeout=0.25)
@@ -536,12 +557,12 @@ class WorkflowGateway:
                 job_snapshot = job.snapshot()
                 await self.flush_events()
                 if message_buffer:
-                    await asyncio.to_thread(
+                    await _database_call(
                         self.store.set_supervisor_message, workflow_id, message_buffer
                     )
-                self.store.update_supervisor(workflow_id, job_snapshot)
+                await _database_call(self.store.update_supervisor, workflow_id, job_snapshot)
 
-                latest = self.store.get_workflow(workflow_id)
+                latest = await _database_call(self.store.get_workflow, workflow_id)
                 if self._advance_is_held(latest):
                     return
                 if workflow_id in self._control_in_progress:
@@ -556,7 +577,7 @@ class WorkflowGateway:
                     else:
                         consecutive_no_progress_turns = 0
                     if consecutive_no_progress_turns >= 3:
-                        self.store.finish_workflow(
+                        await _database_call(self.store.finish_workflow,
                             workflow_id,
                             supervisor_status="failed",
                             response=job_snapshot.get("response"),
@@ -564,7 +585,7 @@ class WorkflowGateway:
                         )
                         return
                     current_thread_id = job.thread_id or current_thread_id
-                    self.store.add_event(
+                    await _database_call(self.store.add_event,
                         workflow_id,
                         node_id=None,
                         source="gateway",
@@ -576,7 +597,7 @@ class WorkflowGateway:
                     )
                     continue
 
-                self.store.finish_workflow(
+                await _database_call(self.store.finish_workflow,
                     workflow_id,
                     supervisor_status=str(job_snapshot["status"]),
                     response=job_snapshot.get("response"),
@@ -587,13 +608,13 @@ class WorkflowGateway:
             held = False
             active = False
             try:
-                current = self.store.get_workflow(workflow_id)
+                current = await _database_call(self.store.get_workflow, workflow_id)
                 held = self._advance_is_held(current)
                 active = current["status"] in {"running", "cancelling"}
             except ValueError:
                 pass
             if workflow_id not in self._control_in_progress and not held and active:
-                self.store.finish_workflow(
+                await _database_call(self.store.finish_workflow,
                     workflow_id,
                     supervisor_status="cancelled",
                     response=None,
@@ -602,18 +623,18 @@ class WorkflowGateway:
             raise
         except Exception as error:
             try:
-                if self._advance_is_held(self.store.get_workflow(workflow_id)):
+                if self._advance_is_held(await _database_call(self.store.get_workflow, workflow_id)):
                     return
             except ValueError:
                 pass
-            self.store.add_event(
+            await _database_call(self.store.add_event,
                 workflow_id,
                 node_id=None,
                 source="gateway",
                 event_type="supervisor.failed_to_start",
                 payload={"error": str(error), "errorType": type(error).__name__},
             )
-            self.store.finish_workflow(
+            await _database_call(self.store.finish_workflow,
                 workflow_id,
                 supervisor_status="failed",
                 response=None,
@@ -722,7 +743,7 @@ class WorkflowGateway:
     async def accept_message(
         self, workflow_id: str, message_id: str, text: str
     ) -> dict[str, Any]:
-        accepted = await asyncio.to_thread(
+        accepted = await _database_call(
             self.store.accept_chat_message, workflow_id, message_id, text
         )
         self._ensure_chat_worker(workflow_id)
@@ -733,7 +754,7 @@ class WorkflowGateway:
             raise ValueError("gateId 必须是 1 到 128 个字符。")
         lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
         async with lock:
-            result = await asyncio.to_thread(
+            result = await _database_call(
                 self.store.confirm_advance, workflow_id, gate_id
             )
             if result.get("resumedFromHold"):
@@ -747,7 +768,7 @@ class WorkflowGateway:
         async with lock:
             self._control_in_progress.add(workflow_id)
             try:
-                result = await asyncio.to_thread(
+                result = await _database_call(
                     self.store.hold_advance, workflow_id, gate_id
                 )
                 await self._pause_supervisor(workflow_id)
@@ -758,6 +779,7 @@ class WorkflowGateway:
     def _ensure_chat_worker(self, workflow_id: str) -> None:
         current = self._chat_tasks.get(workflow_id)
         if current is not None and not current.done():
+            self._chat_wakeups.add(workflow_id)
             return
         task = asyncio.create_task(
             self._run_chat_queue(workflow_id), name=f"workflow-chat:{workflow_id}"
@@ -767,18 +789,22 @@ class WorkflowGateway:
 
     async def _run_chat_queue(self, workflow_id: str) -> None:
         while True:
-            message = self.store.claim_next_chat_message(workflow_id)
+            self._chat_wakeups.discard(workflow_id)
+            message = await _database_call(self.store.claim_next_chat_message, workflow_id)
             if message is None:
+                # 查询在线程中执行；期间收到的新消息已入库，退出前必须重新领取。
+                if workflow_id in self._chat_wakeups:
+                    continue
                 return
             try:
                 await self._process_chat_message(workflow_id, message)
             except asyncio.CancelledError:
-                self.store.fail_chat_message(
+                await _database_call(self.store.fail_chat_message,
                     workflow_id, message["messageId"], "消息处理任务被中断，请安全重试。"
                 )
                 raise
             except Exception as error:
-                self.store.fail_chat_message(workflow_id, message["messageId"], str(error))
+                await _database_call(self.store.fail_chat_message, workflow_id, message["messageId"], str(error))
 
     async def _process_chat_message(
         self, workflow_id: str, message: dict[str, Any]
@@ -786,13 +812,13 @@ class WorkflowGateway:
         message_id = message["messageId"]
         assistant_message_id = str(uuid.uuid4())
         text = message["text"].strip()
-        pending = self.store.get_pending_control(workflow_id)
+        pending = await _database_call(self.store.get_pending_control, workflow_id)
         if text == "确认执行":
             if pending is None:
                 answer = "当前没有等待确认的操作。"
             else:
                 try:
-                    confirmed = self.store.confirm_control(
+                    confirmed = await _database_call(self.store.confirm_control,
                         workflow_id, pending["actionId"], message_id
                     )
                     answer = await self._execute_control(workflow_id, confirmed)
@@ -802,18 +828,18 @@ class WorkflowGateway:
             if pending is None:
                 answer = "当前没有等待取消的操作。"
             else:
-                self.store.cancel_pending_control(workflow_id, message_id)
+                await _database_call(self.store.cancel_pending_control, workflow_id, message_id)
                 answer = "已取消刚才提出的操作，任务状态没有改变。"
         else:
-            snapshot = self.store.get_workflow(workflow_id)
+            snapshot = await _database_call(self.store.get_workflow, workflow_id)
             decision = await self._run_assistant_turn(
                 workflow_id, message_id, snapshot, message
             )
-            answer = self._apply_assistant_decision(workflow_id, message_id, decision)
+            answer = await _database_call(self._apply_assistant_decision, workflow_id, message_id, decision)
         answer = answer.strip()
         if not answer:
             raise RuntimeError("任务助手没有生成可显示的回复。")
-        self.store.complete_chat_message(
+        await _database_call(self.store.complete_chat_message,
             workflow_id, message_id, assistant_message_id, answer
         )
         await self._resume_supervisor_if_needed(workflow_id)
@@ -826,7 +852,7 @@ class WorkflowGateway:
         message: dict[str, Any],
     ) -> dict[str, Any]:
         prompt = self._chat_prompt(snapshot, message)
-        spec = self.store.get_workflow_spec(workflow_id)
+        spec = await _database_call(self.store.get_workflow_spec, workflow_id)
         thread_id = snapshot.get("assistant", {}).get("threadId")
         job = await self.assistant_orchestrator.dispatch(
             agent_id=spec["supervisorAgentId"],
@@ -839,15 +865,15 @@ class WorkflowGateway:
             approval_policy="never",
             output_schema=self._assistant_output_schema(),
         )
-        self.store.update_assistant(workflow_id, job.snapshot())
-        self.store.mark_chat_forwarded(workflow_id, message_id)
+        await _database_call(self.store.update_assistant, workflow_id, job.snapshot())
+        await _database_call(self.store.mark_chat_forwarded, workflow_id, message_id)
         while not job.completed.is_set():
-            self.store.update_assistant(workflow_id, job.snapshot())
+            await _database_call(self.store.update_assistant, workflow_id, job.snapshot())
             try:
                 await asyncio.wait_for(job.completed.wait(), timeout=0.25)
             except TimeoutError:
                 pass
-        self.store.update_assistant(workflow_id, job.snapshot())
+        await _database_call(self.store.update_assistant, workflow_id, job.snapshot())
         if job.status != "completed":
             raise RuntimeError(job.error or "任务助手连接失败。")
         raw = (job.response or "").strip()
@@ -999,7 +1025,7 @@ class WorkflowGateway:
     ) -> str:
         lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
         async with lock:
-            action = self.store.start_control_execution(confirmed["actionId"])
+            action = await _database_call(self.store.start_control_execution, confirmed["actionId"])
             self._control_in_progress.add(workflow_id)
             try:
                 await self._pause_supervisor(workflow_id)
@@ -1008,16 +1034,16 @@ class WorkflowGateway:
                 if action_type == "restart_from":
                     assert node_id is not None
                     await self._interrupt_nodes(
-                        workflow_id, self.store.get_nodes_from(workflow_id, node_id)
+                        workflow_id, await _database_call(self.store.get_nodes_from, workflow_id, node_id)
                     )
-                    result = self.store.restart_from_node(
+                    result = await _database_call(self.store.restart_from_node,
                         workflow_id,
                         node_id,
                         action_id=action["actionId"],
                         revision_instruction=action.get("revisionInstruction"),
                         source_message_id=action.get("proposedByMessageId"),
                     )
-                    self.store.finish_control_execution(
+                    await _database_call(self.store.finish_control_execution,
                         action["actionId"], result={"retryPolicy": result["retryPolicy"]}
                     )
                     await self._resume_supervisor_if_needed(workflow_id)
@@ -1034,10 +1060,10 @@ class WorkflowGateway:
                 if action_type == "skip":
                     assert node_id is not None
                     await self._interrupt_nodes(
-                        workflow_id, [self.store.get_node(workflow_id, node_id)]
+                        workflow_id, [await _database_call(self.store.get_node, workflow_id, node_id)]
                     )
-                    result = self.store.skip_node(workflow_id, node_id)
-                    self.store.finish_control_execution(
+                    result = await _database_call(self.store.skip_node, workflow_id, node_id)
+                    await _database_call(self.store.finish_control_execution,
                         action["actionId"], result={"status": result["status"]}
                     )
                     await self._resume_supervisor_if_needed(workflow_id)
@@ -1045,18 +1071,18 @@ class WorkflowGateway:
                 await self._interrupt_nodes(
                     workflow_id,
                     [
-                        node for node in self.store.get_workflow(workflow_id)["nodes"]
+                        node for node in (await _database_call(self.store.get_workflow, workflow_id))["nodes"]
                         if node["status"] in {"queued", "running", "cancelling"}
                     ]
                 )
-                result = self.store.stop_workflow(workflow_id)
-                self.store.finish_control_execution(
+                result = await _database_call(self.store.stop_workflow, workflow_id)
+                await _database_call(self.store.finish_control_execution,
                     action["actionId"], result={"status": result["status"]}
                 )
                 await self._schedule_pending()
                 return "任务已停止，已经完成的步骤结果会保留。"
             except Exception as error:
-                self.store.finish_control_execution(
+                await _database_call(self.store.finish_control_execution,
                     action["actionId"], error=str(error)
                 )
                 self._control_in_progress.discard(workflow_id)
@@ -1066,7 +1092,7 @@ class WorkflowGateway:
                 self._control_in_progress.discard(workflow_id)
 
     async def _pause_supervisor(self, workflow_id: str) -> None:
-        snapshot = self.store.get_workflow(workflow_id)
+        snapshot = await _database_call(self.store.get_workflow, workflow_id)
         job_id = snapshot["supervisor"].get("jobId")
         if job_id and job_id in self.orchestrator.jobs:
             job = self.orchestrator.get_job(job_id)
@@ -1095,7 +1121,7 @@ class WorkflowGateway:
             )
         deadline = time.monotonic() + 10
         while active and time.monotonic() < deadline:
-            refreshed = [self.store.get_node(workflow_id, node["id"]) for node in active]
+            refreshed = [await _database_call(self.store.get_node, workflow_id, node["id"]) for node in active]
             active = [
                 node for node in refreshed
                 if node["status"] in {"queued", "running", "cancelling"}
@@ -1152,38 +1178,43 @@ class WorkflowGateway:
         )
 
     async def _resume_supervisor_if_needed(self, workflow_id: str) -> None:
-        snapshot = self.store.get_workflow(workflow_id)
-        if snapshot["status"] == "queued":
-            await self._schedule_pending()
-            return
-        if snapshot["status"] != "running" or self._advance_is_held(snapshot):
-            return
-        if not self.store.has_supervisor_lease(workflow_id):
-            return
-        job_id = snapshot["supervisor"].get("jobId")
-        if job_id and job_id in self.orchestrator.jobs:
-            if not self.orchestrator.get_job(job_id).completed.is_set():
+        # 与首次调度共用锁，数据库等待期间不能重复检查并登记同一主监督。
+        async with self._schedule_lock:
+            if self._closing:
                 return
-        if workflow_id in self._tasks and not self._tasks[workflow_id].done():
-            return
-        spec = self.store.get_workflow_spec(workflow_id)
-        thread_id = snapshot["supervisor"].get("threadId")
-        task = asyncio.create_task(
-            self._run_supervisor(spec, resume_thread_id=thread_id),
-            name=f"workflow-supervisor-resume:{workflow_id}",
-        )
-        self._tasks[workflow_id] = task
-        task.add_done_callback(lambda done: self._drop_task(workflow_id, done))
+            snapshot = await _database_call(self.store.get_workflow, workflow_id)
+            if snapshot["status"] != "queued":
+                if snapshot["status"] != "running" or self._advance_is_held(snapshot):
+                    return
+                if not await _database_call(self.store.has_supervisor_lease, workflow_id):
+                    return
+                job_id = snapshot["supervisor"].get("jobId")
+                if job_id and job_id in self.orchestrator.jobs:
+                    if not self.orchestrator.get_job(job_id).completed.is_set():
+                        return
+                if workflow_id in self._tasks and not self._tasks[workflow_id].done():
+                    return
+                spec = await _database_call(self.store.get_workflow_spec, workflow_id)
+                thread_id = snapshot["supervisor"].get("threadId")
+                task = asyncio.create_task(
+                    self._run_supervisor(spec, resume_thread_id=thread_id),
+                    name=f"workflow-supervisor-resume:{workflow_id}",
+                )
+                self._tasks[workflow_id] = task
+                task.add_done_callback(lambda done: self._drop_task(workflow_id, done))
+                return
+        # 排队工作流由正常调度器领取，先释放锁，避免嵌套获取同一把锁。
+        await self._schedule_pending()
 
     async def cancel(self, workflow_id: str) -> dict[str, Any]:
-        snapshot = await asyncio.to_thread(self.store.get_workflow, workflow_id)
+        snapshot = await _database_call(self.store.get_workflow, workflow_id)
         task = self._tasks.get(workflow_id)
         job_id = snapshot["supervisor"].get("jobId")
         if job_id and job_id in self.orchestrator.jobs:
             await self.orchestrator.cancel(job_id)
         if task is not None and not task.done():
             task.cancel()
-        result = await asyncio.to_thread(
+        result = await _database_call(
             self.store.cancel_workflow,
             workflow_id,
             reason="用户已取消任务。",
@@ -1214,18 +1245,20 @@ async def create_workflow(request: Request) -> Response:
 async def get_workflow(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     try:
-        snapshot = await asyncio.to_thread(
-            gateway.store.get_workflow, request.path_params["workflow_id"]
+        snapshot = await _database_call(
+            gateway.store.poll_workflow, request.path_params["workflow_id"],
+            request.query_params.get("knownRevision"),
+            json.loads(request.query_params["knownResults"]) if "knownResults" in request.query_params else None,
         )
         return JSONResponse(snapshot)
     except ValueError as error:
-        return _error_response(error, 404)
+        return _error_response(error, 404 if "找不到" in str(error) else 400)
 
 
 async def get_workflow_artifact(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     try:
-        artifact = await asyncio.to_thread(
+        artifact = await _database_call(
             gateway.store.get_artifact,
             request.path_params["workflow_id"],
             request.path_params["artifact_id"],
@@ -1301,22 +1334,50 @@ async def get_event_history(request: Request) -> Response:
     try:
         after = int(request.query_params.get("after", "0"))
         limit = int(request.query_params.get("limit", "200"))
-        events = await asyncio.to_thread(
-            gateway.store.list_events,
+        page = await _database_call(
+            gateway.store.event_page,
             request.path_params["workflow_id"],
             after=after,
             limit=limit,
+            view=request.query_params.get("view", "all"),
+            before=int(request.query_params["before"]) if "before" in request.query_params else None,
+            tail=request.query_params.get("tail", "false") == "true",
         )
-        return JSONResponse({"events": events})
+        return JSONResponse(page)
     except ValueError as error:
         return _error_response(error, 404 if "找不到" in str(error) else 400)
+
+
+async def get_workflow_statuses(request: Request) -> Response:
+    gateway: WorkflowGateway = request.app.state.gateway
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("请求体必须是 JSON 对象。")
+        statuses = await _database_call(gateway.store.workflow_statuses, body.get("workflowIds"))
+        return JSONResponse({"statuses": statuses})
+    except (ValueError, json.JSONDecodeError) as error:
+        return _error_response(error, 400)
+
+
+async def register_workflow_task_bindings(request: Request) -> Response:
+    gateway: WorkflowGateway = request.app.state.gateway
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("请求体必须是 JSON 对象。")
+        await _database_call(gateway.store.register_task_bindings,
+                                body.get("taskDefinitionId"), body.get("workflowIds"))
+        return JSONResponse({"registered": True})
+    except (ValueError, json.JSONDecodeError) as error:
+        return _error_response(error, 400)
 
 
 async def stream_events(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     workflow_id = request.path_params["workflow_id"]
     try:
-        await asyncio.to_thread(gateway.store.get_workflow, workflow_id)
+        await _database_call(gateway.store.get_workflow, workflow_id)
         after = int(request.query_params.get("after", "0"))
     except ValueError as error:
         return _error_response(error, 404)
@@ -1327,7 +1388,7 @@ async def stream_events(request: Request) -> Response:
         while True:
             if await request.is_disconnected():
                 return
-            events = await asyncio.to_thread(
+            events = await _database_call(
                 gateway.store.list_events, workflow_id, after=cursor, limit=200
             )
             if events:
@@ -1341,7 +1402,7 @@ async def stream_events(request: Request) -> Response:
                 if idle_cycles >= 15:
                     idle_cycles = 0
                     yield ": keep-alive\n\n"
-                snapshot = await asyncio.to_thread(
+                snapshot = await _database_call(
                     gateway.store.get_workflow, workflow_id
                 )
                 if (
@@ -1376,7 +1437,7 @@ async def ready(_: Request) -> Response:
 
 async def list_agents(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
-    return JSONResponse({"agents": gateway.public_agents()})
+    return JSONResponse({"agents": await asyncio.to_thread(gateway.public_agents)})
 
 
 def _sidecar_identity(request: Request) -> tuple[WorkflowGateway, str]:
@@ -1536,10 +1597,10 @@ async def internal_get_workflow(request: Request) -> Response:
     try:
         gateway, supervisor_id = _sidecar_identity(request)
         workflow_id = request.path_params["workflow_id"]
-        await asyncio.to_thread(
+        await _database_call(
             gateway.store.validate_sidecar_access, supervisor_id, workflow_id
         )
-        snapshot = await asyncio.to_thread(gateway.store.get_workflow, workflow_id)
+        snapshot = await _database_call(gateway.store.get_workflow, workflow_id)
         return JSONResponse(_sidecar_workflow_view(snapshot))
     except (PermissionError, RuntimeError, ValueError) as error:
         return _internal_error_response(error)
@@ -1549,10 +1610,10 @@ async def internal_get_node(request: Request) -> Response:
     try:
         gateway, supervisor_id = _sidecar_identity(request)
         workflow_id = request.path_params["workflow_id"]
-        await asyncio.to_thread(
+        await _database_call(
             gateway.store.validate_sidecar_access, supervisor_id, workflow_id
         )
-        snapshot = await asyncio.to_thread(
+        snapshot = await _database_call(
             gateway.store.get_node,
             workflow_id,
             request.path_params["node_id"],
@@ -1575,7 +1636,7 @@ async def _validate_internal_write(
     gateway, supervisor_id = _sidecar_identity(request)
     workflow_id = request.path_params["workflow_id"]
     lease_token = _lease_header(request)
-    await asyncio.to_thread(
+    await _database_call(
         gateway.store.validate_sidecar_access,
         supervisor_id,
         workflow_id,
@@ -1588,7 +1649,7 @@ async def _validate_internal_write(
 async def internal_get_advance(request: Request) -> Response:
     try:
         gateway, _, workflow_id, _ = await _validate_internal_write(request)
-        value = await asyncio.to_thread(
+        value = await _database_call(
             gateway.store.pending_advance_for_node,
             workflow_id,
             request.path_params["node_id"],
@@ -1609,7 +1670,7 @@ async def internal_release_advance(request: Request) -> Response:
         gate_id = str(payload.get("gateId") or "").strip()
         if not 1 <= len(gate_id) <= 128:
             raise ValueError("gateId 必须是 1 到 128 个字符。")
-        released = await asyncio.to_thread(
+        released = await _database_call(
             gateway.store.release_timed_out_advance,
             workflow_id,
             gate_id,
@@ -1632,7 +1693,7 @@ async def internal_prepare_node(request: Request) -> Response:
         dispatch_id = str(payload.get("dispatchId") or "").strip()
         if not 1 <= len(dispatch_id) <= 128:
             raise ValueError("dispatchId 必须是 1 到 128 个字符。")
-        result = await asyncio.to_thread(
+        result = await _database_call(
             gateway.store.prepare_node_dispatch,
             workflow_id,
             request.path_params["node_id"],
@@ -1659,7 +1720,7 @@ async def internal_update_node(request: Request) -> Response:
             snapshot = payload.get("snapshot")
             if not isinstance(snapshot, dict):
                 raise ValueError("snapshot 必须是 JSON 对象。")
-            await asyncio.to_thread(
+            await _database_call(
                 gateway.store.attach_node_job,
                 workflow_id,
                 node_id,
@@ -1671,7 +1732,7 @@ async def internal_update_node(request: Request) -> Response:
             snapshot = payload.get("snapshot")
             if not isinstance(snapshot, dict):
                 raise ValueError("snapshot 必须是 JSON 对象。")
-            await asyncio.to_thread(
+            await _database_call(
                 gateway.store.sync_node_job,
                 workflow_id,
                 node_id,
@@ -1681,7 +1742,7 @@ async def internal_update_node(request: Request) -> Response:
             )
         elif operation == "actual_prompt":
             prompt = str(payload.get("actualPrompt") or "")
-            await asyncio.to_thread(
+            await _database_call(
                 gateway.store.update_node_actual_prompt,
                 workflow_id,
                 node_id,
@@ -1691,7 +1752,7 @@ async def internal_update_node(request: Request) -> Response:
             )
         else:
             raise ValueError("operation 只能是 attach、sync 或 actual_prompt。")
-        result = await asyncio.to_thread(gateway.store.get_node, workflow_id, node_id)
+        result = await _database_call(gateway.store.get_node, workflow_id, node_id)
         return JSONResponse(_sidecar_node_view(result))
     except (PermissionError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         return _internal_error_response(error)
@@ -1737,7 +1798,7 @@ async def internal_add_events(request: Request) -> Response:
                 }
             )
             _validate_internal_timestamp(events[-1]["created_at"], "事件 createdAt")
-        sequences = await asyncio.to_thread(
+        sequences = await _database_call(
             gateway.store.add_events,
             events,
             sidecar_supervisor_id=supervisor_id,
@@ -1817,6 +1878,8 @@ def create_app(
                 methods=["POST"],
             ),
             Route("/workflows", create_workflow, methods=["POST"]),
+            Route("/workflow-task-bindings", register_workflow_task_bindings, methods=["POST"]),
+            Route("/workflow-statuses", get_workflow_statuses, methods=["POST"]),
             Route("/workflows/{workflow_id}", get_workflow, methods=["GET"]),
             Route(
                 "/workflows/{workflow_id}/artifacts/{artifact_id}",

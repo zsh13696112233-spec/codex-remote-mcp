@@ -502,7 +502,10 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 await gateway.submit(self.spec("first", "supervisor-a"))
                 await gateway.submit(self.spec("second", "supervisor-a"))
                 await gateway.submit(self.spec("parallel", "supervisor-b"))
-                await asyncio.sleep(0)
+                for _ in range(100):
+                    if len(orchestrator.dispatched) == 2:
+                        break
+                    await asyncio.sleep(0.01)
 
                 self.assertEqual(store.get_workflow("first")["status"], "running")
                 self.assertEqual(store.get_workflow("second")["status"], "queued")

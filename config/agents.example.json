@@ -6,9 +6,11 @@
       "enabled": true,
       "capabilities": ["supervisor", "executor"],
       "capacity": 1,
+      "orchestration_mode": "local_db",
+      "model": "gpt-5.6-sol",
       "artifact_root": "C:\\codex-workflow-artifacts",
       "allow_write": true,
-      "allow_full_access": true,
+      "allow_full_access": false,
       "allow_cwd_override": true
     },
     "supervisor-b": {
@@ -20,6 +22,7 @@
       "token_env": "SUPERVISOR_B_APP_SERVER_TOKEN",
       "orchestration_mode": "remote_sidecar",
       "sidecar_token_env": "SUPERVISOR_B_SIDECAR_TOKEN",
+      "model": "gpt-5.6-sol",
       "allow_write": false,
       "allow_full_access": false,
       "allow_cwd_override": false
@@ -29,7 +32,8 @@
       "cwd": "/srv/work",
       "enabled": true,
       "capabilities": ["executor"],
-      "token_env": "REMOTE_CODEX_TOKEN",
+      "token_file": "C:\\codex-secrets\\remote-build-app-server.token",
+      "model": "gpt-5.6-terra",
       "allow_write": false,
       "allow_full_access": false,
       "allow_cwd_override": false

@@ -10,6 +10,8 @@ import com.codexflow.configcenter.integration.dingtalk.DingTalkProactiveNotifica
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ObjectNode;
@@ -17,6 +19,8 @@ import tools.jackson.databind.node.ObjectNode;
 /** 协调工作流网关调用与事务性运行状态持久化的应用服务。 */
 @Service
 public class WorkflowRunService {
+
+  private static final Logger LOGGER = LoggerFactory.getLogger(WorkflowRunService.class);
 
   private static final Set<String> ACTIVE_STATUSES =
       Set.of("submitting", "queued", "running", "cancelling");
@@ -74,6 +78,50 @@ public class WorkflowRunService {
     return values;
   }
 
+  public List<ObjectNode> listRunSummaries(String taskId, int page, int size) {
+    List<ObjectNode> values = store.listRunSummaries(taskId, page, size);
+    if (values.isEmpty()) return values;
+    try {
+      ObjectNode request = values.get(0).objectNode();
+      var ids = request.putArray("workflowIds");
+      values.forEach(value -> ids.add(value.path("workflowId").asText()));
+      JsonNode live = gateway.post("/workflow-statuses", request).path("statuses");
+      store.recordSummaryStatuses(live);
+      values.forEach(
+          value -> {
+            JsonNode status = live.get(value.path("workflowId").asText());
+            if (status != null && status.isTextual()) value.put("status", status.asText());
+          });
+    } catch (RuntimeException ignored) {
+      // 列表只执行一次批量查询；离线时继续展示持久化状态。
+    }
+    return values;
+  }
+
+  public ObjectNode runDetail(String workflowId) {
+    return store.runDetail(workflowId);
+  }
+
+  /** 分批补齐未登记的历史运行，避免等待用户再次运行才完成升级。 */
+  public void synchronizeRuntimeScopes() {
+    for (String taskId : store.pendingRuntimeScopeTasks()) {
+      try {
+        List<String> ids = store.pendingRuntimeScopes(taskId);
+        if (ids.isEmpty()) continue;
+        ObjectNode request =
+            tools.jackson.databind.node.JsonNodeFactory.instance
+                .objectNode()
+                .put("taskDefinitionId", taskId);
+        var array = request.putArray("workflowIds");
+        ids.forEach(array::add);
+        gateway.post("/workflow-task-bindings", request);
+        store.markRuntimeScopes(ids);
+      } catch (RuntimeException error) {
+        LOGGER.warn("历史运行归属登记失败，下轮重试，taskDefinitionId={}。", taskId, error);
+      }
+    }
+  }
+
   /** 获取网关当前公开的执行机列表。 */
   public JsonNode agents() {
     return gateway.get("/agents");
@@ -113,7 +161,18 @@ public class WorkflowRunService {
   /** 向网关提交已持久化的运行，并记录成功响应或失败原因。 */
   public ObjectNode submitPrepared(PreparedRun prepared) {
     try {
-      JsonNode response = gateway.post("/workflows", prepared.payload());
+      String taskId = store.taskDefinitionId(prepared.workflowId());
+      ObjectNode payload = prepared.payload();
+      if (taskId != null) {
+        // 历史迁移只由后台推进；暂时保留原编号和运行槽，由对账继续补交。
+        if (store.hasPendingRuntimeHistory(taskId, prepared.workflowId())) {
+          throw new ConflictFailure("历史运行正在完成升级登记，本次运行已保留，登记完成后会自动继续提交。");
+        }
+        payload = payload.deepCopy();
+        payload.put("taskDefinitionId", taskId);
+      }
+      JsonNode response = gateway.post("/workflows", payload);
+      if (taskId != null) store.markRuntimeScopes(List.of(prepared.workflowId()));
       return recordAccepted(prepared.workflowId(), response);
     } catch (RuntimeException error) {
       try {

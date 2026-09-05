@@ -1,5 +1,6 @@
 package com.codexflow.configcenter.integration.feishu;
 
+import com.codexflow.configcenter.application.BoundedWork;
 import com.codexflow.configcenter.application.WorkflowRunService;
 import com.codexflow.configcenter.client.GatewayClient;
 import com.codexflow.configcenter.client.GatewayFailure;
@@ -56,7 +57,9 @@ class FeishuBotCoordinator implements SmartLifecycle {
   private final FeishuProgressCard progressCard;
   private final BotPlatformGuard platformGuard;
   private final ObjectMapper objectMapper;
-  private final AtomicBoolean polling = new AtomicBoolean();
+  private final BoundedWork eventWorkers = new BoundedWork("feishu-events", 4, 4);
+  private final BoundedWork outboxWorker = new BoundedWork("feishu-outbox", 1, 1);
+  private int pollOffset;
   private final AtomicBoolean sending = new AtomicBoolean();
   private final AtomicLong nextEventPollAt = new AtomicLong();
   private final AtomicLong nextOutboxSendAt = new AtomicLong();
@@ -146,18 +149,31 @@ class FeishuBotCoordinator implements SmartLifecycle {
   }
 
   @Scheduled(fixedDelay = 250)
-  void pollEvents() {
-    if (!isRunning() || !due(nextEventPollAt) || !polling.compareAndSet(false, true)) return;
-    try {
-      for (FeishuModels.Binding binding : store.pollable(properties.getAppId())) {
-        pollBinding(binding);
-      }
-    } finally {
-      polling.set(false);
+  void scheduleEvents() {
+    if (!isRunning() || !due(nextEventPollAt)) return;
+    var bindings = store.pollable(properties.getAppId());
+    int size = bindings.size();
+    for (int visited = 0; visited < size && eventWorkers.available() > 0; visited++) {
+      var binding = bindings.get(Math.floorMod(pollOffset++, size));
+      eventWorkers.submit(
+          binding.workflowId(),
+          () -> {
+            if (isRunning()) pollBinding(binding);
+          });
     }
   }
 
   @Scheduled(fixedDelay = 250)
+  void scheduleOutbox() {
+    outboxWorker.submit("outbox", this::sendOutbox);
+  }
+
+  @jakarta.annotation.PreDestroy
+  void closeWorkers() {
+    eventWorkers.close();
+    outboxWorker.close();
+  }
+
   void sendOutbox() {
     if (!isRunning() || !due(nextOutboxSendAt) || !sending.compareAndSet(false, true)) return;
     try {
@@ -367,7 +383,7 @@ class FeishuBotCoordinator implements SmartLifecycle {
   private void pollBinding(FeishuModels.Binding binding) {
     if ("submitting".equals(binding.status()) && !recoverSubmission(binding)) return;
     long cursor = binding.eventCursor();
-    while (true) {
+    for (int page = 0; page < 1; page++) {
       JsonNode result;
       try {
         result =
@@ -376,19 +392,31 @@ class FeishuBotCoordinator implements SmartLifecycle {
                     + binding.workflowId()
                     + "/events/history?after="
                     + cursor
-                    + "&limit=200");
+                    + "&limit=200&view=bot");
       } catch (RuntimeException error) {
         LOGGER.debug("读取飞书任务事件失败，workflowId={}。", binding.workflowId());
         return;
       }
       JsonNode events = result.path("events");
-      if (!events.isArray() || events.isEmpty()) return;
+      if (!events.isArray()) return;
       for (JsonNode event : events) {
         long sequence = event.path("sequence").asLong();
         if (!consumeEvent(binding, event, sequence)) return;
         cursor = Math.max(cursor, sequence);
       }
-      if (events.size() < 200) return;
+      long nextCursor = result.path("nextCursor").asLong(cursor);
+      if (nextCursor > cursor) {
+        // 被过滤的底层事件只推进一次游标，不逐条产生数据库事务。
+        store.recordEvent(
+            properties.getAppId(),
+            binding.workflowId(),
+            nextCursor,
+            "cursor:" + binding.workflowId() + ":" + nextCursor,
+            null,
+            null,
+            null,
+            false);
+      }
     }
   }
 

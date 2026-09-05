@@ -27,8 +27,13 @@ public class TaskScheduleStore {
   /** 在事务中标记当天已处理，并返回所属 SOP 仍可用的任务 ID。 */
   @Transactional
   public List<String> claim(LocalDate scheduleDate, LocalTime scheduleTime) {
+    return claimDaily(scheduleDate, scheduleTime, Integer.MAX_VALUE);
+  }
+
+  private List<String> claimDaily(LocalDate scheduleDate, LocalTime scheduleTime, int limit) {
     List<String> claimed = new ArrayList<>();
     for (TaskDefinitionEntity task : tasks.findDueSchedulesForUpdate(scheduleDate, scheduleTime)) {
+      if (claimed.size() >= limit) break;
       task.lastScheduleDate = scheduleDate;
       if (!task.sop.deleted && task.sop.enabled) claimed.add(task.id);
     }
@@ -38,10 +43,17 @@ public class TaskScheduleStore {
   /** 领取当前扫描周期到期的两类任务；超过正常扫描延迟的间隔只推进时间，不补跑。 */
   @Transactional
   public List<String> claim(ZonedDateTime now) {
+    return claim(now, Integer.MAX_VALUE);
+  }
+
+  @Transactional
+  public List<String> claim(ZonedDateTime now, int limit) {
+    if (limit <= 0) return List.of();
     LocalTime minute = now.toLocalTime().truncatedTo(ChronoUnit.MINUTES);
-    List<String> claimed = new ArrayList<>(claim(now.toLocalDate(), minute));
+    List<String> claimed = new ArrayList<>(claimDaily(now.toLocalDate(), minute, limit));
     Instant currentInstant = now.toInstant();
     for (TaskDefinitionEntity task : tasks.findDueIntervalSchedulesForUpdate(currentInstant)) {
+      if (claimed.size() >= limit) break;
       Instant scheduledAt = task.nextIntervalAt;
       int intervalMinutes = task.scheduleIntervalMinutes;
       Duration lateness = Duration.between(scheduledAt, currentInstant);

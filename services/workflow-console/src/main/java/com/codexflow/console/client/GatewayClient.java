@@ -55,6 +55,35 @@ public class GatewayClient {
     return exchange("GET", "/workflows/" + pathSegment(workflowId), null);
   }
 
+  public JsonNode status(String workflowId, String knownRevision, String knownResults) {
+    return exchange(
+        "GET",
+        "/workflows/"
+            + pathSegment(workflowId)
+            + "?poll=true"
+            + (knownRevision == null ? "" : "&knownRevision=" + pathSegment(knownRevision))
+            + (knownResults == null ? "" : "&knownResults=" + pathSegment(knownResults)),
+        null);
+  }
+
+  public JsonNode events(
+      String workflowId, long after, int limit, String view, Long before, boolean tail) {
+    return exchange(
+        "GET",
+        "/workflows/"
+            + pathSegment(workflowId)
+            + "/events/history?after="
+            + after
+            + "&limit="
+            + limit
+            + "&view="
+            + pathSegment(view)
+            + (before == null ? "" : "&before=" + before)
+            + "&tail="
+            + tail,
+        null);
+  }
+
   /** 按事件游标和数量上限查询指定工作流的历史事件。 */
   public JsonNode events(String workflowId, long after, int limit) {
     return exchange(

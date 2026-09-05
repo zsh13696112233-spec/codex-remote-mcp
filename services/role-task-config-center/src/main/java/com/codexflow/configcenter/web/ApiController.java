@@ -142,8 +142,18 @@ public class ApiController {
 
   /** 查询指定任务定义的运行历史。 */
   @GetMapping("/task-definitions/{id}/runs")
-  public List<ObjectNode> runs(@PathVariable String id) {
-    return workflowRuns.listRuns(id);
+  public List<ObjectNode> runs(
+      @PathVariable String id,
+      @RequestParam(defaultValue = "false") boolean summary,
+      @RequestParam(defaultValue = "0") int page,
+      @RequestParam(defaultValue = "20") int size) {
+    return summary ? workflowRuns.listRunSummaries(id, page, size) : workflowRuns.listRuns(id);
+  }
+
+  /** 按需读取运行的完整不可变快照。 */
+  @GetMapping("/task-runs/{workflowId}")
+  public ObjectNode runDetail(@PathVariable String workflowId) {
+    return workflowRuns.runDetail(workflowId);
   }
 
   /** 取消指定工作流运行。 */

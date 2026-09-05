@@ -4,6 +4,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -11,9 +12,11 @@ import com.codexflow.configcenter.application.WorkflowRunService;
 import com.codexflow.configcenter.client.GatewayClient;
 import com.codexflow.configcenter.domain.WorkflowRunStore;
 import com.codexflow.configcenter.integration.bot.BotPlatformGuard;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -86,6 +89,37 @@ class FeishuBotCoordinatorTest {
     coordinator.safelyHandleMessage(message("ignored", "运行", false, null));
     verify(store, never())
         .reserveStart(eq("cli_test"), eq(TASK_ID), eq(message("ignored", "运行", false, null)));
+  }
+
+  @AfterEach
+  void close() {
+    coordinator.stop();
+    coordinator.closeWorkers();
+  }
+
+  @Test
+  void scheduledEventsAdvanceFilteredCursorThroughBackgroundWorker() {
+    var binding =
+        new FeishuModels.Binding(WORKFLOW_1, "chat-1", "root-1", null, "active", 0, null, false);
+    when(store.pollable("cli_test")).thenReturn(List.of(binding));
+    ObjectNode page = objectMapper.createObjectNode().put("nextCursor", 1000);
+    page.putArray("events");
+    when(gateway.get("/workflows/" + WORKFLOW_1 + "/events/history?after=0&limit=200&view=bot"))
+        .thenReturn(page);
+
+    coordinator.start();
+    coordinator.scheduleEvents();
+
+    verify(store, timeout(2000))
+        .recordEvent(
+            "cli_test",
+            WORKFLOW_1,
+            1000,
+            "cursor:" + WORKFLOW_1 + ":1000",
+            null,
+            null,
+            null,
+            false);
   }
 
   @Test
