@@ -259,8 +259,7 @@ function workflowInspectorHtml(){
     <label>主监督执行机 *<div class="agent-picker"><input data-sop-field="supervisorAgentId" maxlength="128" value="${esc(d.supervisorAgentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
     <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="7200" value="${d.supervisorTimeoutSec}"></label>
     <label>单次任务最多重跑次数<input data-sop-field="maxRetryCount" type="number" min="0" max="100" value="${d.maxRetryCount}"></label>
-    <label class="check"><input data-sop-field="enabled" type="checkbox" ${d.enabled?"checked":""}> 启用该工作流</label>
-    <p class="inspector-hint">步骤默认使用文字结果交接。执行机列表只提供填写建议，网关离线或列表中没有该 ID 时仍可保存；真正运行时由网关校验。失败策略固定为步骤失败后停止。</p>`;
+    <label class="check"><input data-sop-field="enabled" type="checkbox" ${d.enabled?"checked":""}> 启用该工作流</label>`;
 }
 function suggestedAgents(capability){
   return state.agents.filter(a=>a.enabled!==false&&(!Array.isArray(a.capabilities)||a.capabilities.includes(capability)||(capability==="supervisor"&&a.agentId==="local")));
@@ -320,13 +319,14 @@ function nodeInspectorHtml(s){
     <div class="selected-role"><i>${esc(role.name.slice(0,1))}</i><div><strong>${esc(role.name)}</strong><small>${esc(role.duty||"暂无职责说明")}</small></div>${role.enabled===false?'<b>已停用</b>':""}</div>
     <label>显示名称 *<input data-node-field="displayName" value="${esc(s.displayName)}"></label>
     <label><span class="field-title">本步骤要做什么 * <em class="field-scope current-step">仅当前步骤</em></span><textarea data-node-field="instruction" placeholder="说明具体动作、使用哪些输入以及处理范围">${esc(s.instruction)}</textarea><small class="field-help">这是当前步骤的核心执行要求，不会发送给其他步骤。</small></label>
-    <div class="inspector-grid"><label>执行位置<select data-node-field="executorType"><option value="local">本机</option><option value="remote" ${s.executorType==="remote"?"selected":""}>远程</option></select></label><label>执行机 *<div class="agent-picker"><input data-node-field="agentId" maxlength="128" value="${esc(s.agentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部步骤执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("executor","executor")}</div></div></label></div>
+    <label>执行机 *<div class="agent-picker"><input data-node-field="agentId" maxlength="128" value="${esc(s.agentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部步骤执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("executor","executor")}</div></div></label>
     <label>模型<select data-node-field="modelOverride"><option value="">继承工作流默认模型</option>${MODELS.map(m=>`<option value="${m}" ${s.modelOverride===m?"selected":""}>${m}</option>`).join("")}</select></label>
     <div class="inspector-grid"><label>超时（秒）<input data-node-field="timeoutSec" type="number" min="10" max="7200" value="${s.timeoutSec}"></label><label>工作目录<input data-node-field="workingDirectory" value="${esc(s.workingDirectory)}" placeholder="可选"></label></div>
-    <label>Skill 标签<input data-node-field="skills" value="${esc(s.skills.join(", "))}" placeholder="多个标签用逗号分隔"></label>
-    <label>MCP 标签<input data-node-field="mcps" value="${esc(s.mcps.join(", "))}" placeholder="多个标签用逗号分隔"></label>
     <label>权限档位<select data-node-field="permissionProfile">${permissionOptions(s)}</select></label>
-    <p class="inspector-hint">只读：业务工作区只读且不请求审批；工作区写入：允许修改工作区但不请求审批；自动审核：允许修改工作区，越界操作交由 Auto-review 判断；完全访问：不受文件系统和网络沙箱限制且不会请求审批，仅在执行机显式授权时可选。完全访问会取消文件交接的目录和网络隔离。执行机关闭写入时只能选择只读。Skill 与 MCP 仍仅作为配置标签。</p>`;
+    <details class="inspector-advanced"><summary>高级设置</summary>
+      <label>Skill 标签<input data-node-field="skills" value="${esc(s.skills.join(", "))}" placeholder="多个标签用逗号分隔"></label>
+      <label>MCP 标签<input data-node-field="mcps" value="${esc(s.mcps.join(", "))}" placeholder="多个标签用逗号分隔"></label>
+    </details>`;
 }
 
 function addRoleNode(roleId,index){
