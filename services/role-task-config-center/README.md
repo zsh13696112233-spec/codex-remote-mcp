@@ -144,6 +144,33 @@ mvn spring-boot:run
 http://127.0.0.1:8091
 ```
 
+## macOS 本机数据库配置
+
+公共 `application.properties` 继续纳入版本管理。Mac 使用单独的
+`application-mac.properties`，仅覆盖数据库连接配置，默认连接
+`127.0.0.1:3306/codex_sop`，用户名默认为 `root`，密码必须通过
+`MYSQL_PASSWORD` 环境变量提供，不写入配置文件。
+
+从仓库根目录启动（macOS 的 zsh）：
+
+```zsh
+cd services/role-task-config-center
+read -s 'MYSQL_PASSWORD?请输入 MySQL 密码: '
+echo
+export MYSQL_PASSWORD
+mvn spring-boot:run -Dspring-boot.run.profiles=mac
+```
+
+IDE 启动时将 Active profiles 设置为 `mac`，并配置 `MYSQL_PASSWORD` 环境变量。
+打包后使用 `java -jar target/role-task-config-center-0.1.0.jar --spring.profiles.active=mac`，
+同样需要先设置密码环境变量。
+
+请先准备好对应的 MySQL 8 数据库；若使用前文示例创建的 `codex_config` 和 `codex`
+账号，请设置 `MYSQL_URL` 和 `MYSQL_USERNAME` 覆盖默认值。
+`MYSQL_URL` 环境变量优先于 Mac 配置中的默认地址；若终端已有远程数据库的
+`MYSQL_URL`，需先执行 `unset MYSQL_URL`，才能使用默认的本机连接。
+未启用 `mac` 时继续使用原有配置。
+
 ## 打包运行
 
 ```powershell
