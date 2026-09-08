@@ -561,7 +561,7 @@ class DingTalkStoreIntegrationTest {
         .extracting(DingTalkModels.Binding::eventCursor)
         .isEqualTo(8L);
     List<DingTalkModels.Outbox> messages =
-        store.claimDue().stream()
+        drainOutbox().stream()
             .filter(item -> reservation.workflowId().equals(item.workflowId()))
             .toList();
     assertThat(messages)
@@ -680,7 +680,7 @@ class DingTalkStoreIntegrationTest {
                   "update codex_sop_dingtalk_outbox set created_at = '2026-01-01 00:00:00' where workflow_id = ?",
                   workflow);
               var replies =
-                  store.claimDue().stream()
+                  drainOutbox().stream()
                       .filter(item -> workflow.equals(item.workflowId()))
                       .toList();
               assertThat(replies).hasSize(6);
@@ -718,6 +718,136 @@ class DingTalkStoreIntegrationTest {
                   .isEqualTo("sent");
               transaction.setRollbackOnly();
             });
+  }
+
+  private List<DingTalkModels.Outbox> drainOutbox() {
+    var delivered = new java.util.ArrayList<DingTalkModels.Outbox>();
+    for (int i = 0; i < 200; i++) {
+      var batch = store.claimDue(1);
+      if (batch.isEmpty()) return delivered;
+      batch.forEach(item -> store.markOutboxSent(item.id(), "sent-" + item.id()));
+      delivered.addAll(batch);
+    }
+    throw new AssertionError("发送队列未在测试上限内清空");
+  }
+
+  @Test
+  @org.springframework.transaction.annotation.Transactional
+  void failedOrSendingHeadBlocksOnlyItsWorkflowAndConversation() {
+    String client = "ordered-" + UUID.randomUUID();
+    createTask();
+    String firstWorkflow = store.reserveStart(client, message("start-" + client)).workflowId();
+    createTask();
+    String otherWorkflow = store.reserveStart(client, message("other-" + client)).workflowId();
+    String group = "group-" + client;
+    store.enqueueTargetText(client + "1", firstWorkflow, group, "GROUP", group, null, "开始");
+    store.enqueueTargetText(client + "2", firstWorkflow, group, "GROUP", group, null, "完成");
+    store.enqueueTargetText(client + "3", otherWorkflow, group, "GROUP", group, null, "其他任务");
+    store.enqueueTargetText(
+        client + "4", firstWorkflow, group + "2", "GROUP", group + "2", null, "其他群");
+    var batch =
+        store.claimDue().stream().filter(item -> item.conversationId().startsWith(group)).toList();
+    assertThat(batch)
+        .extracting(item -> item.payload().path("text").asText())
+        .containsExactly("开始", "其他任务", "其他群");
+    assertThat(store.claimDue()).noneMatch(item -> group.equals(item.conversationId()));
+    var first = batch.get(0);
+    store.markOutboxFailed(first.id(), new IllegalStateException("临时失败"));
+    entityManager.flush();
+    jdbc.update(
+        "update codex_sop_dingtalk_outbox set next_attempt_at = '2099-01-01 00:00:00' where id = ?",
+        first.id());
+    assertThat(store.claimDue()).noneMatch(item -> group.equals(item.conversationId()));
+    jdbc.update(
+        "update codex_sop_dingtalk_outbox set next_attempt_at = '2000-01-01 00:00:00' where id = ?",
+        first.id());
+    entityManager.clear();
+    var retried =
+        store.claimDue().stream().filter(item -> group.equals(item.conversationId())).toList();
+    assertThat(retried).extracting(DingTalkModels.Outbox::id).containsExactly(first.id());
+    store.markOutboxSent(first.id(), "sent");
+    assertThat(
+            store.claimDue().stream().filter(item -> group.equals(item.conversationId())).toList())
+        .extracting(item -> item.payload().path("text").asText())
+        .containsExactly("完成");
+  }
+
+  @Test
+  @org.springframework.transaction.annotation.Transactional
+  void unboundChunksRemainOrderedAfterRecoveryAndAbandonedReplyDoesNotBlock() {
+    String group = "chunks-" + UUID.randomUUID();
+    String body = "甲".repeat(850) + "乙".repeat(850) + "丙".repeat(300);
+    store.enqueueTargetText(group, null, group, "GROUP", group, null, body);
+    var first =
+        store.claimDue().stream()
+            .filter(item -> group.equals(item.conversationId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(first.payload().path("text").asText()).isEqualTo("甲".repeat(850));
+    assertThat(store.claimDue()).noneMatch(item -> group.equals(item.conversationId()));
+    store.initialize("app");
+    var recovered =
+        store.claimDue().stream()
+            .filter(item -> group.equals(item.conversationId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(recovered.id()).isEqualTo(first.id());
+    store.markOutboxSent(first.id(), "sent");
+    var rest = drainOutbox().stream().filter(item -> group.equals(item.conversationId())).toList();
+    assertThat(rest)
+        .extracting(item -> item.payload().path("text").asText())
+        .containsExactly("乙".repeat(850), "丙".repeat(300));
+
+    store.enqueueReply(
+        group + "reply",
+        null,
+        new DingTalkModels.Message(group, group, "2", "user", "问题", true, false, null),
+        "会话回复");
+    store.enqueueTargetText(group + "next", null, group, "GROUP", group, null, "后续正文");
+    var reply =
+        store.claimDue().stream()
+            .filter(item -> group.equals(item.conversationId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(reply.messageKind()).isEqualTo("reply");
+    store.markOutboxFailed(reply.id(), new IllegalStateException("会话已过期"));
+    assertThat(
+            store.claimDue().stream().filter(item -> group.equals(item.conversationId())).toList())
+        .extracting(item -> item.payload().path("text").asText())
+        .containsExactly("后续正文");
+  }
+
+  @Test
+  @org.springframework.transaction.annotation.Transactional
+  void finishingMessagesKeepsWaitingUntilTheLastAcceptedMessageAndFiltersPolling() {
+    String client = "poll-" + UUID.randomUUID();
+    createTask();
+    String workflow = store.reserveStart(client, message("start-" + client)).workflowId();
+    var binding = store.binding(workflow).orElseThrow();
+    var first = store.registerInbound(client, binding, message("first-" + client));
+    var second = store.registerInbound(client, binding, message("second-" + client));
+    store.reconcileRuntimeStatus(client, workflow, "completed");
+    assertThat(store.pollable(client))
+        .extracting(DingTalkModels.Binding::workflowId)
+        .containsExactly(workflow);
+    store.markInboundFinished(workflow, first.workflowMessageId(), false);
+    assertThat(store.binding(workflow).orElseThrow().waitingAssistant()).isTrue();
+    store.markInboundFinished(workflow, second.workflowMessageId(), true);
+    assertThat(store.binding(workflow).orElseThrow().waitingAssistant()).isFalse();
+    assertThat(store.pollable(client)).isEmpty();
+    // 其他工作流的未完成消息不能让已完成工作流继续轮询。
+    createTask();
+    String other = store.reserveStart(client, message("other-" + client)).workflowId();
+    store.registerInbound(client, store.binding(other).orElseThrow(), message("pending-" + client));
+    store.markInboundFinished(workflow, first.workflowMessageId(), false);
+    assertThat(store.pollable(client))
+        .extracting(DingTalkModels.Binding::workflowId)
+        .containsExactly(other);
+    store.markSubmitted(other);
+    assertThat(store.pollable(client))
+        .extracting(DingTalkModels.Binding::workflowId)
+        .containsExactly(other);
+    assertThat(store.pollable(client + "unrelated")).isEmpty();
   }
 
   private String createSop() {

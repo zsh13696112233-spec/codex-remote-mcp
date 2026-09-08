@@ -176,8 +176,14 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   void sendOutbox() {
     if (!isRunning() || !due(nextOutboxSendAt) || !sending.compareAndSet(false, true)) return;
     try {
-      for (DingTalkModels.Outbox item : store.claimDue()) {
-        deliver(item);
+      int remaining = 50;
+      while (remaining > 0) {
+        var batch = store.claimDue(remaining);
+        if (batch.isEmpty()) break;
+        for (DingTalkModels.Outbox item : batch) {
+          deliver(item);
+        }
+        remaining -= batch.size();
       }
     } finally {
       sending.set(false);

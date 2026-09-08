@@ -26,8 +26,15 @@ interface DingTalkWorkflowBindingRepository
       findFirstByClientIdAndConversationIdAndProgressCardInstanceIdOrderByCreatedAtDesc(
           String clientId, String conversationId, String progressCardInstanceId);
 
-  List<DingTalkWorkflowBindingEntity> findByClientIdAndStatusInOrderByCreatedAt(
-      String clientId, List<String> statuses);
+  @Query(
+      """
+      SELECT binding FROM DingTalkWorkflowBindingEntity binding
+      WHERE binding.clientId = :clientId
+        AND (binding.status IN ('submitting', 'active')
+             OR (binding.status = 'terminal' AND binding.waitingAssistant = true))
+      ORDER BY binding.createdAt
+      """)
+  List<DingTalkWorkflowBindingEntity> findPollable(@Param("clientId") String clientId);
 
   List<DingTalkWorkflowBindingEntity> findByClientIdAndWaitingAssistantTrueOrderByUpdatedAt(
       String clientId);

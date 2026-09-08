@@ -67,6 +67,52 @@ class DingTalkBotCoordinatorTest {
         .thenReturn(new DingTalkModels.Inbound("question", ID, "assistant-id", "accepted"));
   }
 
+  @Test
+  void outboxDrainsSuccessorsInTheSameTickAndContinuesOtherScopesAfterFailure() {
+    ReflectionTestUtils.setField(bot, "running", true);
+    when(transport.connected()).thenReturn(true);
+    var first =
+        new DingTalkModels.Outbox(
+            "first", ID, "group", null, "text", json.createObjectNode().put("text", "开始"));
+    var other =
+        new DingTalkModels.Outbox(
+            "other", OTHER, "group", null, "text", json.createObjectNode().put("text", "其他任务"));
+    var next =
+        new DingTalkModels.Outbox(
+            "next", OTHER, "group", null, "text", json.createObjectNode().put("text", "其他任务完成"));
+    when(store.claimDue(50)).thenReturn(List.of(first, other));
+    when(store.claimDue(48)).thenReturn(List.of(next));
+    when(store.claimDue(47)).thenReturn(List.of());
+    when(transport.sendText(any(), any(), any())).thenReturn(new DingTalkModels.SendResult("sent"));
+    when(transport.sendText("group", null, "开始")).thenThrow(new IllegalStateException("临时失败"));
+    bot.sendOutbox();
+    var order = inOrder(store, transport);
+    order.verify(store).claimDue(50);
+    order.verify(transport).sendText("group", null, "开始");
+    order.verify(store).markOutboxFailed(eq("first"), any());
+    order.verify(transport).sendText("group", null, "其他任务");
+    order.verify(store).markOutboxSent("other", "sent");
+    order.verify(store).claimDue(48);
+    order.verify(transport).sendText("group", null, "其他任务完成");
+    order.verify(store).markOutboxSent("next", "sent");
+    order.verify(store).claimDue(47);
+  }
+
+  @Test
+  void outboxStopsAfterFiftyDeliveriesEvenWhenMoreAreAvailable() {
+    ReflectionTestUtils.setField(bot, "running", true);
+    when(transport.connected()).thenReturn(true);
+    var item =
+        new DingTalkModels.Outbox(
+            "id", ID, "group", null, "text", json.createObjectNode().put("text", "消息"));
+    when(store.claimDue(anyInt())).thenReturn(List.of(item));
+    when(transport.sendText(any(), any(), any())).thenReturn(new DingTalkModels.SendResult("sent"));
+    bot.sendOutbox();
+    verify(store, times(50)).claimDue(anyInt());
+    verify(store, never()).claimDue(0);
+    verify(store, times(50)).markOutboxSent("id", "sent");
+  }
+
   private DingTalkModels.Message message(String text) {
     return new DingTalkModels.Message(
         "question",

@@ -20,8 +20,6 @@ import tools.jackson.databind.ObjectMapper;
 @Service
 class DingTalkStore {
 
-  private static final List<String> POLLED_STATUSES = List.of("submitting", "active", "terminal");
-
   private final DingTalkWorkflowBindingRepository bindings;
   private final DingTalkInboundMessageRepository inboundMessages;
   private final DingTalkOutboxRepository outbox;
@@ -477,10 +475,7 @@ class DingTalkStore {
 
   @Transactional(readOnly = true)
   public List<DingTalkModels.Binding> pollable(String clientId) {
-    return bindings.findByClientIdAndStatusInOrderByCreatedAt(clientId, POLLED_STATUSES).stream()
-        .filter(binding -> !"terminal".equals(binding.status) || binding.waitingAssistant)
-        .map(DingTalkStore::toBinding)
-        .toList();
+    return bindings.findPollable(clientId).stream().map(DingTalkStore::toBinding).toList();
   }
 
   @Transactional
@@ -610,9 +605,7 @@ class DingTalkStore {
               inbound.updatedAt = Instant.now();
             });
     DingTalkWorkflowBindingEntity binding = requiredBinding(workflowId);
-    binding.waitingAssistant =
-        inboundMessages.findAll().stream()
-            .anyMatch(item -> workflowId.equals(item.workflowId) && "accepted".equals(item.status));
+    binding.waitingAssistant = inboundMessages.existsByWorkflowIdAndStatus(workflowId, "accepted");
     binding.updatedAt = Instant.now();
   }
 
@@ -685,9 +678,16 @@ class DingTalkStore {
 
   @Transactional
   public List<DingTalkModels.Outbox> claimDue() {
+    return claimDue(50);
+  }
+
+  @Transactional
+  public List<DingTalkModels.Outbox> claimDue(int limit) {
+    if (limit < 1 || limit > 50) throw new IllegalArgumentException("领取消息数量必须在 1 到 50 之间。");
+    // 每个工作流、会话只领取最早的未完成消息，包括正在退避或发送中的前项。
     List<DingTalkModels.Outbox> claimed = new ArrayList<>();
     for (DingTalkOutboxEntity item :
-        outbox.findDueForUpdate(List.of("pending", "failed"), Instant.now())) {
+        outbox.findDueForUpdate(List.of("pending", "failed"), Instant.now(), limit)) {
       item.status = "sending";
       item.attemptCount++;
       item.updatedAt = Instant.now();

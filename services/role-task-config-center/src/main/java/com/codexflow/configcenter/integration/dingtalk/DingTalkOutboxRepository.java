@@ -32,14 +32,24 @@ interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, S
   @Query(
       value =
           """
-          SELECT *
-          FROM codex_sop_dingtalk_outbox
-          WHERE status IN (:statuses) AND next_attempt_at <= :nextAttemptAt
-          ORDER BY delivery_order
-          LIMIT 50
+          SELECT candidate.*
+          FROM codex_sop_dingtalk_outbox candidate
+          WHERE candidate.status IN (:statuses) AND candidate.next_attempt_at <= :nextAttemptAt
+            AND NOT EXISTS (
+              SELECT 1 FROM codex_sop_dingtalk_outbox earlier
+              WHERE (earlier.workflow_id = candidate.workflow_id
+                     OR (earlier.workflow_id IS NULL AND candidate.workflow_id IS NULL))
+                AND earlier.conversation_id = candidate.conversation_id
+                AND earlier.delivery_order < candidate.delivery_order
+                AND earlier.status IN ('pending', 'failed', 'sending')
+            )
+          ORDER BY candidate.delivery_order
+          LIMIT :limit
           FOR UPDATE
           """,
       nativeQuery = true)
   List<DingTalkOutboxEntity> findDueForUpdate(
-      @Param("statuses") List<String> statuses, @Param("nextAttemptAt") Instant nextAttemptAt);
+      @Param("statuses") List<String> statuses,
+      @Param("nextAttemptAt") Instant nextAttemptAt,
+      @Param("limit") int limit);
 }
