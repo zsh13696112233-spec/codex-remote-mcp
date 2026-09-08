@@ -29,9 +29,9 @@
 
 - `history/` 纳入 Git 版本管理，用于 macOS 与 Windows 两台电脑之间交接。用户授权提交时，将相关会话总结一并提交；生成总结本身不代表可以擅自提交其他改动或推送。
 - 换电脑前提交并推送需要交接的改动；另一台电脑开始前先同步同一分支，再读取最新总结。仅本地提交不会同步到另一台电脑；同步前检查未提交改动，不覆盖另一台电脑的工作。
-- 用户在会话结束时要求“总结本次会话”或“写入 history”后，新建 `history/YYYY-MM-DD_HH-mm-ss_主题.md`，不覆盖旧记录；不能承诺在窗口关闭时自动保存。
+- 只有用户明确要求“总结本次会话”或“写入 history”时，才新建 `history/YYYY-MM-DD_HH-mm-ss_主题.md`，不覆盖旧记录。普通问答、完成修改、提交代码、切换电脑或会话结束都不触发自动总结；不得自行新建或补写总结。
 - 总结记录：本次目的、操作系统、当前分支及基线提交、实际修改及原因、测试命令和结果、已知问题、尚未完成的事项、下一步建议。明确区分已经完成、仅审查发现、尚未验证，注明未提交改动。
-- 不复制完整对话、敏感配置、令牌、数据库内容或原始业务消息。复现脚本可放在该目录并随 Git 提交，使用虚构数据；路径优先使用仓库相对路径，命令注明 macOS/Windows 差异。开始会话只自动读取最新的日期命名 Markdown 总结。
+- `history/` 只保存 Markdown 会话总结，不放 Python、Java 等代码或其他附件。需要保留的复现代码放在对应模块测试目录或 `scripts/`，总结仅引用其路径。不复制完整对话、敏感配置、令牌、数据库内容或原始业务消息；路径优先使用仓库相对路径，命令注明 macOS/Windows 差异。开始会话只自动读取最新的日期命名 Markdown 总结。
 
 ## 不可破坏的架构边界
 
@@ -145,23 +145,34 @@ uv run --project services/python-workflow \
   python scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
 ```
 
-Java 监控中心：
+Java 命令按当前操作系统选择：macOS 使用 `mvnd`，Windows 使用 `mvn`；不要把另一台电脑的命令直接照搬到当前环境。
+
+macOS（从仓库根目录）：
 
 ```sh
 mvnd -f services/workflow-console/pom.xml test
-```
-
-Java 配置中心：
-
-```sh
 mvnd -f services/role-task-config-center/pom.xml test
 ```
 
-Java 构建会在 `validate` 阶段检查格式。仅格式化实际修改过的 Java 模块：
+Windows（从仓库根目录）：
+
+```powershell
+mvn -f services/workflow-console/pom.xml test
+mvn -f services/role-task-config-center/pom.xml test
+```
+
+Java 构建会在 `validate` 阶段检查格式。仅格式化实际修改过的 Java 模块；macOS：
 
 ```sh
 mvnd -f services/workflow-console/pom.xml fmt:format
 mvnd -f services/role-task-config-center/pom.xml fmt:format
+```
+
+Windows：
+
+```powershell
+mvn -f services/workflow-console/pom.xml fmt:format
+mvn -f services/role-task-config-center/pom.xml fmt:format
 ```
 
 不要为了通过格式检查而格式化整个仓库或改动无关文件。需要真实 MySQL、Codex app-server 或远程执行机的测试，如果环境不可用，应明确说明未运行原因，不能声称已验证。

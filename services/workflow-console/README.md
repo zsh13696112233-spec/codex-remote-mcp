@@ -42,6 +42,8 @@ Java 根包为 `com.codexflow.console`，Web 控制器、异常映射和
 
 ## 开发启动
 
+本项目 macOS 使用 `mvnd`，Windows 使用 `mvn`。下方 PowerShell 示例用于 Windows；macOS 启动、测试、打包和格式化均使用 `mvnd`，路径使用 `/`。
+
 从仓库根目录执行：
 
 ```powershell
@@ -89,13 +91,14 @@ java -jar .\target\workflow-console-0.1.0.jar
 
 ## 业务接口
 
-系统提供四个读取接口、一个聊天消息接口和两个半自动流转接口：
+系统提供五个读取接口、一个聊天消息接口和两个半自动流转接口：
 
 ```text
 GET /api/gateway/ready
 GET /api/workflows/{workflowId}
 GET /api/workflows/{workflowId}/events?after=0&limit=200
 GET /api/workflows/{workflowId}/artifacts/{artifactId}
+GET /api/workflows/{workflowId}/input-images/{imageId}
 POST /api/workflows/{workflowId}/messages
 POST /api/workflows/{workflowId}/advance/{gateId}/confirm
 POST /api/workflows/{workflowId}/advance/{gateId}/hold
@@ -135,7 +138,7 @@ mvn test
 
 构建会自动检查 Java 格式。需要修复格式时执行 `mvn fmt:format`。
 
-测试会启动 Spring 上下文，并验证 `/api` 下只有四个 GET、一个消息 POST 和暂停、继续两个半自动流转 POST 路由，不存在直接提交、取消、重试、跳过或编辑接口。
+测试会启动 Spring 上下文，并验证 `/api` 下只有五个 GET、一个消息 POST 和暂停、继续两个半自动流转 POST 路由，不存在直接提交、取消、重试、跳过或编辑接口。
 
 ## 安全说明
 

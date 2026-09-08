@@ -155,6 +155,8 @@ $env:SUPERVISOR_B_SIDECAR_TOKEN = "请通过密钥系统注入"
 
 ### 3. 启动两个 Java Web 应用
 
+本项目 macOS 使用 `mvnd`，Windows 使用 `mvn`。下方 PowerShell 示例用于 Windows；macOS 启动、测试、打包和格式化时使用 `mvnd`，路径使用 `/`。
+
 ```powershell
 cd .\services\workflow-console
 mvn spring-boot:run
@@ -178,7 +180,7 @@ mvn spring-boot:run
 
 ## 跨机器会话记录
 
-`history/` 保存按需生成的会话总结，并随 Git 提交，用于 macOS 与 Windows 之间交接。换电脑前提交并推送，另一台电脑同步同一分支后，先读取最新的日期命名总结，再核对当前分支和代码。命名、内容与读取规则见 [AGENTS.md](AGENTS.md#跨机器会话交接)。
+`history/` 只保存 Markdown 会话总结，并随 Git 提交，用于 macOS 与 Windows 之间交接。只有用户明确要求总结或写入 history 时才生成记录，不自动总结；复现代码放在模块测试目录或 `scripts/`，不放在 history。换电脑前提交并推送，另一台电脑同步同一分支后，先读取最新的日期命名总结，再核对当前分支和代码。命名、内容与读取规则见 [AGENTS.md](AGENTS.md#跨机器会话交接)。
 
 ## 测试
 

@@ -78,6 +78,8 @@ FLUSH PRIVILEGES;
 
 ## 开发启动
 
+本项目 macOS 使用 `mvnd`，Windows 使用 `mvn`。下方 PowerShell 示例用于 Windows；macOS 启动、测试、打包和格式化均使用 `mvnd`，路径使用 `/`。
+
 从仓库根目录执行：
 
 ```powershell
@@ -165,7 +167,7 @@ cd services/role-task-config-center
 read -s 'MYSQL_PASSWORD?请输入 MySQL 密码: '
 echo
 export MYSQL_PASSWORD
-mvn spring-boot:run -Dspring-boot.run.profiles=mac
+mvnd spring-boot:run -Dspring-boot.run.profiles=mac
 ```
 
 IDE 启动时将 Active profiles 设置为 `mac`，并配置 `MYSQL_PASSWORD` 环境变量。

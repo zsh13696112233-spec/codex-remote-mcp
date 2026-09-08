@@ -1,4 +1,4 @@
-"""从仓库根运行：PYTHONPATH=services/python-workflow/src:services/python-workflow .venv/bin/python history/reproduce_image_budget.py"""
+"""从仓库根运行：PYTHONPATH=services/python-workflow/src:services/python-workflow .venv/bin/python scripts/reproductions/reproduce_image_budget.py"""
 import asyncio
 import tempfile
 import uuid
