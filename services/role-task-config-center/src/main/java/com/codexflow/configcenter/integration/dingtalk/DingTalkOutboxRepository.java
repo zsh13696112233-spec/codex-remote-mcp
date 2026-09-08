@@ -35,7 +35,7 @@ interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, S
           SELECT *
           FROM codex_sop_dingtalk_outbox
           WHERE status IN (:statuses) AND next_attempt_at <= :nextAttemptAt
-          ORDER BY created_at
+          ORDER BY delivery_order
           LIMIT 50
           FOR UPDATE
           """,

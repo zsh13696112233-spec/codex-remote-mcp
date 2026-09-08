@@ -205,6 +205,16 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     if (group && (original.mentionAll() || !original.mentionedBot())) return;
     if (group) store.discoverGroup(properties.getClientId(), original);
     DingTalkModels.Message message = original.withContent(normalizedCommand(original.content()));
+    if (group && original.mentionedBot()) {
+      // 富文本的 @名称与编号可能直接相连；不要求名称后存在空格。
+      message =
+          message.withContent(
+              message
+                  .content()
+                  .replaceFirst(
+                      "^@[^\\r\\n]+?\\s*(?=[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\\s|$))",
+                      ""));
+    }
     String command = message.content();
     String[] parts = command.split("\\s+", 2);
     String explicit = parts.length > 0 && isUuid(parts[0]) ? parts[0].toLowerCase() : null;
@@ -220,6 +230,27 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           || hasText(message.quotedText())
           || command.isBlank()
           || !message.imageCodes().isEmpty()) {
+        LOGGER.info(
+            "钉钉消息未定位任务：正文长度={}，图片数={}，开头含@={}，包含标准编号={}，存在引用={}，特殊分隔字符={}。",
+            command.length(),
+            message.imageCodes().size(),
+            command.startsWith("@"),
+            java.util.regex.Pattern.compile("[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+                .matcher(command)
+                .find(),
+            hasText(message.replyToMessageId()) || hasText(message.quotedText()),
+            original
+                .content()
+                .codePoints()
+                .filter(
+                    c ->
+                        Character.isSpaceChar(c)
+                            || Character.isWhitespace(c)
+                            || Character.getType(c) == Character.FORMAT)
+                .distinct()
+                .limit(12)
+                .mapToObj(c -> String.format("U+%04X", c))
+                .toList());
         reply(message, null, "启动请发送完整任务定义名称；提问请带工作流编号和需求，或引用任务消息。");
         return;
       }
@@ -519,6 +550,30 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     String workflowMessageId = null;
     boolean assistantFailed = false;
 
+    if (type.startsWith("appserver.")) {
+      String notice = DingTalkExecutionNotice.execution(event);
+      if (!notice.isBlank()) {
+        String questionId =
+            "assistant".equals(event.path("source").asText())
+                ? payload.path("messageId").asText(null)
+                : null;
+        // 助手事件没有关联提问时不能回落到任务通知对象。
+        if (!"assistant".equals(event.path("source").asText()) || hasText(questionId)) {
+          JsonNode snapshot = gateway.get("/workflows/" + binding.workflowId());
+          store.recordProcess(
+              binding.workflowId(),
+              questionId,
+              sequence,
+              DingTalkExecutionNotice.stepLabel(event, snapshot)
+                  + "\n"
+                  + DingTalkExecutionNotice.execution(event, snapshot),
+              false,
+              false);
+          return true;
+        }
+      }
+    }
+
     if ("chat.assistant.completed".equals(type) || "chat.message.failed".equals(type)) {
       workflowMessageId = payload.path("messageId").asText();
       boolean failed = "chat.message.failed".equals(type);
@@ -530,25 +585,25 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           payload.path("actionId").asText(null));
       finishAssistantEvent(binding, workflowMessageId, failed);
       return true;
-    } else if (PROGRESS_EVENTS.contains(type)
-        && !"dingtalk".equals(binding.triggerSource())
-        && !"chat".equals(binding.triggerSource())) {
+    } else if (PROGRESS_EVENTS.contains(type)) {
       try {
         JsonNode snapshot = gateway.get("/workflows/" + binding.workflowId());
-        if (supportsCard(binding)) {
-          outgoing =
-              objectMapper.valueToTree(
-                  Map.of("card", progressCard.render(snapshot, eventNotice(type), null)));
-          messageKind = binding.progressCardInstanceId() == null ? "card" : "card_update";
-        } else {
-          outgoing =
-              objectMapper
-                  .createObjectNode()
-                  .put("title", "任务进度")
-                  .put("text", progressCard.renderMarkdown(snapshot, eventNotice(type)));
-          messageKind = "markdown";
-        }
-        replyTo = binding.rootMessageId();
+        String notice =
+            DingTalkExecutionNotice.stepLabel(event, snapshot) + "：" + eventNotice(type);
+        if (TERMINAL_EVENTS.contains(type) && !snapshot.path("response").asText().isBlank())
+          notice += "\n执行结果：\n" + DingTalkExecutionNotice.safe(snapshot.path("response").asText());
+        store.recordProcess(
+            binding.workflowId(),
+            null,
+            sequence,
+            notice,
+            TERMINAL_EVENTS.contains(type),
+            TERMINAL_EVENTS.contains(type)
+                || "step.advance.waiting".equals(type)
+                || "step.advance.held".equals(type)
+                || "node.failed".equals(type)
+                || "node.timed_out".equals(type));
+        return true;
       } catch (RuntimeException error) {
         LOGGER.debug("读取任务进度失败，workflowId={}。", binding.workflowId());
         return false;
@@ -590,17 +645,12 @@ class DingTalkBotCoordinator implements SmartLifecycle {
               .orElse(new DingTalkModels.Binding(workflowId, "", "", "active", 0, null, false));
       if ("dingtalk".equals(binding.triggerSource()) || "chat".equals(binding.triggerSource()))
         return;
-      if (supportsCard(binding)) {
-        store.enqueueCard(
-            dedupKey,
-            workflowId,
-            objectMapper.valueToTree(
-                progressCard.render(
-                    snapshot, notice, store.latestAssistantReply(workflowId).orElse(null))));
-      } else {
-        store.enqueueProgressMarkdown(
-            dedupKey, workflowId, "任务进度", progressCard.renderMarkdown(snapshot, notice));
-      }
+      store.enqueueText(
+          dedupKey,
+          workflowId,
+          binding.conversationId(),
+          binding.rootMessageId(),
+          "工作流编号：" + workflowId + "\n" + DingTalkExecutionNotice.safe(notice));
     } catch (RuntimeException error) {
       LOGGER.debug("生成钉钉任务进度消息失败，workflowId={}。", workflowId);
     }
@@ -663,7 +713,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   }
 
   private static String normalizedCommand(String value) {
-    return value == null ? "" : value.trim();
+    return value == null ? "" : value.replaceAll("\\p{Z}", " ").strip();
   }
 
   private static boolean validMessageEnvelope(DingTalkModels.Message message) {
@@ -724,6 +774,14 @@ class DingTalkBotCoordinator implements SmartLifecycle {
 
   private static String eventNotice(String type) {
     return switch (type) {
+      case "node.started" -> "已开始执行。";
+      case "node.completed" -> "已完成。";
+      case "node.failed" -> "执行失败，请查看监控页。";
+      case "node.cancelled" -> "已取消。";
+      case "node.timed_out" -> "执行超时。";
+      case "step.advance.waiting" -> "等待进入下一步，可通过编号暂停或继续。";
+      case "step.advance.held" -> "已暂停，请通过编号继续。";
+      case "step.advance.confirmed", "step.advance.resumed" -> "已确认继续下一步。";
       case "step.advance.timed_out" -> "30 秒等待已结束，任务已自动继续。";
       case "workflow.completed" -> "任务已完成。";
       case "workflow.failed" -> "任务执行失败。";

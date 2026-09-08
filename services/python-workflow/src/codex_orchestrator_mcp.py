@@ -1264,6 +1264,8 @@ class Orchestrator:
                             "input": [{"type": "text", "text": job.prompt}] + [{"type": "localImage", "path": path} for path in job.input_image_paths],
                             "approvalPolicy": job.approval_policy,
                         }
+                        if job.event_callback is not None:
+                            turn_params["summary"] = "auto"
                         if job.artifact_contract and job.managed_output_dir:
                             if job.sandbox_mode == "danger-full-access":
                                 turn_params["sandboxPolicy"] = {

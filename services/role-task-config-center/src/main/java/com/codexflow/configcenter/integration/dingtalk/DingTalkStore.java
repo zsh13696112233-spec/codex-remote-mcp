@@ -80,6 +80,7 @@ class DingTalkStore {
     binding.targetName = message.conversationTitle();
     binding.rootMessageId = message.messageId();
     binding.initiatorUserId = message.senderUserId();
+    binding.sessionWebhook = message.sessionWebhook();
     binding.status = "submitting";
     binding.createdAt = now;
     binding.updatedAt = now;
@@ -208,6 +209,77 @@ class DingTalkStore {
             });
     binding.eventCursor = sequence;
     binding.updatedAt = Instant.now();
+  }
+
+  /** 普通过程消息；提问按入站来源路由，运行过程只发往启动会话或通知对象。 */
+  @Transactional
+  public void recordProcess(
+      String workflowId,
+      String workflowMessageId,
+      long sequence,
+      String text,
+      boolean terminal,
+      boolean attention) {
+    DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
+    if (sequence <= binding.eventCursor) return;
+    String key = "process:" + workflowId + ":" + sequence;
+    if (workflowMessageId != null) {
+      inboundMessages
+          .findByWorkflowIdAndWorkflowMessageId(workflowId, workflowMessageId)
+          .ifPresent(
+              inbound -> {
+                boolean group = "2".equals(inbound.conversationType);
+                enqueue(
+                    key,
+                    workflowId,
+                    inbound.conversationId,
+                    group ? "GROUP" : "PERSON",
+                    group ? inbound.conversationId : inbound.senderUserId,
+                    inbound.messageId,
+                    "reply",
+                    objectMapper
+                        .createObjectNode()
+                        .put("text", "工作流编号：" + workflowId + "\n" + text)
+                        .put("sessionWebhook", inbound.sessionWebhook));
+              });
+    } else if (!"chat".equals(binding.triggerSource)) {
+      var payload =
+          objectMapper.createObjectNode().put("text", "工作流编号：" + workflowId + "\n" + text);
+      enqueue(
+          key,
+          workflowId,
+          binding.conversationId,
+          binding.targetType,
+          binding.targetExternalId,
+          binding.rootMessageId,
+          "text",
+          payload);
+      if (attention
+          && "dingtalk".equals(binding.triggerSource)
+          && "GROUP".equals(binding.targetType)
+          && binding.sessionWebhook != null) {
+        // 正文不依赖临时地址。独立提醒失败时，已发送的进度和结果仍然可见。
+        enqueue(
+            key + ":mention",
+            workflowId,
+            binding.conversationId,
+            binding.targetType,
+            binding.targetExternalId,
+            binding.rootMessageId,
+            "reply",
+            objectMapper
+                .createObjectNode()
+                .put("text", "工作流编号：" + workflowId + "\n任务状态已更新，请查看上方消息。")
+                .put("atUserId", binding.initiatorUserId)
+                .put("sessionWebhook", binding.sessionWebhook));
+      }
+    }
+    binding.eventCursor = sequence;
+    binding.updatedAt = Instant.now();
+    if (terminal) {
+      binding.status = "terminal";
+      releaseSlot(binding, workflowId);
+    }
   }
 
   @Transactional(readOnly = true)
@@ -671,6 +743,30 @@ class DingTalkStore {
       String replyTo,
       String messageKind,
       JsonNode payload) {
+    String content = payload.path("text").asText("");
+    if (("reply".equals(messageKind) || "text".equals(messageKind)) && content.length() > 1000) {
+      String prefix = workflowId == null ? "" : "工作流编号：" + workflowId + "\n";
+      String body = content.startsWith(prefix) ? content.substring(prefix.length()) : content;
+      int part = 0;
+      for (int offset = 0; offset < body.length(); ) {
+        int end = Math.min(offset + 850, body.length());
+        if (end < body.length() && Character.isHighSurrogate(body.charAt(end - 1))) end--;
+        var chunk = ((tools.jackson.databind.node.ObjectNode) payload).deepCopy();
+        chunk.put("text", prefix + body.substring(offset, end));
+        if (end < body.length()) chunk.remove("atUserId");
+        enqueue(
+            dedupKey + ":part:" + part++,
+            workflowId,
+            conversationId,
+            targetType,
+            targetExternalId,
+            replyTo,
+            messageKind,
+            chunk);
+        offset = end;
+      }
+      return;
+    }
     if (outbox.existsByDedupKey(dedupKey)) return;
     Instant now = Instant.now();
     DingTalkOutboxEntity item = new DingTalkOutboxEntity();

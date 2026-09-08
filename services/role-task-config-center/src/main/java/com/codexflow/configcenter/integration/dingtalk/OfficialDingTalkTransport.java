@@ -118,7 +118,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     }
     ObjectNode body = objectMapper.createObjectNode().put("msgtype", "text");
     body.putObject("text").put("content", payload.path("text").asText());
-    if ("GROUP".equals(targetType)) {
+    if ("GROUP".equals(targetType) && !payload.path("atUserId").asText("").isBlank()) {
       body.putObject("at")
           .put("isAtAll", false)
           .putArray("atUserIds")
@@ -155,10 +155,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
                 .createObjectNode()
                 .put("robotCode", properties.getClientId())
                 .put("downloadCode", downloadCode));
-    URI uri = URI.create(result.path("downloadUrl").asText());
-    if (!"https".equals(uri.getScheme()) || uri.getHost() == null || uri.getUserInfo() != null) {
-      throw new IllegalArgumentException("钉钉图片下载地址无效。");
-    }
+    URI uri = imageDownloadUri(result);
     try {
       var response =
           httpClient.send(
@@ -177,6 +174,27 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     } catch (IOException error) {
       throw new IllegalStateException("图片下载失败，请重新发送。");
     }
+  }
+
+  static URI imageDownloadUri(JsonNode response) {
+    String address = response.path("downloadUrl").asText("").strip();
+    if (address.isEmpty()) {
+      throw new IllegalArgumentException("钉钉未返回图片下载地址，请重新发送图片。");
+    }
+    URI uri;
+    try {
+      uri = URI.create(address);
+    } catch (IllegalArgumentException invalid) {
+      // URI 异常会包含带签名的原始地址，不将其作为异常原因传播。
+      throw new IllegalArgumentException("钉钉图片下载地址格式错误，请重新发送图片。");
+    }
+    if (!("https".equalsIgnoreCase(uri.getScheme()) || "http".equalsIgnoreCase(uri.getScheme()))) {
+      throw new IllegalArgumentException("钉钉图片下载地址协议不受支持，请重新发送图片。");
+    }
+    if (uri.getHost() == null || uri.getUserInfo() != null || uri.getFragment() != null) {
+      throw new IllegalArgumentException("钉钉图片下载地址格式错误，请重新发送图片。");
+    }
+    return uri;
   }
 
   @Override
@@ -229,9 +247,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
       throw new IllegalStateException("无法生成钉钉个人消息。", error);
     }
     JsonNode response = authorized("POST", "/v1.0/robot/oToMessages/batchSend", body);
-    String messageId = response.path("processQueryKey").asText();
-    if (messageId.isBlank()) messageId = UUID.randomUUID().toString();
-    return new DingTalkModels.SendResult(messageId);
+    return new DingTalkModels.SendResult(firstText(response, "msgId", "messageId"));
   }
 
   @Override
@@ -416,8 +432,11 @@ class OfficialDingTalkTransport implements DingTalkTransport {
         for (JsonNode item : messageContent.path("richText")) {
           if (item.has("text")) words.append(item.path("text").asText());
           String code = firstText(item, "downloadCode", "pictureDownloadCode");
-          if (code != null) images.add(code);
-          else if ("picture".equals(item.path("type").asText()))
+          if (code != null) {
+            images.add(code);
+            // 图片隔开前后的文字，避免工作流编号与图片下方的问题粘连。
+            words.append('\n');
+          } else if ("picture".equals(item.path("type").asText()))
             throw new IllegalArgumentException("图片下载码缺失。");
         }
         content = words.toString();

@@ -856,6 +856,16 @@ class WorkflowGateway:
         prompt = self._chat_prompt(snapshot, message)
         spec = await _database_call(self.store.get_workflow_spec, workflow_id)
         thread_id = snapshot.get("assistant", {}).get("threadId")
+        async def record(event: dict[str, Any], received_at: str) -> None:
+            method = str(event.get("method") or "unknown")
+            if method not in {"item/started", "item/completed"}:
+                return
+            await self.event_batcher.add(
+                workflow_id, node_id=None, source="assistant",
+                event_type=f"appserver.{method}",
+                payload={"receivedAt": received_at, "messageId": message_id, "message": event},
+            )
+
         job = await self.assistant_orchestrator.dispatch(
             agent_id=spec["supervisorAgentId"],
             prompt=prompt,
@@ -866,6 +876,7 @@ class WorkflowGateway:
             timeout_sec=min(600, int(spec.get("supervisorTimeoutSec", 7200))),
             approval_policy="never",
             output_schema=self._assistant_output_schema(),
+            event_callback=record,
             input_images=await _database_call(self.store.input_images, workflow_id, message.get("imageIds", [])),
         )
         await _database_call(self.store.update_assistant, workflow_id, job.snapshot())
@@ -878,7 +889,10 @@ class WorkflowGateway:
                 pass
         await _database_call(self.store.update_assistant, workflow_id, job.snapshot())
         if job.status != "completed":
+            await self.event_batcher.flush()
             raise RuntimeError(job.error or "任务助手连接失败。")
+        # 中间过程必须先于该提问的最终回答入库，跨会话按 messageId 路由。
+        await self.event_batcher.flush()
         raw = (job.response or "").strip()
         try:
             decision = json.loads(raw)

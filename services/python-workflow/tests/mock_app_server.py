@@ -25,6 +25,7 @@ class MockAppServer:
         steer_completes_turn: bool = False,
         structured_reply: str | None = None,
         config_requirements: dict[str, Any] | None = None,
+        process_notifications: list[dict[str, Any]] | None = None,
     ) -> None:
         self.delay_sec = delay_sec
         self.turn_status = turn_status
@@ -44,6 +45,7 @@ class MockAppServer:
             "revisionInstruction": None,
         }, ensure_ascii=False)
         self.config_requirements = config_requirements
+        self.process_notifications = process_notifications or []
         self.url = ""
         self.authorization: str | None = None
         self.requests: list[dict[str, Any]] = []
@@ -144,6 +146,8 @@ class MockAppServer:
     async def _complete_turn(self, connection: ServerConnection, reply: str) -> None:
         await asyncio.sleep(self.delay_sec)
         try:
+            for notification in self.process_notifications:
+                await connection.send(json.dumps(notification))
             if self.send_message_delta:
                 await connection.send(
                     json.dumps(

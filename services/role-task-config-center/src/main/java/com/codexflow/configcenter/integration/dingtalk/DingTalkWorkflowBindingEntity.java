@@ -45,6 +45,9 @@ class DingTalkWorkflowBindingEntity {
   @Column(name = "initiator_user_id", length = 256)
   String initiatorUserId;
 
+  @Column(name = "session_webhook", columnDefinition = "LONGTEXT")
+  String sessionWebhook;
+
   @Column(nullable = false, length = 32)
   String status;
 

@@ -1,6 +1,7 @@
 package com.codexflow.configcenter.integration.dingtalk;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import org.junit.jupiter.api.Test;
@@ -9,6 +10,44 @@ import tools.jackson.databind.node.ObjectNode;
 
 /** 验证钉钉 Stream 原始消息和卡片回调到内部模型的映射。 */
 class DingTalkTransportParsingTest {
+
+  @Test
+  void acceptsHttpAndHttpsImageUrlsWithoutChangingSignedQuery() {
+    for (String scheme : new String[] {"http", "https"}) {
+      String address =
+          scheme + "://files.example.com/image.png?signature=test%2Bvalue%2Fpart&expires=123";
+      var response = objectMapper.createObjectNode().put("downloadUrl", " " + address + " ");
+      assertThat(OfficialDingTalkTransport.imageDownloadUri(response).toString())
+          .isEqualTo(address);
+    }
+  }
+
+  @Test
+  void invalidImageUrlsHaveSpecificErrorsWithoutLeakingAddress() {
+    assertThatThrownBy(
+            () -> OfficialDingTalkTransport.imageDownloadUri(objectMapper.createObjectNode()))
+        .hasMessage("钉钉未返回图片下载地址，请重新发送图片。");
+    for (String address :
+        new String[] {
+          "https://files.example.com/bad path?signature=secret",
+          "https://user:secret@files.example.com/a",
+          "https:///a?signature=secret"
+        }) {
+      assertThatThrownBy(
+              () ->
+                  OfficialDingTalkTransport.imageDownloadUri(
+                      objectMapper.createObjectNode().put("downloadUrl", address)))
+          .hasMessage("钉钉图片下载地址格式错误，请重新发送图片。")
+          .hasNoCause();
+    }
+    assertThatThrownBy(
+            () ->
+                OfficialDingTalkTransport.imageDownloadUri(
+                    objectMapper
+                        .createObjectNode()
+                        .put("downloadUrl", "file:///private/image.png")))
+        .hasMessage("钉钉图片下载地址协议不受支持，请重新发送图片。");
+  }
 
   @Test
   void richTextKeepsTextAndOriginalImageOrder() {
@@ -24,6 +63,20 @@ class DingTalkTransportParsingTest {
     assertThat(message.imageCodes()).containsExactly("first", "second");
     assertThat(message.senderUserId()).isEqualTo("bob");
     assertThat(message.sessionWebhook()).contains("sendBySession");
+  }
+
+  @Test
+  void imageSeparatesWorkflowIdFromCaptionWithoutSplittingTextFragments() {
+    var message =
+        transport.toMessage(
+            """
+        {"msgId":"m","conversationId":"g","conversationType":"2","senderStaffId":"bob",
+         "isInAtList":true,"msgtype":"richText","content":{"richText":[
+           {"text":"a8bce1a0-25e7-42ae-8e48-"},{"text":"e3ea79afe455"},
+           {"type":"picture","downloadCode":"original"},{"text":"这是你写的吗"}]}}
+        """);
+    assertThat(message.content()).isEqualTo("a8bce1a0-25e7-42ae-8e48-e3ea79afe455\n这是你写的吗");
+    assertThat(message.imageCodes()).containsExactly("original");
   }
 
   @Test

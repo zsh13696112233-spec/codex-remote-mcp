@@ -3,7 +3,6 @@ package com.codexflow.configcenter.integration.dingtalk;
 import com.codexflow.configcenter.client.GatewayClient;
 import com.codexflow.configcenter.domain.ConflictFailure;
 import com.codexflow.configcenter.domain.DingTalkTaskBindingDirectory;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -57,17 +56,15 @@ public class DingTalkProactiveNotificationService {
       store.markSubmitted(workflowId);
       JsonNode snapshot = gateway.get("/workflows/" + workflowId);
       DingTalkModels.Binding binding = store.binding(workflowId).orElseThrow();
-      if ("GROUP".equals(binding.targetType()) && !settings.current().cardTemplateId().isBlank()) {
-        Map<String, Object> card = progressCard.render(snapshot, notice, null);
-        store.enqueueCard(
-            "proactive-start:" + workflowId, workflowId, objectMapper.valueToTree(card));
-      } else {
-        store.enqueueProgressMarkdown(
-            "proactive-start:" + workflowId,
-            workflowId,
-            "任务进度",
-            progressCard.renderMarkdown(snapshot, notice));
-      }
+      store.enqueueText(
+          "proactive-start:" + workflowId,
+          workflowId,
+          binding.conversationId(),
+          binding.rootMessageId(),
+          "工作流编号："
+              + workflowId
+              + "\n"
+              + DingTalkExecutionNotice.safe(snapshot.path("name").asText() + "：" + notice));
     } catch (RuntimeException error) {
       LOGGER.warn("钉钉主动任务已提交，但首条进度消息暂未生成，workflowId={}。", workflowId, error);
     }

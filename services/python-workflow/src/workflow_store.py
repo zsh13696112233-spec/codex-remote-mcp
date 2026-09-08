@@ -49,6 +49,7 @@ MONITOR_EVENTS_SQL = """(source = 'chat' OR (source = 'supervisor' AND
     (event_type IN ('appserver.item/agentMessage/delta', 'appserver.item/completed')
      OR event_type NOT LIKE 'appserver.%')))"""
 BOT_EVENTS_SQL = """event_type IN (
+    'appserver.item/started', 'appserver.item/completed',
     'chat.assistant.completed', 'chat.message.failed',
     'node.started', 'node.completed', 'node.failed', 'node.cancelled', 'node.timed_out',
     'step.advance.waiting', 'step.advance.held', 'step.advance.confirmed',
@@ -3677,9 +3678,38 @@ class WorkflowStore(InputImageStore):
     ) -> int:
         encoded = json.dumps(payload, ensure_ascii=False, default=str)
         if len(encoded) > EVENT_PAYLOAD_LIMIT:
-            encoded = json.dumps(
-                {"truncated": True, "preview": encoded[:262_000]}, ensure_ascii=False
-            )
+            compact: dict[str, Any] = {"truncated": True}
+            message = payload.get("message")
+            params = message.get("params") if isinstance(message, dict) else None
+            item = params.get("item") if isinstance(params, dict) else None
+            if event_type in {"appserver.item/started", "appserver.item/completed"} and isinstance(item, dict):
+                # 原图和大工具输出可以截断，生命周期和公开摘要不能随之丢失。
+                kept = {key: item[key] for key in ("type", "id", "status", "tool", "phase", "success", "exitCode")
+                        if key in item and isinstance(item[key], (str, bool, int, type(None)))}
+                kept = {key: value[:512] if isinstance(value, str) else value for key, value in kept.items()}
+                if item.get("error") is not None:
+                    kept["error"] = {"message": "工具执行未成功。"}
+                if isinstance(item.get("text"), str):
+                    kept["text"] = item["text"][:20_000] + (TRUNCATION_NOTICE if len(item["text"]) > 20_000 else "")
+                if isinstance(item.get("summary"), list):
+                    summary = []
+                    remaining = 20_000
+                    for part in item["summary"]:
+                        text = part if isinstance(part, str) else part.get("text", "") if isinstance(part, dict) else ""
+                        if not isinstance(text, str) or not text:
+                            continue
+                        summary.append(text[:remaining])
+                        remaining -= len(summary[-1])
+                        if remaining <= 0:
+                            summary.append(TRUNCATION_NOTICE)
+                            break
+                    kept["summary"] = summary
+                compact["message"] = {"params": {"item": kept}}
+                if isinstance(payload.get("messageId"), str):
+                    compact["messageId"] = payload["messageId"][:512]
+            else:
+                compact["preview"] = encoded[:200_000]
+            encoded = json.dumps(compact, ensure_ascii=False)
         compressed = zlib.compress(encoded.encode("utf-8"), level=3) if len(encoded) >= 1024 else None
         if compressed is not None and len(compressed) >= len(encoded.encode("utf-8")) * 0.75:
             compressed = None

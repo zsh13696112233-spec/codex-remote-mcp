@@ -103,6 +103,70 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void unicodeSpacesAroundMentionAndWorkflowIdStillRouteQuestion() {
+    String[] separators = {"\u2005", "\u2002", "\u2003", "\u2009", "\u3000", "\u00a0"};
+    for (String space : separators) {
+      bot.safelyHandleMessage(message("@sop测试机器人" + space + ID + space + "这是你创建的吗"));
+    }
+    var request = ArgumentCaptor.forClass(JsonNode.class);
+    verify(gateway, times(separators.length))
+        .post(eq("/workflows/" + ID + "/messages"), request.capture());
+    for (JsonNode body : request.getAllValues()) {
+      assertThat(body.path("text").asText()).isEqualTo("这是你创建的吗");
+    }
+    verify(store, never()).reserveStart(any(), any());
+  }
+
+  @Test
+  void adjacentRichTextMentionAndIdStillUploadImageAndForwardCaption() {
+    var parser = new OfficialDingTalkTransport(new DingTalkProperties(), json);
+    var incoming =
+        parser.toMessage(
+            """
+        {"msgId":"question","conversationId":"other-group","conversationType":"2",
+         "senderStaffId":"user-2","isInAtList":true,"msgtype":"richText",
+         "content":{"richText":[{"text":"@sop测试机器人"},{"text":"%s"},
+          {"type":"picture","downloadCode":"image-code"},{"text":"这个文件是你新建的吗"}]}}
+        """
+                .formatted(ID));
+    assertThat(incoming.content()).startsWith("@sop测试机器人" + ID);
+    byte[] image = new byte[] {1, 2, 3};
+    when(transport.downloadImage("image-code")).thenReturn(image);
+    when(gateway.uploadImage(ID, image))
+        .thenReturn(json.createObjectNode().put("imageId", "image-1"));
+    bot.safelyHandleMessage(incoming);
+    var request = ArgumentCaptor.forClass(JsonNode.class);
+    verify(gateway).post(eq("/workflows/" + ID + "/messages"), request.capture());
+    assertThat(request.getValue().path("text").asText()).isEqualTo("这个文件是你新建的吗");
+    assertThat(request.getValue().path("imageIds").get(0).asText()).isEqualTo("image-1");
+    verify(store, never()).enqueueReply(any(), any(), any(), any());
+  }
+
+  @Test
+  void richTextIdImageCaptionReachesAssistantWithOriginalImage() {
+    var parser = new OfficialDingTalkTransport(new DingTalkProperties(), json);
+    var incoming =
+        parser.toMessage(
+            """
+        {"msgId":"question","conversationId":"other-group","conversationType":"2",
+         "senderStaffId":"user-2","isInAtList":true,"msgtype":"richText",
+         "content":{"richText":[{"text":"@sop测试机器人 %s"},
+          {"type":"picture","downloadCode":"image-code"},{"text":"这是你写的吗"}]}}
+        """
+                .formatted(ID));
+    byte[] image = new byte[] {1, 2, 3};
+    when(transport.downloadImage("image-code")).thenReturn(image);
+    when(gateway.uploadImage(ID, image))
+        .thenReturn(json.createObjectNode().put("imageId", "image-1"));
+    bot.safelyHandleMessage(incoming);
+    var request = ArgumentCaptor.forClass(JsonNode.class);
+    verify(gateway).post(eq("/workflows/" + ID + "/messages"), request.capture());
+    assertThat(request.getValue().path("text").asText()).isEqualTo("这是你写的吗");
+    assertThat(request.getValue().path("imageIds").get(0).asText()).isEqualTo("image-1");
+    verify(store, never()).reserveStart(any(), any());
+  }
+
+  @Test
   void explicitIdRoutesQuestionFromAnotherGroup() {
     bot.safelyHandleMessage(message(ID + " 目前进度"));
     var request = ArgumentCaptor.forClass(JsonNode.class);
@@ -254,13 +318,58 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
-  void dingtalkProgressEventsAdvanceCursorWithoutPush() {
+  void dingtalkProgressEventsReplyToLaunchConversation() {
     var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
     var event = json.createObjectNode().put("type", "node.completed");
     ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 1L);
+    verify(store).recordProcess(eq(ID), isNull(), eq(1L), contains("已完成"), eq(false), eq(false));
+    verify(store, never()).enqueueCard(any(), any(), any());
+  }
+
+  @Test
+  void durableProgressUsesOpenApiTextEvenWhenMentionReplyFails() {
+    var result = new DingTalkModels.SendResult("real-id");
+    when(transport.sendText(eq("launch-group"), any(), any())).thenReturn(result);
+    var body =
+        new DingTalkModels.Outbox(
+            "body",
+            ID,
+            "launch-group",
+            "root",
+            "text",
+            json.createObjectNode().put("text", "任务完成"));
+    var mention =
+        new DingTalkModels.Outbox(
+            "mention",
+            ID,
+            "launch-group",
+            "root",
+            "reply",
+            json.createObjectNode().put("text", "查看结果").put("sessionWebhook", "expired"));
+    when(transport.sendReply(any(), any(), any())).thenThrow(new IllegalStateException("会话已过期"));
+    bot.deliver(body);
+    bot.deliver(mention);
+    verify(transport).sendText("launch-group", "root", "任务完成");
+    verify(store).markOutboxSent("body", "real-id");
+    verify(store).markOutboxFailed(eq("mention"), any());
+    verify(store, never()).markOutboxFailed(eq("body"), any());
+  }
+
+  @Test
+  void assistantToolProgressKeepsQuestionId() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var event =
+        json.createObjectNode().put("type", "appserver.item/started").put("source", "assistant");
+    event
+        .putObject("payload")
+        .put("messageId", "question-b")
+        .putObject("message")
+        .putObject("params")
+        .putObject("item")
+        .put("type", "webSearch");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 2L);
     verify(store)
-        .recordEvent(
-            eq("app"), eq(ID), eq(1L), anyString(), isNull(), isNull(), isNull(), eq(false));
+        .recordProcess(eq(ID), eq("question-b"), eq(2L), contains("搜索资料"), eq(false), eq(false));
   }
 
   @Test

@@ -1,5 +1,7 @@
 # Python 工作流服务
 
+钉钉普通过程消息使用 `GET /workflows/{workflowId}/events/history?view=bot`：除步骤与终态事件外，返回 `appserver.item/started` 和 `appserver.item/completed`。主监督和步骤沿用现有事件上报，任务助手新增 `source: assistant`，并在 payload 中携带对应提问的 `messageId`。助手中间事件先刷新入库，再保存最终回答；模型结构化答案和原始推理增量不作为公开过程消息发送。带事件回调的执行请求使用 `turn/start` 的 `summary: auto` 请求可读摘要，模型未提供时不编造。Java 只提取工具状态、完整可读摘要和用户可见进度说明，普通监控页面的事件过滤保持兼容。
+
 本模块同时提供 HTTP 工作流网关、Codex Orchestrator MCP 服务和 SQLite 状态存储，是整套平台的执行核心。
 
 ## 文件说明

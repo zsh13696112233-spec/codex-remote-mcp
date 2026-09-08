@@ -43,6 +43,7 @@ class DingTalkStoreIntegrationTest {
   @Autowired DingTalkTargetDirectory targets;
   @Autowired TaskLaunchStore taskLaunches;
   @Autowired PlatformTransactionManager transactions;
+  @Autowired jakarta.persistence.EntityManager entityManager;
 
   @Test
   void staleDingTalkPointerCannotOverwriteANewerWebRunOnRestart() {
@@ -631,6 +632,92 @@ class DingTalkStoreIntegrationTest {
   private String createTask(String clientId) {
     String targetId = clientId == null ? null : createGroupTarget(clientId, "chat-1", "测试群");
     return createBoundTask(createSop(), targetId);
+  }
+
+  @Test
+  void processRepliesKeepConversationAndInsertionOrderEvenWithEqualTimestamps() {
+    String client = "ordered-" + UUID.randomUUID();
+    createTask(client);
+    new TransactionTemplate(transactions)
+        .executeWithoutResult(
+            transaction -> {
+              var start =
+                  new DingTalkModels.Message(
+                      "start-" + client,
+                      "launch-group",
+                      "2",
+                      "alice",
+                      lastTaskName,
+                      true,
+                      false,
+                      null,
+                      "启动群",
+                      List.of(),
+                      "https://oapi.dingtalk.com/robot/sendBySession?session=launch");
+              String workflow = store.reserveStart(client, start).workflowId();
+              var question =
+                  new DingTalkModels.Message(
+                      "ask-" + client,
+                      "question-group",
+                      "2",
+                      "bob",
+                      "检查",
+                      true,
+                      false,
+                      null,
+                      "提问群",
+                      List.of(),
+                      "https://oapi.dingtalk.com/robot/sendBySession?session=question");
+              var inbound =
+                  store.registerInbound(client, store.route(workflow, question), question);
+              store.recordProcess(workflow, null, 1, "步骤开始", false, false);
+              store.recordProcess(workflow, inbound.workflowMessageId(), 2, "工具开始", false, false);
+              store.recordProcess(workflow, inbound.workflowMessageId(), 3, "思考摘要", false, false);
+              store.recordProcess(workflow, inbound.workflowMessageId(), 3, "重复事件", false, false);
+              store.completeReply(workflow, inbound.workflowMessageId(), 4, "最终回答", null);
+              store.recordProcess(workflow, null, 5, "任务完成", true, true);
+              jdbc.update(
+                  "update codex_sop_dingtalk_outbox set created_at = '2026-01-01 00:00:00' where workflow_id = ?",
+                  workflow);
+              var replies =
+                  store.claimDue().stream()
+                      .filter(item -> workflow.equals(item.workflowId()))
+                      .toList();
+              assertThat(replies).hasSize(6);
+              assertThat(
+                      replies.stream().map(item -> item.payload().path("text").asText()).toList())
+                  .containsExactly(
+                      "工作流编号：" + workflow + "\n步骤开始",
+                      "工作流编号：" + workflow + "\n工具开始",
+                      "工作流编号：" + workflow + "\n思考摘要",
+                      "工作流编号：" + workflow + "\n最终回答",
+                      "工作流编号：" + workflow + "\n任务完成",
+                      "工作流编号：" + workflow + "\n任务状态已更新，请查看上方消息。");
+              assertThat(replies.stream().map(DingTalkModels.Outbox::targetExternalId).toList())
+                  .containsExactly(
+                      "launch-group",
+                      "question-group",
+                      "question-group",
+                      "question-group",
+                      "launch-group",
+                      "launch-group");
+              assertThat(replies.get(0).messageKind()).isEqualTo("text");
+              assertThat(replies.get(4).messageKind()).isEqualTo("text");
+              assertThat(replies.get(4).payload().has("sessionWebhook")).isFalse();
+              assertThat(replies.get(0).payload().path("atUserId").asText()).isEmpty();
+              assertThat(replies.get(3).payload().path("atUserId").asText()).isEqualTo("bob");
+              assertThat(replies.get(5).payload().path("atUserId").asText()).isEqualTo("alice");
+              replies.forEach(item -> store.markOutboxSent(item.id(), "sent-" + item.id()));
+              store.markOutboxFailed(replies.get(5).id(), new IllegalStateException("会话已过期"));
+              entityManager.flush();
+              assertThat(
+                      jdbc.queryForObject(
+                          "select status from codex_sop_dingtalk_outbox where id = ?",
+                          String.class,
+                          replies.get(4).id()))
+                  .isEqualTo("sent");
+              transaction.setRollbackOnly();
+            });
   }
 
   private String createSop() {
