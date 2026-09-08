@@ -31,6 +31,8 @@ Java 根包为 `com.codexflow.console`，Web 控制器、异常映射和
 
 ## 启动依赖
 
+对话中显示从钉钉提交给 Codex 的输入图片，可点击查看原图。新增只读代理 `GET /api/workflows/{workflowId}/input-images/{imageId}`，浏览器仍只访问本 Java 服务；本次不增加网页图片上传入口。输入图片不展示为步骤产出。
+
 启动前需要准备：
 
 1. Java 17 和 Maven 3.9 或更高版本。

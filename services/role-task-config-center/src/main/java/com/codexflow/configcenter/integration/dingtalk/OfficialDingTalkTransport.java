@@ -108,6 +108,78 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   }
 
   @Override
+  public DingTalkModels.SendResult sendReply(String target, String targetType, JsonNode payload) {
+    String webhook = payload.path("sessionWebhook").asText("");
+    URI uri = URI.create(webhook);
+    if (!"https".equals(uri.getScheme())
+        || !"oapi.dingtalk.com".equals(uri.getHost())
+        || !"/robot/sendBySession".equals(uri.getPath())) {
+      throw new IllegalArgumentException("回复会话不可用，请重新向机器人发送消息。");
+    }
+    ObjectNode body = objectMapper.createObjectNode().put("msgtype", "text");
+    body.putObject("text").put("content", payload.path("text").asText());
+    if ("GROUP".equals(targetType)) {
+      body.putObject("at")
+          .put("isAtAll", false)
+          .putArray("atUserIds")
+          .add(payload.path("atUserId").asText());
+    }
+    try {
+      var request =
+          HttpRequest.newBuilder(uri)
+              .timeout(Duration.ofSeconds(30))
+              .header("Content-Type", "application/json")
+              .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+              .build();
+      var response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+      JsonNode result = objectMapper.readTree(response.body());
+      if (response.statusCode() != 200 || result.path("errcode").asInt(-1) != 0) {
+        throw new IllegalStateException("钉钉回复失败，请重新提问。");
+      }
+      return new DingTalkModels.SendResult(firstText(result, "msgId", "messageId"));
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("钉钉回复被中断。");
+    } catch (IOException error) {
+      throw new IllegalStateException("钉钉回复失败。");
+    }
+  }
+
+  @Override
+  public byte[] downloadImage(String downloadCode) {
+    JsonNode result =
+        authorized(
+            "POST",
+            "/v1.0/robot/messageFiles/download",
+            objectMapper
+                .createObjectNode()
+                .put("robotCode", properties.getClientId())
+                .put("downloadCode", downloadCode));
+    URI uri = URI.create(result.path("downloadUrl").asText());
+    if (!"https".equals(uri.getScheme()) || uri.getHost() == null || uri.getUserInfo() != null) {
+      throw new IllegalArgumentException("钉钉图片下载地址无效。");
+    }
+    try {
+      var response =
+          httpClient.send(
+              HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(30)).GET().build(),
+              HttpResponse.BodyHandlers.ofInputStream());
+      try (var input = response.body()) {
+        if (response.statusCode() != 200) throw new IllegalStateException("钉钉图片下载失败。");
+        byte[] content = input.readNBytes(20_000_001);
+        if (content.length == 0 || content.length > 20_000_000)
+          throw new IllegalArgumentException("图片为空或超过 20 MB。");
+        return content;
+      }
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("图片下载被中断。");
+    } catch (IOException error) {
+      throw new IllegalStateException("图片下载失败，请重新发送。");
+    }
+  }
+
+  @Override
   public DingTalkModels.SendResult sendMarkdown(
       String conversationId, String replyToMessageId, String title, String markdown) {
     return sendGroupMessage(
@@ -126,8 +198,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
       throw new IllegalStateException(serializationError, error);
     }
     JsonNode response = authorized("POST", "/v1.0/robot/groupMessages/send", body);
-    String messageId = response.path("processQueryKey").asText();
-    if (messageId.isBlank()) messageId = UUID.randomUUID().toString();
+    String messageId = firstText(response, "msgId", "messageId");
     return new DingTalkModels.SendResult(messageId);
   }
 
@@ -333,6 +404,24 @@ class OfficialDingTalkTransport implements DingTalkTransport {
       JsonNode value = objectMapper.readTree(request);
       String content = value.path("text").path("content").asText();
       if (content.isBlank()) content = value.path("content").path("content").asText();
+      var images = new java.util.ArrayList<String>();
+      JsonNode messageContent = parseEmbedded(value.path("content"));
+      if ("picture".equals(value.path("msgtype").asText())) {
+        String code = firstText(messageContent, "downloadCode", "pictureDownloadCode");
+        if (code == null) throw new IllegalArgumentException("图片下载码缺失。");
+        images.add(code);
+      }
+      if ("richText".equals(value.path("msgtype").asText())) {
+        StringBuilder words = new StringBuilder();
+        for (JsonNode item : messageContent.path("richText")) {
+          if (item.has("text")) words.append(item.path("text").asText());
+          String code = firstText(item, "downloadCode", "pictureDownloadCode");
+          if (code != null) images.add(code);
+          else if ("picture".equals(item.path("type").asText()))
+            throw new IllegalArgumentException("图片下载码缺失。");
+        }
+        content = words.toString();
+      }
       String replyTo = firstText(value, "originalMsgId", "replyToMessageId");
       if (replyTo == null) {
         JsonNode replied = value.path("repliedMsg");
@@ -341,6 +430,9 @@ class OfficialDingTalkTransport implements DingTalkTransport {
         }
         replyTo = firstText(replied, "msgId", "messageId", "originalMsgId");
       }
+      JsonNode quote = parseEmbedded(value.path("repliedMsg"));
+      String quotedText = quote.path("text").path("content").asText();
+      if (quotedText.isBlank()) quotedText = quote.path("content").asText();
       return new DingTalkModels.Message(
           value.path("msgId").asText(),
           value.path("conversationId").asText(),
@@ -350,7 +442,10 @@ class OfficialDingTalkTransport implements DingTalkTransport {
           value.path("isInAtList").asBoolean(false),
           mentionAll(value, content),
           replyTo,
-          firstText(value, "conversationTitle", "conversationName"));
+          firstText(value, "conversationTitle", "conversationName"),
+          List.copyOf(images),
+          firstText(value, "sessionWebhook"),
+          quotedText);
     } catch (Exception error) {
       throw new IllegalArgumentException("无法解析钉钉机器人消息。", error);
     }

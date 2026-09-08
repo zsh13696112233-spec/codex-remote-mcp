@@ -60,7 +60,10 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-class WorkflowStore:
+from workflow_input_images import InputImageStore
+
+
+class WorkflowStore(InputImageStore):
     """跨 HTTP 网关和 MCP 子进程共享的 SQLite 工作流状态库。"""
 
     def __init__(self, path: Path | str) -> None:
@@ -434,6 +437,7 @@ class WorkflowStore:
                 connection.execute(
                     "ALTER TABLE workflow_artifacts ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 0"
                 )
+            self.initialize_input_images(connection)
             control_columns = {
                 row["name"]
                 for row in connection.execute(
@@ -1397,8 +1401,7 @@ class WorkflowStore:
             )
             pending_control_row = connection.execute(
                 """
-                SELECT action_id, action_type, node_id, status, expires_at,
-                       revision_instruction
+                SELECT *
                 FROM workflow_control_actions
                 WHERE workflow_id = ? AND status = 'pending' AND expires_at > ?
                 ORDER BY created_at DESC LIMIT 1
@@ -1617,8 +1620,9 @@ class WorkflowStore:
             count = int(
                 connection.execute(
                     "SELECT (SELECT COUNT(*) FROM workflow_artifacts WHERE workflow_id = ?) "
-                    "+ (SELECT COUNT(*) FROM workflow_attempt_artifacts WHERE workflow_id = ?)",
-                    (workflow_id, workflow_id),
+                    "+ (SELECT COUNT(*) FROM workflow_attempt_artifacts WHERE workflow_id = ?) "
+                    "+ (SELECT COUNT(*) FROM workflow_input_images WHERE workflow_id = ?)",
+                    (workflow_id, workflow_id, workflow_id),
                 ).fetchone()[0]
             )
             if count >= ARTIFACTS_PER_WORKFLOW_LIMIT:
@@ -1831,8 +1835,16 @@ class WorkflowStore:
     def get_workflow_spec(self, workflow_id: str) -> dict[str, Any]:
         return self.get_spec(workflow_id)
 
-    def accept_chat_message(self, workflow_id: str, message_id: str, text: str) -> dict[str, Any]:
+    def accept_chat_message(
+        self, workflow_id: str, message_id: str, text: str,
+        image_ids: list[str] | None = None, actor_id: str | None = None,
+        expected_action_id: str | None = None,
+    ) -> dict[str, Any]:
         text = text.strip()
+        image_ids = [] if image_ids is None else image_ids
+        for value, limit in ((actor_id, 512), (expected_action_id, 128)):
+            if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > limit):
+                raise ValueError("调用者或操作编号无效。")
         try:
             parsed = uuid.UUID(message_id)
         except (ValueError, AttributeError) as error:
@@ -1847,12 +1859,14 @@ class WorkflowStore:
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self.validate_message_images(connection, workflow_id, image_ids)
             existing = connection.execute(
                 "SELECT * FROM workflow_chat_messages WHERE workflow_id = ? AND message_id = ?",
                 (workflow_id, message_id),
             ).fetchone()
             if existing is not None:
-                if existing["content"] != text:
+                if (existing["content"] != text or json.loads(existing["image_ids_json"]) != image_ids
+                        or existing["actor_id"] != actor_id or existing["expected_action_id"] != expected_action_id):
                     raise RuntimeError("同一 messageId 不能提交不同内容。")
                 if existing["status"] == "failed":
                     connection.execute(
@@ -1888,11 +1902,14 @@ class WorkflowStore:
                     workflow["state_version"], now, now,
                 ),
             )
+            connection.execute("UPDATE workflow_chat_messages SET image_ids_json = ?, actor_id = ?, expected_action_id = ? WHERE workflow_id = ? AND message_id = ?",
+                (json.dumps(image_ids), actor_id, expected_action_id, workflow_id, message_id))
             self._add_event_with_connection(
                 connection, workflow_id, None, "chat", "chat.user.accepted",
                 {
                     "messageId": message_id,
                     "text": text,
+                    "imageIds": image_ids,
                     "workflowStatusAtAcceptance": workflow["status"],
                     "stateVersionAtAcceptance": workflow["state_version"],
                 },
@@ -1911,6 +1928,9 @@ class WorkflowStore:
             "workflowId": row["workflow_id"],
             "role": row["role"],
             "text": row["content"],
+            "imageIds": json.loads(row["image_ids_json"]),
+            "actorId": row["actor_id"],
+            "expectedActionId": row["expected_action_id"],
             "status": row["status"],
             "replyToMessageId": row["reply_to_message_id"],
             "workflowStatusAtAcceptance": row["workflow_status_at_acceptance"],
@@ -1996,9 +2016,10 @@ class WorkflowStore:
                 "WHERE workflow_id = ? AND message_id = ?",
                 (now, workflow_id, message_id),
             )
+            proposal = connection.execute("SELECT action_id FROM workflow_control_actions WHERE workflow_id = ? AND proposed_by_message_id = ? AND status = 'pending'", (workflow_id, message_id)).fetchone()
             self._add_event_with_connection(
                 connection, workflow_id, None, "chat", "chat.assistant.completed",
-                {"messageId": message_id, "assistantMessageId": assistant_message_id, "text": content},
+                {"messageId": message_id, "assistantMessageId": assistant_message_id, "text": content, "actionId": proposal[0] if proposal else None},
                 now,
             )
 
@@ -2054,8 +2075,7 @@ class WorkflowStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT action_id, action_type, node_id, status, expires_at,
-                       revision_instruction
+                SELECT *
                 FROM workflow_control_actions
                 WHERE workflow_id = ? AND status = 'pending' AND expires_at > ?
                 ORDER BY created_at DESC LIMIT 1
@@ -2076,10 +2096,11 @@ class WorkflowStore:
             if row is None:
                 raise ValueError("没有等待确认的控制操作。")
             message = connection.execute(
-                "SELECT content FROM workflow_chat_messages WHERE workflow_id = ? "
+                "SELECT * FROM workflow_chat_messages WHERE workflow_id = ? "
                 "AND message_id = ? AND role = 'user'",
                 (workflow_id, message_id),
             ).fetchone()
+            self.validate_control_actor(connection, workflow_id, row, message)
             if message is None or message["content"].strip() != "取消操作":
                 raise ValueError("必须单独回复“取消操作”。")
             connection.execute(
@@ -2195,6 +2216,8 @@ class WorkflowStore:
                 (action_id, workflow_id, action_type, node_id, message_id,
                  workflow["state_version"], revision_instruction, now, expires, now),
             )
+            connection.execute("UPDATE workflow_control_actions SET actor_id = (SELECT actor_id FROM workflow_chat_messages WHERE workflow_id = ? AND message_id = ?), image_ids_json = COALESCE((SELECT image_ids_json FROM workflow_chat_messages WHERE workflow_id = ? AND message_id = ?), '[]') WHERE action_id = ?",
+                (workflow_id, message_id, workflow_id, message_id, action_id))
             self._add_event_with_connection(
                 connection, workflow_id, node_id, "chat", "chat.control.proposed",
                 {"messageId": message_id, "actionId": action_id,
@@ -2229,7 +2252,7 @@ class WorkflowStore:
             if action is None or action["status"] != "pending":
                 raise ValueError("没有可确认的控制操作。")
             confirmation = connection.execute(
-                "SELECT content, created_at FROM workflow_chat_messages "
+                "SELECT * FROM workflow_chat_messages "
                 "WHERE workflow_id = ? AND message_id = ? AND role = 'user'",
                 (workflow_id, message_id),
             ).fetchone()
@@ -2240,6 +2263,7 @@ class WorkflowStore:
                 or message_id == action["proposed_by_message_id"]
             ):
                 raise ValueError("必须在另一条新消息中单独回复“确认执行”。")
+            self.validate_control_actor(connection, workflow_id, action, confirmation)
             if action["expires_at"] <= now:
                 connection.execute(
                     "UPDATE workflow_control_actions SET status = 'expired', updated_at = ? WHERE action_id = ?",
@@ -2301,6 +2325,8 @@ class WorkflowStore:
             "confirmedByMessageId": row["confirmed_by_message_id"],
             "proposedByMessageId": row["proposed_by_message_id"],
             "revisionInstruction": row["revision_instruction"],
+            "actorId": row["actor_id"],
+            "imageIds": json.loads(row["image_ids_json"]),
         }
 
     def finish_control_execution(
@@ -2391,6 +2417,11 @@ class WorkflowStore:
                 raise RuntimeError("仍有步骤没有安全停止：" + "、".join(active))
             self._supersede_pending_advances(connection, workflow_id, "restart", now)
             retry_ordinal = used + 1
+            if action_id:
+                image_action = connection.execute("SELECT image_ids_json FROM workflow_control_actions WHERE action_id = ? AND workflow_id = ?", (action_id, workflow_id)).fetchone()
+                for image_id in json.loads(image_action[0]) if image_action else []:
+                    for target in tail:
+                        connection.execute("INSERT OR IGNORE INTO workflow_revision_images VALUES (?, ?, ?, ?)", (workflow_id, target["node_id"], image_id, action_id))
             if revision_instruction is not None:
                 connection.execute(
                     """
@@ -2610,6 +2641,8 @@ class WorkflowStore:
             "status": row["status"],
             "expiresAt": row["expires_at"],
             "revisionInstruction": row["revision_instruction"],
+            "actorId": row["actor_id"],
+            "imageIds": json.loads(row["image_ids_json"]),
         }
 
     @staticmethod

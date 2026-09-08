@@ -1,3 +1,4 @@
+import base64
 import asyncio
 import hashlib
 import inspect
@@ -357,6 +358,8 @@ class Job:
     staged_artifacts: list[dict[str, Any]] = field(default_factory=list, repr=False)
     captured_files: list[dict[str, Any]] = field(default_factory=list, repr=False)
     artifact_contract: bool = field(default=False, repr=False)
+    input_images: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    input_image_paths: list[str] = field(default_factory=list, repr=False)
 
     def record_event(self, method: str, received_at: str) -> None:
         self.events_seen += 1
@@ -920,6 +923,7 @@ class Orchestrator:
             [dict[str, Any], str], None | Awaitable[None]
         ] | None = None,
         artifact_handoff: dict[str, Any] | None = None,
+        input_images: list[dict[str, Any]] | None = None,
     ) -> Job:
         prompt = prompt.strip()
         if not prompt:
@@ -966,6 +970,11 @@ class Orchestrator:
         ):
             raise PermissionError(f"{agent_id} 未启用完全访问权限。")
 
+        if input_images:
+            if not agent.artifact_root or not agent.allow_write:
+                raise ValueError("接收图片的执行机必须配置 artifact_root 并允许托管文件写入。")
+            if sum(len(value["content"]) for value in input_images) > 20_000_000:
+                raise ValueError("步骤图片合计不能超过 20 MB。")
         job_id = uuid.uuid4().hex
         managed_attempt_dir = None
         managed_output_dir = None
@@ -1046,6 +1055,7 @@ class Orchestrator:
             managed_attempt_dir=managed_attempt_dir,
             managed_output_dir=managed_output_dir,
             staged_artifacts=staged_artifacts,
+            input_images=input_images or [],
             artifact_contract=artifact_handoff is not None,
         )
         self._prune_completed_jobs()
@@ -1239,10 +1249,19 @@ class Orchestrator:
                         )
 
                         job.thread_id = self._extract_id(thread_result, "thread")
+                        if job.input_images:
+                            stage = "image/stage"
+                            image_dir = remote_path_join(agent.artifact_root, "conversation-inputs", job.job_id)
+                            await self._request_with_deadline(client, "fs/createDirectory", {"path": image_dir, "recursive": True}, deadline, job.timeout_sec)
+                            for index, value in enumerate(job.input_images):
+                                extension = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}[value["mediaType"]]
+                                path = remote_path_join(image_dir, f"{index + 1}.{extension}")
+                                await self._request_with_deadline(client, "fs/writeFile", {"path": path, "dataBase64": base64.b64encode(value["content"]).decode("ascii")}, deadline, job.timeout_sec)
+                                job.input_image_paths.append(path)
                         stage = "turn/start"
                         turn_params: dict[str, Any] = {
                             "threadId": job.thread_id,
-                            "input": [{"type": "text", "text": job.prompt}],
+                            "input": [{"type": "text", "text": job.prompt}] + [{"type": "localImage", "path": path} for path in job.input_image_paths],
                             "approvalPolicy": job.approval_policy,
                         }
                         if job.artifact_contract and job.managed_output_dir:
@@ -1982,6 +2001,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             timeout_sec=node["timeoutSec"],
             event_callback=record,
             artifact_handoff=artifact_handoff,
+            input_images=store.node_input_images(workflow_id, node_id),
         )
         if artifact_handoff is not None:
             store.update_node_actual_prompt(workflow_id, node_id, job.prompt)

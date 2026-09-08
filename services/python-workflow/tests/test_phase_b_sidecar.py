@@ -236,6 +236,17 @@ class SidecarStoreTests(unittest.TestCase):
 
 
 class SidecarInternalApiTests(unittest.TestCase):
+    def test_input_images_require_matching_supervisor_and_current_lease(self):
+        lease = self._claim("images-a", "supervisor-a", "token-a")
+        other_lease = self._claim("images-b", "supervisor-b", "token-b")
+        path = "/internal/v1/workflows/images-a/nodes/a/input-images"
+        self.assertEqual(self.client.post(path).status_code, 401)
+        self.assertEqual(self.client.post(path, headers=self._auth("token-b", other_lease)).status_code, 403)
+        self.assertEqual(self.client.post(path, headers=self._auth("token-a")).status_code, 409)
+        response = self.client.post(path, headers=self._auth("token-a", lease))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"images": []})
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

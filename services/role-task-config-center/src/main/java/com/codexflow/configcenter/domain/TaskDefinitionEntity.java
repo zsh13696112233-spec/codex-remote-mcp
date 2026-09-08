@@ -36,7 +36,7 @@ class TaskDefinitionEntity extends Timestamped {
   @Column(name = "additional_notes", columnDefinition = "LONGTEXT")
   String additionalNotes;
 
-  /** 从钉钉启动该任务时使用的唯一人员或群聊；同一对象只能绑定一个任务定义。 */
+  /** 网页和定时运行的主动通知对象；同一对象可接收多个任务的通知。 */
   @ManyToOne
   @JoinColumn(name = "dingtalk_target_id")
   DingTalkTargetEntity dingtalkTarget;

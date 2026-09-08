@@ -8,6 +8,17 @@ import java.util.function.Consumer;
 /** 隔离钉钉官方 SDK，便于业务测试使用内存替身。 */
 interface DingTalkTransport {
 
+  default byte[] downloadImage(String downloadCode) {
+    throw new UnsupportedOperationException("当前通道不支持图片下载。");
+  }
+
+  default DingTalkModels.SendResult sendReply(
+      String target, String targetType, tools.jackson.databind.JsonNode payload) {
+    return "PERSON".equals(targetType)
+        ? sendPersonText(target, payload.path("text").asText())
+        : sendText(target, null, payload.path("text").asText());
+  }
+
   void start(
       Consumer<DingTalkModels.Message> messageHandler,
       Consumer<DingTalkModels.CardAction> actionHandler);

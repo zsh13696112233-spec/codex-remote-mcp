@@ -52,5 +52,24 @@ class ArtifactResponseTest {
     public BinaryResponse artifact(String workflowId, String artifactId) {
       return artifact;
     }
+
+    @Override
+    public BinaryResponse inputImage(String workflowId, String imageId) {
+      return artifact;
+    }
+  }
+
+  @Test
+  void conversationImageProxyPreservesBytesWithoutPublicCaching() {
+    byte[] bytes = new byte[] {1, 2, 3};
+    WorkflowController controller =
+        new WorkflowController(
+            new StubGatewayClient(
+                new GatewayClient.BinaryResponse(bytes, "image/png", "input.png")));
+    var response = controller.inputImage("workflow", "image");
+    assertThat(response.getBody()).isEqualTo(bytes);
+    assertThat(response.getHeaders().getFirst("X-Content-Type-Options")).isEqualTo("nosniff");
+    assertThat(response.getHeaders().getCacheControl()).contains("no-store");
+    assertThat(response.getHeaders().getContentType().toString()).isEqualTo("image/png");
   }
 }

@@ -24,6 +24,21 @@ class DingTalkInboundMessageEntity {
   @Column(name = "sender_user_id", nullable = false, length = 256)
   String senderUserId;
 
+  @Column(name = "conversation_id", length = 256)
+  String conversationId;
+
+  @Column(name = "conversation_type", length = 16)
+  String conversationType;
+
+  @Column(name = "image_ids_json", columnDefinition = "LONGTEXT")
+  String imageIdsJson;
+
+  @Column(name = "session_webhook", columnDefinition = "LONGTEXT")
+  String sessionWebhook;
+
+  @Column(name = "action_id", length = 128)
+  String actionId;
+
   @Column(nullable = false, length = 32)
   String status;
 

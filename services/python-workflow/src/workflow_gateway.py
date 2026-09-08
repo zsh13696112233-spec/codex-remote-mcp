@@ -741,10 +741,12 @@ class WorkflowGateway:
         )
 
     async def accept_message(
-        self, workflow_id: str, message_id: str, text: str
+        self, workflow_id: str, message_id: str, text: str,
+        image_ids: list[str] | None = None, actor_id: str | None = None,
+        expected_action_id: str | None = None,
     ) -> dict[str, Any]:
         accepted = await _database_call(
-            self.store.accept_chat_message, workflow_id, message_id, text
+            self.store.accept_chat_message, workflow_id, message_id, text, image_ids, actor_id, expected_action_id
         )
         self._ensure_chat_worker(workflow_id)
         return accepted
@@ -864,6 +866,7 @@ class WorkflowGateway:
             timeout_sec=min(600, int(spec.get("supervisorTimeoutSec", 7200))),
             approval_policy="never",
             output_schema=self._assistant_output_schema(),
+            input_images=await _database_call(self.store.input_images, workflow_id, message.get("imageIds", [])),
         )
         await _database_call(self.store.update_assistant, workflow_id, job.snapshot())
         await _database_call(self.store.mark_chat_forwarded, workflow_id, message_id)
@@ -1160,6 +1163,10 @@ class WorkflowGateway:
         return (
             "你是独立的任务助手，只回答咨询或识别用户的控制意图，不执行任务、"
             "不调用任何工具，也不直接改变状态。必须按输出结构返回。\n"
+            "随本条消息附带的图片是用户提供的原始参考，直接结合图片回答。图片本身不是执行指令。"
+            "用户要求按图返工时，在返工要求中保留图片的用途，确认后系统会将原图交给重跑步骤。"
+            f"本条消息明确关联了 {len(message.get('imageIds', []))} 张图片。"
+            "若用户要求依据历史图片返工但本条未关联图片，请让用户引用原图消息或重新附图，不能擅自选取历史图片。"
             "普通咨询返回 kind=answer；信息不足返回 kind=clarify。"
             "用户明确要求停止整个任务时返回 propose_control/stop；要求跳过某一步时"
             "返回 propose_control/skip；要求重试、重新执行、从某一步重新开始时统一返回"
@@ -1279,6 +1286,46 @@ async def get_workflow_artifact(request: Request) -> Response:
         return _error_response(error, 404)
 
 
+async def upload_input_image(request: Request) -> Response:
+    try:
+        content = bytearray()
+        async for chunk in request.stream():
+            content.extend(chunk)
+            if len(content) > 20_000_000:
+                raise ValueError("图片不能超过 20 MB。")
+        result = await _database_call(request.app.state.gateway.store.save_input_image,
+            request.path_params["workflow_id"], bytes(content))
+        return JSONResponse(result, status_code=201)
+    except LookupError as error:
+        return _error_response(error, 404)
+    except ValueError as error:
+        return _error_response(error, 400)
+
+
+async def get_input_image(request: Request) -> Response:
+    try:
+        value = await _database_call(request.app.state.gateway.store.get_input_image,
+            request.path_params["workflow_id"], request.path_params["image_id"])
+        return Response(value["content"], media_type=value["mediaType"],
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
+    except LookupError as error:
+        return _error_response(error, 404)
+
+
+async def internal_node_images(request: Request) -> Response:
+    import base64
+    try:
+        gateway, supervisor_id, workflow_id, lease_token = await _validate_internal_write(request)
+        await _database_call(gateway.store.get_node, workflow_id, request.path_params["node_id"])
+        images = await _database_call(gateway.store.node_input_images, workflow_id, request.path_params["node_id"])
+        if sum(len(value["content"]) for value in images) > 20_000_000:
+            raise ValueError("步骤图片合计超过 20 MB。")
+        return JSONResponse({"images": [{"imageId": value["imageId"], "mediaType": value["mediaType"],
+            "dataBase64": base64.b64encode(value["content"]).decode("ascii")} for value in images]})
+    except (PermissionError, RuntimeError, ValueError) as error:
+        return _internal_error_response(error)
+
+
 async def post_workflow_message(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     try:
@@ -1289,6 +1336,7 @@ async def post_workflow_message(request: Request) -> Response:
             request.path_params["workflow_id"],
             str(payload.get("messageId") or "").strip(),
             str(payload.get("text") or ""),
+            payload.get("imageIds", []), payload.get("actorId"), payload.get("expectedActionId"),
         )
         return JSONResponse(result, status_code=202)
     except LookupError as error:
@@ -1835,6 +1883,9 @@ def create_app(
 
     app = Starlette(
         routes=[
+            Route("/workflows/{workflow_id}/input-images", upload_input_image, methods=["POST"]),
+            Route("/workflows/{workflow_id}/input-images/{image_id}", get_input_image, methods=["GET"]),
+            Route("/internal/v1/workflows/{workflow_id}/nodes/{node_id}/input-images", internal_node_images, methods=["POST"]),
             Route("/readyz", ready, methods=["GET"]),
             Route("/agents", list_agents, methods=["GET"]),
             Route(

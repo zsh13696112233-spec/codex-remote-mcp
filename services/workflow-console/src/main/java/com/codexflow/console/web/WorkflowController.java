@@ -91,6 +91,17 @@ public class WorkflowController {
         .body(artifact.body());
   }
 
+  @GetMapping("/workflows/{workflowId}/input-images/{imageId}")
+  public ResponseEntity<byte[]> inputImage(
+      @PathVariable String workflowId, @PathVariable String imageId) {
+    var image = gatewayClient.inputImage(workflowId, imageId);
+    return ResponseEntity.ok()
+        .contentType(MediaType.parseMediaType(image.contentType()))
+        .cacheControl(CacheControl.noStore())
+        .header("X-Content-Type-Options", "nosniff")
+        .body(image.body());
+  }
+
   /** 向指定工作流主监督会话发送消息并返回 HTTP 202。 */
   @PostMapping("/workflows/{workflowId}/messages")
   public ResponseEntity<JsonNode> sendMessage(

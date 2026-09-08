@@ -1,5 +1,6 @@
 package com.codexflow.configcenter.integration.dingtalk;
 
+import java.util.List;
 import java.util.Map;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ObjectNode;
@@ -18,7 +19,77 @@ final class DingTalkModels {
       boolean mentionedBot,
       boolean mentionAll,
       String replyToMessageId,
-      String conversationTitle) {
+      String conversationTitle,
+      List<String> imageCodes,
+      String sessionWebhook,
+      String quotedText) {
+
+    Message(
+        String messageId,
+        String conversationId,
+        String conversationType,
+        String senderUserId,
+        String content,
+        boolean mentionedBot,
+        boolean mentionAll,
+        String replyToMessageId,
+        String conversationTitle,
+        List<String> imageCodes,
+        String sessionWebhook) {
+      this(
+          messageId,
+          conversationId,
+          conversationType,
+          senderUserId,
+          content,
+          mentionedBot,
+          mentionAll,
+          replyToMessageId,
+          conversationTitle,
+          imageCodes,
+          sessionWebhook,
+          null);
+    }
+
+    Message(
+        String messageId,
+        String conversationId,
+        String conversationType,
+        String senderUserId,
+        String content,
+        boolean mentionedBot,
+        boolean mentionAll,
+        String replyToMessageId,
+        String conversationTitle) {
+      this(
+          messageId,
+          conversationId,
+          conversationType,
+          senderUserId,
+          content,
+          mentionedBot,
+          mentionAll,
+          replyToMessageId,
+          conversationTitle,
+          List.of(),
+          null);
+    }
+
+    Message withContent(String text) {
+      return new Message(
+          messageId,
+          conversationId,
+          conversationType,
+          senderUserId,
+          text,
+          mentionedBot,
+          mentionAll,
+          replyToMessageId,
+          conversationTitle,
+          imageCodes,
+          sessionWebhook,
+          quotedText);
+    }
 
     Message(
         String messageId,

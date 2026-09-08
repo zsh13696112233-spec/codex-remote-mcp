@@ -47,6 +47,8 @@ class MockAppServer:
         self.url = ""
         self.authorization: str | None = None
         self.requests: list[dict[str, Any]] = []
+        self.file_writes: dict[str, bytes] = {}
+        self.reject_file_writes = False
         self.interrupt_requests = 0
         self._server: Server | None = None
         self._completion_tasks: set[asyncio.Task[None]] = set()
@@ -82,6 +84,14 @@ class MockAppServer:
 
                 if method == "initialize":
                     await self._result(connection, request_id, {"serverInfo": {"name": "mock"}})
+                elif method in {"fs/createDirectory", "fs/writeFile"}:
+                    if self.reject_file_writes:
+                        await connection.send(json.dumps({"id": request_id, "error": {"code": -32601, "message": "File API unavailable"}}))
+                    else:
+                        if method == "fs/writeFile":
+                            import base64
+                            self.file_writes[message["params"]["path"]] = base64.b64decode(message["params"]["dataBase64"], validate=True)
+                        await self._result(connection, request_id, {})
                 elif method == "configRequirements/read":
                     await self._result(
                         connection,

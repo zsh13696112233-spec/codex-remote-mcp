@@ -205,13 +205,6 @@ public class DingTalkTargetDirectory {
     if (target.deleted || !target.enabled || !target.available) {
       throw new ConflictFailure("所选钉钉通知对象未启用或当前不可用。");
     }
-    tasks
-        .findFirstByDingtalkTargetIdAndDeletedFalse(id)
-        .filter(owner -> !owner.id.equals(taskId))
-        .ifPresent(
-            owner -> {
-              throw new ConflictFailure("该钉钉通知对象已绑定其他任务定义。");
-            });
     return target;
   }
 

@@ -12,6 +12,16 @@ import org.springframework.data.repository.query.Param;
 /** 任务定义的 Spring Data JPA 数据访问接口。 */
 interface TaskDefinitionRepository extends JpaRepository<TaskDefinitionEntity, String> {
 
+  interface NamedTask {
+    String getId();
+
+    String getName();
+  }
+
+  @Query(
+      "SELECT task.id AS id, task.name AS name FROM TaskDefinitionEntity task WHERE task.deleted = false AND task.name = :name")
+  List<NamedTask> findNamedCandidates(@Param("name") String name);
+
   /** 查询未软删除且名称匹配的任务定义，并按创建时间倒序返回。 */
   List<TaskDefinitionEntity> findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(
       String query);

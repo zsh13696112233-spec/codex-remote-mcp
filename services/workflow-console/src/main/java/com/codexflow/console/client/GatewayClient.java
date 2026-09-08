@@ -99,7 +99,16 @@ public class GatewayClient {
 
   /** 读取工作流发布的任意文件附件。 */
   public BinaryResponse artifact(String workflowId, String artifactId) {
-    String path = "/workflows/" + pathSegment(workflowId) + "/artifacts/" + pathSegment(artifactId);
+    return binary(
+        "/workflows/" + pathSegment(workflowId) + "/artifacts/" + pathSegment(artifactId));
+  }
+
+  public BinaryResponse inputImage(String workflowId, String imageId) {
+    return binary(
+        "/workflows/" + pathSegment(workflowId) + "/input-images/" + pathSegment(imageId));
+  }
+
+  private BinaryResponse binary(String path) {
     try {
       HttpRequest request =
           HttpRequest.newBuilder(gatewayBaseUri.resolve(path))

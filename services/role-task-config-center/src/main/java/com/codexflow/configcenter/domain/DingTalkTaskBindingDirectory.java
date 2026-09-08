@@ -31,6 +31,27 @@ public class DingTalkTaskBindingDirectory {
     return new StartRoute("started", task.id, prepared.workflowId(), view(task), prepared);
   }
 
+  @Transactional
+  public StartRoute reserveNamed(String name) {
+    var matches =
+        tasks.findNamedCandidates(name.trim()).stream()
+            .filter(task -> task.getName().equals(name.trim()))
+            .toList();
+    if (matches.isEmpty()) throw new NotFoundFailure("找不到任务定义，请发送完整任务名称或工作流编号加问题。");
+    if (matches.size() != 1) throw new ConflictFailure("任务定义名称重复，请联系管理员调整名称。");
+    TaskDefinitionEntity task = requiredForUpdate(matches.get(0).getId());
+    if (!task.name.equals(name.trim())) throw new ConflictFailure("任务名称已变化，请重新发送。");
+    if (task.deleted || !task.enabled || task.sop.deleted || !task.sop.enabled) {
+      throw new ConflictFailure("任务定义或所选 SOP 已停用或删除。");
+    }
+    String active = taskLaunches.activeWorkflowId(task.id).orElse(null);
+    if (active != null) return new StartRoute("busy", task.id, active, null, null);
+    PreparedRun prepared = taskLaunches.reserveLatest(task.id).prepared();
+    task.dingtalkActiveWorkflowId = prepared.workflowId();
+    tasks.saveAndFlush(task);
+    return new StartRoute("started", task.id, prepared.workflowId(), null, prepared);
+  }
+
   @Transactional(readOnly = true)
   public Optional<ActiveRoute> active(String clientId, String targetType, String externalId) {
     return tasks

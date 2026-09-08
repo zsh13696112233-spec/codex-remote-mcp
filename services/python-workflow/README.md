@@ -4,6 +4,8 @@
 
 ## 文件说明
 
+钉钉图文对话新增 `POST /workflows/{workflowId}/input-images`（原始图片字节上传，返回 `imageId`）和 `GET /workflows/{workflowId}/input-images/{imageId}`（只读原图）。消息接口新增可选 `imageIds`、`actorId`、`expectedActionId`；原有纯文字调用兼容。调用者和确认操作由运行库事务校验。远程 Sidecar 通过带机器认证和当前租约的 `POST /internal/v1/workflows/{workflowId}/nodes/{nodeId}/input-images` 获取该步骤已确认的输入图。部署及容量限制见[钉钉图片升级说明](../../docs/DINGTALK_UNIFIED_ENTRY_UPGRADE.zh-CN.md)。
+
 ```text
 python-workflow/
 ├── src/

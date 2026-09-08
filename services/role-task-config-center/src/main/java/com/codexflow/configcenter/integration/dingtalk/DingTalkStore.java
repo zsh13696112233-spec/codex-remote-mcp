@@ -63,12 +63,10 @@ class DingTalkStore {
     if (duplicate.isPresent()) {
       return new DingTalkModels.StartReservation("duplicate", duplicate.get().workflowId, null);
     }
-    DingTalkTaskBindingDirectory.StartRoute route =
-        taskBindings.reserveStart(clientId, incomingTargetType(message), incomingTargetId(message));
+    DingTalkTaskBindingDirectory.StartRoute route = taskBindings.reserveNamed(message.content());
     if (!"started".equals(route.outcome())) {
       return new DingTalkModels.StartReservation(route.outcome(), route.workflowId(), null);
     }
-    DingTalkTargetDirectory.TargetView target = route.target();
     Instant now = Instant.now();
     DingTalkWorkflowBindingEntity binding = new DingTalkWorkflowBindingEntity();
     binding.workflowId = route.workflowId();
@@ -77,9 +75,9 @@ class DingTalkStore {
     binding.triggerMessageId = message.messageId();
     binding.triggerSource = "dingtalk";
     binding.conversationId = message.conversationId();
-    binding.targetType = target.targetType();
-    binding.targetExternalId = target.externalId();
-    binding.targetName = target.displayName();
+    binding.targetType = incomingTargetType(message);
+    binding.targetExternalId = incomingTargetId(message);
+    binding.targetName = message.conversationTitle();
     binding.rootMessageId = message.messageId();
     binding.initiatorUserId = message.senderUserId();
     binding.status = "submitting";
@@ -117,6 +115,181 @@ class DingTalkStore {
     targetDirectory.discoverGroup(clientId, message.conversationId(), message.conversationTitle());
   }
 
+  @Transactional
+  public void ensureConversation(
+      String clientId,
+      String workflowId,
+      String taskId,
+      DingTalkModels.Message message,
+      String status) {
+    if (bindings.existsById(workflowId)) return;
+    DingTalkWorkflowBindingEntity binding = new DingTalkWorkflowBindingEntity();
+    binding.workflowId = workflowId;
+    binding.clientId = clientId;
+    binding.taskDefinitionId = taskId;
+    binding.triggerSource = "chat";
+    binding.conversationId = message.conversationId();
+    binding.targetType = incomingTargetType(message);
+    binding.targetExternalId = incomingTargetId(message);
+    binding.status =
+        List.of("queued", "running", "cancelling").contains(status) ? "active" : "terminal";
+    binding.createdAt = Instant.now();
+    binding.updatedAt = binding.createdAt;
+    bindings.saveAndFlush(binding);
+  }
+
+  public DingTalkModels.Binding route(String workflowId, DingTalkModels.Message message) {
+    return new DingTalkModels.Binding(
+        workflowId,
+        message.conversationId(),
+        incomingTargetType(message),
+        incomingTargetId(message),
+        message.conversationTitle(),
+        message.messageId(),
+        "chat",
+        "active",
+        0,
+        null,
+        false);
+  }
+
+  @Transactional
+  public void enqueueReply(
+      String dedupKey, String workflowId, DingTalkModels.Message message, String text) {
+    var payload =
+        objectMapper
+            .createObjectNode()
+            .put("text", (workflowId == null ? "" : "工作流编号：" + workflowId + "\n") + text)
+            .put("atUserId", message.senderUserId())
+            .put("sessionWebhook", message.sessionWebhook());
+    enqueue(
+        dedupKey,
+        workflowId,
+        message.conversationId(),
+        incomingTargetType(message),
+        incomingTargetId(message),
+        message.messageId(),
+        "reply",
+        payload);
+  }
+
+  @Transactional
+  public void completeReply(
+      String workflowId, String workflowMessageId, long sequence, String text, String actionId) {
+    DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
+    if (sequence <= binding.eventCursor) return;
+    inboundMessages
+        .findByWorkflowIdAndWorkflowMessageId(workflowId, workflowMessageId)
+        .ifPresent(
+            inbound -> {
+              String conversationId =
+                  inbound.conversationId == null ? binding.conversationId : inbound.conversationId;
+              boolean group =
+                  inbound.conversationType == null
+                      ? "GROUP".equals(binding.targetType)
+                      : "2".equals(inbound.conversationType);
+              var payload =
+                  objectMapper
+                      .createObjectNode()
+                      .put("text", "工作流编号：" + workflowId + "\n" + text)
+                      .put("atUserId", inbound.senderUserId)
+                      .put("sessionWebhook", inbound.sessionWebhook)
+                      .put("actionId", actionId);
+              inbound.actionId = actionId;
+              enqueue(
+                  "assistant:" + workflowMessageId,
+                  workflowId,
+                  conversationId,
+                  group ? "GROUP" : "PERSON",
+                  group ? conversationId : inbound.senderUserId,
+                  inbound.messageId,
+                  "reply",
+                  payload);
+            });
+    binding.eventCursor = sequence;
+    binding.updatedAt = Instant.now();
+  }
+
+  @Transactional(readOnly = true)
+  public String quotedAction(DingTalkModels.Message message) {
+    return quotedOutgoing(message)
+        .map(this::toOutbox)
+        .map(item -> item.payload().path("actionId").asText(null))
+        .orElse(null);
+  }
+
+  private Optional<DingTalkOutboxEntity> quotedOutgoing(DingTalkModels.Message message) {
+    if (hasTextValue(message.replyToMessageId())) {
+      var found =
+          outbox.findFirstByConversationIdAndSentMessageIdOrderByCreatedAtDesc(
+              message.conversationId(), message.replyToMessageId());
+      if (found.isPresent()) return found;
+    }
+    // Some session replies do not return msgId. Only match exact content of an actually sent reply.
+    if (!hasTextValue(message.quotedText())) return Optional.empty();
+    var matches =
+        outbox
+            .findTop50ByConversationIdAndStatusOrderByCreatedAtDesc(
+                message.conversationId(), "sent")
+            .stream()
+            .filter(
+                item ->
+                    message
+                        .quotedText()
+                        .trim()
+                        .equals(toOutbox(item).payload().path("text").asText().trim()))
+            .toList();
+    return matches.size() == 1 ? Optional.of(matches.get(0)) : Optional.empty();
+  }
+
+  private static boolean hasTextValue(String value) {
+    return value != null && !value.isBlank();
+  }
+
+  @Transactional(readOnly = true)
+  public List<String> messageImages(String messageId, String workflowId, String conversationId) {
+    if (messageId == null) return List.of();
+    return inboundMessages
+        .findById(messageId)
+        .filter(
+            item ->
+                workflowId.equals(item.workflowId) && conversationId.equals(item.conversationId))
+        .map(
+            item -> {
+              if (item.imageIdsJson == null) return List.<String>of();
+              try {
+                var ids = new ArrayList<String>();
+                for (JsonNode value : objectMapper.readTree(item.imageIdsJson))
+                  ids.add(value.asText());
+                return List.copyOf(ids);
+              } catch (Exception error) {
+                throw new IllegalStateException("无法读取图片关联。");
+              }
+            })
+        .orElse(List.of());
+  }
+
+  @Transactional(readOnly = true)
+  public List<String> referencedImages(DingTalkModels.Message message, String workflowId) {
+    String source =
+        quotedOutgoing(message)
+            .filter(item -> workflowId.equals(item.workflowId))
+            .map(item -> item.replyToMessageId)
+            .orElse(message.replyToMessageId());
+    return messageImages(source, workflowId, message.conversationId());
+  }
+
+  @Transactional
+  public void saveMessageImages(String messageId, List<String> imageIds, boolean awaitingText) {
+    var item = inboundMessages.findById(messageId).orElseThrow();
+    try {
+      item.imageIdsJson = objectMapper.writeValueAsString(imageIds);
+    } catch (Exception error) {
+      throw new IllegalStateException("无法保存图片关联。");
+    }
+    if (awaitingText) item.status = "awaiting_text";
+  }
+
   @Transactional(readOnly = true)
   public Optional<DingTalkModels.Binding> active(String clientId, DingTalkModels.Message message) {
     return taskBindings
@@ -143,8 +316,19 @@ class DingTalkStore {
   @Transactional(readOnly = true)
   public Optional<DingTalkModels.Binding> conversation(
       String clientId, DingTalkModels.Message message) {
+    var outgoing =
+        quotedOutgoing(message)
+            .filter(item -> item.workflowId != null)
+            .flatMap(item -> bindings.findById(item.workflowId))
+            .filter(item -> clientId.equals(item.clientId))
+            .map(DingTalkStore::toBinding);
+    if (outgoing.isPresent()) return outgoing;
     String repliedMessageId = blankToNull(message.replyToMessageId());
     if (repliedMessageId == null) return Optional.empty();
+    var inbound = inboundMessages.findById(repliedMessageId);
+    if (inbound.isPresent() && message.conversationId().equals(inbound.get().conversationId)) {
+      return binding(inbound.get().workflowId);
+    }
     Optional<DingTalkWorkflowBindingEntity> byRoot =
         bindings.findFirstByClientIdAndConversationIdAndRootMessageIdOrderByCreatedAtDesc(
             clientId, message.conversationId(), repliedMessageId);
@@ -248,6 +432,9 @@ class DingTalkStore {
     entity.workflowId = binding.workflowId();
     entity.workflowMessageId = workflowMessageId;
     entity.senderUserId = message.senderUserId();
+    entity.conversationId = message.conversationId();
+    entity.conversationType = message.conversationType();
+    entity.sessionWebhook = message.sessionWebhook();
     entity.status = "accepted";
     entity.createdAt = now;
     entity.updatedAt = now;
@@ -468,7 +655,7 @@ class DingTalkStore {
   @Transactional
   public void markOutboxFailed(String id, RuntimeException error) {
     DingTalkOutboxEntity item = outbox.findById(id).orElseThrow();
-    item.status = "failed";
+    item.status = "reply".equals(item.messageKind) ? "abandoned" : "failed";
     item.lastError = abbreviate(error.getMessage(), 2000);
     item.nextAttemptAt =
         Instant.now().plus(Math.min(60, 1L << Math.min(item.attemptCount, 6)), ChronoUnit.SECONDS);

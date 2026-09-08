@@ -194,7 +194,7 @@ function consume(event) {
   const payload = event.payload || {};
   if (event.type === "chat.user.accepted") {
     upsertMessage({id: payload.messageId, role: "user", time: event.createdAt,
-      text: text(payload.text), status: "accepted", streaming: false});
+      text: text(payload.text), imageIds: payload.imageIds || [], status: "accepted", streaming: false});
     return;
   }
   if (event.type === "chat.user.forwarded") {
@@ -310,6 +310,19 @@ function renderMessages() {
     meta.append(make("strong", "", isUser ? "我" : sourceLabel), make("time", "", fmt(message.time)));
     const bubble = make("div", "bubble");
     bubble.append(make("p", "", message.text));
+    for (const imageId of message.imageIds || []) {
+      const link = make("a", "");
+      link.href = `/api/workflows/${encodeURIComponent(state.workflowId)}/input-images/${encodeURIComponent(imageId)}`;
+      link.target = "_blank";
+      link.rel = "noopener";
+      const image = make("img", "conversation-image");
+      image.src = link.href;
+      image.alt = "对话输入图片";
+      image.loading = "lazy";
+      image.style.cssText = "max-width:240px;max-height:180px;object-fit:contain";
+      link.append(image);
+      bubble.append(link);
+    }
     if (message.streaming) bubble.append(make("i", "typing-caret"));
     if (message.status === "failed") {
       bubble.append(make("span", "chat-error", message.error || "发送失败，请重试"));

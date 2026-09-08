@@ -9,6 +9,9 @@ import org.springframework.data.repository.query.Param;
 
 interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, String> {
 
+  List<DingTalkOutboxEntity> findTop50ByConversationIdAndStatusOrderByCreatedAtDesc(
+      String conversationId, String status);
+
   boolean existsByDedupKey(String dedupKey);
 
   Optional<DingTalkOutboxEntity> findFirstByConversationIdAndSentMessageIdOrderByCreatedAtDesc(

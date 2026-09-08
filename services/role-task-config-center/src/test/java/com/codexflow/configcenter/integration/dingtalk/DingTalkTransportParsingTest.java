@@ -10,6 +10,34 @@ import tools.jackson.databind.node.ObjectNode;
 /** 验证钉钉 Stream 原始消息和卡片回调到内部模型的映射。 */
 class DingTalkTransportParsingTest {
 
+  @Test
+  void richTextKeepsTextAndOriginalImageOrder() {
+    var message =
+        transport.toMessage(
+            """
+        {"msgId":"m", "conversationId":"g", "conversationType":"2", "senderStaffId":"bob",
+         "isInAtList":true, "sessionWebhook":"https://oapi.dingtalk.com/robot/sendBySession?session=test",
+         "msgtype":"richText", "content":{"richText":[{"text":"编号 问题"},
+           {"type":"picture", "downloadCode":"first"}, {"type":"picture", "pictureDownloadCode":"second"}]}}
+        """);
+    assertThat(message.content()).isEqualTo("编号 问题");
+    assertThat(message.imageCodes()).containsExactly("first", "second");
+    assertThat(message.senderUserId()).isEqualTo("bob");
+    assertThat(message.sessionWebhook()).contains("sendBySession");
+  }
+
+  @Test
+  void pictureMessageWithoutTextRetainsItsDownloadCode() {
+    var message =
+        transport.toMessage(
+            """
+        {"msgId":"m", "conversationId":"g", "conversationType":"1", "senderStaffId":"bob",
+         "msgtype":"picture", "content":{"downloadCode":"original"}}
+        """);
+    assertThat(message.content()).isEmpty();
+    assertThat(message.imageCodes()).containsExactly("original");
+  }
+
   private final ObjectMapper objectMapper = new ObjectMapper();
   private final OfficialDingTalkTransport transport =
       new OfficialDingTalkTransport(new DingTalkProperties(), objectMapper);

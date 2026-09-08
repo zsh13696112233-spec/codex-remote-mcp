@@ -32,6 +32,9 @@ import tools.jackson.databind.node.ObjectNode;
 @SpringBootTest
 class DingTalkStoreIntegrationTest {
 
+  private String lastTaskName;
+  private final java.util.Map<String, String> namesByConversation = new java.util.HashMap<>();
+
   @Autowired DingTalkStore store;
   @Autowired ConfigService config;
   @Autowired JdbcTemplate jdbc;
@@ -367,15 +370,13 @@ class DingTalkStoreIntegrationTest {
   }
 
   @Test
-  void oneTargetCannotBindTwoTaskDefinitions() {
+  void oneTargetCanNotifyMultipleTaskDefinitions() {
     String clientId = "app-" + UUID.randomUUID();
     String sopId = createSop();
     String targetId = createGroupTarget(clientId, "chat-unique", "唯一绑定群");
     createBoundTask(sopId, targetId);
 
-    assertThatThrownBy(() -> createBoundTask(sopId, targetId))
-        .isInstanceOf(ConflictFailure.class)
-        .hasMessageContaining("已绑定其他任务定义");
+    assertThat(createBoundTask(sopId, targetId)).isNotBlank();
   }
 
   @Test
@@ -436,15 +437,15 @@ class DingTalkStoreIntegrationTest {
   }
 
   @Test
-  void rejectsStartFromGroupOtherThanSopTarget() {
+  void anyGroupCanStartNamedTask() {
     String clientId = "app-" + UUID.randomUUID();
     String taskId = createTask(clientId);
     store.initialize(clientId);
     DingTalkModels.Message wrongGroup =
         new DingTalkModels.Message(
-            "wrong-group-trigger", "chat-2", "2", "user-2", "运行", true, false, null);
+            "wrong-group-trigger", "chat-2", "2", "user-2", lastTaskName, true, false, null);
 
-    assertThat(store.reserveStart(clientId, wrongGroup).outcome()).isEqualTo("unauthorized");
+    assertThat(store.reserveStart(clientId, wrongGroup).outcome()).isEqualTo("started");
     assertThat(store.active(clientId, wrongGroup)).isEmpty();
   }
 
@@ -577,6 +578,56 @@ class DingTalkStoreIntegrationTest {
     return createTask(null);
   }
 
+  @Test
+  void namedTaskNeedsNoNotificationTarget() {
+    String taskId = createTask();
+    var result = store.reserveStart("unbound-app", message("unbound-start"));
+    assertThat(result.outcome()).isEqualTo("started");
+    assertThat(taskLaunches.activeWorkflowId(taskId)).contains(result.workflowId());
+  }
+
+  @Test
+  void crossGroupReplyDoesNotMoveProactiveNotificationTarget() {
+    String clientId = "app-" + UUID.randomUUID();
+    String taskId = createTask(clientId);
+    String workflowId = taskLaunches.reserveLatest(taskId).prepared().workflowId();
+    store.reserveProactive(clientId, taskId, workflowId, "web");
+    store.markSubmitted(workflowId);
+    var question =
+        new DingTalkModels.Message(
+            "cross-" + UUID.randomUUID(),
+            "another-group",
+            "2",
+            "bob",
+            "为什么",
+            true,
+            false,
+            null,
+            "另一个群",
+            List.of(),
+            "https://oapi.dingtalk.com/robot/sendBySession?session=test");
+    store.ensureConversation(clientId, workflowId, taskId, question, "running");
+    var incoming = store.registerInbound(clientId, store.route(workflowId, question), question);
+    store.completeReply(workflowId, incoming.workflowMessageId(), 10, "回答", "action-1");
+    var outgoing =
+        store.claimDue().stream()
+            .filter(item -> workflowId.equals(item.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(outgoing.targetExternalId()).isEqualTo("another-group");
+    assertThat(outgoing.payload().path("atUserId").asText()).isEqualTo("bob");
+    assertThat(outgoing.payload().path("text").asText()).contains(workflowId, "回答");
+    assertThat(store.binding(workflowId).orElseThrow().targetExternalId()).isEqualTo("chat-1");
+    assertThat(store.binding(workflowId).orElseThrow().triggerSource()).isEqualTo("web");
+    store.markOutboxSent(outgoing.id(), "real-reply-id");
+    var quoted =
+        new DingTalkModels.Message(
+            "quote", "another-group", "2", "bob", "确认执行", true, false, "real-reply-id");
+    assertThat(store.conversation(clientId, quoted).orElseThrow().workflowId())
+        .isEqualTo(workflowId);
+    assertThat(store.quotedAction(quoted)).isEqualTo("action-1");
+  }
+
   private String createTask(String clientId) {
     String targetId = clientId == null ? null : createGroupTarget(clientId, "chat-1", "测试群");
     return createBoundTask(createSop(), targetId);
@@ -614,20 +665,35 @@ class DingTalkStoreIntegrationTest {
   }
 
   private String createBoundTask(String sopId, String targetId) {
+    lastTaskName = "钉钉任务-" + UUID.randomUUID();
+    String conversationId =
+        targetId == null
+            ? "chat-1"
+            : jdbc.queryForObject(
+                "select external_id from codex_sop_dingtalk_targets where id = ?",
+                String.class,
+                targetId);
+    namesByConversation.put(conversationId, lastTaskName);
     return config
         .createTask(
-            new TaskDefinitionSaveRequest(
-                "钉钉任务-" + UUID.randomUUID(), "验证钉钉任务启动", sopId, null, true, targetId))
+            new TaskDefinitionSaveRequest(lastTaskName, "验证钉钉任务启动", sopId, null, true, targetId))
         .path("id")
         .asText();
   }
 
-  private static DingTalkModels.Message message(String messageId) {
+  private DingTalkModels.Message message(String messageId) {
     return message(messageId, "chat-1");
   }
 
-  private static DingTalkModels.Message message(String messageId, String conversationId) {
+  private DingTalkModels.Message message(String messageId, String conversationId) {
     return new DingTalkModels.Message(
-        messageId, conversationId, "2", "user-1", "运行", true, false, null);
+        messageId,
+        conversationId,
+        "2",
+        "user-1",
+        namesByConversation.getOrDefault(conversationId, lastTaskName),
+        true,
+        false,
+        null);
   }
 }

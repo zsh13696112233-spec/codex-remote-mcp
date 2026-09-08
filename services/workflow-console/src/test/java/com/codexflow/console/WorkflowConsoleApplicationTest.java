@@ -22,14 +22,14 @@ class WorkflowConsoleApplicationTest {
 
   /** 确认监控中心只暴露读取、聊天和半自动暂停/继续接口。 */
   @Test
-  void applicationContextLoadsWithFourReadsAndThreeRestrictedPosts() {
+  void applicationContextLoadsWithFiveReadsAndThreeRestrictedPosts() {
     var apiMethods =
         mappings.getHandlerMethods().entrySet().stream()
             .filter(
                 entry ->
                     entry.getKey().getPatternValues().stream().anyMatch(p -> p.startsWith("/api/")))
             .toList();
-    assertThat(apiMethods).hasSize(7);
+    assertThat(apiMethods).hasSize(8);
     var getRoutes =
         apiMethods.stream()
             .filter(
@@ -42,7 +42,7 @@ class WorkflowConsoleApplicationTest {
                 entry ->
                     entry.getKey().getMethodsCondition().getMethods().contains(RequestMethod.POST))
             .toList();
-    assertThat(getRoutes).hasSize(4);
+    assertThat(getRoutes).hasSize(5);
     assertThat(postRoutes).hasSize(3);
     assertThat(postRoutes)
         .flatExtracting(entry -> entry.getKey().getPatternValues())

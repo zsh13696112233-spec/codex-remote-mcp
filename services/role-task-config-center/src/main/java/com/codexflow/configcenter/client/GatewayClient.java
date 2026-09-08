@@ -39,6 +39,28 @@ public class GatewayClient {
     return exchange("POST", path, body);
   }
 
+  public JsonNode uploadImage(String workflowId, byte[] content) {
+    try {
+      var request =
+          HttpRequest.newBuilder(
+                  gatewayBaseUri.resolve("/workflows/" + workflowId + "/input-images"))
+              .timeout(Duration.ofSeconds(30))
+              .header("Content-Type", "application/octet-stream")
+              .POST(HttpRequest.BodyPublishers.ofByteArray(content))
+              .build();
+      var response =
+          httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+      if (response.statusCode() != 201)
+        throw new GatewayFailure(response.statusCode(), response.body());
+      return objectMapper.readTree(response.body());
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      throw new GatewayFailure(502, "图片传递被中断。");
+    } catch (IOException error) {
+      throw new GatewayFailure(502, "图片传递失败。");
+    }
+  }
+
   /** 构建并执行 HTTP 请求，将成功响应解析为 JSON，并统一转换网络异常。 */
   private JsonNode exchange(String method, String path, JsonNode body) {
     try {

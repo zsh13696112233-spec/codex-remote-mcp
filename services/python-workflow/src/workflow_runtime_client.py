@@ -136,6 +136,12 @@ class InternalApiClient:
         )
         return bool(result.get("released"))
 
+    def node_input_images(self, workflow_id: str, node_id: str) -> list[dict[str, Any]]:
+        import base64
+        result = self._lease_request("POST", workflow_id, self._node_path(workflow_id, node_id) + "/input-images", {})
+        return [{"imageId": value["imageId"], "mediaType": value["mediaType"],
+                 "content": base64.b64decode(value["dataBase64"], validate=True)} for value in result["images"]]
+
     def prepare_node_dispatch(
         self, workflow_id: str, node_id: str
     ) -> dict[str, Any]:
