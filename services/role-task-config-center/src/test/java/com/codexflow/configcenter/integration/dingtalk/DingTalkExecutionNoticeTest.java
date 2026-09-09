@@ -28,7 +28,8 @@ class DingTalkExecutionNoticeTest {
   void hidesOnlySupervisorPollingToolsAcrossTheirLifecycle() {
     for (String type : new String[] {"mcpToolCall", "dynamicToolCall"}) {
       for (String method : new String[] {"item/started", "item/completed"}) {
-        for (String tool : new String[] {"wait_node", "node_status", "workflow_status"}) {
+        for (String tool :
+            new String[] {"wait_node", "node_status", "workflow_status", "dispatch_node"}) {
           var event = event(method, type).put("source", "supervisor");
           item(event).put("tool", tool);
           assertThat(DingTalkExecutionNotice.execution(event)).isEmpty();
@@ -46,7 +47,7 @@ class DingTalkExecutionNoticeTest {
     var event = event("item/completed", "agentMessage").put("source", "supervisor");
     item(event).put("phase", "commentary").put("text", "策划已完成，开始开发");
     assertThat(DingTalkExecutionNotice.execution(event)).contains("策划已完成，开始开发");
-    for (String tool : new String[] {"dispatch_node", "cancel_node"}) {
+    for (String tool : new String[] {"cancel_node"}) {
       event = event("item/started", "mcpToolCall").put("source", "supervisor");
       item(event).put("tool", tool);
       assertThat(DingTalkExecutionNotice.execution(event)).startsWith("正在");
@@ -69,9 +70,9 @@ class DingTalkExecutionNoticeTest {
     item(event).put("tool", "dispatch_node");
     item(event).putObject("arguments").put("node_id", "node-a").put("workflow_id", "workflow-a");
     item(event).putObject("result").put("internal", "raw-result");
-    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEqualTo("正在启动步骤「策划」");
+    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEmpty();
     event.put("type", "appserver.item/completed");
-    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEqualTo("已启动步骤「策划」");
+    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEmpty();
     item(event).put("tool", "cancel_node");
     assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEqualTo("已提交步骤「策划」的停止请求");
     item(event).put("status", "failed");
@@ -83,6 +84,41 @@ class DingTalkExecutionNoticeTest {
     event.put("source", "worker");
     assertThat(DingTalkExecutionNotice.execution(event, snapshot))
         .contains("node-a", "workflow-a", "raw-result");
+  }
+
+  @Test
+  void waitingHidesSupervisorOnlyAndDelayedMessagesStayHiddenAfterRelease() {
+    var snapshot = json.createObjectNode().put("advanceMode", "semi_automatic");
+    var nodes = snapshot.putArray("nodes");
+    // 故意按相反顺序排列，流转关系只取 dependsOn。
+    var next = nodes.addObject().put("id", "b").put("startedAt", "2026-09-09T06:35:00Z");
+    next.putArray("dependsOn").add("a");
+    nodes
+        .addObject()
+        .put("id", "a")
+        .put("status", "completed")
+        .put("finishedAt", "2026-09-09T06:33:00Z");
+    var event =
+        event("item/completed", "agentMessage")
+            .put("source", "supervisor")
+            .put("createdAt", "2026-09-09T14:33:10+08:00");
+    item(event).put("phase", "commentary").put("text", "开始开发");
+    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEmpty();
+    event.put("createdAt", "2026-09-09T06:35:00Z");
+    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).contains("开始开发");
+    for (String state : new String[] {"countdown", "held"}) {
+      snapshot.putObject("pendingAdvance").put("gateId", "gate").put("state", state);
+      assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEmpty();
+      event.put("source", "worker");
+      assertThat(DingTalkExecutionNotice.execution(event, snapshot)).contains("开始开发");
+      event.put("source", "assistant");
+      assertThat(DingTalkExecutionNotice.suppressWhileWaiting(event, snapshot)).isFalse();
+      event.put("source", "supervisor");
+    }
+    snapshot.remove("pendingAdvance");
+    snapshot.put("advanceMode", "automatic");
+    event.put("createdAt", "2026-09-09T06:33:10Z");
+    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).contains("开始开发");
   }
 
   @Test

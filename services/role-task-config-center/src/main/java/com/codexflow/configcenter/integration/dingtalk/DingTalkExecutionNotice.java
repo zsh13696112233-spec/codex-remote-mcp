@@ -1,6 +1,7 @@
 package com.codexflow.configcenter.integration.dingtalk;
 
 import java.net.URI;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Locale;
 import java.util.Map;
@@ -17,16 +18,17 @@ final class DingTalkExecutionNotice {
   }
 
   static String execution(JsonNode event, JsonNode snapshot) {
+    if (suppressWhileWaiting(event, snapshot)) return "";
     boolean started = "appserver.item/started".equals(event.path("type").asText());
     boolean completed = "appserver.item/completed".equals(event.path("type").asText());
     if (!started && !completed) return "";
     JsonNode item = event.path("payload").path("message").path("params").path("item");
     String type = item.path("type").asText();
-    // 只隐藏主监督的轮询工具；业务步骤及任务助手的同名工具仍正常展示。
+    // 隐藏主监督轮询和派发请求；业务步骤及任务助手的同名工具仍正常展示。
     if ("supervisor".equals(event.path("source").asText())
         && ("mcpToolCall".equals(type) || "dynamicToolCall".equals(type))
         && switch (item.path("tool").asText()) {
-          case "wait_node", "node_status", "workflow_status" -> true;
+          case "wait_node", "node_status", "workflow_status", "dispatch_node" -> true;
           default -> false;
         }) return "";
     String text = "";
@@ -70,7 +72,7 @@ final class DingTalkExecutionNotice {
         if ("supervisor".equals(event.path("source").asText())
             && ("mcpToolCall".equals(type) || "dynamicToolCall".equals(type))) {
           String action = item.path("tool").asText();
-          if ("dispatch_node".equals(action) || "cancel_node".equals(action)) {
+          if ("cancel_node".equals(action)) {
             String target = "步骤";
             String nodeId = item.path("arguments").path("node_id").asText();
             if (snapshot != null && !nodeId.isBlank()) {
@@ -81,10 +83,9 @@ final class DingTalkExecutionNotice {
                 }
               }
             }
-            String verb = "dispatch_node".equals(action) ? "启动" : "停止";
-            if (started) return "正在" + verb + target;
-            if (failed) return verb + target + "未成功，请查看任务进度。";
-            return "dispatch_node".equals(action) ? "已启动" + target : "已提交" + target + "的停止请求";
+            if (started) return "正在停止" + target;
+            if (failed) return "停止" + target + "未成功，请查看任务进度。";
+            return "已提交" + target + "的停止请求";
           }
         }
         text = "工具调用：" + tool + " · " + (started ? "开始执行" : failed ? "未成功" : "已完成");
@@ -93,6 +94,34 @@ final class DingTalkExecutionNotice {
       }
     }
     return safe(text);
+  }
+
+  // 主监督发出派发请求时可能仍在等待；实际启动由 node.started 通知。
+  // 同时按事件发生时间判断，避免等待期间的文字在放行后才被轮询、补发。
+  static boolean suppressWhileWaiting(JsonNode event, JsonNode snapshot) {
+    if (snapshot == null || !"supervisor".equals(event.path("source").asText())) return false;
+    if (!snapshot.path("pendingAdvance").path("gateId").asText().isBlank()) return true;
+    if (!"semi_automatic".equals(snapshot.path("advanceMode").asText())) return false;
+    Instant emitted = timestamp(event.path("createdAt"));
+    if (emitted == null) return false;
+    for (JsonNode completed : snapshot.path("nodes")) {
+      if (!"completed".equals(completed.path("status").asText())) continue;
+      Instant finished = timestamp(completed.path("finishedAt"));
+      if (finished == null || emitted.isBefore(finished)) continue;
+      for (JsonNode next : snapshot.path("nodes")) {
+        for (JsonNode dependency : next.path("dependsOn")) {
+          if (!dependency.asText().equals(completed.path("id").asText())) continue;
+          Instant started = timestamp(next.path("startedAt"));
+          if (started == null || emitted.isBefore(started)) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private static Instant timestamp(JsonNode value) {
+    if (value.asText().isBlank()) return null;
+    return Instant.parse(value.asText());
   }
 
   private static String toolDetails(

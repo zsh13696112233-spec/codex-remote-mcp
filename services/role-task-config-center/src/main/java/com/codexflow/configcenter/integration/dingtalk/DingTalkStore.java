@@ -218,6 +218,18 @@ class DingTalkStore {
       String text,
       boolean terminal,
       boolean attention) {
+    recordProcess(workflowId, workflowMessageId, sequence, text, terminal, attention, null);
+  }
+
+  @Transactional
+  public void recordProcess(
+      String workflowId,
+      String workflowMessageId,
+      long sequence,
+      String text,
+      boolean terminal,
+      boolean attention,
+      JsonNode executionEvent) {
     DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
     if (sequence <= binding.eventCursor) return;
     String key = "process:" + workflowId + ":" + sequence;
@@ -243,6 +255,12 @@ class DingTalkStore {
     } else if (!"chat".equals(binding.triggerSource)) {
       var payload =
           objectMapper.createObjectNode().put("text", "工作流编号：" + workflowId + "\n" + text);
+      if (executionEvent != null) {
+        payload
+            .putObject("executionEvent")
+            .put("source", executionEvent.path("source").asText())
+            .put("createdAt", executionEvent.path("createdAt").asText());
+      }
       enqueue(
           key,
           workflowId,
@@ -288,6 +306,35 @@ class DingTalkStore {
         .orElse(null);
   }
 
+  /** 保持等待只发送一条完整通知，不再追加独立的 @ 提醒。 */
+  @Transactional
+  public void recordHeld(String workflowId, long sequence, String text) {
+    DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
+    if (sequence <= binding.eventCursor) return;
+    if (!"chat".equals(binding.triggerSource)) {
+      var payload =
+          objectMapper.createObjectNode().put("text", "工作流编号：" + workflowId + "\n" + text);
+      boolean reply =
+          "dingtalk".equals(binding.triggerSource) && hasTextValue(binding.sessionWebhook);
+      if (reply) {
+        payload
+            .put("sessionWebhook", binding.sessionWebhook)
+            .put("atUserId", binding.initiatorUserId);
+      }
+      enqueue(
+          "held:" + workflowId + ":" + sequence,
+          workflowId,
+          binding.conversationId,
+          binding.targetType,
+          binding.targetExternalId,
+          binding.rootMessageId,
+          reply ? "reply" : "text",
+          payload);
+    }
+    binding.eventCursor = sequence;
+    binding.updatedAt = Instant.now();
+  }
+
   @Transactional(readOnly = true)
   public String quotedAdvance(DingTalkModels.Message message) {
     return quotedOutgoing(message).map(item -> item.advanceGateId).orElse(null);
@@ -298,6 +345,20 @@ class DingTalkStore {
     DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
     if (sequence <= binding.eventCursor) return;
     if (!"chat".equals(binding.triggerSource)) {
+      // 在工作流行锁内编号，重试复用已入队正文；不同等待不能因正文相同而引用歧义。
+      long noticeNumber = outbox.countAdvanceNotices(workflowId) + 1;
+      var payload =
+          objectMapper
+              .createObjectNode()
+              .put("text", "工作流编号：" + workflowId + "\n第" + noticeNumber + "次等待确认\n" + text)
+              .put("gateId", gateId);
+      boolean reply =
+          "dingtalk".equals(binding.triggerSource) && hasTextValue(binding.sessionWebhook);
+      if (reply) {
+        payload
+            .put("sessionWebhook", binding.sessionWebhook)
+            .put("atUserId", binding.initiatorUserId);
+      }
       enqueue(
           "advance:" + workflowId + ":" + gateId,
           workflowId,
@@ -305,11 +366,8 @@ class DingTalkStore {
           binding.targetType,
           binding.targetExternalId,
           binding.rootMessageId,
-          "text",
-          objectMapper
-              .createObjectNode()
-              .put("text", "工作流编号：" + workflowId + "\n" + text)
-              .put("gateId", gateId));
+          reply ? "reply" : "text",
+          payload);
     }
     binding.eventCursor = sequence;
     binding.updatedAt = Instant.now();
@@ -760,7 +818,8 @@ class DingTalkStore {
   @Transactional
   public void markOutboxFailed(String id, RuntimeException error) {
     DingTalkOutboxEntity item = outbox.findById(id).orElseThrow();
-    item.status = "reply".equals(item.messageKind) ? "abandoned" : "failed";
+    item.status =
+        "reply".equals(item.messageKind) && item.advanceGateId == null ? "abandoned" : "failed";
     item.lastError = abbreviate(error.getMessage(), 2000);
     item.nextAttemptAt =
         Instant.now().plus(Math.min(60, 1L << Math.min(item.attemptCount, 6)), ChronoUnit.SECONDS);

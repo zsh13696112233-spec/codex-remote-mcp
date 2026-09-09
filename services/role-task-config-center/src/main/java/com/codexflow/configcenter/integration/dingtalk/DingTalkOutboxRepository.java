@@ -22,6 +22,13 @@ interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, S
 
   boolean existsByDedupKey(String dedupKey);
 
+  @Query(
+      value =
+          "SELECT COUNT(DISTINCT advance_gate_id) FROM codex_sop_dingtalk_outbox "
+              + "WHERE workflow_id = :workflowId",
+      nativeQuery = true)
+  long countAdvanceNotices(@Param("workflowId") String workflowId);
+
   Optional<DingTalkOutboxEntity> findFirstByConversationIdAndSentMessageIdOrderByCreatedAtDesc(
       String conversationId, String sentMessageId);
 

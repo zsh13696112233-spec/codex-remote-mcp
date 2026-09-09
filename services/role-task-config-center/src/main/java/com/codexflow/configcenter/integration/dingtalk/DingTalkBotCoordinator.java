@@ -435,7 +435,10 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         inbound = store.registerInbound(properties.getClientId(), binding, message);
         gateway.post(
             "/workflows/" + binding.workflowId() + "/input-observations",
-            objectMapper.createObjectNode().put("messageId", inbound.workflowMessageId()));
+            objectMapper
+                .createObjectNode()
+                .put("messageId", inbound.workflowMessageId())
+                .put("hold", !"confirm".equals(action)));
         reply(message, binding.workflowId(), "当前没有等待确认的步骤。");
         return true;
       }
@@ -443,7 +446,10 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       JsonNode observed =
           gateway.post(
               "/workflows/" + binding.workflowId() + "/input-observations",
-              objectMapper.createObjectNode().put("messageId", inbound.workflowMessageId()));
+              objectMapper
+                  .createObjectNode()
+                  .put("messageId", inbound.workflowMessageId())
+                  .put("hold", !"confirm".equals(action)));
       if (!gateId.equals(observed.path("gateId").asText())) {
         reply(message, binding.workflowId(), "该消息对应的等待已结束，请重新发送。");
         store.markInboundFinished(binding.workflowId(), inbound.workflowMessageId(), false);
@@ -598,15 +604,25 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         // 助手事件没有关联提问时不能回落到任务通知对象。
         if (!"assistant".equals(event.path("source").asText()) || hasText(questionId)) {
           JsonNode snapshot = gateway.get("/workflows/" + binding.workflowId());
-          store.recordProcess(
-              binding.workflowId(),
-              questionId,
-              sequence,
-              DingTalkExecutionNotice.stepLabel(event, snapshot)
-                  + "\n"
-                  + DingTalkExecutionNotice.execution(event, snapshot),
-              false,
-              false);
+          String visible = DingTalkExecutionNotice.execution(event, snapshot);
+          if (visible.isBlank()) {
+            store.recordEvent(
+                properties.getClientId(),
+                binding.workflowId(),
+                sequence,
+                "hidden-execution:" + sequence,
+                null,
+                null,
+                null,
+                false);
+            return true;
+          }
+          String text = DingTalkExecutionNotice.stepLabel(event, snapshot) + "\n" + visible;
+          if ("supervisor".equals(event.path("source").asText())) {
+            store.recordProcess(
+                binding.workflowId(), questionId, sequence, text, false, false, event);
+          } else
+            store.recordProcess(binding.workflowId(), questionId, sequence, text, false, false);
           return true;
         }
       }
@@ -625,6 +641,10 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       return true;
     } else if (PROGRESS_EVENTS.contains(type)) {
       try {
+        if ("step.advance.held".equals(type)) {
+          store.recordHeld(binding.workflowId(), sequence, "任务已保持等待，不会自动进入下一步。\n请回复“确认继续”后再进入下一步。");
+          return true;
+        }
         JsonNode snapshot = gateway.get("/workflows/" + binding.workflowId());
         if ("step.advance.waiting".equals(type)) {
           String gateId = payload.path("gateId").asText();
@@ -725,6 +745,13 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   @SuppressWarnings("unchecked")
   void deliver(DingTalkModels.Outbox item) {
     try {
+      if (item.payload().hasNonNull("executionEvent")
+          && DingTalkExecutionNotice.suppressWhileWaiting(
+              item.payload().path("executionEvent"),
+              gateway.get("/workflows/" + item.workflowId()))) {
+        store.markOutboxSuperseded(item.id());
+        return;
+      }
       String gateId = item.payload().path("gateId").asText(null);
       String deliveredAt = item.payload().path("deliveredAt").asText(null);
       if (gateId != null && deliveredAt != null) {

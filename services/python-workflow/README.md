@@ -87,6 +87,8 @@ Copy-Item .\config\agents.example.json .\config\agents.json
 
 配置中心在下载图片前调用 `POST /workflows/{workflowId}/input-observations`，请求为 `{"messageId":"有效 UUID"}`，返回首次入站对应的 `gateId`（可为空）和 `controlAllowed`；同一编号与后续 `/messages` 复用。该服务端入口不增加监控中心路由。
 
+钉钉明确确认继续时，该接口传 `hold: false`，只记录消息首次对应的等待，不保持等待、不暂停主监督，再通过原确认接口放行。省略 `hold` 默认仍为 `true`，提问、图片和暂停请求保留先保持的行为；重复消息仍绑定首次等待。升级时先更新 Python 网关，再更新配置中心。
+
 钉钉通知成功后调用 `POST /workflows/{workflowId}/advance/{gateId}/notified`，请求为 `{"sentAt":"带时区的发送成功时间"}`。仅尚未过期的倒计时等待接受首次回执，将 `expiresAt` 调整为发送时间后120秒，并返回 `updated: true`；重复、迟到、已保持或已关闭等待返回 `updated: false`。`pendingAdvance` 新增可空 `notifiedAt`。通知失败、回执未能在原截止前送达或没有钉钉通知时，仍按等待创建后120秒放行。旧等待保留原截止时间。
 
 ## 返工要求

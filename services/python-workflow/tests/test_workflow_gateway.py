@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from codex_orchestrator_mcp import Orchestrator
 from starlette.testclient import TestClient
@@ -649,6 +649,13 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                 self.assertTrue(notified.json()["updated"])
                 invalid = client.post("/workflows/advance-demo/input-observations", json={"messageId": "invalid"})
                 self.assertEqual(invalid.status_code, 400)
+                invalid_hold = client.post("/workflows/advance-demo/input-observations", json={"messageId": str(uuid.uuid4()), "hold": "false"})
+                self.assertEqual(invalid_hold.status_code, 400)
+                with patch.object(app.state.gateway, "_pause_supervisor", new_callable=AsyncMock) as pause:
+                    confirm_input = client.post("/workflows/advance-demo/input-observations", json={"messageId": str(uuid.uuid4()), "hold": False})
+                    self.assertEqual(confirm_input.json()["gateId"], gate["gateId"])
+                    pause.assert_not_awaited()
+                self.assertEqual(store.get_workflow("advance-demo")["pendingAdvance"]["state"], "countdown")
                 observed = client.post("/workflows/advance-demo/input-observations", json={"messageId": str(uuid.uuid4())})
                 self.assertEqual(observed.json()["gateId"], gate["gateId"])
                 held = client.post(

@@ -2697,7 +2697,8 @@ class WorkflowStore(InputImageStore):
             raise RuntimeError("当前步骤正在执行，或该请求在执行期间收到。请在步骤结束后重新提出操作。")
 
     def _observe_input(
-        self, connection: sqlite3.Connection, workflow_id: str, message_id: str, now: str
+        self, connection: sqlite3.Connection, workflow_id: str, message_id: str, now: str,
+        hold: bool = True,
     ) -> dict[str, Any]:
         existing = connection.execute(
             "SELECT * FROM workflow_input_observations WHERE workflow_id = ? AND message_id = ?",
@@ -2725,7 +2726,7 @@ class WorkflowStore(InputImageStore):
             "AND (status = 'held' OR (status = 'pending' AND expires_at > ?)) "
             "ORDER BY created_at DESC LIMIT 1", (workflow_id, now)
         ).fetchone()
-        if gate is not None and gate["status"] == "pending" and not active:
+        if hold and gate is not None and gate["status"] == "pending" and not active:
             connection.execute(
                 "UPDATE workflow_advance_gates SET status = 'held', held_at = ?, updated_at = ? WHERE gate_id = ?",
                 (now, now, gate["gate_id"]),
@@ -2740,14 +2741,16 @@ class WorkflowStore(InputImageStore):
         )
         return {"gateId": gate_id, "controlAllowed": not bool(active)}
 
-    def observe_input(self, workflow_id: str, message_id: str) -> dict[str, Any]:
+    def observe_input(self, workflow_id: str, message_id: str, hold: bool = True) -> dict[str, Any]:
+        if not isinstance(hold, bool):
+            raise ValueError("hold 必须是布尔值。")
         try:
             message_id = str(uuid.UUID(message_id))
         except (ValueError, AttributeError, TypeError) as error:
             raise ValueError("messageId 必须是有效的 UUID。") from error
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            return self._observe_input(connection, workflow_id, message_id, utc_now())
+            return self._observe_input(connection, workflow_id, message_id, utc_now(), hold)
 
     def mark_advance_notified(self, workflow_id: str, gate_id: str, sent_at: str) -> dict[str, Any]:
         try:

@@ -145,6 +145,10 @@ class DingTalkBotCoordinatorTest {
         .thenReturn(json.createObjectNode().put("gateId", "11111111111111111111111111111111"));
     bot.safelyHandleMessage(message(ID + " 确认继续"));
     verify(gateway)
+        .post(
+            eq("/workflows/" + ID + "/input-observations"),
+            argThat(body -> body.has("hold") && !body.path("hold").asBoolean()));
+    verify(gateway)
         .post("/workflows/" + ID + "/advance/11111111111111111111111111111111/confirm", null);
     verify(gateway, never()).post(eq("/workflows/" + ID + "/messages"), any());
   }
@@ -172,15 +176,16 @@ class DingTalkBotCoordinatorTest {
   @Test
   void deliveryReportsTimestampAndReceiptRetryDoesNotSendAgain() {
     when(gateway.get("/workflows/" + ID)).thenReturn(waiting());
-    when(transport.sendText(any(), any(), any())).thenReturn(new DingTalkModels.SendResult("sent"));
+    when(transport.sendReply(any(), any(), any()))
+        .thenReturn(new DingTalkModels.SendResult("sent"));
     var payload =
         json.createObjectNode()
             .put("text", "等待确认")
             .put("gateId", "11111111111111111111111111111111");
-    var item = new DingTalkModels.Outbox("notice", ID, "group", null, "text", payload);
+    var item = new DingTalkModels.Outbox("notice", ID, "group", null, "reply", payload);
     bot.deliver(item);
     var order = inOrder(transport, store, gateway);
-    order.verify(transport).sendText("group", null, "等待确认");
+    order.verify(transport).sendReply(eq("group"), any(), eq(payload));
     order.verify(store).markAdvanceDelivered(eq("notice"), eq("sent"), any());
     order
         .verify(gateway)
@@ -189,9 +194,52 @@ class DingTalkBotCoordinatorTest {
         .put("deliveredAt", java.time.Instant.now().minusSeconds(1).toString())
         .put("sentMessageId", "sent");
     bot.deliver(item);
-    verify(transport, times(1)).sendText(any(), any(), any());
+    verify(transport, times(1)).sendReply(any(), any(), any());
+    verify(transport, never()).sendText(any(), any(), any());
     verify(gateway, times(2))
         .post(eq("/workflows/" + ID + "/advance/11111111111111111111111111111111/notified"), any());
+  }
+
+  @Test
+  void waitingSuppressesSupervisorAtConsumptionAndDeliveryButKeepsActualNodeStart() {
+    when(gateway.get("/workflows/" + ID)).thenReturn(waiting());
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var event =
+        json.createObjectNode().put("source", "supervisor").put("type", "appserver.item/completed");
+    event
+        .putObject("payload")
+        .putObject("message")
+        .putObject("params")
+        .putObject("item")
+        .put("type", "agentMessage")
+        .put("phase", "commentary")
+        .put("text", "开始开发");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 1L);
+    verify(store)
+        .recordEvent(
+            eq("app"), eq(ID), eq(1L), anyString(), isNull(), isNull(), isNull(), eq(false));
+    verify(store, never())
+        .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean(), any());
+    var payload = json.createObjectNode().put("text", "开始开发");
+    payload.putObject("executionEvent").put("source", "supervisor");
+    bot.deliver(new DingTalkModels.Outbox("queued", ID, "group", null, "text", payload));
+    verify(store).markOutboxSuperseded("queued");
+    verifyNoInteractions(transport);
+    when(gateway.get("/workflows/" + ID))
+        .thenReturn(json.createObjectNode().put("status", "running"));
+    ReflectionTestUtils.invokeMethod(
+        bot, "consumeEvent", binding, json.createObjectNode().put("type", "node.started"), 2L);
+    verify(store).recordProcess(eq(ID), isNull(), eq(2L), contains("已开始执行"), eq(false), eq(false));
+  }
+
+  @Test
+  void heldEventUsesOneCombinedNotice() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    ReflectionTestUtils.invokeMethod(
+        bot, "consumeEvent", binding, json.createObjectNode().put("type", "step.advance.held"), 1L);
+    verify(store).recordHeld(eq(ID), eq(1L), contains("不会自动进入下一步"));
+    verify(store, never())
+        .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean());
   }
 
   @Test

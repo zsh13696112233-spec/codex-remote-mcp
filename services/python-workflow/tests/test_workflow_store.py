@@ -96,6 +96,17 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "countdown")
         self.assertNotEqual(next_gate["gateId"], gate["gateId"])
 
+    def test_continue_observation_does_not_hold_and_remains_bound_on_retry(self) -> None:
+        gate = self.waiting_gate()
+        message = str(uuid.uuid4())
+        self.assertEqual(self.store.observe_input("serial-demo", message, False)["gateId"], gate["gateId"])
+        self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "countdown")
+        self.store.confirm_advance("serial-demo", gate["gateId"])
+        self.store.prepare_node_dispatch("serial-demo", "b")
+        self.store.sync_node_job("serial-demo", "b", {"status": "completed", "finished_at": utc_now()})
+        self.assertEqual(self.store.observe_input("serial-demo", message, False)["gateId"], gate["gateId"])
+        self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "countdown")
+
     def test_running_input_cannot_become_later_control_for_either_mode(self) -> None:
         for mode in ("automatic", "semi_automatic"):
             with self.subTest(mode=mode):

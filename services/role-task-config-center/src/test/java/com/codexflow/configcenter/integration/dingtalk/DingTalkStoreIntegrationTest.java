@@ -69,7 +69,24 @@ class DingTalkStoreIntegrationTest {
   void advanceQuoteAndDeliveryTimeSurviveRetry() {
     String client = "advance-" + UUID.randomUUID();
     createTask(client);
-    String workflow = store.reserveStart(client, message("advance-start")).workflowId();
+    var start = message("advance-start");
+    String workflow =
+        store
+            .reserveStart(
+                client,
+                new DingTalkModels.Message(
+                    start.messageId(),
+                    start.conversationId(),
+                    "2",
+                    "user-1",
+                    start.content(),
+                    true,
+                    false,
+                    null,
+                    "群",
+                    java.util.List.of(),
+                    "https://oapi.dingtalk.com/robot/sendBySession?session=test"))
+            .workflowId();
     store.recordAdvance(workflow, 1, "11111111111111111111111111111111", "第1步完成，请确认继续");
     var item =
         store.claimDue().stream()
@@ -78,6 +95,9 @@ class DingTalkStoreIntegrationTest {
             .orElseThrow();
     assertThat(item.payload().path("gateId").asText())
         .isEqualTo("11111111111111111111111111111111");
+    assertThat(item.messageKind()).isEqualTo("reply");
+    assertThat(item.payload().path("atUserId").asText()).isEqualTo("user-1");
+    assertThat(item.payload().path("sessionWebhook").asText()).endsWith("session=test");
     var sentAt = java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
     store.markAdvanceDelivered(item.id(), "sent-advance", sentAt);
     store.markOutboxFailed(item.id(), new IllegalStateException("回执失败"));
@@ -112,7 +132,9 @@ class DingTalkStoreIntegrationTest {
         new DingTalkModels.Message(
             "quote-advance", "chat-1", "2", "user", "确认继续", true, false, "sent-advance");
     assertThat(store.quotedAdvance(quoted)).isEqualTo("11111111111111111111111111111111");
-    store.recordAdvance(workflow, 2, "22222222222222222222222222222222", "下一轮等待");
+    assertThat(item.payload().path("text").asText()).contains("第1次等待确认");
+    store.recordAdvance(workflow, 2, "22222222222222222222222222222222", "第1步完成，请确认继续");
+    store.recordAdvance(workflow, 2, "22222222222222222222222222222222", "第1步完成，请确认继续");
     assertThat(store.quotedAdvance(quoted)).isEqualTo("11111111111111111111111111111111");
     String nextId =
         jdbc.queryForObject(
@@ -120,7 +142,105 @@ class DingTalkStoreIntegrationTest {
             String.class,
             workflow,
             "22222222222222222222222222222222");
-    store.markOutboxSuperseded(nextId);
+    var next =
+        store.claimDue().stream().filter(row -> nextId.equals(row.id())).findFirst().orElseThrow();
+    assertThat(next.payload().path("text").asText()).contains("第2次等待确认");
+    // 会话回复可能没有消息编号，两轮相同业务正文仍必须分别定位。
+    store.markAdvanceDelivered(nextId, null, java.time.Instant.now());
+    store.markOutboxSent(nextId, null);
+    ((tools.jackson.databind.node.ObjectNode) callback.path("text").path("repliedMsg"))
+        .put("content", next.payload().path("text").asText());
+    var quotedNext =
+        new OfficialDingTalkTransport(new DingTalkProperties(), objectMapper)
+            .toMessage(callback.toString());
+    assertThat(store.quotedAdvance(quotedNext)).isEqualTo("22222222222222222222222222222222");
+    assertThat(store.quotedAdvance(quotedBeforeReceipt))
+        .isEqualTo("11111111111111111111111111111111");
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id = ?",
+                Integer.class,
+                workflow))
+        .isEqualTo(2);
+  }
+
+  @Test
+  void heldNoticeIsOneMentionedReplyAndDuplicateEventDoesNotResend() {
+    String client = "held-" + UUID.randomUUID();
+    createTask(client);
+    var start = message("held-start");
+    String workflow =
+        store
+            .reserveStart(
+                client,
+                new DingTalkModels.Message(
+                    start.messageId(),
+                    start.conversationId(),
+                    "2",
+                    "user-1",
+                    start.content(),
+                    true,
+                    false,
+                    null,
+                    "群",
+                    java.util.List.of(),
+                    "https://oapi.dingtalk.com/robot/sendBySession?session=test"))
+            .workflowId();
+    store.recordHeld(workflow, 1, "任务已保持等待，不会自动进入下一步。");
+    store.recordHeld(workflow, 1, "重复通知");
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id = ?",
+                Integer.class,
+                workflow))
+        .isEqualTo(1);
+    var notice =
+        store.claimDue().stream()
+            .filter(row -> workflow.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(notice.messageKind()).isEqualTo("reply");
+    assertThat(notice.payload().path("atUserId").asText()).isEqualTo("user-1");
+    assertThat(notice.payload().path("text").asText())
+        .contains("已保持等待")
+        .doesNotContain("查看上方消息", "重复通知");
+    store.markOutboxSent(notice.id(), "held-sent");
+  }
+
+  @Test
+  void advanceWithoutSessionUsesTextAndSupervisorQueueKeepsEventTime() {
+    String client = "advance-fallback-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("fallback-start")).workflowId();
+    store.recordAdvance(workflow, 1, "11111111111111111111111111111111", "请确认继续");
+    var notice =
+        store.claimDue().stream()
+            .filter(row -> workflow.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(notice.messageKind()).isEqualTo("text");
+    store.markOutboxSent(notice.id(), "fallback-sent");
+    var event =
+        objectMapper
+            .createObjectNode()
+            .put("source", "supervisor")
+            .put("createdAt", "2026-09-09T06:33:10Z");
+    store.recordProcess(workflow, null, 2, "执行进度", false, false, event);
+    var process =
+        store.claimDue().stream()
+            .filter(row -> workflow.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(process.payload().path("executionEvent")).isEqualTo(event);
+    store.markOutboxSent(process.id(), "process-sent");
+    store.recordHeld(workflow, 3, "已保持等待");
+    var held =
+        store.claimDue().stream()
+            .filter(row -> workflow.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(held.messageKind()).isEqualTo("text");
+    store.markOutboxSent(held.id(), "held-fallback-sent");
   }
 
   @Test

@@ -752,11 +752,11 @@ class WorkflowGateway:
         self._ensure_chat_worker(workflow_id)
         return accepted
 
-    async def observe_input(self, workflow_id: str, message_id: str) -> dict[str, Any]:
+    async def observe_input(self, workflow_id: str, message_id: str, hold: bool = True) -> dict[str, Any]:
         lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
         async with lock:
-            observed = await _database_call(self.store.observe_input, workflow_id, message_id)
-            if observed["gateId"]:
+            observed = await _database_call(self.store.observe_input, workflow_id, message_id, hold)
+            if hold and observed["gateId"]:
                 snapshot = await _database_call(self.store.get_workflow, workflow_id)
                 gate = snapshot.get("pendingAdvance") or {}
                 if gate.get("gateId") == observed["gateId"] and gate.get("state") == "held":
@@ -1291,7 +1291,7 @@ async def observe_workflow_input(request: Request) -> Response:
     try:
         payload = await request.json()
         return JSONResponse(await gateway.observe_input(
-            request.path_params["workflow_id"], payload.get("messageId")))
+            request.path_params["workflow_id"], payload.get("messageId"), payload.get("hold", True)))
     except LookupError as error:
         return _error_response(error, 404)
     except (ValueError, TypeError, AttributeError) as error:
