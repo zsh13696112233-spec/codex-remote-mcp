@@ -40,7 +40,7 @@ ARTIFACT_LIMIT = 20_000_000
 ARTIFACTS_PER_WORKFLOW_LIMIT = 50
 IMAGE_ARTIFACT_LIMIT = ARTIFACT_LIMIT
 IMAGE_ARTIFACTS_PER_WORKFLOW_LIMIT = ARTIFACTS_PER_WORKFLOW_LIMIT
-ADVANCE_TIMEOUT_SEC = 30
+ADVANCE_TIMEOUT_SEC = 120
 LEGACY_IMAGE_LINK_PATTERN = re.compile(
     r"\[[^\]]*\]\((?P<path>[^)]+\.(?:png|jpe?g|gif|webp))\)", re.IGNORECASE
 )
@@ -463,6 +463,16 @@ class WorkflowStore(InputImageStore):
                 connection.execute(
                     "ALTER TABLE workflow_advance_gates ADD COLUMN held_at TEXT"
                 )
+            if "notified_at" not in advance_gate_columns:
+                connection.execute("ALTER TABLE workflow_advance_gates ADD COLUMN notified_at TEXT")
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS workflow_input_observations (
+                    workflow_id TEXT NOT NULL, message_id TEXT NOT NULL,
+                    gate_id TEXT, control_allowed INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, message_id)
+                )
+            """)
             lease_columns = {
                 row["name"]
                 for row in connection.execute(
@@ -1412,7 +1422,7 @@ class WorkflowStore(InputImageStore):
             pending_advance_row = connection.execute(
                 """
                 SELECT gate_id, completed_node_id, next_node_id, status,
-                       expires_at, held_at, confirmed_at
+                       expires_at, held_at, confirmed_at, notified_at
                 FROM workflow_advance_gates
                 WHERE workflow_id = ?
                   AND ((status = 'pending' AND expires_at > ?) OR status = 'held')
@@ -1890,6 +1900,10 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
             if workflow is None:
                 raise LookupError(f"找不到工作流：{workflow_id}")
+            self._observe_input(connection, workflow_id, message_id, now)
+            workflow = connection.execute(
+                "SELECT status, state_version FROM workflows WHERE workflow_id = ?", (workflow_id,)
+            ).fetchone()
             connection.execute(
                 """
                 INSERT INTO workflow_chat_messages (
@@ -2155,6 +2169,7 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
             if workflow is None:
                 raise ValueError(f"找不到工作流：{workflow_id}")
+            self._require_control_idle(connection, workflow_id, message_id)
             if action_type == "stop":
                 status = connection.execute(
                     "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
@@ -2252,6 +2267,7 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
             if action is None or action["status"] != "pending":
                 raise ValueError("没有可确认的控制操作。")
+            self._require_control_idle(connection, workflow_id, message_id)
             confirmation = connection.execute(
                 "SELECT * FROM workflow_chat_messages "
                 "WHERE workflow_id = ? AND message_id = ? AND role = 'user'",
@@ -2313,6 +2329,7 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
             if row is None or row["status"] != "confirmed":
                 raise ValueError("控制操作尚未确认或已经处理。")
+            self._require_control_idle(connection, row["workflow_id"], row["confirmed_by_message_id"])
             connection.execute(
                 "UPDATE workflow_control_actions SET status = 'executing', updated_at = ? "
                 "WHERE action_id = ?",
@@ -2366,6 +2383,7 @@ class WorkflowStore(InputImageStore):
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_control_idle(connection, workflow_id)
             binding = connection.execute(
                 "SELECT task_definition_id FROM workflow_task_bindings WHERE workflow_id = ?",
                 (workflow_id,),
@@ -2529,6 +2547,7 @@ class WorkflowStore(InputImageStore):
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_control_idle(connection, workflow_id)
             row = connection.execute(
                 "SELECT status FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
                 (workflow_id, node_id),
@@ -2576,6 +2595,8 @@ class WorkflowStore(InputImageStore):
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if event_reason in {"user_requested", "chat_control"}:
+                self._require_control_idle(connection, workflow_id)
             workflow = connection.execute(
                 "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
             ).fetchone()
@@ -2657,7 +2678,102 @@ class WorkflowStore(InputImageStore):
             "state": "held" if row["status"] == "held" else "countdown",
             "expiresAt": row["expires_at"],
             "heldAt": row["held_at"],
+            "notifiedAt": row["notified_at"],
         }
+
+    @staticmethod
+    def _require_control_idle(
+        connection: sqlite3.Connection, workflow_id: str, message_id: str | None = None
+    ) -> None:
+        active = connection.execute(
+            "SELECT 1 FROM workflow_nodes WHERE workflow_id = ? "
+            "AND status IN ('queued', 'running', 'cancelling') LIMIT 1", (workflow_id,)
+        ).fetchone()
+        observation = connection.execute(
+            "SELECT control_allowed FROM workflow_input_observations "
+            "WHERE workflow_id = ? AND message_id = ?", (workflow_id, message_id)
+        ).fetchone() if message_id else None
+        if active or (observation is not None and not observation["control_allowed"]):
+            raise RuntimeError("当前步骤正在执行，或该请求在执行期间收到。请在步骤结束后重新提出操作。")
+
+    def _observe_input(
+        self, connection: sqlite3.Connection, workflow_id: str, message_id: str, now: str
+    ) -> dict[str, Any]:
+        existing = connection.execute(
+            "SELECT * FROM workflow_input_observations WHERE workflow_id = ? AND message_id = ?",
+            (workflow_id, message_id),
+        ).fetchone()
+        if existing is not None:
+            return {"gateId": existing["gate_id"], "controlAllowed": bool(existing["control_allowed"])}
+        legacy = connection.execute(
+            "SELECT created_at FROM workflow_chat_messages WHERE workflow_id = ? AND message_id = ?",
+            (workflow_id, message_id),
+        ).fetchone()
+        if legacy is not None:
+            # 升级前已接收的消息不能在重试时取得当前新等待的操作许可。
+            connection.execute("INSERT INTO workflow_input_observations VALUES (?, ?, NULL, 0, ?)",
+                (workflow_id, message_id, legacy["created_at"]))
+            return {"gateId": None, "controlAllowed": False}
+        if connection.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (workflow_id,)).fetchone() is None:
+            raise LookupError("找不到对应任务。")
+        active = connection.execute(
+            "SELECT 1 FROM workflow_nodes WHERE workflow_id = ? "
+            "AND status IN ('queued', 'running', 'cancelling') LIMIT 1", (workflow_id,)
+        ).fetchone()
+        gate = connection.execute(
+            "SELECT * FROM workflow_advance_gates WHERE workflow_id = ? "
+            "AND (status = 'held' OR (status = 'pending' AND expires_at > ?)) "
+            "ORDER BY created_at DESC LIMIT 1", (workflow_id, now)
+        ).fetchone()
+        if gate is not None and gate["status"] == "pending" and not active:
+            connection.execute(
+                "UPDATE workflow_advance_gates SET status = 'held', held_at = ?, updated_at = ? WHERE gate_id = ?",
+                (now, now, gate["gate_id"]),
+            )
+            connection.execute("UPDATE workflows SET state_version = state_version + 1 WHERE workflow_id = ?", (workflow_id,))
+            self._add_event_with_connection(connection, workflow_id, gate["completed_node_id"], "gateway",
+                "step.advance.held", {"gateId": gate["gate_id"], "nextNodeId": gate["next_node_id"]}, now)
+        gate_id = gate["gate_id"] if gate is not None and not active else None
+        connection.execute(
+            "INSERT INTO workflow_input_observations VALUES (?, ?, ?, ?, ?)",
+            (workflow_id, message_id, gate_id, int(not active), now),
+        )
+        return {"gateId": gate_id, "controlAllowed": not bool(active)}
+
+    def observe_input(self, workflow_id: str, message_id: str) -> dict[str, Any]:
+        try:
+            message_id = str(uuid.UUID(message_id))
+        except (ValueError, AttributeError, TypeError) as error:
+            raise ValueError("messageId 必须是有效的 UUID。") from error
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._observe_input(connection, workflow_id, message_id, utc_now())
+
+    def mark_advance_notified(self, workflow_id: str, gate_id: str, sent_at: str) -> dict[str, Any]:
+        try:
+            # Java Instant 可以携带纳秒；归一到微秒以兼容 Python 3.10。
+            normalized = re.sub(r"(\.\d{6})\d+", r"\1", sent_at.replace("Z", "+00:00"))
+            sent = datetime.fromisoformat(normalized)
+            if sent.tzinfo is None or sent > datetime.now(UTC):
+                raise ValueError()
+            sent_at = sent.astimezone(UTC).isoformat()
+        except (ValueError, AttributeError, TypeError) as error:
+            raise ValueError("发送时间必须是有效且不晚于当前时间的带时区时间。") from error
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            now = utc_now()
+            row = connection.execute("SELECT * FROM workflow_advance_gates WHERE workflow_id = ? AND gate_id = ?", (workflow_id, gate_id)).fetchone()
+            if row is None:
+                raise ValueError("找不到对应的步骤确认请求。")
+            if (row["status"] != "pending" or row["notified_at"] is not None
+                    or row["expires_at"] <= now or sent_at < row["created_at"]):
+                return {"updated": False}
+            expires = (sent.astimezone(UTC) + timedelta(seconds=ADVANCE_TIMEOUT_SEC)).isoformat()
+            connection.execute("UPDATE workflow_advance_gates SET notified_at = ?, expires_at = ?, updated_at = ? WHERE gate_id = ?", (sent_at, expires, now, gate_id))
+            connection.execute("UPDATE workflows SET state_version = state_version + 1 WHERE workflow_id = ?", (workflow_id,))
+            self._add_event_with_connection(connection, workflow_id, row["completed_node_id"], "gateway",
+                "step.advance.notified", {"gateId": gate_id, "expiresAt": expires}, now)
+            return {"updated": True, "expiresAt": expires}
 
     def pending_advance_for_node(
         self, workflow_id: str, node_id: str
@@ -2666,7 +2782,7 @@ class WorkflowStore(InputImageStore):
             row = connection.execute(
                 """
                 SELECT gate_id, completed_node_id, next_node_id, status,
-                       expires_at, held_at, confirmed_at
+                       expires_at, held_at, confirmed_at, notified_at
                 FROM workflow_advance_gates
                 WHERE workflow_id = ? AND next_node_id = ?
                   AND status IN ('pending', 'held')
@@ -2759,7 +2875,7 @@ class WorkflowStore(InputImageStore):
         if stale:
             raise RuntimeError("任务状态已经变化，请刷新页面。")
         if expired:
-            raise RuntimeError("30 秒倒计时已经结束，系统正在自动进入下一步。")
+            raise RuntimeError("两分钟倒计时已经结束，系统正在自动进入下一步。")
         assert result is not None
         return result
 
@@ -2863,7 +2979,7 @@ class WorkflowStore(InputImageStore):
         if stale:
             raise RuntimeError("任务状态已经变化，请刷新页面。")
         if expired:
-            raise RuntimeError("30 秒倒计时已经结束，系统正在自动进入下一步。")
+            raise RuntimeError("两分钟倒计时已经结束，系统正在自动进入下一步。")
         assert result is not None
         return result
 
@@ -2872,6 +2988,7 @@ class WorkflowStore(InputImageStore):
         workflow_id: str,
         gate_id: str,
         *,
+        node_id: str | None = None,
         sidecar_supervisor_id: str | None = None,
         lease_token: str | None = None,
     ) -> bool:
@@ -2892,6 +3009,8 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
             if row is None or row["status"] != "pending" or row["expires_at"] > now:
                 return False
+            if node_id is not None and node_id != row["next_node_id"]:
+                raise ValueError("等待与目标步骤不一致。")
             connection.execute(
                 "UPDATE workflow_advance_gates SET status = 'timed_out', updated_at = ? "
                 "WHERE gate_id = ?",
@@ -3002,6 +3121,11 @@ class WorkflowStore(InputImageStore):
                 raise ValueError(f"找不到工作流：{workflow_id}")
             if workflow["status"] in {"completed", "failed", "cancelled"}:
                 raise ValueError(f"工作流已结束，不能派发节点：{workflow['status']}")
+            if connection.execute(
+                "SELECT 1 FROM workflow_control_actions WHERE workflow_id = ? "
+                "AND status IN ('confirmed', 'executing') LIMIT 1", (workflow_id,)
+            ).fetchone():
+                raise RuntimeError("正在处理已确认的操作，请稍后派发步骤。")
             row = connection.execute(
                 """
                 SELECT * FROM workflow_nodes

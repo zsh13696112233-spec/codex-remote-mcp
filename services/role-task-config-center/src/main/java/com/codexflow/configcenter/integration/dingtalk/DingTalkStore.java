@@ -288,6 +288,33 @@ class DingTalkStore {
         .orElse(null);
   }
 
+  @Transactional(readOnly = true)
+  public String quotedAdvance(DingTalkModels.Message message) {
+    return quotedOutgoing(message).map(item -> item.advanceGateId).orElse(null);
+  }
+
+  @Transactional
+  public void recordAdvance(String workflowId, long sequence, String gateId, String text) {
+    DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
+    if (sequence <= binding.eventCursor) return;
+    if (!"chat".equals(binding.triggerSource)) {
+      enqueue(
+          "advance:" + workflowId + ":" + gateId,
+          workflowId,
+          binding.conversationId,
+          binding.targetType,
+          binding.targetExternalId,
+          binding.rootMessageId,
+          "text",
+          objectMapper
+              .createObjectNode()
+              .put("text", "工作流编号：" + workflowId + "\n" + text)
+              .put("gateId", gateId));
+    }
+    binding.eventCursor = sequence;
+    binding.updatedAt = Instant.now();
+  }
+
   private Optional<DingTalkOutboxEntity> quotedOutgoing(DingTalkModels.Message message) {
     if (hasTextValue(message.replyToMessageId())) {
       var found =
@@ -298,10 +325,7 @@ class DingTalkStore {
     // Some session replies do not return msgId. Only match exact content of an actually sent reply.
     if (!hasTextValue(message.quotedText())) return Optional.empty();
     var matches =
-        outbox
-            .findTop50ByConversationIdAndStatusOrderByCreatedAtDesc(
-                message.conversationId(), "sent")
-            .stream()
+        outbox.findRecentDelivered(message.conversationId()).stream()
             .filter(
                 item ->
                     message
@@ -710,6 +734,15 @@ class DingTalkStore {
     }
   }
 
+  @Transactional
+  public void markAdvanceDelivered(String id, String sentMessageId, Instant deliveredAt) {
+    DingTalkOutboxEntity item = outbox.findById(id).orElseThrow();
+    if (item.deliveredAt == null) {
+      item.deliveredAt = deliveredAt;
+      item.sentMessageId = sentMessageId;
+    }
+  }
+
   @Transactional(readOnly = true)
   public boolean isLatestCardOutbox(String id, String workflowId) {
     if (workflowId == null) return true;
@@ -778,6 +811,7 @@ class DingTalkStore {
     item.targetExternalId = targetExternalId;
     item.replyToMessageId = replyTo;
     item.messageKind = messageKind;
+    item.advanceGateId = payload.path("gateId").asText(null);
     try {
       item.payloadJson = objectMapper.writeValueAsString(payload);
     } catch (Exception error) {
@@ -804,6 +838,13 @@ class DingTalkStore {
 
   private DingTalkModels.Outbox toOutbox(DingTalkOutboxEntity item) {
     try {
+      var payload =
+          (tools.jackson.databind.node.ObjectNode) objectMapper.readTree(item.payloadJson);
+      if (item.advanceGateId != null) payload.put("gateId", item.advanceGateId);
+      if (item.deliveredAt != null) {
+        payload.put("deliveredAt", item.deliveredAt.toString());
+        payload.put("sentMessageId", item.sentMessageId);
+      }
       return new DingTalkModels.Outbox(
           item.id,
           item.workflowId,
@@ -812,7 +853,7 @@ class DingTalkStore {
           item.targetExternalId == null ? item.conversationId : item.targetExternalId,
           item.replyToMessageId,
           item.messageKind,
-          objectMapper.readTree(item.payloadJson));
+          payload);
     } catch (Exception error) {
       throw new IllegalStateException("无法读取钉钉待发送消息。", error);
     }

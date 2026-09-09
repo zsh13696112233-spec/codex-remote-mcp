@@ -122,10 +122,11 @@ class InternalApiClient:
         return advance if isinstance(advance, dict) else None
 
     def release_timed_out_advance(
-        self, workflow_id: str, gate_id: str
+        self, workflow_id: str, gate_id: str, *, node_id: str | None = None
     ) -> bool:
-        node = self.get_workflow(workflow_id).get("pendingAdvance")
-        node_id = str(node.get("nextNodeId") or "") if isinstance(node, dict) else ""
+        if node_id is None:
+            node = self.get_workflow(workflow_id).get("pendingAdvance")
+            node_id = str(node.get("nextNodeId") or "") if isinstance(node, dict) else ""
         if not node_id:
             return False
         result = self._lease_request(

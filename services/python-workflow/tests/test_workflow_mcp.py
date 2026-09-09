@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock, AsyncMock
 
 import codex_orchestrator_mcp as service
 from tests.mock_app_server import MockAppServer
@@ -11,6 +11,24 @@ from workflow_store import WorkflowStore
 
 
 class WorkflowMcpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dispatch_rechecks_deadline_when_release_loses_to_delivery(self) -> None:
+        store = Mock()
+        store.pending_advance_for_node.side_effect = [
+            {"gateId": "gate", "state": "countdown", "expiresAt": "2000-01-01T00:00:00+00:00"},
+            {"gateId": "gate", "state": "held", "expiresAt": "2000-01-01T00:00:00+00:00"},
+            None,
+        ]
+        store.release_timed_out_advance.return_value = False
+        store.prepare_node_dispatch.return_value = {"alreadyDispatched": True, "jobId": "job"}
+        orchestrator = Mock()
+        orchestrator.jobs = {"job": object()}
+        orchestrator.get_job.return_value.snapshot.return_value = {"status": "running"}
+        with patch.object(service, "_workflow_store", store), patch.object(service, "orchestrator", orchestrator), patch.object(service.asyncio, "sleep", new_callable=AsyncMock) as sleep:
+            await service.dispatch_node("workflow", "node")
+        self.assertEqual(store.pending_advance_for_node.call_count, 3)
+        sleep.assert_awaited_once_with(0.25)
+        store.prepare_node_dispatch.assert_called_once()
+
     async def test_node_tool_dispatches_new_thread_and_persists_events(self) -> None:
         async with MockAppServer(delay_sec=0.01, send_message_delta=True) as server:
             with tempfile.TemporaryDirectory() as directory:

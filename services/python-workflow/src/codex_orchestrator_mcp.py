@@ -1931,8 +1931,9 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             datetime.fromisoformat(gate["expiresAt"]) - datetime.now(UTC)
         ).total_seconds()
         if remaining <= 0:
-            store.release_timed_out_advance(workflow_id, gate["gateId"])
-            break
+            store.release_timed_out_advance(workflow_id, gate["gateId"], node_id=node_id)
+            # 投递回执或用户输入可能刚刚延长/保持等待，重新读取中央状态。
+            continue
         await asyncio.sleep(min(0.25, remaining))
     node = store.prepare_node_dispatch(workflow_id, node_id)
     if node["alreadyDispatched"]:

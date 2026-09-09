@@ -470,17 +470,17 @@ function renderSteps(nodes, initializing = false) {
       const copy = make("div", "advance-copy");
       copy.append(
         make("strong", "", held
-          ? `已暂停：暂不进入${next?.displayName || "下一步骤"}`
+          ? `保持等待：暂不进入${next?.displayName || "下一步骤"}`
           : `等待进入下一步：${next?.displayName || "下一步骤"}`),
         make("span", "", held
-          ? "当前只是暂停，不会自动返工。结果不符合要求时，请在任务助手中说明修改点并确认执行；也可以稍后继续下一步。"
-          : "您可以立即确认、暂停等待，或等待倒计时结束后自动继续。暂停不会返工；如需返工，请在任务助手中说明修改点。")
+          ? "任务不会自动继续。请点击或回复“确认继续”进入下一步；如需返工，请说明修改点并确认执行。"
+          : "请确认继续；两分钟内未回复将自动继续。提问或选择保持等待后，将等待您明确确认。节点操作仅在步骤未执行时允许。")
       );
       const actions = make("div", "advance-actions");
       const confirm = make(
         "button",
         "advance-confirm",
-        held ? "继续进入下一步" : "立即进入下一步"
+        "确认继续"
       );
       confirm.type = "button";
       confirm.dataset.advanceGate = advance.gateId;
@@ -490,7 +490,7 @@ function renderSteps(nodes, initializing = false) {
       confirm.onclick = () => confirmAdvance(advance.gateId);
       actions.append(confirm);
       if (!held) {
-        const hold = make("button", "advance-hold", "暂停，暂不进入下一步");
+        const hold = make("button", "advance-hold", "保持等待");
         hold.type = "button";
         hold.dataset.advanceGate = advance.gateId;
         hold.dataset.advanceState = "countdown";
@@ -581,17 +581,17 @@ function renderAdvanceCountdown() {
     const remaining = Math.max(0, Math.ceil((new Date(button.dataset.advanceExpires) - Date.now()) / 1000));
     if (acting) {
       if (action.type === button.dataset.advanceAction) {
-        button.textContent = action.type === "hold" ? "正在暂停…" : "正在确认…";
+        button.textContent = action.type === "hold" ? "正在保持等待…" : "正在确认…";
       }
       button.disabled = true;
     } else if (held) {
-      button.textContent = "继续进入下一步";
+      button.textContent = "确认继续";
       button.disabled = false;
     } else if (remaining > 0) {
       if (button.dataset.advanceAction === "confirm") {
-        button.textContent = `立即进入下一步（${remaining} 秒）`;
+        button.textContent = `确认继续（${remaining} 秒后自动继续）`;
       } else {
-        button.textContent = "暂停，暂不进入下一步";
+        button.textContent = "保持等待";
       }
       button.disabled = false;
     } else {

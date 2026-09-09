@@ -6,6 +6,7 @@ import com.codexflow.configcenter.client.GatewayClient;
 import com.codexflow.configcenter.client.GatewayFailure;
 import com.codexflow.configcenter.domain.PreparedRun;
 import com.codexflow.configcenter.domain.WorkflowRunStore;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -327,6 +328,10 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     if (!"accepted".equals(inbound.status())) return;
     boolean restartReserved = false;
     try {
+      // 首次入站即保持等待；同一编号重试不会保持后续新等待。
+      gateway.post(
+          "/workflows/" + workflowId + "/input-observations",
+          objectMapper.createObjectNode().put("messageId", inbound.workflowMessageId()));
       var imageIds =
           new java.util.ArrayList<>(
               store.messageImages(message.messageId(), workflowId, message.conversationId()));
@@ -411,24 +416,51 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     String command = normalizedCommand(message.content());
     String action =
         switch (command) {
-          case "暂停", "暂停，暂不进入下一步" -> "hold";
-          case "继续", "立即进入下一步", "继续进入下一步" -> "confirm";
+          case "暂停", "暂停一下", "等一下", "暂停，暂不进入下一步" -> "hold";
+          case "确认继续", "继续", "立即进入下一步", "继续进入下一步" -> "confirm";
           default -> null;
         };
     if (action == null) return false;
 
+    DingTalkModels.Inbound inbound = null;
     try {
       JsonNode snapshot = gateway.get("/workflows/" + binding.workflowId());
       String gateId = snapshot.path("pendingAdvance").path("gateId").asText();
+      String quotedGate = store.quotedAdvance(message);
+      if (quotedGate != null && !quotedGate.equals(gateId)) {
+        reply(message, binding.workflowId(), "引用的等待已结束，请引用当前等待消息操作。");
+        return true;
+      }
       if (!isGateId(gateId)) {
+        inbound = store.registerInbound(properties.getClientId(), binding, message);
+        gateway.post(
+            "/workflows/" + binding.workflowId() + "/input-observations",
+            objectMapper.createObjectNode().put("messageId", inbound.workflowMessageId()));
         reply(message, binding.workflowId(), "当前没有等待确认的步骤。");
+        return true;
+      }
+      inbound = store.registerInbound(properties.getClientId(), binding, message);
+      JsonNode observed =
+          gateway.post(
+              "/workflows/" + binding.workflowId() + "/input-observations",
+              objectMapper.createObjectNode().put("messageId", inbound.workflowMessageId()));
+      if (!gateId.equals(observed.path("gateId").asText())) {
+        reply(message, binding.workflowId(), "该消息对应的等待已结束，请重新发送。");
+        store.markInboundFinished(binding.workflowId(), inbound.workflowMessageId(), false);
         return true;
       }
       gateway.post(
           "/workflows/" + binding.workflowId() + "/advance/" + gateId + "/" + action, null);
-      reply(message, binding.workflowId(), "hold".equals(action) ? "已暂停，将等待手动继续。" : "已进入下一步。");
+      store.markInboundFinished(binding.workflowId(), inbound.workflowMessageId(), false);
+      reply(
+          message,
+          binding.workflowId(),
+          "hold".equals(action) ? "已保持等待，请回复“确认继续”。" : "已确认，任务将继续下一步。");
     } catch (RuntimeException error) {
       reply(message, binding.workflowId(), "步骤等待可能已结束，请查询当前进度后重试。");
+    } finally {
+      if (inbound != null)
+        store.markInboundFinished(binding.workflowId(), inbound.workflowMessageId(), false);
     }
     return true;
   }
@@ -594,6 +626,27 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     } else if (PROGRESS_EVENTS.contains(type)) {
       try {
         JsonNode snapshot = gateway.get("/workflows/" + binding.workflowId());
+        if ("step.advance.waiting".equals(type)) {
+          String gateId = payload.path("gateId").asText();
+          JsonNode gate = snapshot.path("pendingAdvance");
+          if (isGateId(gateId)
+              && gateId.equals(gate.path("gateId").asText())
+              && "countdown".equals(gate.path("state").asText())) {
+            store.recordAdvance(
+                binding.workflowId(), sequence, gateId, advanceNotice(snapshot, gate));
+          } else {
+            store.recordEvent(
+                properties.getClientId(),
+                binding.workflowId(),
+                sequence,
+                "expired-advance:" + gateId,
+                null,
+                null,
+                null,
+                false);
+          }
+          return true;
+        }
         String notice =
             DingTalkExecutionNotice.stepLabel(event, snapshot) + "：" + eventNotice(type);
         if (TERMINAL_EVENTS.contains(type) && !snapshot.path("response").asText().isBlank())
@@ -672,6 +725,22 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   @SuppressWarnings("unchecked")
   void deliver(DingTalkModels.Outbox item) {
     try {
+      String gateId = item.payload().path("gateId").asText(null);
+      String deliveredAt = item.payload().path("deliveredAt").asText(null);
+      if (gateId != null && deliveredAt != null) {
+        reportAdvanceDelivery(item, gateId, deliveredAt);
+        store.markOutboxSent(item.id(), item.payload().path("sentMessageId").asText(null));
+        return;
+      }
+      if (gateId != null) {
+        JsonNode gate = gateway.get("/workflows/" + item.workflowId()).path("pendingAdvance");
+        if (!gateId.equals(gate.path("gateId").asText())
+            || !"countdown".equals(gate.path("state").asText())
+            || !Instant.parse(gate.path("expiresAt").asText()).isAfter(Instant.now())) {
+          store.markOutboxSuperseded(item.id());
+          return;
+        }
+      }
       DingTalkModels.SendResult result;
       if ("reply".equals(item.messageKind())) {
         result = transport.sendReply(item.targetExternalId(), item.targetType(), item.payload());
@@ -712,10 +781,43 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           result = transport.sendCard(item.conversationId(), item.replyToMessageId(), card);
         }
       }
+      if (gateId != null) {
+        Instant sentAt = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        store.markAdvanceDelivered(item.id(), result.messageId(), sentAt);
+        reportAdvanceDelivery(item, gateId, sentAt.toString());
+      }
       store.markOutboxSent(item.id(), result.messageId());
     } catch (RuntimeException error) {
       store.markOutboxFailed(item.id(), error);
     }
+  }
+
+  private void reportAdvanceDelivery(DingTalkModels.Outbox item, String gateId, String sentAt) {
+    gateway.post(
+        "/workflows/" + item.workflowId() + "/advance/" + gateId + "/notified",
+        objectMapper.createObjectNode().put("sentAt", sentAt));
+  }
+
+  private static String advanceNotice(JsonNode snapshot, JsonNode gate) {
+    String completed = "当前步骤";
+    String next = "下一步骤";
+    int index = 0;
+    for (JsonNode node : snapshot.path("nodes")) {
+      index++;
+      String name = DingTalkExecutionNotice.safe(node.path("displayName").asText("未命名步骤"));
+      if (name.length() > 100) name = name.substring(0, 100) + "…";
+      if (node.path("id").asText().equals(gate.path("completedNodeId").asText()))
+        completed = "第" + index + "步「" + name + "」";
+      if (node.path("id").asText().equals(gate.path("nextNodeId").asText()))
+        next = "「" + name + "」";
+    }
+    return completed
+        + "已完成，下一步"
+        + next
+        + "。\n"
+        + "请引用本消息回复“确认继续”，立即开始下一步。\n"
+        + "两分钟内未回复将自动继续。\n"
+        + "如需提问或暂缓，请回复本消息，任务将保持等待。";
   }
 
   private static String normalizedCommand(String value) {
@@ -786,9 +888,9 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       case "node.cancelled" -> "已取消。";
       case "node.timed_out" -> "执行超时。";
       case "step.advance.waiting" -> "等待进入下一步，可通过编号暂停或继续。";
-      case "step.advance.held" -> "已暂停，请通过编号继续。";
+      case "step.advance.held" -> "已保持等待，请回复“确认继续”进入下一步。";
       case "step.advance.confirmed", "step.advance.resumed" -> "已确认继续下一步。";
-      case "step.advance.timed_out" -> "30 秒等待已结束，任务已自动继续。";
+      case "step.advance.timed_out" -> "两分钟等待已结束，任务已自动继续。";
       case "workflow.completed" -> "任务已完成。";
       case "workflow.failed" -> "任务执行失败。";
       case "workflow.cancelled" -> "任务已停止。";

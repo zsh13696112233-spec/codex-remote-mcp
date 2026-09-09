@@ -77,9 +77,17 @@ Copy-Item .\config\agents.example.json .\config\agents.json
 工作流提交可携带 `advanceMode`：
 
 - `automatic`：默认值，成功步骤完成后立即派发下一步骤。
-- `semi_automatic`：仅支持严格串行工作流。成功步骤完成且仍有下一步骤时，SQLite 中创建 30 秒持久化等待；调用 `POST /workflows/{workflowId}/advance/{gateId}/confirm` 可立即放行，调用 `POST /workflows/{workflowId}/advance/{gateId}/hold` 可持久化暂停并取消自动放行。暂停后再次调用确认接口即可继续；未暂停且未确认时由运行时到期自动放行。
+- `semi_automatic`：仅支持严格串行工作流。成功步骤完成且仍有下一步骤时，SQLite 中创建两分钟持久化等待；调用 `POST /workflows/{workflowId}/advance/{gateId}/confirm` 可立即放行，调用 `POST /workflows/{workflowId}/advance/{gateId}/hold` 可持久化暂停并取消自动放行。暂停后再次调用确认接口即可继续；未暂停且未确认时由运行时到期自动放行。
 
 状态接口同时返回 `advanceMode` 和 `pendingAdvance`；后者通过 `state` 区分 `countdown` 和 `held`，并在暂停时返回 `heldAt`。暂停期间工作流仍为 `running`，暂停时间不计入主监督最长运行时间。最后一步、失败步骤和跳过步骤不创建等待；取消、重跑和其他使等待失效的状态变化会关闭旧等待，防止过期按钮影响新一轮执行。
+
+全自动、半自动均禁止在业务步骤为排队派发、执行中或停止中时执行用户停止、跳过、返工操作；咨询不受影响。控制在提议、确认及执行时校验，派发与已确认控制互斥。执行期间收到的控制请求不能在稍后的等待中自动执行，需用户重新提出。任务失败、完成后的原有重试、返工保持不变，系统超时和故障清理不受此限制。
+
+半自动等待期间，新任务消息在入站事务中先保持等待，再交给助手；回复“确认继续”（兼容“继续”）直接放行，不需要模型判断。重复消息绑定首次接收时的等待和控制许可，不影响后续新等待。保持等待仍占用运行名额；沿用网关重启将遗留运行标记失败的策略，不增加恢复机制。
+
+配置中心在下载图片前调用 `POST /workflows/{workflowId}/input-observations`，请求为 `{"messageId":"有效 UUID"}`，返回首次入站对应的 `gateId`（可为空）和 `controlAllowed`；同一编号与后续 `/messages` 复用。该服务端入口不增加监控中心路由。
+
+钉钉通知成功后调用 `POST /workflows/{workflowId}/advance/{gateId}/notified`，请求为 `{"sentAt":"带时区的发送成功时间"}`。仅尚未过期的倒计时等待接受首次回执，将 `expiresAt` 调整为发送时间后120秒，并返回 `updated: true`；重复、迟到、已保持或已关闭等待返回 `updated: false`。`pendingAdvance` 新增可空 `notifiedAt`。通知失败、回执未能在原截止前送达或没有钉钉通知时，仍按等待创建后120秒放行。旧等待保留原截止时间。
 
 ## 返工要求
 

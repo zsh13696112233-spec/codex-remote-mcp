@@ -396,6 +396,14 @@ class SidecarInternalApiTests(unittest.TestCase):
 
 
 class InternalApiClientTests(unittest.TestCase):
+    def test_expired_wait_release_uses_dispatch_node_without_public_pending_gate(self) -> None:
+        client = InternalApiClient("http://127.0.0.1:8080", "supervisor-a",
+            started_at=utc_now(), token_env="TEST_UNUSED_TOKEN")
+        with patch.object(client, "get_workflow", return_value={"pendingAdvance": None}) as snapshot, patch.object(client, "_lease_request", return_value={"released": True}) as request:
+            self.assertTrue(client.release_timed_out_advance("workflow", "gate", node_id="b"))
+        snapshot.assert_not_called()
+        request.assert_called_once_with("POST", "workflow", "/internal/v1/workflows/workflow/nodes/b/advance/release", {"gateId": "gate"})
+
     def test_token_resolution_and_constructor_validation(self) -> None:
         with patch.dict(os.environ, {"CENTRAL_TOKEN": "secret-value"}):
             self.assertEqual(

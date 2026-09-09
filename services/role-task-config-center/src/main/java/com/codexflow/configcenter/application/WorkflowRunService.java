@@ -62,6 +62,12 @@ public class WorkflowRunService {
 
   /** 请求网关取消运行，并持久化网关返回的最新状态。 */
   public ObjectNode cancel(String workflowId) {
+    JsonNode live = gateway.get("/workflows/" + workflowId);
+    for (JsonNode node : live.path("nodes")) {
+      if (Set.of("queued", "running", "cancelling").contains(node.path("status").asText())) {
+        throw new ConflictFailure("当前步骤正在执行，请在步骤结束后操作。");
+      }
+    }
     JsonNode response = gateway.post("/workflows/" + workflowId + "/cancel", null);
     ObjectNode result = store.recordGatewayStatus(workflowId, response, "cancelled");
     if (isTerminal(result.path("status").asText())) launches.release(workflowId);

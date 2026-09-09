@@ -9,6 +9,14 @@ import org.springframework.data.repository.query.Param;
 
 interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, String> {
 
+  @Query(
+      value =
+          "SELECT * FROM codex_sop_dingtalk_outbox WHERE conversation_id = :conversationId "
+              + "AND ((status = 'sent' AND advance_gate_id IS NULL) OR delivered_at IS NOT NULL) "
+              + "ORDER BY created_at DESC LIMIT 50",
+      nativeQuery = true)
+  List<DingTalkOutboxEntity> findRecentDelivered(@Param("conversationId") String conversationId);
+
   List<DingTalkOutboxEntity> findTop50ByConversationIdAndStatusOrderByCreatedAtDesc(
       String conversationId, String status);
 

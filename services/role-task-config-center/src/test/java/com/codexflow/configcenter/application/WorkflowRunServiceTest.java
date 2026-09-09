@@ -32,6 +32,18 @@ class WorkflowRunServiceTest {
   private PreparedRun prepared;
 
   @Test
+  void executingStepRejectsCancelBeforePostingControl() {
+    ObjectNode live = objectMapper.createObjectNode().put("status", "running");
+    live.putArray("nodes").addObject().put("status", "running");
+    when(gateway.get("/workflows/" + WORKFLOW_ID)).thenReturn(live);
+    assertThatThrownBy(() -> service.cancel(WORKFLOW_ID))
+        .isInstanceOf(ConflictFailure.class)
+        .hasMessageContaining("步骤正在执行");
+    verify(gateway, never()).post("/workflows/" + WORKFLOW_ID + "/cancel", null);
+    verify(launches, never()).release(WORKFLOW_ID);
+  }
+
+  @Test
   void oldSnapshotsReceiveRuntimeScopeWithoutChangingStoredPayload() {
     when(store.taskDefinitionId(WORKFLOW_ID)).thenReturn("task-1");
     ObjectNode accepted = objectMapper.createObjectNode().put("status", "queued");

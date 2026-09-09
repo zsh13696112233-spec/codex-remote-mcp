@@ -722,7 +722,7 @@ class WorkflowGateway:
             "等待超时时继续调用，以便及时响应用户咨询。\n"
             "如果 failurePolicy=stop，任一节点失败后不得启动后续节点。\n"
             "如果 advanceMode=semi_automatic，dispatch_node 会在成功步骤之间等待最多"
-            "30 秒；用户也可以选择暂停且暂不进入下一步。等待或暂停期间应告诉用户"
+            "两分钟；用户也可以选择保持等待且暂不进入下一步。等待期间收到输入会保持等待，应告诉用户"
             "尚未进入下一步，不得声称下一步已经开始。\n"
             "你面对的是完全不懂技术的普通用户。所有对外可见消息必须使用简单中文，"
             "像耐心的助手一样说明进度。\n"
@@ -748,8 +748,20 @@ class WorkflowGateway:
         accepted = await _database_call(
             self.store.accept_chat_message, workflow_id, message_id, text, image_ids, actor_id, expected_action_id
         )
+        await self.observe_input(workflow_id, message_id)
         self._ensure_chat_worker(workflow_id)
         return accepted
+
+    async def observe_input(self, workflow_id: str, message_id: str) -> dict[str, Any]:
+        lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
+        async with lock:
+            observed = await _database_call(self.store.observe_input, workflow_id, message_id)
+            if observed["gateId"]:
+                snapshot = await _database_call(self.store.get_workflow, workflow_id)
+                gate = snapshot.get("pendingAdvance") or {}
+                if gate.get("gateId") == observed["gateId"] and gate.get("state") == "held":
+                    await self._pause_supervisor(workflow_id)
+            return observed
 
     async def confirm_advance(self, workflow_id: str, gate_id: str) -> dict[str, Any]:
         if not gate_id or len(gate_id) > 128:
@@ -815,7 +827,24 @@ class WorkflowGateway:
         assistant_message_id = str(uuid.uuid4())
         text = message["text"].strip()
         pending = await _database_call(self.store.get_pending_control, workflow_id)
-        if text == "确认执行":
+        if text in {"确认继续", "继续", "立即进入下一步", "继续进入下一步"} and not message.get("imageIds"):
+            observed = await _database_call(self.store.observe_input, workflow_id, message_id)
+            if observed["gateId"] is None:
+                answer = "收到消息时没有等待确认的步骤，请查看当前进度。"
+            else:
+                try:
+                    await self.confirm_advance(workflow_id, observed["gateId"])
+                    answer = "已确认，任务将继续下一步。"
+                except (RuntimeError, ValueError) as error:
+                    answer = f"未继续：{error}"
+        elif text in {"暂停", "暂停一下", "等一下", "暂停，暂不进入下一步"}:
+            observed = await _database_call(self.store.observe_input, workflow_id, message_id)
+            current = await _database_call(self.store.get_workflow, workflow_id)
+            gate = current.get("pendingAdvance") or {}
+            held = observed["gateId"] and gate.get("gateId") == observed["gateId"] and gate.get("state") == "held"
+            answer = ("已保持等待，请回复“确认继续”进入下一步。" if held
+                      else "当前没有可保持等待的步骤；执行中的步骤不支持暂停。")
+        elif text == "确认执行":
             if pending is None:
                 answer = "当前没有等待确认的操作。"
             else:
@@ -825,7 +854,7 @@ class WorkflowGateway:
                     )
                     answer = await self._execute_control(workflow_id, confirmed)
                 except (RuntimeError, ValueError) as error:
-                    answer = f"操作未执行：{error}任务状态和重跑额度均未改变。"
+                    answer = f"操作未完成：{error}请查看当前任务状态。"
         elif text == "取消操作":
             if pending is None:
                 answer = "当前没有等待取消的操作。"
@@ -1172,6 +1201,8 @@ class WorkflowGateway:
             "stateVersion": snapshot["stateVersion"],
             "retryPolicy": snapshot.get("retryPolicy"),
             "pendingControl": snapshot.get("pendingControl"),
+            "advanceMode": snapshot.get("advanceMode"),
+            "pendingAdvance": snapshot.get("pendingAdvance"),
             "steps": steps,
         }
         return (
@@ -1182,6 +1213,8 @@ class WorkflowGateway:
             f"本条消息明确关联了 {len(message.get('imageIds', []))} 张图片。"
             "若用户要求依据历史图片返工但本条未关联图片，请让用户引用原图消息或重新附图，不能擅自选取历史图片。"
             "普通咨询返回 kind=answer；信息不足返回 kind=clarify。"
+            "业务步骤执行期间不允许停止、跳过或返工，应回答请在步骤结束后重新提出操作；"
+            "不能预约控制。半自动等待期间收到任务回复后保持等待，只有明确继续才放行。"
             "用户明确要求停止整个任务时返回 propose_control/stop；要求跳过某一步时"
             "返回 propose_control/skip；要求重试、重新执行、从某一步重新开始时统一返回"
             "propose_control/restart_from，并把步骤序号或名称映射为快照里的真实 id。"
@@ -1228,13 +1261,6 @@ class WorkflowGateway:
         await self._schedule_pending()
 
     async def cancel(self, workflow_id: str) -> dict[str, Any]:
-        snapshot = await _database_call(self.store.get_workflow, workflow_id)
-        task = self._tasks.get(workflow_id)
-        job_id = snapshot["supervisor"].get("jobId")
-        if job_id and job_id in self.orchestrator.jobs:
-            await self.orchestrator.cancel(job_id)
-        if task is not None and not task.done():
-            task.cancel()
         result = await _database_call(
             self.store.cancel_workflow,
             workflow_id,
@@ -1242,6 +1268,13 @@ class WorkflowGateway:
             source="gateway",
             event_reason="user_requested",
         )
+        # 先在存储事务中拒绝业务步骤执行中的取消，再清理空闲编排器。
+        task = self._tasks.get(workflow_id)
+        job_id = result["supervisor"].get("jobId")
+        if job_id and job_id in self.orchestrator.jobs:
+            await self.orchestrator.cancel(job_id)
+        if task is not None and not task.done():
+            task.cancel()
         await self._schedule_pending()
         return result
 
@@ -1251,6 +1284,35 @@ def _error_response(error: Exception, status_code: int = 400) -> JSONResponse:
         {"error": str(error), "errorType": type(error).__name__},
         status_code=status_code,
     )
+
+
+async def observe_workflow_input(request: Request) -> Response:
+    gateway: WorkflowGateway = request.app.state.gateway
+    try:
+        payload = await request.json()
+        return JSONResponse(await gateway.observe_input(
+            request.path_params["workflow_id"], payload.get("messageId")))
+    except LookupError as error:
+        return _error_response(error, 404)
+    except (ValueError, TypeError, AttributeError) as error:
+        return _error_response(error)
+    except RuntimeError as error:
+        return _error_response(error, 409)
+
+
+async def notify_workflow_advance(request: Request) -> Response:
+    gateway: WorkflowGateway = request.app.state.gateway
+    try:
+        payload = await request.json()
+        gate_id = request.path_params["gate_id"]
+        if not 1 <= len(gate_id) <= 128:
+            raise ValueError("步骤确认编号无效。")
+        return JSONResponse(await _database_call(gateway.store.mark_advance_notified,
+            request.path_params["workflow_id"], gate_id, payload.get("sentAt")))
+    except (ValueError, TypeError, AttributeError) as error:
+        return _error_response(error)
+    except RuntimeError as error:
+        return _error_response(error, 409)
 
 
 async def create_workflow(request: Request) -> Response:
@@ -1491,6 +1553,8 @@ async def cancel_workflow(request: Request) -> Response:
         return JSONResponse(await gateway.cancel(request.path_params["workflow_id"]))
     except ValueError as error:
         return _error_response(error, 404)
+    except RuntimeError as error:
+        return _error_response(error, 409)
 
 
 async def ready(_: Request) -> Response:
@@ -1736,6 +1800,7 @@ async def internal_release_advance(request: Request) -> Response:
             gateway.store.release_timed_out_advance,
             workflow_id,
             gate_id,
+            node_id=request.path_params["node_id"],
             sidecar_supervisor_id=supervisor_id,
             lease_token=lease_token,
         )
@@ -1946,6 +2011,8 @@ def create_app(
             Route("/workflow-task-bindings", register_workflow_task_bindings, methods=["POST"]),
             Route("/workflow-statuses", get_workflow_statuses, methods=["POST"]),
             Route("/workflows/{workflow_id}", get_workflow, methods=["GET"]),
+            Route("/workflows/{workflow_id}/input-observations", observe_workflow_input, methods=["POST"]),
+            Route("/workflows/{workflow_id}/advance/{gate_id}/notified", notify_workflow_advance, methods=["POST"]),
             Route(
                 "/workflows/{workflow_id}/artifacts/{artifact_id}",
                 get_workflow_artifact,

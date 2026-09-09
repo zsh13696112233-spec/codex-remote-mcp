@@ -66,6 +66,64 @@ class DingTalkStoreIntegrationTest {
   }
 
   @Test
+  void advanceQuoteAndDeliveryTimeSurviveRetry() {
+    String client = "advance-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("advance-start")).workflowId();
+    store.recordAdvance(workflow, 1, "11111111111111111111111111111111", "第1步完成，请确认继续");
+    var item =
+        store.claimDue().stream()
+            .filter(row -> workflow.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(item.payload().path("gateId").asText())
+        .isEqualTo("11111111111111111111111111111111");
+    var sentAt = java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+    store.markAdvanceDelivered(item.id(), "sent-advance", sentAt);
+    store.markOutboxFailed(item.id(), new IllegalStateException("回执失败"));
+    var callback =
+        objectMapper
+            .createObjectNode()
+            .put("msgId", "reply-before-receipt")
+            .put("conversationId", "chat-1");
+    callback
+        .putObject("text")
+        .put("content", "确认继续")
+        .putObject("repliedMsg")
+        .put("content", item.payload().path("text").asText());
+    var quotedBeforeReceipt =
+        new OfficialDingTalkTransport(new DingTalkProperties(), objectMapper)
+            .toMessage(callback.toString());
+    assertThat(store.quotedAdvance(quotedBeforeReceipt))
+        .isEqualTo("11111111111111111111111111111111");
+    jdbc.update(
+        "update codex_sop_dingtalk_outbox set next_attempt_at = ? where id = ?",
+        java.time.Instant.now().minusSeconds(5),
+        item.id());
+    var retry =
+        store.claimDue().stream()
+            .filter(row -> row.id().equals(item.id()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(java.time.Instant.parse(retry.payload().path("deliveredAt").asText()))
+        .isEqualTo(sentAt.truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+    store.markOutboxSent(item.id(), "sent-advance");
+    var quoted =
+        new DingTalkModels.Message(
+            "quote-advance", "chat-1", "2", "user", "确认继续", true, false, "sent-advance");
+    assertThat(store.quotedAdvance(quoted)).isEqualTo("11111111111111111111111111111111");
+    store.recordAdvance(workflow, 2, "22222222222222222222222222222222", "下一轮等待");
+    assertThat(store.quotedAdvance(quoted)).isEqualTo("11111111111111111111111111111111");
+    String nextId =
+        jdbc.queryForObject(
+            "select id from codex_sop_dingtalk_outbox where workflow_id = ? and advance_gate_id = ?",
+            String.class,
+            workflow,
+            "22222222222222222222222222222222");
+    store.markOutboxSuperseded(nextId);
+  }
+
+  @Test
   void acquiringAnExistingRunAlsoProtectsAnUnreconciledDingTalkOwner() {
     String clientId = "app-" + UUID.randomUUID();
     String taskId = createTask(clientId);

@@ -72,7 +72,7 @@ class DingTalkProgressCard {
           .append(
               "held".equals(gate.path("state").asText())
                   ? "自动流转已暂停，请选择继续。"
-                  : "30 秒后自动继续，也可以直接选择操作。");
+                  : "两分钟后自动继续，也可以直接选择操作。");
       return value.toString();
     }
 
@@ -198,7 +198,7 @@ class DingTalkProgressCard {
       value.append(
           "held".equals(gate.path("state").asText())
               ? "自动流转已暂停，请点击“继续进入下一步”。"
-              : "可选择暂停或立即继续；未操作时将在 30 秒后自动进入下一步。");
+              : "可选择暂停或立即继续；未操作时将在 两分钟后自动进入下一步。");
     }
     if (notice != null && !notice.isBlank()) {
       if (!value.isEmpty()) value.append("\n\n---\n\n");
@@ -270,7 +270,7 @@ class DingTalkProgressCard {
       value.append(
           "held".equals(gate.path("state").asText())
               ? "已暂停自动流转。请点击“继续进入下一步”。"
-              : "请点击“暂停”或“立即进入下一步”；否则将在 30 秒后自动继续。");
+              : "请点击“暂停”或“立即进入下一步”；否则将在 两分钟后自动继续。");
     }
 
     if (latestAssistantReply != null && !latestAssistantReply.isBlank()) {

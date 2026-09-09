@@ -54,6 +54,12 @@ class DingTalkOutboxEntity {
   @Column(name = "sent_message_id", length = 256)
   String sentMessageId;
 
+  @Column(name = "advance_gate_id", length = 128)
+  String advanceGateId;
+
+  @Column(name = "delivered_at")
+  Instant deliveredAt;
+
   @Column(name = "created_at", nullable = false)
   Instant createdAt;
 

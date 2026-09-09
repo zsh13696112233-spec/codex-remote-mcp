@@ -6,6 +6,8 @@ import tempfile
 import unittest
 import uuid
 from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -45,6 +47,116 @@ class WorkflowStoreTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.store = WorkflowStore(Path(self.directory.name, "workflows.db"))
+
+    def waiting_gate(self) -> dict:
+        value = serial_workflow()
+        value["advanceMode"] = "semi_automatic"
+        self.store.create_workflow(value)
+        self.store.prepare_node_dispatch("serial-demo", "a")
+        self.store.sync_node_job("serial-demo", "a", {"status": "completed", "finished_at": utc_now()})
+        return self.store.get_workflow("serial-demo")["pendingAdvance"]
+
+    def test_notification_extends_once_and_survives_reload(self) -> None:
+        gate = self.waiting_gate()
+        initial = datetime.fromisoformat(gate["expiresAt"])
+        self.assertAlmostEqual((initial - datetime.now(timezone.utc)).total_seconds(), 120, delta=2)
+        sent = utc_now()
+        self.assertTrue(self.store.mark_advance_notified("serial-demo", gate["gateId"], sent)["updated"])
+        reloaded = WorkflowStore(self.store.path)
+        current = reloaded.get_workflow("serial-demo")["pendingAdvance"]
+        self.assertEqual(current["notifiedAt"], sent)
+        self.assertEqual(datetime.fromisoformat(current["expiresAt"]), datetime.fromisoformat(sent) + timedelta(seconds=120))
+        self.assertFalse(reloaded.mark_advance_notified("serial-demo", gate["gateId"], utc_now())["updated"])
+        self.assertEqual(reloaded.get_workflow("serial-demo")["pendingAdvance"]["expiresAt"], current["expiresAt"])
+
+    def test_notification_does_not_revive_expired_or_held_wait(self) -> None:
+        gate = self.waiting_gate()
+        self.store.hold_advance("serial-demo", gate["gateId"])
+        self.assertFalse(self.store.mark_advance_notified("serial-demo", gate["gateId"], utc_now())["updated"])
+        self.store.confirm_advance("serial-demo", gate["gateId"])
+        self.assertFalse(self.store.mark_advance_notified("serial-demo", gate["gateId"], utc_now())["updated"])
+        self.store.prepare_node_dispatch("serial-demo", "b")
+        self.store.sync_node_job("serial-demo", "b", {"status": "completed", "finished_at": utc_now()})
+        gate = self.store.get_workflow("serial-demo")["pendingAdvance"]
+        with patch("workflow_store.utc_now", return_value=(datetime.now(timezone.utc) + timedelta(seconds=121)).isoformat()):
+            self.assertFalse(self.store.mark_advance_notified("serial-demo", gate["gateId"], utc_now())["updated"])
+            self.assertTrue(self.store.release_timed_out_advance("serial-demo", gate["gateId"]))
+
+    def test_input_holds_before_assistant_and_duplicate_does_not_hold_next_gate(self) -> None:
+        gate = self.waiting_gate()
+        message = str(uuid.uuid4())
+        self.store.accept_chat_message("serial-demo", message, "解释一下结果")
+        self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "held")
+        self.store.confirm_advance("serial-demo", gate["gateId"])
+        self.store.prepare_node_dispatch("serial-demo", "b")
+        self.store.sync_node_job("serial-demo", "b", {"status": "completed", "finished_at": utc_now()})
+        next_gate = self.store.get_workflow("serial-demo")["pendingAdvance"]
+        self.store.accept_chat_message("serial-demo", message, "解释一下结果")
+        self.assertEqual(self.store.observe_input("serial-demo", message)["gateId"], gate["gateId"])
+        self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "countdown")
+        self.assertNotEqual(next_gate["gateId"], gate["gateId"])
+
+    def test_running_input_cannot_become_later_control_for_either_mode(self) -> None:
+        for mode in ("automatic", "semi_automatic"):
+            with self.subTest(mode=mode):
+                value = serial_workflow()
+                value["workflowId"] = mode
+                value["advanceMode"] = mode
+                self.store.create_workflow(value)
+                self.store.prepare_node_dispatch(mode, "a")
+                message = str(uuid.uuid4())
+                self.store.observe_input(mode, message)
+                for control in (lambda: self.store.cancel_workflow(mode), lambda: self.store.skip_node(mode, "b"), lambda: self.store.restart_from_node(mode, "a")):
+                    with self.assertRaisesRegex(RuntimeError, "执行期间"):
+                        control()
+                self.store.sync_node_job(mode, "a", {"status": "completed", "finished_at": utc_now()})
+                self.store.accept_chat_message(mode, message, "退回第一步")
+                with self.assertRaisesRegex(RuntimeError, "执行期间"):
+                    self.store.propose_control(mode, "restart_from", "a", message)
+                self.assertEqual(self.store.get_workflow(mode)["retryPolicy"]["usedRetries"], 0)
+
+    def test_legacy_message_retry_cannot_capture_current_wait(self) -> None:
+        gate = self.waiting_gate()
+        message = str(uuid.uuid4())
+        self.store.accept_chat_message("serial-demo", message, "原来的提问")
+        self.store.confirm_advance("serial-demo", gate["gateId"])
+        self.store.prepare_node_dispatch("serial-demo", "b")
+        self.store.sync_node_job("serial-demo", "b", {"status": "completed", "finished_at": utc_now()})
+        with self.store._connect() as connection:
+            connection.execute("DELETE FROM workflow_input_observations WHERE message_id = ?", (message,))
+        self.assertEqual(self.store.observe_input("serial-demo", message), {"gateId": None, "controlAllowed": False})
+        self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "countdown")
+
+    def test_confirmed_control_blocks_dispatch_until_finished(self) -> None:
+        gate = self.waiting_gate()
+        message = str(uuid.uuid4())
+        self.store.accept_chat_message("serial-demo", message, "跳过下一步")
+        action = self.store.propose_control("serial-demo", "skip", "b", message)
+        confirmation = str(uuid.uuid4())
+        self.store.accept_chat_message("serial-demo", confirmation, "确认执行")
+        self.store.confirm_control("serial-demo", action["actionId"], confirmation)
+        self.store.confirm_advance("serial-demo", gate["gateId"])
+        with self.assertRaisesRegex(RuntimeError, "已确认的操作"):
+            self.store.prepare_node_dispatch("serial-demo", "b")
+
+    def test_input_and_timeout_have_one_atomic_winner(self) -> None:
+        gate = self.waiting_gate()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda action: action(), [
+                lambda: self.store.observe_input("serial-demo", str(uuid.uuid4())),
+                lambda: self.store.release_timed_out_advance("serial-demo", gate["gateId"]),
+            ]))
+        self.assertFalse(results[1])
+        self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "held")
+
+    def test_old_wait_migration_preserves_deadline(self) -> None:
+        gate = self.waiting_gate()
+        with self.store._connect() as connection:
+            connection.execute("ALTER TABLE workflow_advance_gates DROP COLUMN notified_at")
+        reloaded = WorkflowStore(self.store.path)
+        current = reloaded.get_workflow("serial-demo")["pendingAdvance"]
+        self.assertIsNone(current["notifiedAt"])
+        self.assertEqual(current["expiresAt"], gate["expiresAt"])
 
     def test_create_returns_monitorable_snapshot(self) -> None:
         snapshot = self.store.create_workflow(serial_workflow())
@@ -684,6 +796,9 @@ class WorkflowStoreTests(unittest.TestCase):
         snapshot = self.store.get_workflow("serial-demo")
         self.assertEqual(snapshot["nodes"][0]["status"], "skipped")
         self.assertEqual(snapshot["retryPolicy"]["usedRetries"], 0)
+        with self.assertRaisesRegex(RuntimeError, "执行期间"):
+            self.store.stop_workflow("serial-demo")
+        self.store.sync_node_job("serial-demo", "b", {"status": "completed", "finished_at": utc_now()})
         stopped = self.store.stop_workflow("serial-demo")
         self.assertEqual(stopped["retryPolicy"]["usedRetries"], 0)
 

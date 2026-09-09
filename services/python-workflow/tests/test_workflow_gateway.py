@@ -46,7 +46,7 @@ class SupervisorPromptTests(unittest.TestCase):
         self.assertIn("任务已全部完成", prompt)
         self.assertIn("timeout_sec 使用 10 秒", prompt)
         self.assertIn("节点派发后必须调用 wait_node", prompt)
-        self.assertIn("用户也可以选择暂停", prompt)
+        self.assertIn("用户也可以选择保持等待", prompt)
 
     def test_chat_prompt_only_classifies_against_latest_snapshot(self) -> None:
         prompt = WorkflowGateway._chat_prompt(
@@ -644,6 +644,13 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                     },
                 )
                 gate = store.get_workflow("advance-demo")["pendingAdvance"]
+                notified = client.post(f"/workflows/advance-demo/advance/{gate['gateId']}/notified", json={"sentAt": utc_now()})
+                self.assertEqual(notified.status_code, 200)
+                self.assertTrue(notified.json()["updated"])
+                invalid = client.post("/workflows/advance-demo/input-observations", json={"messageId": "invalid"})
+                self.assertEqual(invalid.status_code, 400)
+                observed = client.post("/workflows/advance-demo/input-observations", json={"messageId": str(uuid.uuid4())})
+                self.assertEqual(observed.json()["gateId"], gate["gateId"])
                 held = client.post(
                     f"/workflows/advance-demo/advance/{gate['gateId']}/hold"
                 )
@@ -667,6 +674,9 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                     f"/workflows/advance-demo/advance/{gate['gateId']}/confirm"
                 )
                 self.assertEqual(repeated.status_code, 200)
+                store.prepare_node_dispatch("advance-demo", "b")
+                cancelled = client.post("/workflows/advance-demo/cancel")
+                self.assertEqual(cancelled.status_code, 409)
             self.assertGreaterEqual(
                 app.state.gateway._pause_supervisor.await_count, 1
             )
@@ -912,7 +922,7 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
         })
         return store
 
-    async def test_cross_connection_interrupt_allows_atomic_tail_restart(self) -> None:
+    async def test_finished_step_allows_atomic_tail_restart_without_interrupt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = self._running_store(Path(directory, "workflows.db"))
 
@@ -927,6 +937,8 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             gateway = WorkflowGateway(store, InterruptingOrchestrator())
             gateway._resume_supervisor_if_needed = AsyncMock()
+            store.sync_node_job("control-demo", "b", {"status": "completed", "response": "B", "finished_at": utc_now()})
+            gateway.orchestrator.interrupt_turn = AsyncMock(side_effect=AssertionError("不能中断业务步骤"))
             confirmed = self._confirmed_restart(store)
             answer = await gateway._execute_control("control-demo", confirmed)
 
@@ -947,7 +959,7 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 store.get_workflow("control-demo")["retryPolicy"]["usedRetries"], 1
             )
 
-    async def test_interrupt_failure_does_not_consume_or_partially_reset(self) -> None:
+    async def test_running_step_rejects_restart_and_cancel_without_interrupt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = self._running_store(Path(directory, "workflows.db"))
 
@@ -959,25 +971,26 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             gateway = WorkflowGateway(store, FailingOrchestrator())
             gateway._resume_supervisor_if_needed = AsyncMock()
-            confirmed = self._confirmed_restart(store)
-            with self.assertRaisesRegex(RuntimeError, "远端拒绝中止"):
-                await gateway._execute_control("control-demo", confirmed)
+            gateway.orchestrator.interrupt_turn = AsyncMock()
+            gateway.orchestrator.cancel = AsyncMock()
+            with self.assertRaisesRegex(RuntimeError, "执行期间"):
+                self._confirmed_restart(store)
+            with self.assertRaisesRegex(RuntimeError, "执行期间"):
+                await gateway.cancel("control-demo")
+            gateway.orchestrator.interrupt_turn.assert_not_called()
+            gateway.orchestrator.cancel.assert_not_called()
 
             snapshot = store.get_workflow("control-demo")
             self.assertEqual(snapshot["retryPolicy"]["usedRetries"], 0)
             self.assertEqual(snapshot["nodes"][1]["status"], "running")
             with store._connect() as connection:
-                action = connection.execute(
-                    "SELECT status, retry_ordinal FROM workflow_control_actions "
-                    "WHERE action_id = ?", (confirmed["actionId"],)
-                ).fetchone()
+                action_count = connection.execute("SELECT COUNT(*) FROM workflow_control_actions").fetchone()[0]
                 revision_count = connection.execute(
                     "SELECT COUNT(*) FROM workflow_node_revision_instructions "
                     "WHERE workflow_id = ?",
                     ("control-demo",),
                 ).fetchone()[0]
-            self.assertEqual(action["status"], "failed")
-            self.assertIsNone(action["retry_ordinal"])
+            self.assertEqual(action_count, 0)
             self.assertEqual(revision_count, 0)
 
 

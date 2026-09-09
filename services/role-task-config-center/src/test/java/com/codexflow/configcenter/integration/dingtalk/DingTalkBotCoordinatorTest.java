@@ -128,6 +128,89 @@ class DingTalkBotCoordinatorTest {
         "https://oapi.dingtalk.com/robot/sendBySession?session=test");
   }
 
+  private JsonNode waiting() {
+    var snapshot = json.createObjectNode().put("status", "running");
+    snapshot
+        .putObject("pendingAdvance")
+        .put("gateId", "11111111111111111111111111111111")
+        .put("state", "countdown")
+        .put("expiresAt", java.time.Instant.now().plusSeconds(120).toString());
+    return snapshot;
+  }
+
+  @Test
+  void confirmContinueUsesObservedGateAndDoesNotCallAssistant() {
+    when(gateway.get("/workflows/" + ID)).thenReturn(waiting());
+    when(gateway.post(eq("/workflows/" + ID + "/input-observations"), any()))
+        .thenReturn(json.createObjectNode().put("gateId", "11111111111111111111111111111111"));
+    bot.safelyHandleMessage(message(ID + " 确认继续"));
+    verify(gateway)
+        .post("/workflows/" + ID + "/advance/11111111111111111111111111111111/confirm", null);
+    verify(gateway, never()).post(eq("/workflows/" + ID + "/messages"), any());
+  }
+
+  @Test
+  void oldWaitingQuoteCannotConfirmNewGate() {
+    when(gateway.get("/workflows/" + ID)).thenReturn(waiting());
+    when(store.quotedAdvance(any())).thenReturn("old-gate");
+    bot.safelyHandleMessage(message(ID + " 确认继续"));
+    verify(gateway, never()).post(anyString(), any());
+    verify(store).enqueueReply(anyString(), eq(ID), any(), contains("引用的等待已结束"));
+  }
+
+  @Test
+  void runningContinueIsRememberedAndCannotReleaseLaterWaitOnRetry() {
+    when(gateway.post(eq("/workflows/" + ID + "/input-observations"), any()))
+        .thenReturn(json.createObjectNode().put("controlAllowed", false));
+    bot.safelyHandleMessage(message(ID + " 确认继续"));
+    when(gateway.get("/workflows/" + ID)).thenReturn(waiting());
+    bot.safelyHandleMessage(message(ID + " 确认继续"));
+    verify(gateway, never()).post(contains("/confirm"), any());
+    verify(store, atLeastOnce()).markInboundFinished(ID, "assistant-id", false);
+  }
+
+  @Test
+  void deliveryReportsTimestampAndReceiptRetryDoesNotSendAgain() {
+    when(gateway.get("/workflows/" + ID)).thenReturn(waiting());
+    when(transport.sendText(any(), any(), any())).thenReturn(new DingTalkModels.SendResult("sent"));
+    var payload =
+        json.createObjectNode()
+            .put("text", "等待确认")
+            .put("gateId", "11111111111111111111111111111111");
+    var item = new DingTalkModels.Outbox("notice", ID, "group", null, "text", payload);
+    bot.deliver(item);
+    var order = inOrder(transport, store, gateway);
+    order.verify(transport).sendText("group", null, "等待确认");
+    order.verify(store).markAdvanceDelivered(eq("notice"), eq("sent"), any());
+    order
+        .verify(gateway)
+        .post(eq("/workflows/" + ID + "/advance/11111111111111111111111111111111/notified"), any());
+    payload
+        .put("deliveredAt", java.time.Instant.now().minusSeconds(1).toString())
+        .put("sentMessageId", "sent");
+    bot.deliver(item);
+    verify(transport, times(1)).sendText(any(), any(), any());
+    verify(gateway, times(2))
+        .post(eq("/workflows/" + ID + "/advance/11111111111111111111111111111111/notified"), any());
+  }
+
+  @Test
+  void expiredWaitingNoticeIsNotSent() {
+    var payload = json.createObjectNode().put("text", "等待确认").put("gateId", "old");
+    bot.deliver(new DingTalkModels.Outbox("old-notice", ID, "group", null, "text", payload));
+    verifyNoInteractions(transport);
+    verify(store).markOutboxSuperseded("old-notice");
+  }
+
+  @Test
+  void questionObservesWaitingBeforeForwardingAndReceivedIsNotContinue() {
+    bot.safelyHandleMessage(message(ID + " 收到"));
+    var order = inOrder(gateway);
+    order.verify(gateway).post(eq("/workflows/" + ID + "/input-observations"), any());
+    order.verify(gateway).post(eq("/workflows/" + ID + "/messages"), any());
+    verify(gateway, never()).post(contains("/confirm"), any());
+  }
+
   @Test
   void namedStartRepliesWithoutProgressPush() {
     when(store.reserveStart(eq("app"), any()))
@@ -368,7 +451,10 @@ class DingTalkBotCoordinatorTest {
             "群",
             List.of("bad"),
             m.sessionWebhook()));
-    verify(gateway, never()).post(any(), any());
+    var order = inOrder(gateway, transport);
+    order.verify(gateway).post(eq("/workflows/" + ID + "/input-observations"), any());
+    order.verify(transport).downloadImage("bad");
+    verify(gateway, never()).post(eq("/workflows/" + ID + "/messages"), any());
   }
 
   @Test
@@ -377,7 +463,7 @@ class DingTalkBotCoordinatorTest {
     snapshot.putObject("pendingControl").put("actionId", "action").put("actorId", "app:user-1");
     when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
     bot.safelyHandleMessage(message(ID + " 确认执行"));
-    verify(gateway, never()).post(any(), any());
+    verify(gateway, never()).post(eq("/workflows/" + ID + "/messages"), any());
     verify(store).enqueueReply(anyString(), eq(ID), any(), contains("提议人"));
   }
 
