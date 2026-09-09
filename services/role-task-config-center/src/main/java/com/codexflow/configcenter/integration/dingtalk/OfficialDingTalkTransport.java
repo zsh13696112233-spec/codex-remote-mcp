@@ -441,17 +441,15 @@ class OfficialDingTalkTransport implements DingTalkTransport {
         }
         content = words.toString();
       }
+      // 文字与图文消息分别在 text、content 中携带引用；保留旧版顶层格式。
+      JsonNode quote = parseEmbedded(value.path("text").path("repliedMsg"));
+      if (!quote.isObject()) quote = parseEmbedded(messageContent.path("repliedMsg"));
+      if (!quote.isObject()) quote = parseEmbedded(value.path("repliedMsg"));
       String replyTo = firstText(value, "originalMsgId", "replyToMessageId");
       if (replyTo == null) {
-        JsonNode replied = value.path("repliedMsg");
-        if (replied.isTextual() && !replied.asText().isBlank()) {
-          replied = objectMapper.readTree(replied.asText());
-        }
-        replyTo = firstText(replied, "msgId", "messageId", "originalMsgId");
+        replyTo = firstText(quote, "msgId", "messageId", "originalMsgId");
       }
-      JsonNode quote = parseEmbedded(value.path("repliedMsg"));
-      String quotedText = quote.path("text").path("content").asText();
-      if (quotedText.isBlank()) quotedText = quote.path("content").asText();
+      String quotedText = quotedMessageText(quote);
       return new DingTalkModels.Message(
           value.path("msgId").asText(),
           value.path("conversationId").asText(),
@@ -468,6 +466,23 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     } catch (Exception error) {
       throw new IllegalArgumentException("无法解析钉钉机器人消息。", error);
     }
+  }
+
+  private String quotedMessageText(JsonNode quote) {
+    String text = quote.path("text").path("content").asText();
+    if (!text.isBlank()) return text;
+    JsonNode content = quote.path("content");
+    if (content.isTextual()) return content.asText();
+    text = content.path("text").asText();
+    if (!text.isBlank()) return text;
+    text = content.path("content").asText();
+    if (!text.isBlank()) return text;
+    StringBuilder words = new StringBuilder();
+    for (JsonNode item : content.path("richText")) {
+      if (item.has("text")) words.append(item.path("text").asText());
+      else if ("picture".equals(item.path("type").asText())) words.append('\n');
+    }
+    return words.toString();
   }
 
   @SuppressWarnings("unchecked")

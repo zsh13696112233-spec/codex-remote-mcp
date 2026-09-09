@@ -162,6 +162,72 @@ class DingTalkTransportParsingTest {
   }
 
   @Test
+  void parsesNestedQuoteWithoutMixingQuotedTextIntoQuestion() {
+    for (boolean embedded : new boolean[] {false, true}) {
+      ObjectNode raw = objectMapper.createObjectNode();
+      raw.put("msgId", "question").put("conversationId", "group").put("msgtype", "text");
+      ObjectNode text = raw.putObject("text").put("content", "是谁创建的").put("isReplyMsg", true);
+      ObjectNode quote = objectMapper.createObjectNode().put("msgId", "bot-message");
+      quote.putObject("content").put("text", "工作流编号：测试编号\n步骤「策划」");
+      if (embedded) text.put("repliedMsg", quote.toString());
+      else text.set("repliedMsg", quote);
+
+      var message = transport.toMessage(raw.toString());
+      assertThat(message.replyToMessageId()).isEqualTo("bot-message");
+      assertThat(message.quotedText()).isEqualTo("工作流编号：测试编号\n步骤「策划」");
+      assertThat(message.content()).isEqualTo("是谁创建的");
+      assertThat(message.imageCodes()).isEmpty();
+    }
+  }
+
+  @Test
+  void richTextReplyRetainsQuoteImageAndCaption() {
+    for (boolean embedded : new boolean[] {false, true}) {
+      var raw = objectMapper.createObjectNode().put("msgtype", "richText");
+      var content = objectMapper.createObjectNode().put("isReplyMsg", true);
+      var quote = content.putObject("repliedMsg").put("msgId", "task-message");
+      quote.putObject("content").put("text", "工作流编号：原任务\n步骤「策划」");
+      var items = content.putArray("richText");
+      items.addObject().put("type", "picture").put("downloadCode", "new-image");
+      items.addObject().put("text", "怎么有这么多文件");
+      if (embedded) raw.put("content", content.toString());
+      else raw.set("content", content);
+
+      var message = transport.toMessage(raw.toString());
+      assertThat(message.replyToMessageId()).isEqualTo("task-message");
+      assertThat(message.quotedText()).isEqualTo("工作流编号：原任务\n步骤「策划」");
+      assertThat(message.content()).isEqualTo("怎么有这么多文件");
+      assertThat(message.imageCodes()).containsExactly("new-image");
+    }
+  }
+
+  @Test
+  void parsesQuoteTextShapesAndKeepsQuotedImagesSeparate() {
+    for (String body :
+        new String[] {
+          "{\"text\":{\"content\":\"任务结果\"}}",
+          "{\"content\":\"任务结果\"}",
+          "{\"content\":{\"text\":\"任务结果\"}}",
+          "{\"content\":{\"content\":\"任务结果\"}}",
+          "{\"content\":{\"richText\":[{\"text\":\"任务\"},{\"text\":\"结果\"}]}}"
+        }) {
+      ObjectNode raw = objectMapper.createObjectNode();
+      raw.putObject("text").put("content", "问题");
+      raw.set("repliedMsg", objectMapper.readTree(body));
+      assertThat(transport.toMessage(raw.toString()).quotedText()).isEqualTo("任务结果");
+    }
+    var message =
+        transport.toMessage(
+            """
+        {"text":{"content":"问题","repliedMsg":{"msgId":"picture-message",
+          "content":{"downloadCode":"quoted-image"}}}}
+        """);
+    assertThat(message.replyToMessageId()).isEqualTo("picture-message");
+    assertThat(message.quotedText()).isEmpty();
+    assertThat(message.imageCodes()).isEmpty();
+  }
+
+  @Test
   void parsesCardActionParametersAndConversation() {
     String raw =
         """

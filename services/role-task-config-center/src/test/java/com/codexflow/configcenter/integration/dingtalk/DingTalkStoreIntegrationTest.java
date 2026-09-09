@@ -627,6 +627,28 @@ class DingTalkStoreIntegrationTest {
     assertThat(store.conversation(clientId, quoted).orElseThrow().workflowId())
         .isEqualTo(workflowId);
     assertThat(store.quotedAction(quoted)).isEqualTo("action-1");
+    // Session replies may return no usable message ID: parsed nested text must match the sent
+    // reply.
+    var callback = objectMapper.createObjectNode();
+    callback.put("msgId", "nested-question").put("conversationId", "another-group");
+    var text = callback.putObject("text").put("content", "是谁创建的").put("isReplyMsg", true);
+    text.putObject("repliedMsg")
+        .put("msgId", "unavailable-reply-id")
+        .putObject("content")
+        .put("text", outgoing.payload().path("text").asText());
+    var parsed =
+        new OfficialDingTalkTransport(new DingTalkProperties(), objectMapper)
+            .toMessage(callback.toString());
+    assertThat(store.conversation(clientId, parsed).orElseThrow().workflowId())
+        .isEqualTo(workflowId);
+    assertThat(store.quotedAction(parsed)).isEqualTo("action-1");
+    assertThat(store.conversation("another-client", parsed)).isEmpty();
+    callback.put("conversationId", "unrelated-group");
+    var unrelated =
+        new OfficialDingTalkTransport(new DingTalkProperties(), objectMapper)
+            .toMessage(callback.toString());
+    assertThat(store.conversation(clientId, unrelated)).isEmpty();
+    assertThat(store.quotedAction(unrelated)).isNull();
   }
 
   private String createTask(String clientId) {

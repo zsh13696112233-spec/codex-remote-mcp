@@ -2,20 +2,12 @@
 
 本文件适用于整个仓库，供 Codex 在本项目中进行分析、修改和验证时使用。进入子模块后，还应先阅读该模块的 `README.md`；业务边界和协议以本文件、根 README 及对应模块 README 为入口，部署与升级说明位于 `docs/`。
 
-## 项目概览
+## 文档分工与入口
 
-这是一个 Codex 多执行机工作流编排平台，由三个可独立启动的服务组成：
-
-- `services/python-workflow/`：Python 3.10+ 工作流网关、Codex Orchestrator MCP 和 SQLite 状态存储，默认端口 `8080`。
-- `services/workflow-console/`：Java 17 / Spring Boot 监控中心，默认端口 `8090`。
-- `services/role-task-config-center/`：Java 17 / Spring Boot 配置中心，使用 MySQL 8，默认端口 `8091`。
-
-其他目录：
-
-- `config/`：执行机配置模板；`agents.json` 是本机私有配置，不得提交。
-- `docs/`：仅保留部署与升级文档。
-- `scripts/`：端到端验证和运维辅助脚本。
-- `prototypes/`：历史交互原型，不参与正式运行或构建。正式页面位于两个 Java 模块的 `src/main/resources/static/`。
+- 本文件维护 AI 工作规则和修改约束；项目概览、目录、启动及测试命令见[根 README](README.md)。
+- 功能、接口、配置和当前限制分别见 [Python 工作流服务](services/python-workflow/README.md)、[监控中心](services/workflow-console/README.md)和[配置中心](services/role-task-config-center/README.md)。部署与升级说明放在 `docs/`，会话交接放在 `history/`。
+- 详细事实只在对应文档维护一份，本文件通过链接引用；关键架构与安全约束可简短重复。行为变化时更新所属 README，工作规则变化时更新本文件。
+- 文档与实现不一致时先核对代码和测试，区分当前行为与目标约束；不得仅因实现存在就认定其符合约束，也不得把过期说明当成实现事实。
 
 ## 开始工作前
 
@@ -48,10 +40,6 @@
 
 ### Python 工作流服务
 
-- 主要文件：
-  - `workflow_gateway.py`：HTTP、SSE、主监督会话和聊天工作线程。
-  - `codex_orchestrator_mcp.py`：MCP 工具、执行机配置和 app-server WebSocket 客户端。
-  - `workflow_store.py`：SQLite 模型、状态转换、事件、聊天和控制动作。
 - 保持 Python 3.10 兼容；沿用现有类型注解、异步模式、标准库 `unittest` 和中文业务错误信息。
 - 所有外部输入都应在边界处验证，包括 ID、状态、超时、路径、写权限、消息长度和执行机 ID。
 - 保持工作流与消息的幂等语义。尤其不要破坏 `workflowId` 唯一性、聊天 `messageId` 重试复用以及控制动作的二次确认机制。
@@ -83,7 +71,7 @@
 
 ## 已知实现与安全约定的差异
 
-- 钉钉 v2 当前会直接展示业务工具的路径、命令、参数和文本结果（见配置中心 README 的工具详情说明），只过滤图片传输字段；这不等于已经满足下文“不泄露令牌、执行机地址和原始内部信息”的约定。涉及消息展示时必须核对这项差异，不得仅凭工具名或方法名宣称已脱敏。
+- 钉钉 v2 当前会直接展示业务工具的路径、命令、参数和文本结果（见[配置中心 README 的钉钉说明](services/role-task-config-center/README.md#启用钉钉机器人)），只过滤图片传输字段；这不等于已经满足下文“不泄露令牌、执行机地址和原始内部信息”的约定。涉及消息展示时必须核对这项差异，不得仅凭工具名或方法名宣称已脱敏。
 
 ## API、状态与数据兼容性
 
@@ -102,86 +90,26 @@
 
 ## 构建与测试
 
-仓库没有根级聚合构建。优先运行与改动最接近的测试，再按影响范围扩大验证。
+- 命令统一见[根 README 的测试与格式化](README.md#测试与格式化)。优先运行与改动最接近的测试，再按影响范围扩大验证。
+- Python 优先使用根目录已有的 `.venv`，不可用时才按 README 回退；不要擅自安装工具、重建环境或把 Codex 内置运行时路径写入项目。
+- 仅限 Windows：如果根目录 `.venv\Scripts\python.exe` 存在，但 Codex 沙箱因无法执行用户 `AppData` 下的基础 Python 而报“拒绝访问”或 `Unable to create process`，应申请在沙箱外执行同一条 `.venv` 命令。此规则不适用于 macOS。
+- Java 按操作系统使用 Windows 的 `mvn` 或 macOS 的 `mvnd`。只格式化实际修改的 Java 模块，检查格式化差异，不保留无关改动。
+- 需要真实 MySQL、Codex app-server 或远程执行机的测试，环境不可用时明确列出未运行项及原因，不能声称已验证。
 
-Python（从仓库根目录）：
+## 修改完成后的自动 Review
 
-优先检查并使用当前机器已有的根目录 `.venv`，不要假定操作系统、Python 小版本或依赖一定已安装。若未以 editable 方式安装本模块，显式设置 `PYTHONPATH`，避免测试找不到 `src` 中的模块。Windows 示例：
-
-```powershell
-$env:PYTHONPATH = "$PWD\services\python-workflow\src"
-.\.venv\Scripts\python.exe -m unittest discover `
-  -s services/python-workflow/tests `
-  -t services/python-workflow -v
-```
-
-macOS/Linux（从仓库根目录）：
-
-```sh
-PYTHONPATH=services/python-workflow/src .venv/bin/python -m unittest discover \
-  -s services/python-workflow/tests -t services/python-workflow -v
-```
-
-仅限 Windows：如果根目录 `.venv\Scripts\python.exe` 存在，但 Codex 沙箱因无法执行用户 `AppData` 下的基础 Python 而报“拒绝访问”或 `Unable to create process`，应申请在沙箱外执行同一条 `.venv` 命令。不要把 Codex 缓存目录中的内置 Python 路径写死到项目文档或脚本中。此规则不适用于 macOS；macOS 继续使用其本机项目环境和下述跨平台回退方式。
-
-只有根目录 `.venv` 不存在或不可用时，才回退到以下跨平台 `uv` 命令；不要仅为了运行测试擅自安装 `uv` 或重建虚拟环境：
-
-```sh
-uv run --project services/python-workflow \
-  python -m unittest discover -s services/python-workflow/tests \
-  -t services/python-workflow -v
-```
-
-长任务集成验证（需要可用的本地环境时）同样优先使用根目录虚拟环境：
-
-```powershell
-.\.venv\Scripts\python.exe scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
-```
-
-根目录 `.venv` 不可用时再回退到：
-
-```sh
-uv run --project services/python-workflow \
-  python scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
-```
-
-Java 命令按当前操作系统选择：macOS 使用 `mvnd`，Windows 使用 `mvn`；不要把另一台电脑的命令直接照搬到当前环境。
-
-macOS（从仓库根目录）：
-
-```sh
-mvnd -f services/workflow-console/pom.xml test
-mvnd -f services/role-task-config-center/pom.xml test
-```
-
-Windows（从仓库根目录）：
-
-```powershell
-mvn -f services/workflow-console/pom.xml test
-mvn -f services/role-task-config-center/pom.xml test
-```
-
-Java 构建会在 `validate` 阶段检查格式。仅格式化实际修改过的 Java 模块；macOS：
-
-```sh
-mvnd -f services/workflow-console/pom.xml fmt:format
-mvnd -f services/role-task-config-center/pom.xml fmt:format
-```
-
-Windows：
-
-```powershell
-mvn -f services/workflow-console/pom.xml fmt:format
-mvn -f services/role-task-config-center/pom.xml fmt:format
-```
-
-不要为了通过格式检查而格式化整个仓库或改动无关文件。需要真实 MySQL、Codex app-server 或远程执行机的测试，如果环境不可用，应明确说明未运行原因，不能声称已验证。
+- 每次代码修改完成并完成相应验证后，交付前必须主动 review 本次代码改动，无需用户再次要求；不能用“测试通过”代替代码审查。
+- 以本次实际修改的差异为入口，结合调用方、实现、相关测试和必要上下文，检查需求是否完整实现，以及正确性、边界条件、异常处理、安全、兼容性和跨服务一致性；按改动涉及范围检查状态恢复、幂等和前端交互。
+- 保留并区分开始工作前已有的用户改动，不把它们算成本次成果，也不借 review 修改无关代码。
+- 发现本次范围内的问题时主动修复，补充必要的回归测试，重新运行受影响的验证，并再次 review 修复后的差异；无新改动或疑点时不机械重复测试。
+- 涉及范围外问题或需要用户决定的行为变化，说明问题、影响和待决事项，不擅自扩展需求。
+- 最终回复简述 review 结论、验证结果和剩余风险；未发现问题时写明“本次 review 未发现需要修复的问题”，不得将其表述为绝对无缺陷。仅修改文档时检查表述一致性、链接和命令示例即可，无需运行无关代码测试。
 
 ## 完成标准
 
 - 实现保持上述服务职责与安全边界。
 - 新行为有针对性测试；修复缺陷时优先增加能复现问题的回归测试。
-- 相关测试通过，或清楚列出未运行项及原因。
+- 相关测试通过，或清楚列出未运行项及原因；已完成上述自动 review 并处理本次范围内的发现。
 - 接口、配置、启动方式或用户行为变化时，同步更新对应 README/`docs/`。
 - 最后检查 `git diff --check` 和 `git status --short`，确认没有秘密、本地产物或无关改动。
 - 向用户交付时简述改了什么、验证了什么以及仍存在的环境限制；不要自动提交或推送，除非用户明确要求。

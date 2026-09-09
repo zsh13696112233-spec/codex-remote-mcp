@@ -213,6 +213,39 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void richTextQuoteImageAndCaptionReachTheReferencedWorkflow() {
+    var parser = new OfficialDingTalkTransport(new DingTalkProperties(), json);
+    var incoming =
+        parser.toMessage(
+            """
+        {"msgId":"question","conversationId":"other-group","conversationType":"2",
+         "senderStaffId":"user-2","isInAtList":true,"msgtype":"richText",
+         "content":{"isReplyMsg":true,"repliedMsg":{"msgId":"task-message",
+           "content":{"text":"原任务进度"}},"richText":[
+           {"type":"picture","downloadCode":"image-code"},{"text":"怎么有这么多文件"}]}}
+        """);
+    when(store.conversation(
+            eq("app"), argThat(message -> "task-message".equals(message.replyToMessageId()))))
+        .thenReturn(
+            Optional.of(
+                new DingTalkModels.Binding(ID, "other-group", "root", "active", 0, null, false)));
+    byte[] image = new byte[] {1, 2, 3};
+    when(transport.downloadImage("image-code")).thenReturn(image);
+    when(gateway.uploadImage(ID, image))
+        .thenReturn(json.createObjectNode().put("imageId", "image-1"));
+
+    bot.safelyHandleMessage(incoming);
+
+    var request = ArgumentCaptor.forClass(JsonNode.class);
+    verify(gateway).post(eq("/workflows/" + ID + "/messages"), request.capture());
+    assertThat(request.getValue().path("text").asText()).isEqualTo("怎么有这么多文件");
+    assertThat(request.getValue().path("imageIds"))
+        .isEqualTo(json.createArrayNode().add("image-1"));
+    verify(store, never()).reserveStart(any(), any());
+    verify(store, never()).enqueueReply(any(), any(), any(), any());
+  }
+
+  @Test
   void explicitIdRoutesQuestionFromAnotherGroup() {
     bot.safelyHandleMessage(message(ID + " 目前进度"));
     var request = ArgumentCaptor.forClass(JsonNode.class);

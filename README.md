@@ -178,26 +178,92 @@ mvn spring-boot:run
 配置中心还需要 MySQL 8；数据库初始化和环境变量见其模块 README。
 如需启用钉钉机器人，请先按配置中心 README 创建并发布对应企业内部应用、配置事件与权限，再在 8091 的机器人页面测试并保存配置。新钉钉消息统一使用普通文本；卡片模板仅保留用于历史卡片兼容。`DINGTALK_*` 环境变量只作为数据库尚无页面配置时的启动默认值。
 
+## 文档维护
+
+- 根 README 维护项目概览、快速启动和统一测试入口；模块 README 维护对应功能、接口、配置和当前限制。部署与升级步骤放在 `docs/`。
+- [AGENTS.md](AGENTS.md) 维护 AI 修改仓库时的工作流程、架构约束、安全要求和交付检查。功能、接口或配置变化时更新对应 README；工作规则变化时更新 AGENTS。详细说明只维护一处，其他位置使用链接，关键约束可以简短重复。
+
 ## 跨机器会话记录
 
 `history/` 只保存 Markdown 会话总结，并随 Git 提交，用于 macOS 与 Windows 之间交接。只有用户明确要求总结或写入 history 时才生成记录，不自动总结；复现代码放在模块测试目录或 `scripts/`，不放在 history。换电脑前提交并推送，另一台电脑同步同一分支后，先读取最新的日期命名总结，再核对当前分支和代码。命名、内容与读取规则见 [AGENTS.md](AGENTS.md#跨机器会话交接)。
 
-## 测试
+## 测试与格式化
 
-Python：
+仓库没有根级聚合构建。优先运行与改动最接近的测试，再按影响范围扩大验证。
 
-```powershell
-uv run --project .\services\python-workflow `
-  python -m unittest discover -s .\services\python-workflow\tests `
-  -t .\services\python-workflow -v
-```
+Python（从仓库根目录）：
 
-Java：
+优先检查并使用当前机器已有的根目录 `.venv`，不要假定操作系统、Python 小版本或依赖一定已安装。若未以 editable 方式安装本模块，显式设置 `PYTHONPATH`，避免测试找不到 `src` 中的模块。Windows 示例：
 
 ```powershell
-mvn -f .\services\workflow-console\pom.xml test
-mvn -f .\services\role-task-config-center\pom.xml test
+$env:PYTHONPATH = "$PWD\services\python-workflow\src"
+.\.venv\Scripts\python.exe -m unittest discover `
+  -s services/python-workflow/tests `
+  -t services/python-workflow -v
 ```
+
+macOS/Linux（从仓库根目录）：
+
+```sh
+PYTHONPATH=services/python-workflow/src .venv/bin/python -m unittest discover \
+  -s services/python-workflow/tests -t services/python-workflow -v
+```
+
+只有根目录 `.venv` 不存在或不可用时，才回退到以下跨平台 `uv` 命令；不要仅为了运行测试擅自安装 `uv` 或重建虚拟环境：
+
+```sh
+uv run --project services/python-workflow python -m unittest discover -s services/python-workflow/tests -t services/python-workflow -v
+```
+
+长任务集成验证需要可用的本地环境，同样优先使用根目录虚拟环境。Windows：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
+```
+
+macOS/Linux：
+
+```sh
+.venv/bin/python scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
+```
+
+根目录 `.venv` 不可用时再回退到：
+
+```sh
+uv run --project services/python-workflow python scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
+```
+
+Java 命令按当前操作系统选择：macOS 使用 `mvnd`，Windows 使用 `mvn`；不要把另一台电脑的命令直接照搬到当前环境。
+
+macOS（从仓库根目录）：
+
+```sh
+mvnd -f services/workflow-console/pom.xml test
+mvnd -f services/role-task-config-center/pom.xml test
+```
+
+Windows（从仓库根目录）：
+
+```powershell
+mvn -f services/workflow-console/pom.xml test
+mvn -f services/role-task-config-center/pom.xml test
+```
+
+Java 构建会在 `validate` 阶段检查格式。仅格式化实际修改过的 Java 模块；macOS：
+
+```sh
+mvnd -f services/workflow-console/pom.xml fmt:format
+mvnd -f services/role-task-config-center/pom.xml fmt:format
+```
+
+Windows：
+
+```powershell
+mvn -f services/workflow-console/pom.xml fmt:format
+mvn -f services/role-task-config-center/pom.xml fmt:format
+```
+
+不要为了通过格式检查而格式化整个仓库或改动无关文件。需要真实 MySQL、Codex app-server 或远程执行机的测试，如果环境不可用，应明确说明未运行原因，不能声称已验证。
 
 ## 运行与安全边界
 

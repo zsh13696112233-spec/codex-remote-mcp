@@ -132,11 +132,7 @@ POST /api/workflows/{workflowId}/advance/{gateId}/hold
 
 ## 测试
 
-```powershell
-mvn test
-```
-
-构建会自动检查 Java 格式。需要修复格式时执行 `mvn fmt:format`。
+测试与格式化命令统一见[根 README](../../README.md#测试与格式化)，从仓库根目录执行并按 Windows/macOS 选择命令。
 
 测试会启动 Spring 上下文，并验证 `/api` 下只有五个 GET、一个消息 POST 和暂停、继续两个半自动流转 POST 路由，不存在直接提交、取消、重试、跳过或编辑接口。
 

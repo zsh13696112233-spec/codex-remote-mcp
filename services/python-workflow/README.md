@@ -152,15 +152,4 @@ Sidecar 启动时先确认 `8082` 已监听，再向中央登记上线，之后�
 
 ## 测试
 
-```powershell
-uv run --project .\services\python-workflow `
-  python -m unittest discover -s .\services\python-workflow\tests `
-  -t .\services\python-workflow -v
-```
-
-长任务 MCP 子进程验证从仓库根目录运行：
-
-```powershell
-uv run --project .\services\python-workflow `
-  python .\scripts\verify_long_job.py --delay-sec 3 --wait-sec 1
-```
+从仓库根目录执行，统一命令见[根 README 的测试与格式化](../../README.md#测试与格式化)，包含 Windows、macOS/Linux、现有 `.venv` 优先规则、`uv` 回退和长任务 MCP 子进程验证。
