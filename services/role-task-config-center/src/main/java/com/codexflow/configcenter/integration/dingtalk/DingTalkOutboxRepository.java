@@ -75,7 +75,7 @@ interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, S
   @Query(
       value =
           """
-          SELECT candidate.*
+          SELECT candidate.id
           FROM codex_sop_dingtalk_outbox candidate
           WHERE candidate.status IN (:statuses) AND candidate.next_attempt_at <= :nextAttemptAt
             AND NOT EXISTS (
@@ -88,11 +88,29 @@ interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, S
             )
           ORDER BY candidate.delivery_order
           LIMIT :limit
-          FOR UPDATE
           """,
       nativeQuery = true)
-  List<DingTalkOutboxEntity> findDueForUpdate(
+  List<String> findDueIds(
       @Param("statuses") List<String> statuses,
       @Param("nextAttemptAt") Instant nextAttemptAt,
       @Param("limit") int limit);
+
+  @Query(
+      value = "SELECT * FROM codex_sop_dingtalk_outbox WHERE id = :id FOR UPDATE",
+      nativeQuery = true)
+  Optional<DingTalkOutboxEntity> lockById(@Param("id") String id);
+
+  @Query(
+      value =
+          """
+      SELECT COUNT(*) FROM codex_sop_dingtalk_outbox earlier
+      JOIN codex_sop_dingtalk_outbox candidate ON candidate.id = :id
+      WHERE (earlier.workflow_id = candidate.workflow_id
+             OR (earlier.workflow_id IS NULL AND candidate.workflow_id IS NULL))
+        AND earlier.conversation_id = candidate.conversation_id
+        AND earlier.delivery_order < candidate.delivery_order
+        AND earlier.status IN ('pending', 'failed', 'sending')
+      """,
+      nativeQuery = true)
+  long countBlockingPredecessors(@Param("id") String id);
 }

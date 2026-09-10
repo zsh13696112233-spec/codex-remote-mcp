@@ -92,6 +92,75 @@ class DingTalkStoreIntegrationTest {
   }
 
   @Test
+  void restartCardWorksWithoutWaitingAndRejectsWrongActorOrAction() {
+    String client = "restart-card-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("start-restart-card")).workflowId();
+    var binding = store.binding(workflow).orElseThrow();
+    var source =
+        new DingTalkModels.Message(
+            "propose-" + client, "restart-group", "2", "owner", "返工", true, false, null);
+    var inbound = store.registerInbound(client, binding, source);
+    var snapshot = objectMapper.createObjectNode();
+    snapshot
+        .putObject("pendingControl")
+        .put("actionId", "action-one")
+        .put("type", "restart_from")
+        .put("status", "pending")
+        .put("actorId", client + ":owner")
+        .put("expiresAt", java.time.Instant.now().plusSeconds(600).toString());
+    store.completeReply(workflow, inbound.workflowMessageId(), 1, "返工内容", "action-one", snapshot);
+    String id =
+        jdbc.queryForObject(
+            "select id from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card'",
+            String.class,
+            workflow);
+    var click =
+        new DingTalkModels.CardAction(
+            "wait-" + id, null, "owner", "restart_confirm", java.util.Map.of());
+    assertThat(store.controlCardMessage(click, client, workflow, "action-one", true)).isEmpty();
+    store.markAdvanceDelivered(id, "carrier", java.time.Instant.now());
+    store.markOutboxSent(id, "carrier");
+    var accepted =
+        store.controlCardMessage(click, client, workflow, "action-one", true).orElseThrow();
+    assertThat(accepted.content()).isEqualTo("确认执行");
+    assertThat(accepted.messageId())
+        .isEqualTo(
+            store
+                .controlCardMessage(click, client, workflow, "action-one", true)
+                .orElseThrow()
+                .messageId());
+    assertThat(store.controlCardMessage(click, client, workflow, "action-two", true)).isEmpty();
+    var outsider =
+        new DingTalkModels.CardAction(
+            "wait-" + id, null, "other", "restart_confirm", java.util.Map.of());
+    assertThat(store.controlCardMessage(outsider, client, workflow, "action-one", true)).isEmpty();
+    assertThat(
+            store
+                .controlCardMessage(click, client, workflow, "action-one", false)
+                .orElseThrow()
+                .content())
+        .isEqualTo("取消操作");
+    jdbc.update(
+        "update codex_sop_dingtalk_workflow_bindings set status = 'terminal', waiting_assistant = false where workflow_id = ?",
+        workflow);
+    assertThat(store.pollable(client))
+        .extracting(DingTalkModels.Binding::workflowId)
+        .contains(workflow);
+    store.refreshWaitingCards(workflow, objectMapper.createObjectNode());
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card_update'",
+                Integer.class,
+                workflow))
+        .isEqualTo(1);
+    store.markWaitingCardRefreshed("wait-" + id, "closed");
+    assertThat(store.pollable(client))
+        .extracting(DingTalkModels.Binding::workflowId)
+        .doesNotContain(workflow);
+  }
+
+  @Test
   void waitingCompletionDeduplicatesByGateAndHeldReusesExistingCard() {
     String client = "merge-cards-" + UUID.randomUUID();
     createTask(client);
@@ -1274,6 +1343,43 @@ class DingTalkStoreIntegrationTest {
       delivered.addAll(batch);
     }
     throw new AssertionError("发送队列未在测试上限内清空");
+  }
+
+  @Test
+  void concurrentClaimsDoNotDuplicateOrOvertakeHeads() throws Exception {
+    String group = "claim-race-" + UUID.randomUUID();
+    store.enqueueTargetText(group + "1", null, group, "GROUP", group, null, "第一条");
+    store.enqueueTargetText(group + "2", null, group, "GROUP", group, null, "第二条");
+    var pool = Executors.newFixedThreadPool(2);
+    var ready = new CountDownLatch(2);
+    var start = new CountDownLatch(1);
+    try {
+      java.util.concurrent.Callable<List<DingTalkModels.Outbox>> claim =
+          () -> {
+            ready.countDown();
+            if (!start.await(10, TimeUnit.SECONDS)) throw new AssertionError("领取未启动");
+            return DingTalkDatabaseRetry.execute("并发测试", () -> store.claimDue(50));
+          };
+      var first = pool.submit(claim);
+      var second = pool.submit(claim);
+      assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+      start.countDown();
+      var claimed = new java.util.ArrayList<>(first.get(20, TimeUnit.SECONDS));
+      claimed.addAll(second.get(20, TimeUnit.SECONDS));
+      var matching = claimed.stream().filter(item -> group.equals(item.conversationId())).toList();
+      assertThat(matching).hasSize(1);
+      assertThat(matching.get(0).payload().path("text").asText()).isEqualTo("第一条");
+      store.markOutboxSent(matching.get(0).id(), "sent");
+      assertThat(
+              store.claimDue(50).stream()
+                  .filter(item -> group.equals(item.conversationId()))
+                  .toList())
+          .extracting(item -> item.payload().path("text").asText())
+          .containsExactly("第二条");
+    } finally {
+      start.countDown();
+      pool.shutdownNow();
+    }
   }
 
   @Test

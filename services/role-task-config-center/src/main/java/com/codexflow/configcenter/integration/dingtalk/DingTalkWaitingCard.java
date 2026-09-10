@@ -7,7 +7,7 @@ import tools.jackson.databind.JsonNode;
 
 /** 单轮等待卡片：正文快照独立保存，状态与按钮读取中央当前等待。 */
 final class DingTalkWaitingCard {
-  static final String TEMPLATE_ID = "330ed542-3c7b-4d3b-b7bd-9ee608602e1b.schema";
+  static final String TEMPLATE_ID = "59418790-6cad-43f9-b1d8-55cf9f18ed1a.schema";
 
   private DingTalkWaitingCard() {}
 
@@ -23,7 +23,9 @@ final class DingTalkWaitingCard {
 
   static Map<String, Object> render(String workflowId, JsonNode payload, JsonNode snapshot) {
     String gateId = payload.path("gateId").asText();
-    String state = state(snapshot, gateId);
+    String state = cardState(snapshot, payload);
+    boolean restart = payload.path("restartControl").asBoolean();
+    boolean stop = restart && "stop".equals(payload.path("controlType").asText());
     String status =
         switch (state) {
           case "held" -> "已保持等待";
@@ -37,6 +39,10 @@ final class DingTalkWaitingCard {
           default -> "此卡片已不能继续任务，请查看最新状态。";
         };
     Map<String, Object> values = new LinkedHashMap<>();
+    values.put("restartMode", Boolean.toString(restart && !stop));
+    values.put("stopMode", Boolean.toString(stop));
+    values.put("waitingMode", Boolean.toString(!restart));
+    values.put("controlId", payload.path("actionId").asText(""));
     values.put("title", payload.path("title").asText("任务等待确认"));
     values.put(
         "markdown",
@@ -53,7 +59,36 @@ final class DingTalkWaitingCard {
     values.put("confirmStatus", "closed".equals(state) ? "disabled" : "normal");
     // 初次展示及刷新不代表某次按钮成功；回调按本次网关结果单独返回成功判定。
     values.put("confirmRequestSucceeded", "false");
+    if (restart) {
+      String body = payload.path("text").asText().replace("如要继续，请另发一条仅包含“确认执行”的消息；10分钟内有效。", "");
+      values.put("title", "返工确认");
+      values.put(
+          "markdown",
+          "**"
+              + ("closed".equals(state) ? "本次返工提议已失效或已处理" : "等待确认返工")
+              + "**\n\n"
+              + body.strip()
+              + "\n\n确认有效期至："
+              + payload.path("controlExpiresAt").asText()
+              + "\n\n请由提议人点击“确认返工”或“取消返工”。取消或过期只撤销返工提议，不自动继续原流程。");
+    }
+    if (stop) {
+      values.put("title", "停止确认");
+      values.put("markdown", values.get("markdown").toString().replace("返工", "停止"));
+    }
     return values;
+  }
+
+  static String cardState(JsonNode snapshot, JsonNode payload) {
+    if (!payload.path("restartControl").asBoolean())
+      return state(snapshot, payload.path("gateId").asText());
+    JsonNode control = snapshot.path("pendingControl");
+    if (!payload.path("actionId").asText().isBlank()
+        && payload.path("actionId").asText().equals(control.path("actionId").asText())
+        && payload.path("controlType").asText("restart_from").equals(control.path("type").asText())
+        && "pending".equals(control.path("status").asText())
+        && Instant.parse(control.path("expiresAt").asText()).isAfter(Instant.now())) return "held";
+    return "closed";
   }
 
   static String steps(JsonNode snapshot) {

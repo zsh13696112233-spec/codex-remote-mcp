@@ -2497,13 +2497,14 @@ class WorkflowStore(InputImageStore):
                 )
             connection.execute(
                 """
-                UPDATE workflow_nodes SET status = 'pending', job_id = NULL, thread_id = NULL,
+                UPDATE workflow_nodes SET status = 'pending', job_id = NULL,
+                    thread_id = CASE WHEN node_id = ? THEN thread_id ELSE NULL END,
                     turn_id = NULL, response = NULL, error = NULL, started_at = NULL,
                     finished_at = NULL, actual_prompt = NULL, dispatch_token = NULL,
                     attempt_count = attempt_count + 1
                 WHERE workflow_id = ? AND position >= ?
                 """,
-                (workflow_id, row["position"]),
+                (node_id, workflow_id, row["position"]),
             )
             connection.execute(
                 "UPDATE workflows SET status = CASE WHEN EXISTS ("
@@ -2904,6 +2905,12 @@ class WorkflowStore(InputImageStore):
                 }
             if row["status"] not in {"pending", "held"}:
                 raise RuntimeError("这次步骤确认已经失效，请刷新页面。")
+            if connection.execute(
+                "SELECT 1 FROM workflow_control_actions WHERE workflow_id = ? "
+                "AND ((status = 'pending' AND expires_at > ?) OR status IN ('confirmed', 'executing')) LIMIT 1",
+                (workflow_id, now),
+            ).fetchone():
+                raise RuntimeError("请先确认或取消当前操作，暂不能继续下一步。")
             was_held = row["status"] == "held"
             workflow = connection.execute(
                 "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
@@ -3216,6 +3223,11 @@ class WorkflowStore(InputImageStore):
                 revision_rows,
                 str(workflow["handoff_mode"]),
             )
+            if row["thread_id"]:
+                resume_notice = "\n\n用户已确认新一轮返工。请基于本会话上一版产物完成本次修改，未要求改变的内容保留。本轮允许重新修改并交付一个版本。"
+                if len(actual_prompt) + len(resume_notice) > PROMPT_LIMIT:
+                    actual_prompt = actual_prompt[:PROMPT_LIMIT - len(resume_notice) - len(TRUNCATION_NOTICE)] + TRUNCATION_NOTICE
+                actual_prompt += resume_notice
 
             timestamp = utc_now()
             connection.execute(
@@ -3371,6 +3383,7 @@ class WorkflowStore(InputImageStore):
             "status": row["status"],
             "jobId": row["job_id"],
             "alreadyDispatched": already_dispatched,
+            "threadId": row["thread_id"],
         }
 
     def attach_node_job(

@@ -56,6 +56,36 @@ class WorkflowStoreTests(unittest.TestCase):
         self.store.sync_node_job("serial-demo", "a", {"status": "completed", "finished_at": utc_now()})
         return self.store.get_workflow("serial-demo")["pendingAdvance"]
 
+    def test_restart_resumes_only_target_thread(self) -> None:
+        self.store.create_workflow(serial_workflow())
+        for node in ("a", "b", "c"):
+            self.store.prepare_node_dispatch("serial-demo", node)
+            self.store.sync_node_job("serial-demo", node, {
+                "status": "completed", "thread_id": "thread-" + node,
+                "response": "旧产物", "finished_at": utc_now(),
+            })
+        self.store.restart_from_node("serial-demo", "b", revision_instruction="界面炫酷一点")
+        snapshot = self.store.get_workflow("serial-demo")
+        self.assertEqual(snapshot["nodes"][1]["threadId"], "thread-b")
+        self.assertIsNone(snapshot["nodes"][2]["threadId"])
+        dispatched = self.store.prepare_node_dispatch("serial-demo", "b")
+        self.assertEqual(dispatched["threadId"], "thread-b")
+        self.assertIn("基于本会话上一版产物", dispatched["prompt"])
+        self.assertIn("界面炫酷一点", dispatched["prompt"])
+
+    def test_pending_control_blocks_advance_until_cancelled(self) -> None:
+        gate = self.waiting_gate()
+        message = str(uuid.uuid4())
+        self.store.accept_chat_message("serial-demo", message, "停止")
+        self.store.propose_control("serial-demo", "stop", None, message)
+        with self.assertRaisesRegex(RuntimeError, "请先确认或取消"):
+            self.store.confirm_advance("serial-demo", gate["gateId"])
+        cancel = str(uuid.uuid4())
+        self.store.accept_chat_message("serial-demo", cancel, "取消操作")
+        self.store.cancel_pending_control("serial-demo", cancel)
+        self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "held")
+        self.store.confirm_advance("serial-demo", gate["gateId"])
+
     def test_notification_extends_once_and_survives_reload(self) -> None:
         gate = self.waiting_gate()
         initial = datetime.fromisoformat(gate["expiresAt"])
@@ -146,7 +176,8 @@ class WorkflowStoreTests(unittest.TestCase):
         confirmation = str(uuid.uuid4())
         self.store.accept_chat_message("serial-demo", confirmation, "确认执行")
         self.store.confirm_control("serial-demo", action["actionId"], confirmation)
-        self.store.confirm_advance("serial-demo", gate["gateId"])
+        with self.assertRaisesRegex(RuntimeError, "请先确认或取消"):
+            self.store.confirm_advance("serial-demo", gate["gateId"])
         with self.assertRaisesRegex(RuntimeError, "已确认的操作"):
             self.store.prepare_node_dispatch("serial-demo", "b")
 

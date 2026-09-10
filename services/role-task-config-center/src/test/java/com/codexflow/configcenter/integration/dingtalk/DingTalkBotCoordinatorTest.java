@@ -69,6 +69,109 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void stopButtonsUseControlMessagesWithoutRestartReservationOrAdvance() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    when(store.binding(ID)).thenReturn(Optional.of(binding));
+    var snapshot = json.createObjectNode();
+    snapshot
+        .putObject("pendingControl")
+        .put("actionId", "stop-action")
+        .put("type", "stop")
+        .put("status", "pending")
+        .put("actorId", "app:user")
+        .put("expiresAt", java.time.Instant.now().plusSeconds(600).toString());
+    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
+    for (boolean confirm : new boolean[] {true, false}) {
+      var action =
+          new DingTalkModels.CardAction(
+              "wait-stop",
+              null,
+              "user",
+              confirm ? "stop_confirm" : "stop_cancel",
+              java.util.Map.of("workflowId", ID, "controlId", "stop-action"));
+      var source =
+          new DingTalkModels.Message(
+              "stop-button", "group", "2", "user", confirm ? "确认执行" : "取消操作", true, false, null);
+      when(store.controlCardMessage(action, "app", ID, "stop-action", confirm))
+          .thenReturn(Optional.of(source));
+      assertThat(bot.safelyHandleAction(action).toString())
+          .contains("confirmRequestSucceeded=true");
+      verify(gateway)
+          .post(
+              eq("/workflows/" + ID + "/messages"),
+              argThat(
+                  body ->
+                      source.content().equals(body.path("text").asText())
+                          && "stop-action".equals(body.path("expectedActionId").asText())));
+    }
+    verify(store, never()).acquireForRestart(any(), any());
+    verify(gateway, never()).post(contains("/advance/"), any());
+  }
+
+  @Test
+  void restartButtonsSubmitBoundActionWithoutAdvancingGate() {
+    String actionId = "restart-action";
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    when(store.binding(ID)).thenReturn(Optional.of(binding));
+    var snapshot = json.createObjectNode();
+    var pending =
+        snapshot
+            .putObject("pendingControl")
+            .put("actionId", actionId)
+            .put("type", "restart_from")
+            .put("status", "pending")
+            .put("actorId", "app:user")
+            .put("expiresAt", java.time.Instant.now().plusSeconds(600).toString());
+    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
+    for (boolean confirm : new boolean[] {true, false}) {
+      var action =
+          new DingTalkModels.CardAction(
+              "wait-card",
+              null,
+              "user",
+              confirm ? "restart_confirm" : "restart_cancel",
+              java.util.Map.of("workflowId", ID, "controlId", actionId));
+      var source =
+          new DingTalkModels.Message(
+              "button", "group", "2", "user", confirm ? "确认执行" : "取消操作", true, false, null);
+      when(store.controlCardMessage(action, "app", ID, actionId, confirm))
+          .thenReturn(Optional.of(source));
+      var result = bot.safelyHandleAction(action);
+      assertThat(result.toString()).contains("confirmRequestSucceeded=true");
+      verify(gateway)
+          .post(
+              eq("/workflows/" + ID + "/messages"),
+              argThat(
+                  body ->
+                      actionId.equals(body.path("expectedActionId").asText())
+                          && source.content().equals(body.path("text").asText())
+                          && "app:user".equals(body.path("actorId").asText())));
+      pending.put("actionId", "new-action");
+      assertThat(bot.safelyHandleAction(action).toString())
+          .contains("confirmRequestSucceeded=false");
+      pending.put("actionId", actionId);
+    }
+    verify(store, times(1)).acquireForRestart("app", ID);
+    verify(gateway, never()).post(contains("/advance/"), any());
+  }
+
+  @Test
+  void processLockRetryRepeatsOnlyDatabaseTransaction() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    doThrow(new org.springframework.dao.CannotAcquireLockException("test"))
+        .doNothing()
+        .when(store)
+        .recordProcess(eq(ID), isNull(), eq(1L), anyString(), eq(false), eq(false));
+    var event = json.createObjectNode().put("type", "node.started");
+    assertThat((Boolean) ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 1L))
+        .isTrue();
+    verify(store, times(2))
+        .recordProcess(eq(ID), isNull(), eq(1L), anyString(), eq(false), eq(false));
+    verify(gateway, times(1)).get("/workflows/" + ID);
+    verifyNoInteractions(transport);
+  }
+
+  @Test
   void outboxDrainsSuccessorsInTheSameTickAndContinuesOtherScopesAfterFailure() {
     ReflectionTestUtils.setField(bot, "running", true);
     when(transport.connected()).thenReturn(true);

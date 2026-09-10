@@ -44,6 +44,64 @@ class DingTalkWaitingCardTest {
   }
 
   @Test
+  void stopCardDoesNotShowContinueOrRestart() {
+    var payload =
+        json.createObjectNode()
+            .put("restartControl", true)
+            .put("controlType", "stop")
+            .put("actionId", "stop-action")
+            .put("text", "准备停止整个任务。");
+    var snapshot = json.createObjectNode();
+    snapshot
+        .putObject("pendingControl")
+        .put("actionId", "stop-action")
+        .put("type", "stop")
+        .put("status", "pending")
+        .put("expiresAt", Instant.now().plusSeconds(600).toString());
+    var data = DingTalkWaitingCard.render("workflow", payload, snapshot);
+    assertThat(data)
+        .containsEntry("stopMode", "true")
+        .containsEntry("restartMode", "false")
+        .containsEntry("waitingMode", "false")
+        .containsEntry("confirmStatus", "normal");
+    assertThat(data.get("markdown").toString())
+        .contains("确认停止", "取消停止")
+        .doesNotContain("返工", "继续执行");
+  }
+
+  @Test
+  void restartCardUsesControlLifetimeInsteadOfWaitingGate() {
+    var payload =
+        json.createObjectNode()
+            .put("restartControl", true)
+            .put("actionId", "action")
+            .put("text", "重跑策划。如要继续，请另发一条仅包含“确认执行”的消息；10分钟内有效。")
+            .put("controlExpiresAt", "2026-09-10T18:00:00Z");
+    var snapshot = json.createObjectNode();
+    var control =
+        snapshot
+            .putObject("pendingControl")
+            .put("actionId", "action")
+            .put("type", "restart_from")
+            .put("status", "pending")
+            .put("expiresAt", Instant.now().plusSeconds(600).toString());
+    var rendered = DingTalkWaitingCard.render("workflow", payload, snapshot);
+    assertThat(rendered)
+        .containsEntry("restartMode", "true")
+        .containsEntry("waitingMode", "false")
+        .containsEntry("confirmStatus", "normal")
+        .containsEntry("controlId", "action");
+    assertThat(rendered.get("markdown").toString())
+        .contains("取消返工", "重跑策划")
+        .doesNotContain("另发", "点击“继续执行”", "两分钟");
+    control.put("actionId", "replacement");
+    assertThat(DingTalkWaitingCard.render("workflow", payload, snapshot))
+        .containsEntry("confirmStatus", "disabled");
+    control.put("actionId", "action").put("expiresAt", Instant.now().minusSeconds(1).toString());
+    assertThat(DingTalkWaitingCard.cardState(snapshot, payload)).isEqualTo("closed");
+  }
+
+  @Test
   void officialDeliveryUsesPublishedTemplateGroupMentionAndPersonalSpace() {
     var transport = new OfficialDingTalkTransport(new DingTalkProperties(), json);
     ObjectNode group =

@@ -1996,7 +1996,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         job = await orchestrator.dispatch(
             agent_id=node["agentId"],
             prompt=node["prompt"],
-            thread_id=None,
+            thread_id=node.get("threadId"),
             cwd=node["cwd"],
             write=node["write"],
             permission_profile=node["permissionProfile"],

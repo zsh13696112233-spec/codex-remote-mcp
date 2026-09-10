@@ -7,6 +7,7 @@ import com.codexflow.configcenter.client.GatewayFailure;
 import com.codexflow.configcenter.domain.PreparedRun;
 import com.codexflow.configcenter.domain.WorkflowRunStore;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -179,7 +180,8 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     try {
       int remaining = 50;
       while (remaining > 0) {
-        var batch = store.claimDue(remaining);
+        int batchLimit = remaining;
+        var batch = DingTalkDatabaseRetry.execute("领取通知", () -> store.claimDue(batchLimit));
         if (batch.isEmpty()) break;
         for (DingTalkModels.Outbox item : batch) {
           deliver(item);
@@ -518,10 +520,57 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         Map.of("updateCardDataByKey", true));
   }
 
+  private boolean handleRestartCard(
+      DingTalkModels.CardAction event, String workflowId, boolean confirm) {
+    String controlId = stringValue(event.value(), "controlId", null);
+    if (!isUuid(workflowId) || !hasText(controlId) || controlId.length() > 128) return false;
+    var source =
+        store.controlCardMessage(event, properties.getClientId(), workflowId, controlId, confirm);
+    var binding = store.binding(workflowId);
+    if (source.isEmpty() || binding.isEmpty()) return false;
+    JsonNode snapshot = gateway.get("/workflows/" + workflowId);
+    JsonNode pending = snapshot.path("pendingControl");
+    if (!controlId.equals(pending.path("actionId").asText())
+        || !(stringValue(event.value(), "action", event.actionId()).startsWith("stop_")
+                ? "stop"
+                : "restart_from")
+            .equals(pending.path("type").asText())
+        || !"pending".equals(pending.path("status").asText())
+        || !(properties.getClientId() + ":" + event.operatorUserId())
+            .equals(pending.path("actorId").asText())
+        || !Instant.parse(pending.path("expiresAt").asText()).isAfter(Instant.now())) {
+      store.refreshWaitingCards(workflowId, snapshot);
+      return false;
+    }
+    boolean reserved = false;
+    try {
+      if (confirm && "restart_from".equals(pending.path("type").asText())) {
+        if (store.acquireForRestart(properties.getClientId(), workflowId).isPresent()) return false;
+        reserved = true;
+      }
+      var inbound = store.registerInbound(properties.getClientId(), binding.get(), source.get());
+      var request =
+          objectMapper
+              .createObjectNode()
+              .put("messageId", inbound.workflowMessageId())
+              .put("text", source.get().content())
+              .put("actorId", properties.getClientId() + ":" + event.operatorUserId())
+              .put("expectedActionId", controlId);
+      gateway.post("/workflows/" + workflowId + "/messages", request);
+      return true; // 仅表示提交成功；执行结果由原有任务助手事件返回。
+    } catch (RuntimeException error) {
+      if (reserved && !workflowBecameActive(workflowId))
+        store.releaseRestartReservation(properties.getClientId(), workflowId);
+      throw error;
+    }
+  }
+
   private boolean handleAction(DingTalkModels.CardAction event) {
     String action = stringValue(event.value(), "action", event.actionId());
     String workflowId = stringValue(event.value(), "workflowId", null);
     String gateId = stringValue(event.value(), "gateId", null);
+    if (List.of("restart_confirm", "restart_cancel", "stop_confirm", "stop_cancel")
+        .contains(action)) return handleRestartCard(event, workflowId, action.endsWith("_confirm"));
     if (!isUuid(workflowId) || !isGateId(gateId)) return false;
     Optional<DingTalkModels.Binding> binding = store.binding(workflowId);
     if (binding.isEmpty()) return false;
@@ -666,10 +715,11 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           }
           String text = DingTalkExecutionNotice.stepLabel(event, snapshot) + "\n" + visible;
           if ("supervisor".equals(event.path("source").asText())) {
-            store.recordProcess(
+            recordProcessWithRetry(
                 binding.workflowId(), questionId, sequence, text, false, false, event);
           } else
-            store.recordProcess(binding.workflowId(), questionId, sequence, text, false, false);
+            recordProcessWithRetry(
+                binding.workflowId(), questionId, sequence, text, false, false, null);
           return true;
         }
       }
@@ -683,7 +733,13 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       boolean waitingReply =
           isGateId(replyGate)
               && !"closed".equals(DingTalkWaitingCard.state(replySnapshot, replyGate));
-      if (waitingReply) {
+      if (waitingReply
+          || (List.of("restart_from", "stop")
+                  .contains(replySnapshot.path("pendingControl").path("type").asText())
+              && payload
+                  .path("actionId")
+                  .asText()
+                  .equals(replySnapshot.path("pendingControl").path("actionId").asText()))) {
         store.completeReply(
             binding.workflowId(),
             workflowMessageId,
@@ -774,7 +830,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         store.refreshWaitingCards(binding.workflowId(), snapshot);
         if (TERMINAL_EVENTS.contains(type) && !snapshot.path("response").asText().isBlank())
           notice += "\n执行结果：\n" + DingTalkExecutionNotice.safe(snapshot.path("response").asText());
-        store.recordProcess(
+        recordProcessWithRetry(
             binding.workflowId(),
             null,
             sequence,
@@ -784,7 +840,8 @@ class DingTalkBotCoordinator implements SmartLifecycle {
                 || "step.advance.waiting".equals(type)
                 || "step.advance.held".equals(type)
                 || "node.failed".equals(type)
-                || "node.timed_out".equals(type));
+                || "node.timed_out".equals(type),
+            null);
         return true;
       } catch (RuntimeException error) {
         LOGGER.debug("读取任务进度失败，workflowId={}。", binding.workflowId());
@@ -816,6 +873,24 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     } catch (RuntimeException ignored) {
       // 下一轮事件轮询会继续校正状态；不影响已经持久化的助手回复。
     }
+  }
+
+  private void recordProcessWithRetry(
+      String workflowId,
+      String questionId,
+      long sequence,
+      String text,
+      boolean terminal,
+      boolean attention,
+      JsonNode event) {
+    DingTalkDatabaseRetry.run(
+        "通知入队",
+        () -> {
+          if (event == null)
+            store.recordProcess(workflowId, questionId, sequence, text, terminal, attention);
+          else
+            store.recordProcess(workflowId, questionId, sequence, text, terminal, attention, event);
+        });
   }
 
   static boolean redundantAdvanceNotice(String type, JsonNode payload, JsonNode snapshot) {
@@ -956,7 +1031,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       return;
     }
     JsonNode snapshot = gateway.get("/workflows/" + item.workflowId());
-    boolean closed = "closed".equals(DingTalkWaitingCard.state(snapshot, gateId));
+    boolean closed = "closed".equals(DingTalkWaitingCard.cardState(snapshot, item.payload()));
     if (!update
         && closed
         && !item.payload().path("answer").asBoolean()
@@ -973,7 +1048,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           cardId,
           "disabled".equals(data.get("confirmStatus"))
               ? "closed"
-              : snapshot.path("pendingAdvance").path("state").asText());
+              : DingTalkWaitingCard.cardState(snapshot, item.payload()));
     } else {
       DingTalkModels.SendResult receipt =
           transport.sendWaitingCard(
