@@ -21,7 +21,7 @@ interface DingTalkTransport {
 
   void start(
       Consumer<DingTalkModels.Message> messageHandler,
-      Consumer<DingTalkModels.CardAction> actionHandler);
+      java.util.function.Function<DingTalkModels.CardAction, Map<String, Object>> actionHandler);
 
   void stop();
 
@@ -58,4 +58,13 @@ interface DingTalkTransport {
       String conversationId, String replyToMessageId, Map<String, Object> cardData);
 
   void updateCard(String cardInstanceId, Map<String, Object> cardData);
+
+  default DingTalkModels.SendResult sendWaitingCard(
+      String cardId,
+      String targetType,
+      String targetId,
+      String atUserId,
+      Map<String, Object> cardData) {
+    throw new UnsupportedOperationException("当前通道不支持等待卡片。");
+  }
 }

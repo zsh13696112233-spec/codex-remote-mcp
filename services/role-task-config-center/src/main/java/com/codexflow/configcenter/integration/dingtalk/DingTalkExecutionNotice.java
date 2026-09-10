@@ -256,9 +256,11 @@ final class DingTalkExecutionNotice {
   static String stepLabel(JsonNode event, JsonNode snapshot) {
     String id = event.path("nodeId").asText("");
     if (id.isBlank()) id = event.path("payload").path("nodeId").asText("");
+    int index = 0;
     for (JsonNode node : snapshot.path("nodes")) {
+      index++;
       if (!id.isBlank() && id.equals(node.path("id").asText())) {
-        return safe("步骤「" + node.path("displayName").asText("未命名") + "」");
+        return safe("第" + index + "步「" + node.path("displayName").asText("未命名") + "」");
       }
     }
     return "assistant".equals(event.path("source").asText()) ? "任务助手" : "任务执行";

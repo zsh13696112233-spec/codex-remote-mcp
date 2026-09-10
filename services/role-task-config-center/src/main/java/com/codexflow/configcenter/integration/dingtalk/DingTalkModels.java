@@ -22,7 +22,95 @@ final class DingTalkModels {
       String conversationTitle,
       List<String> imageCodes,
       String sessionWebhook,
-      String quotedText) {
+      String quotedText,
+      List<String> referenceIds,
+      boolean quotedCard) {
+
+    Message(
+        String messageId,
+        String conversationId,
+        String conversationType,
+        String senderUserId,
+        String content,
+        boolean mentionedBot,
+        boolean mentionAll,
+        String replyToMessageId,
+        String conversationTitle,
+        List<String> imageCodes,
+        String sessionWebhook,
+        String quotedText,
+        List<String> referenceIds) {
+      this(
+          messageId,
+          conversationId,
+          conversationType,
+          senderUserId,
+          content,
+          mentionedBot,
+          mentionAll,
+          replyToMessageId,
+          conversationTitle,
+          imageCodes,
+          sessionWebhook,
+          quotedText,
+          referenceIds,
+          false);
+    }
+
+    Message {
+      var ids = new java.util.LinkedHashSet<String>();
+      if (replyToMessageId != null && !replyToMessageId.isBlank()) ids.add(replyToMessageId);
+      if (referenceIds != null)
+        for (String id : referenceIds) if (id != null && !id.isBlank()) ids.add(id);
+      referenceIds = List.copyOf(ids);
+    }
+
+    Message(
+        String messageId,
+        String conversationId,
+        String conversationType,
+        String senderUserId,
+        String content,
+        boolean mentionedBot,
+        boolean mentionAll,
+        String replyToMessageId,
+        String conversationTitle,
+        List<String> imageCodes,
+        String sessionWebhook,
+        String quotedText) {
+      this(
+          messageId,
+          conversationId,
+          conversationType,
+          senderUserId,
+          content,
+          mentionedBot,
+          mentionAll,
+          replyToMessageId,
+          conversationTitle,
+          imageCodes,
+          sessionWebhook,
+          quotedText,
+          List.of());
+    }
+
+    Message withReference(String id) {
+      return new Message(
+          messageId,
+          conversationId,
+          conversationType,
+          senderUserId,
+          content,
+          mentionedBot,
+          mentionAll,
+          id,
+          conversationTitle,
+          imageCodes,
+          sessionWebhook,
+          quotedText,
+          List.of(),
+          quotedCard);
+    }
 
     Message(
         String messageId,
@@ -88,7 +176,9 @@ final class DingTalkModels {
           conversationTitle,
           imageCodes,
           sessionWebhook,
-          quotedText);
+          quotedText,
+          referenceIds,
+          quotedCard);
     }
 
     Message(
@@ -121,6 +211,18 @@ final class DingTalkModels {
       Map<String, Object> value) {}
 
   record SendResult(String messageId) {}
+
+  static String referenceFingerprint(String id) {
+    if (id == null || id.isBlank()) return "无";
+    try {
+      byte[] digest =
+          java.security.MessageDigest.getInstance("SHA-256")
+              .digest(id.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      return id.length() + ":" + java.util.HexFormat.of().formatHex(digest).substring(0, 16);
+    } catch (java.security.NoSuchAlgorithmException error) {
+      throw new IllegalStateException(error);
+    }
+  }
 
   record StartReservation(String outcome, String workflowId, ObjectNode payload) {}
 

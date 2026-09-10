@@ -10,6 +10,20 @@ import org.springframework.data.repository.query.Param;
 interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, String> {
 
   @Query(
+      "select count(o) from DingTalkOutboxEntity o where o.workflowId = :workflowId "
+          + "and o.messageKind = 'waiting_card' and o.deliveredAt is not null "
+          + "and ((o.targetType = 'GROUP' and :conversationType = '2' and o.conversationId = :conversationId) "
+          + "or (o.targetType = 'PERSON' and :conversationType = '1' and o.targetExternalId = :senderId))")
+  long countDeliveredQuotedCards(
+      @Param("workflowId") String workflowId,
+      @Param("conversationType") String conversationType,
+      @Param("conversationId") String conversationId,
+      @Param("senderId") String senderId);
+
+  List<DingTalkOutboxEntity> findByWorkflowIdAndWaitingCardStateIn(
+      String workflowId, List<String> states);
+
+  @Query(
       value =
           "SELECT * FROM codex_sop_dingtalk_outbox WHERE conversation_id = :conversationId "
               + "AND ((status = 'sent' AND advance_gate_id IS NULL) OR delivered_at IS NOT NULL) "
@@ -17,10 +31,24 @@ interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, S
       nativeQuery = true)
   List<DingTalkOutboxEntity> findRecentDelivered(@Param("conversationId") String conversationId);
 
+  @Query(
+      value =
+          "SELECT * FROM codex_sop_dingtalk_outbox WHERE conversation_id = :conversationId "
+              + "AND workflow_id = :workflowId "
+              + "AND ((status = 'sent' AND advance_gate_id IS NULL) OR delivered_at IS NOT NULL) "
+              + "ORDER BY created_at DESC, id DESC",
+      nativeQuery = true)
+  List<DingTalkOutboxEntity> findDeliveredForQuote(
+      @Param("conversationId") String conversationId,
+      @Param("workflowId") String workflowId,
+      org.springframework.data.domain.Pageable pageable);
+
   List<DingTalkOutboxEntity> findTop50ByConversationIdAndStatusOrderByCreatedAtDesc(
       String conversationId, String status);
 
   boolean existsByDedupKey(String dedupKey);
+
+  Optional<DingTalkOutboxEntity> findByDedupKey(String dedupKey);
 
   @Query(
       value =

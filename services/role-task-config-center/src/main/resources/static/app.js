@@ -69,7 +69,7 @@ function renderDingTalkConfig(){
       <label class="check"><input name="enabled" type="checkbox" ${x.enabled?"checked":""}> 启用钉钉机器人 Stream 长连接</label>
       <div class="grid"><label>Client ID<input name="clientId" maxlength="128" required value="${esc(x.clientId)}" placeholder="dingxxxxxxxxxxxxxxxx"></label>
       <label>Client Secret<input name="clientSecret" type="password" maxlength="512" placeholder="${x.secretConfigured?"已保存；留空表示不修改":"请输入 Client Secret"}"></label></div>
-      <input type="hidden" name="cardTemplateId" value="${esc(x.cardTemplateId)}"><p>进度、工具调用和可读思考摘要按顺序发送普通消息，无需配置卡片模板。</p>
+      <input type="hidden" name="cardTemplateId" value="${esc(x.cardTemplateId)}"><p>步骤间等待通知与正式回答使用已发布的等待卡片，需开通卡片权限；其余进度按顺序发送普通消息。</p>
       <label>事件轮询间隔（毫秒）<input name="eventPollIntervalMs" type="number" min="250" max="60000" required value="${Number(x.eventPollIntervalMs)||1000}"></label>
       <p class="hint">Client Secret 只保存在服务端且不会回显。通过完整任务定义名称启动，后续携带工作流编号提问。仅网页和定时运行向配置对象主动通知。模板 ID 留空时使用钉钉内置 Markdown 进度消息，填写后使用互动进度卡。</p>
       <div class="target-list">${bindings.length?bindings.map(t=>`<article class="target-card"><div class="target-main"><strong>${esc(t.name)}</strong><p>${targetTypeLabel(t.dingtalkTarget.targetType)}：${esc(t.dingtalkTarget.displayName)}</p></div><span class="badge ${t.dingtalkActiveWorkflowId?"":"off"}">${t.dingtalkActiveWorkflowId?"运行中":"已配置通知"}</span></article>`).join(""):'<div class="empty">尚未配置主动通知。仍可通过机器人发送任务定义名称启动。</div>'}</div>

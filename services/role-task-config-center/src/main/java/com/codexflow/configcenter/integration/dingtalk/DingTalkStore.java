@@ -175,6 +175,17 @@ class DingTalkStore {
   @Transactional
   public void completeReply(
       String workflowId, String workflowMessageId, long sequence, String text, String actionId) {
+    completeReply(workflowId, workflowMessageId, sequence, text, actionId, null);
+  }
+
+  @Transactional
+  public void completeReply(
+      String workflowId,
+      String workflowMessageId,
+      long sequence,
+      String text,
+      String actionId,
+      JsonNode waitingSnapshot) {
     DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
     if (sequence <= binding.eventCursor) return;
     inboundMessages
@@ -195,6 +206,18 @@ class DingTalkStore {
                       .put("sessionWebhook", inbound.sessionWebhook)
                       .put("actionId", actionId);
               inbound.actionId = actionId;
+              boolean waiting =
+                  waitingSnapshot != null
+                      && inbound.observedGateId != null
+                      && inbound.observedGateId.equals(
+                          waitingSnapshot.path("pendingAdvance").path("gateId").asText());
+              if (waiting) {
+                payload =
+                    waitingPayload(workflowId, waitingSnapshot, text, false)
+                        .put("answer", true)
+                        .put("atUserId", inbound.senderUserId)
+                        .put("actionId", actionId);
+              }
               enqueue(
                   "assistant:" + workflowMessageId,
                   workflowId,
@@ -202,7 +225,7 @@ class DingTalkStore {
                   group ? "GROUP" : "PERSON",
                   group ? conversationId : inbound.senderUserId,
                   inbound.messageId,
-                  "reply",
+                  waiting ? "waiting_card" : "reply",
                   payload);
             });
     binding.eventCursor = sequence;
@@ -341,6 +364,118 @@ class DingTalkStore {
   }
 
   @Transactional
+  public void recordWaitingCard(
+      String workflowId, long sequence, JsonNode snapshot, boolean invitation) {
+    var binding = requiredBindingForUpdate(workflowId);
+    if (sequence <= binding.eventCursor) return;
+    if (!"chat".equals(binding.triggerSource)) {
+      String gateId = snapshot.path("pendingAdvance").path("gateId").asText();
+      if (!invitation
+          && outbox
+              .findByWorkflowIdAndWaitingCardStateIn(workflowId, List.of("countdown", "held"))
+              .stream()
+              .anyMatch(
+                  card ->
+                      "waiting_card".equals(card.messageKind)
+                          && gateId.equals(card.advanceGateId)
+                          && binding.conversationId.equals(card.conversationId))) {
+        refreshWaitingCards(workflowId, snapshot);
+        binding.eventCursor = sequence;
+        binding.updatedAt = Instant.now();
+        return;
+      }
+      String body = invitation ? DingTalkWaitingCard.completion(snapshot) : "任务已保持等待，不会自动进入下一步。";
+      var payload =
+          waitingPayload(workflowId, snapshot, body, invitation)
+              .put("atUserId", binding.initiatorUserId);
+      if (invitation) payload.put("retainResult", true);
+      enqueue(
+          "waiting:" + workflowId + ":" + gateId + ":" + (invitation ? "invitation" : "held"),
+          workflowId,
+          binding.conversationId,
+          binding.targetType,
+          binding.targetExternalId,
+          binding.rootMessageId,
+          "waiting_card",
+          payload);
+    }
+    binding.eventCursor = sequence;
+    binding.updatedAt = Instant.now();
+  }
+
+  private tools.jackson.databind.node.ObjectNode waitingPayload(
+      String workflowId, JsonNode snapshot, String text, boolean invitation) {
+    return objectMapper
+        .createObjectNode()
+        .put("gateId", snapshot.path("pendingAdvance").path("gateId").asText())
+        .put("invitation", invitation)
+        .put("title", DingTalkExecutionNotice.safe(snapshot.path("name").asText("任务等待确认")))
+        .put("steps", DingTalkWaitingCard.steps(snapshot))
+        .put("text", "工作流编号：" + workflowId + "\n\n" + DingTalkExecutionNotice.safe(text));
+  }
+
+  /** 每张卡片独立刷新，回答正文仍使用各自的不可变快照。 */
+  @Transactional
+  public void refreshWaitingCards(String workflowId, JsonNode snapshot) {
+    requiredBindingForUpdate(workflowId);
+    for (var card :
+        outbox.findByWorkflowIdAndWaitingCardStateIn(workflowId, List.of("countdown", "held"))) {
+      if (card.deliveredAt == null) continue;
+      String state = DingTalkWaitingCard.state(snapshot, card.advanceGateId);
+      if (state.equals(card.waitingCardState)) continue;
+      var payload = (tools.jackson.databind.node.ObjectNode) toOutbox(card).payload();
+      payload.put("cardId", "wait-" + card.id);
+      String updateKey = "waiting-update:" + card.id + ":" + state;
+      enqueue(
+          updateKey,
+          workflowId,
+          card.conversationId,
+          card.targetType,
+          card.targetExternalId,
+          card.replyToMessageId,
+          "waiting_card_update",
+          payload);
+      // 调度快照可能在投递前过时。仅在真正更新后保存远端展示状态；必要时重用更新记录。
+      outbox
+          .findByDedupKey(updateKey)
+          .filter(item -> "sent".equals(item.status))
+          .ifPresent(
+              item -> {
+                item.status = "pending";
+                item.nextAttemptAt = Instant.now();
+              });
+    }
+  }
+
+  @Transactional
+  public void markWaitingCardRefreshed(String cardId, String state) {
+    var card = outbox.findById(cardId.substring(5)).orElseThrow();
+    card.waitingCardState = state;
+  }
+
+  @Transactional(readOnly = true)
+  public boolean ownsWaitingCard(
+      DingTalkModels.CardAction event, String workflowId, String gateId) {
+    if (event.cardInstanceId() == null || !event.cardInstanceId().startsWith("wait-")) return false;
+    if (!hasTextValue(event.operatorUserId())) return false;
+    return outbox
+        .findById(event.cardInstanceId().substring(5))
+        .filter(
+            card ->
+                "waiting_card".equals(card.messageKind)
+                    && card.deliveredAt != null
+                    && workflowId.equals(card.workflowId)
+                    && gateId.equals(card.advanceGateId)
+                    && ("GROUP".equals(card.targetType)
+                        ? (hasTextValue(card.conversationId)
+                            && (!hasTextValue(event.conversationId())
+                                || card.conversationId.equals(event.conversationId())))
+                        : ("PERSON".equals(card.targetType)
+                            && card.targetExternalId.equals(event.operatorUserId()))))
+        .isPresent();
+  }
+
+  @Transactional
   public void recordAdvance(String workflowId, long sequence, String gateId, String text) {
     DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
     if (sequence <= binding.eventCursor) return;
@@ -374,7 +509,30 @@ class DingTalkStore {
   }
 
   private Optional<DingTalkOutboxEntity> quotedOutgoing(DingTalkModels.Message message) {
+    var matches = new java.util.LinkedHashMap<String, DingTalkOutboxEntity>();
+    if (message.referenceIds().isEmpty()) return quotedOutgoingSingle(message);
+    for (String id : message.referenceIds()) {
+      quotedOutgoingSingle(message.withReference(id)).ifPresent(item -> matches.put(item.id, item));
+    }
+    if (matches.size() > 1) throw new IllegalArgumentException("引用对应多条任务消息，请重新引用需要回复的消息。");
+    return matches.values().stream().findFirst();
+  }
+
+  private Optional<DingTalkOutboxEntity> quotedOutgoingSingle(DingTalkModels.Message message) {
     if (hasTextValue(message.replyToMessageId())) {
+      if (message.replyToMessageId().startsWith("wait-")) {
+        var card =
+            outbox
+                .findById(message.replyToMessageId().substring(5))
+                .filter(
+                    item ->
+                        "waiting_card".equals(item.messageKind)
+                            && (item.conversationId.equals(message.conversationId())
+                                || ("PERSON".equals(item.targetType)
+                                    && "1".equals(message.conversationType())
+                                    && item.targetExternalId.equals(message.senderUserId()))));
+        if (card.isPresent()) return card;
+      }
       var found =
           outbox.findFirstByConversationIdAndSentMessageIdOrderByCreatedAtDesc(
               message.conversationId(), message.replyToMessageId());
@@ -382,16 +540,51 @@ class DingTalkStore {
     }
     // Some session replies do not return msgId. Only match exact content of an actually sent reply.
     if (!hasTextValue(message.quotedText())) return Optional.empty();
-    var matches =
-        outbox.findRecentDelivered(message.conversationId()).stream()
-            .filter(
+    String quotedText = normalizeQuote(message.quotedText());
+    var header =
+        java.util.regex.Pattern.compile(
+                "^工作流编号[：:]\\s*([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})(?:\\n|$)")
+            .matcher(quotedText);
+    var matches = new ArrayList<DingTalkOutboxEntity>();
+    if (header.find()) {
+      String workflowId = header.group(1).toLowerCase(java.util.Locale.ROOT);
+      for (int page = 0; ; page++) {
+        var candidates =
+            outbox.findDeliveredForQuote(
+                message.conversationId(),
+                workflowId,
+                org.springframework.data.domain.PageRequest.of(page, 200));
+        for (var item : candidates)
+          if (quotedText.equals(normalizeQuote(toOutbox(item).payload().path("text").asText())))
+            matches.add(item);
+        if (candidates.size() < 200) break;
+      }
+    } else {
+      for (var item : outbox.findRecentDelivered(message.conversationId()))
+        if (quotedText.equals(normalizeQuote(toOutbox(item).payload().path("text").asText())))
+          matches.add(item);
+    }
+    if (matches.isEmpty()) return Optional.empty();
+    var first = matches.get(0);
+    // 同一任务重复投递的普通进度正文可以关联；不同等待、控制提议或回答来源仍不能合并。
+    boolean sameSource =
+        matches.stream()
+            .allMatch(
                 item ->
-                    message
-                        .quotedText()
-                        .trim()
-                        .equals(toOutbox(item).payload().path("text").asText().trim()))
-            .toList();
-    return matches.size() == 1 ? Optional.of(matches.get(0)) : Optional.empty();
+                    java.util.Objects.equals(first.workflowId, item.workflowId)
+                        && java.util.Objects.equals(first.advanceGateId, item.advanceGateId)
+                        && java.util.Objects.equals(first.replyToMessageId, item.replyToMessageId)
+                        && java.util.Objects.equals(first.messageKind, item.messageKind)
+                        && java.util.Objects.equals(
+                            toOutbox(first).payload().path("actionId").asText(),
+                            toOutbox(item).payload().path("actionId").asText()));
+    return sameSource && (matches.size() == 1 || !"waiting_card".equals(first.messageKind))
+        ? Optional.of(first)
+        : Optional.empty();
+  }
+
+  private static String normalizeQuote(String text) {
+    return text.replace("\r\n", "\n").replace('\r', '\n').strip();
   }
 
   private static boolean hasTextValue(String value) {
@@ -467,6 +660,50 @@ class DingTalkStore {
 
   @Transactional(readOnly = true)
   public Optional<DingTalkModels.Binding> conversation(
+      String clientId, DingTalkModels.Message message) {
+    var matches = new java.util.LinkedHashMap<String, DingTalkModels.Binding>();
+    if (message.referenceIds().isEmpty())
+      conversationSingle(clientId, message)
+          .ifPresent(binding -> matches.put(binding.workflowId(), binding));
+    // 先校验是否指向不同卡片（包括同一任务的不同等待），不能只取首个命中。
+    quotedOutgoing(message);
+    for (String id : message.referenceIds()) {
+      conversationSingle(clientId, message.withReference(id))
+          .ifPresent(binding -> matches.put(binding.workflowId(), binding));
+    }
+    quotedCardBinding(clientId, message)
+        .ifPresent(binding -> matches.put(binding.workflowId(), binding));
+    if (matches.size() > 1) throw new IllegalArgumentException("引用对应多个任务，请重新引用需要回复的消息。");
+    return matches.values().stream().findFirst();
+  }
+
+  private Optional<DingTalkModels.Binding> quotedCardBinding(
+      String clientId, DingTalkModels.Message message) {
+    if (!message.quotedCard() || !hasTextValue(message.quotedText())) return Optional.empty();
+    var matcher =
+        java.util.regex.Pattern.compile(
+                "(?m)^工作流编号[：:][ \\t]*([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})[ \\t]*$")
+            .matcher(normalizeQuote(message.quotedText()));
+    var ids = new java.util.LinkedHashSet<String>();
+    while (matcher.find()) ids.add(matcher.group(1).toLowerCase(java.util.Locale.ROOT));
+    if (ids.size() > 1) throw new IllegalArgumentException("引用卡片包含多个工作流编号，请明确要咨询的任务。");
+    if (ids.isEmpty()) return Optional.empty();
+    String workflowId = ids.iterator().next();
+    return bindings
+        .findById(workflowId)
+        .filter(binding -> clientId.equals(binding.clientId))
+        .filter(
+            binding ->
+                outbox.countDeliveredQuotedCards(
+                        workflowId,
+                        message.conversationType(),
+                        message.conversationId(),
+                        message.senderUserId())
+                    > 0)
+        .map(DingTalkStore::toBinding);
+  }
+
+  private Optional<DingTalkModels.Binding> conversationSingle(
       String clientId, DingTalkModels.Message message) {
     var outgoing =
         quotedOutgoing(message)
@@ -599,6 +836,12 @@ class DingTalkStore {
     return inboundMessages
         .findByWorkflowIdAndWorkflowMessageId(workflowId, workflowMessageId)
         .map(DingTalkStore::toInbound);
+  }
+
+  @Transactional
+  public void recordInputGate(String messageId, String gateId) {
+    var inbound = inboundMessages.findById(messageId).orElseThrow();
+    if (inbound.observedGateId == null) inbound.observedGateId = gateId == null ? "" : gateId;
   }
 
   @Transactional(readOnly = true)
@@ -798,6 +1041,13 @@ class DingTalkStore {
     if (item.deliveredAt == null) {
       item.deliveredAt = deliveredAt;
       item.sentMessageId = sentMessageId;
+      if ("waiting_card".equals(item.messageKind))
+        org.slf4j.LoggerFactory.getLogger(DingTalkStore.class)
+            .info(
+                "钉钉卡片关联指纹：会话={}，卡片={}，平台消息={}。",
+                DingTalkModels.referenceFingerprint(item.conversationId),
+                DingTalkModels.referenceFingerprint("wait-" + item.id),
+                DingTalkModels.referenceFingerprint(item.sentMessageId));
     }
   }
 
@@ -811,6 +1061,7 @@ class DingTalkStore {
   public void markOutboxSuperseded(String id) {
     DingTalkOutboxEntity item = outbox.findById(id).orElseThrow();
     item.status = "sent";
+    if ("waiting_card".equals(item.messageKind)) item.waitingCardState = "closed";
     item.lastError = null;
     item.updatedAt = Instant.now();
   }
@@ -871,6 +1122,7 @@ class DingTalkStore {
     item.replyToMessageId = replyTo;
     item.messageKind = messageKind;
     item.advanceGateId = payload.path("gateId").asText(null);
+    if ("waiting_card".equals(messageKind)) item.waitingCardState = "countdown";
     try {
       item.payloadJson = objectMapper.writeValueAsString(payload);
     } catch (Exception error) {

@@ -15,6 +15,7 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 /** 统一入口不依赖群绑定；回答与每次提问关联。 */
 class DingTalkBotCoordinatorTest {
@@ -235,11 +236,153 @@ class DingTalkBotCoordinatorTest {
   @Test
   void heldEventUsesOneCombinedNotice() {
     var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
-    ReflectionTestUtils.invokeMethod(
-        bot, "consumeEvent", binding, json.createObjectNode().put("type", "step.advance.held"), 1L);
-    verify(store).recordHeld(eq(ID), eq(1L), contains("不会自动进入下一步"));
+    var snapshot = waiting();
+    ((ObjectNode) snapshot.path("pendingAdvance")).put("state", "held");
+    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
+    var event = json.createObjectNode().put("type", "step.advance.held");
+    event
+        .putObject("payload")
+        .put("gateId", snapshot.path("pendingAdvance").path("gateId").asText());
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 1L);
+    verify(store).recordWaitingCard(ID, 1L, snapshot, false);
     verify(store, never())
         .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean());
+  }
+
+  @Test
+  void waitingCardReceiptRetryDoesNotResendAndHeldAnswerDoesNotRestartTimer() {
+    var snapshot = waiting();
+    ((ObjectNode) snapshot.path("pendingAdvance")).put("state", "held");
+    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
+    String gate = snapshot.path("pendingAdvance").path("gateId").asText();
+    var payload = json.createObjectNode().put("gateId", gate).put("text", "回答正文");
+    when(transport.sendWaitingCard(any(), any(), any(), any(), any()))
+        .thenReturn(new DingTalkModels.SendResult("platform-message"));
+    bot.deliver(new DingTalkModels.Outbox("answer", ID, "group", null, "waiting_card", payload));
+    verify(store).markAdvanceDelivered(eq("answer"), eq("platform-message"), any());
+    verify(store).markOutboxSent("answer", "platform-message");
+    verify(transport).sendWaitingCard(eq("wait-answer"), eq("GROUP"), eq("group"), isNull(), any());
+    verify(gateway, never()).post(contains("/notified"), any());
+    payload
+        .put("invitation", true)
+        .put("deliveredAt", java.time.Instant.now().toString())
+        .put("sentMessageId", "platform-message");
+    bot.deliver(new DingTalkModels.Outbox("receipt", ID, "group", null, "waiting_card", payload));
+    verify(transport, times(1)).sendWaitingCard(any(), any(), any(), any(), any());
+    verify(store).markOutboxSent("receipt", "platform-message");
+    verify(gateway).post(eq("/workflows/" + ID + "/advance/" + gate + "/notified"), any());
+  }
+
+  @Test
+  void waitingCardConfirmationValidatesCardAndDirectlyConfirmsWithoutHolding() {
+    var action =
+        new DingTalkModels.CardAction(
+            "wait-card",
+            "other-group",
+            "user",
+            "advance_confirm",
+            java.util.Map.of("workflowId", ID, "gateId", "11111111111111111111111111111111"));
+    when(store.binding(ID))
+        .thenReturn(
+            java.util.Optional.of(
+                new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false)));
+    when(store.ownsWaitingCard(action, ID, "11111111111111111111111111111111")).thenReturn(true);
+    var result = bot.safelyHandleAction(action);
+    assertThat(
+            json.valueToTree(result)
+                .path("cardData")
+                .path("cardParamMap")
+                .path("confirmRequestSucceeded")
+                .asText())
+        .isEqualTo("true");
+    verify(gateway)
+        .post("/workflows/" + ID + "/advance/11111111111111111111111111111111/confirm", null);
+    verify(gateway, never()).post(contains("/hold"), any());
+    verify(gateway, never()).post(contains("/input-observations"), any());
+    verify(store).refreshWaitingCards(eq(ID), any());
+    when(store.ownsWaitingCard(action, ID, "11111111111111111111111111111111")).thenReturn(false);
+    var rejected = bot.safelyHandleAction(action);
+    assertThat(
+            json.valueToTree(rejected)
+                .path("cardData")
+                .path("cardParamMap")
+                .path("confirmRequestSucceeded")
+                .asText())
+        .isEqualTo("false");
+    verify(gateway, times(1)).post(contains("/confirm"), any());
+  }
+
+  @Test
+  void expiredWaitingAnswerIsStillDeliveredWithDisabledButton() {
+    var payload =
+        json.createObjectNode().put("gateId", "old").put("text", "迟到的正式回答").put("answer", true);
+    bot.deliver(new DingTalkModels.Outbox("answer", ID, "group", null, "waiting_card", payload));
+    var data = ArgumentCaptor.forClass(java.util.Map.class);
+    verify(transport)
+        .sendWaitingCard(eq("wait-answer"), eq("GROUP"), eq("group"), isNull(), data.capture());
+    assertThat(data.getValue()).containsEntry("confirmStatus", "disabled");
+    assertThat(data.getValue().get("markdown").toString()).contains("迟到的正式回答");
+  }
+
+  @Test
+  void completedStepMergesOnlyIntoItsCurrentWaitingGate() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var snapshot = (ObjectNode) waiting();
+    ((ObjectNode) snapshot.path("pendingAdvance")).put("completedNodeId", "first");
+    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
+    var event = json.createObjectNode().put("type", "node.completed").put("nodeId", "first");
+    assertThat((Boolean) ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 1L))
+        .isTrue();
+    verify(store).recordWaitingCard(ID, 1L, snapshot, true);
+    verify(store, never())
+        .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean());
+    // Automatic/final completion and a completion from another gate keep the ordinary notice.
+    event.put("nodeId", "other");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 2L);
+    verify(store).recordProcess(eq(ID), isNull(), eq(2L), contains("已完成"), eq(false), eq(false));
+    snapshot.remove("pendingAdvance");
+    event.put("nodeId", "first");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 3L);
+    verify(store).recordProcess(eq(ID), isNull(), eq(3L), contains("已完成"), eq(false), eq(false));
+  }
+
+  @Test
+  void continueAcknowledgementIsRetainedUntilNextStepHasStarted() {
+    var payload = json.createObjectNode().put("nextNodeId", "second");
+    var snapshot = json.createObjectNode();
+    var node = snapshot.putArray("nodes").addObject().put("id", "second").put("status", "pending");
+    assertThat(
+            DingTalkBotCoordinator.redundantAdvanceNotice(
+                "step.advance.confirmed", payload, snapshot))
+        .isFalse();
+    node.put("startedAt", "2026-09-10T07:00:00Z");
+    assertThat(
+            DingTalkBotCoordinator.redundantAdvanceNotice(
+                "step.advance.confirmed", payload, snapshot))
+        .isTrue();
+    assertThat(
+            DingTalkBotCoordinator.redundantAdvanceNotice(
+                "step.advance.resumed", payload, snapshot))
+        .isTrue();
+    assertThat(DingTalkBotCoordinator.redundantAdvanceNotice("node.started", payload, snapshot))
+        .isFalse();
+    assertThat(DingTalkBotCoordinator.redundantAdvanceNotice("node.failed", payload, snapshot))
+        .isFalse();
+  }
+
+  @Test
+  void expiredCompletionCardStillDeliversItsResult() {
+    var payload =
+        json.createObjectNode()
+            .put("gateId", "old")
+            .put("text", "本步骤完整产出")
+            .put("retainResult", true);
+    bot.deliver(new DingTalkModels.Outbox("result", ID, "group", null, "waiting_card", payload));
+    var data = ArgumentCaptor.forClass(java.util.Map.class);
+    verify(transport)
+        .sendWaitingCard(eq("wait-result"), eq("GROUP"), eq("group"), isNull(), data.capture());
+    assertThat(data.getValue()).containsEntry("confirmStatus", "disabled");
+    assertThat(data.getValue().get("markdown").toString()).contains("本步骤完整产出");
   }
 
   @Test
@@ -395,6 +538,35 @@ class DingTalkBotCoordinatorTest {
     bot.safelyHandleMessage(message("为什么"));
     verify(gateway).post(eq("/workflows/" + ID + "/messages"), any());
     verify(store, never()).reserveStart(any(), any());
+  }
+
+  @Test
+  void cardBodyCanRouteQuestionButCannotGuessWhichWaitToConfirm() {
+    when(store.conversation(eq("app"), any()))
+        .thenReturn(
+            Optional.of(new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false)));
+    when(gateway.get("/workflows/" + ID)).thenReturn(waiting());
+    var cardQuote =
+        new DingTalkModels.Message(
+            "card-question",
+            "group",
+            "2",
+            "user",
+            "为什么",
+            true,
+            false,
+            "native-id",
+            null,
+            java.util.List.of(),
+            null,
+            "任务名称\n工作流编号：" + ID,
+            java.util.List.of("native-id"),
+            true);
+    bot.safelyHandleMessage(cardQuote);
+    verify(gateway).post(eq("/workflows/" + ID + "/messages"), any());
+    bot.safelyHandleMessage(cardQuote.withContent("继续"));
+    verify(gateway, never()).post(contains("/confirm"), any());
+    verify(store).enqueueReply(any(), eq(ID), any(), contains("当前等待卡片"));
   }
 
   @Test

@@ -55,7 +55,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   @Override
   public synchronized void start(
       Consumer<DingTalkModels.Message> messageHandler,
-      Consumer<DingTalkModels.CardAction> actionHandler) {
+      java.util.function.Function<DingTalkModels.CardAction, Map<String, Object>> actionHandler) {
     if (client != null) return;
     OpenDingTalkClient created =
         createClient(
@@ -87,7 +87,8 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     if (connected()
         && properties.getClientId().equals(clientId)
         && properties.getClientSecret().equals(clientSecret)) return;
-    OpenDingTalkClient test = createClient(clientId, clientSecret, ignored -> {}, ignored -> {});
+    OpenDingTalkClient test =
+        createClient(clientId, clientSecret, ignored -> {}, ignored -> Map.of());
     try {
       test.start();
     } catch (Exception error) {
@@ -385,11 +386,66 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     authorized("PUT", "/v1.0/card/instances", body);
   }
 
+  @Override
+  public DingTalkModels.SendResult sendWaitingCard(
+      String cardId,
+      String targetType,
+      String targetId,
+      String atUserId,
+      Map<String, Object> cardData) {
+    JsonNode response =
+        authorized(
+            "POST",
+            "/v1.0/card/instances/createAndDeliver",
+            waitingCardBody(cardId, targetType, targetId, atUserId, cardData));
+    return waitingCardReceipt(response, targetType, targetId);
+  }
+
+  static DingTalkModels.SendResult waitingCardReceipt(
+      JsonNode response, String targetType, String targetId) {
+    if (!response.path("success").asBoolean(false)) throw new IllegalStateException("钉钉卡片创建未成功。");
+    String spaceType = "GROUP".equals(targetType) ? "IM_GROUP" : "IM_ROBOT";
+    for (JsonNode delivery : response.path("result").path("deliverResults")) {
+      if (!spaceType.equals(delivery.path("spaceType").asText())
+          || !targetId.equals(delivery.path("spaceId").asText())) continue;
+      if (!delivery.path("success").asBoolean(false)) throw new IllegalStateException("钉钉卡片投递未成功。");
+      // 平台载体编号用于引用匹配，outTrackId 仍单独用于卡片更新与按钮校验。
+      String carrierId = delivery.path("carrierId").asText();
+      return new DingTalkModels.SendResult(carrierId.isBlank() ? null : carrierId);
+    }
+    throw new IllegalStateException("钉钉卡片缺少目标会话投递结果。");
+  }
+
+  ObjectNode waitingCardBody(
+      String cardId,
+      String targetType,
+      String targetId,
+      String atUserId,
+      Map<String, Object> cardData) {
+    ObjectNode body = objectMapper.createObjectNode();
+    body.put("cardTemplateId", DingTalkWaitingCard.TEMPLATE_ID);
+    body.put("outTrackId", cardId).put("callbackType", "STREAM").put("userIdType", 1);
+    if ("GROUP".equals(targetType)) {
+      body.put("openSpaceId", "dtv1.card//IM_GROUP." + targetId);
+      body.putObject("imGroupOpenSpaceModel").put("supportForward", false);
+      ObjectNode delivery =
+          body.putObject("imGroupOpenDeliverModel").put("robotCode", properties.getClientId());
+      if (atUserId != null && !atUserId.isBlank())
+        delivery.putObject("atUserIds").put(atUserId, "任务参与人");
+    } else if ("PERSON".equals(targetType)) {
+      body.put("openSpaceId", "dtv1.card//IM_ROBOT." + targetId);
+      body.putObject("imRobotOpenSpaceModel").put("supportForward", false);
+      body.putObject("imRobotOpenDeliverModel").put("spaceType", "IM_ROBOT");
+    } else throw new IllegalArgumentException("不支持的卡片接收类型。");
+    body.putObject("cardData").set("cardParamMap", stringValues(cardData));
+    return body;
+  }
+
   private OpenDingTalkClient createClient(
       String clientId,
       String clientSecret,
       Consumer<DingTalkModels.Message> messageHandler,
-      Consumer<DingTalkModels.CardAction> actionHandler) {
+      java.util.function.Function<DingTalkModels.CardAction, Map<String, Object>> actionHandler) {
     return OpenDingTalkStreamClientBuilder.custom()
         .credential(new AuthClientCredential(clientId, clientSecret))
         .consumeThreads(4)
@@ -408,8 +464,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
             new OpenDingTalkCallbackListener<String, Map<String, Object>>() {
               @Override
               public Map<String, Object> execute(String request) {
-                actionHandler.accept(toAction(request));
-                return Map.of();
+                return actionHandler.apply(toAction(request));
               }
             })
         .build();
@@ -445,11 +500,43 @@ class OfficialDingTalkTransport implements DingTalkTransport {
       JsonNode quote = parseEmbedded(value.path("text").path("repliedMsg"));
       if (!quote.isObject()) quote = parseEmbedded(messageContent.path("repliedMsg"));
       if (!quote.isObject()) quote = parseEmbedded(value.path("repliedMsg"));
-      String replyTo = firstText(value, "originalMsgId", "replyToMessageId");
+      String replyTo = firstText(quote, "outTrackId", "cardInstanceId");
+      if (replyTo == null) replyTo = firstText(value, "originalMsgId", "replyToMessageId");
       if (replyTo == null) {
-        replyTo = firstText(quote, "msgId", "messageId", "originalMsgId");
+        replyTo =
+            firstText(quote, "outTrackId", "cardInstanceId", "msgId", "messageId", "originalMsgId");
       }
       String quotedText = quotedMessageText(quote);
+      var references = new java.util.LinkedHashSet<String>();
+      for (String key : List.of("originalMsgId", "replyToMessageId")) {
+        String id = firstText(value, key);
+        if (id != null) references.add(id);
+      }
+      for (String key :
+          List.of("outTrackId", "cardInstanceId", "msgId", "messageId", "originalMsgId")) {
+        String id = firstText(quote, key);
+        if (id != null) references.add(id);
+      }
+      if (quote.isObject() || replyTo != null) {
+        org.slf4j.LoggerFactory.getLogger(OfficialDingTalkTransport.class)
+            .info("钉钉引用字段结构：{}", quotedStructure(quote));
+        org.slf4j.LoggerFactory.getLogger(OfficialDingTalkTransport.class)
+            .info(
+                "钉钉引用结构：会话类型={}，顶层消息编号={}，引用卡片编号={}，引用消息编号={}，引用content类型={}，引用正文长度={}。",
+                "1".equals(value.path("conversationType").asText()) ? "单聊" : "群聊",
+                firstText(value, "originalMsgId", "replyToMessageId") != null,
+                firstText(quote, "outTrackId", "cardInstanceId") != null,
+                firstText(quote, "msgId", "messageId", "originalMsgId") != null,
+                quote.path("content").getNodeType(),
+                quotedText.length());
+        org.slf4j.LoggerFactory.getLogger(OfficialDingTalkTransport.class)
+            .info(
+                "钉钉引用编号指纹：会话={}，顶层={}，候选编号={}。",
+                DingTalkModels.referenceFingerprint(value.path("conversationId").asText()),
+                DingTalkModels.referenceFingerprint(
+                    firstText(value, "originalMsgId", "replyToMessageId")),
+                references.stream().map(DingTalkModels::referenceFingerprint).toList());
+      }
       return new DingTalkModels.Message(
           value.path("msgId").asText(),
           value.path("conversationId").asText(),
@@ -462,13 +549,20 @@ class OfficialDingTalkTransport implements DingTalkTransport {
           firstText(value, "conversationTitle", "conversationName"),
           List.copyOf(images),
           firstText(value, "sessionWebhook"),
-          quotedText);
+          quotedText,
+          List.copyOf(references),
+          quote.path("content").path("cardContent").isArray());
     } catch (Exception error) {
       throw new IllegalArgumentException("无法解析钉钉机器人消息。", error);
     }
   }
 
   private String quotedMessageText(JsonNode quote) {
+    if (quote.path("content").path("cardContent").isArray()) {
+      var text = new StringBuilder();
+      appendQuotedCard(quote.path("content").path("cardContent"), text, 0, new int[] {4096});
+      return text.toString().strip();
+    }
     String text = quote.path("text").path("content").asText();
     if (!text.isBlank()) return text;
     JsonNode content = quote.path("content");
@@ -483,6 +577,70 @@ class OfficialDingTalkTransport implements DingTalkTransport {
       else if ("picture".equals(item.path("type").asText())) words.append('\n');
     }
     return words.toString();
+  }
+
+  private void appendQuotedCard(JsonNode nodes, StringBuilder text, int depth, int[] remaining) {
+    if (depth > 32) throw new IllegalArgumentException("引用卡片层级过多。");
+    for (JsonNode node : nodes) {
+      if (--remaining[0] < 0) throw new IllegalArgumentException("引用卡片内容过多。");
+      if (node.path("value").isTextual()) {
+        if (text.length() + node.path("value").asText().length() + 1 > 100000)
+          throw new IllegalArgumentException("引用卡片内容过长。");
+        text.append(node.path("value").asText()).append('\n');
+      }
+      if (node.path("children").isArray())
+        appendQuotedCard(node.path("children"), text, depth + 1, remaining);
+    }
+  }
+
+  // 仅用于确认平台实际返回的引用协议；不输出字段值，不改变任务关联规则。
+  String quotedStructure(JsonNode quote) {
+    return quoteShape(quote, 0, new int[] {128}).toString();
+  }
+
+  private JsonNode quoteShape(JsonNode node, int depth, int[] remaining) {
+    if (depth >= 8 || remaining[0]-- <= 0) return objectMapper.getNodeFactory().textNode("<已截断>");
+    if (node.isObject()) {
+      var result = objectMapper.createObjectNode();
+      for (var entry : node.properties()) {
+        if (remaining[0] <= 0) {
+          result.put("<已截断>", true);
+          break;
+        }
+        String key = entry.getKey();
+        if (!key.matches("[A-Za-z][A-Za-z0-9_]{0,63}"))
+          key = "<字段:" + DingTalkModels.referenceFingerprint(key) + ">";
+        result.set(key, quoteShape(entry.getValue(), depth + 1, remaining));
+      }
+      return result;
+    }
+    if (node.isArray()) {
+      var result = objectMapper.createArrayNode();
+      for (JsonNode item : node) {
+        if (remaining[0] <= 0) {
+          result.add("<已截断>");
+          break;
+        }
+        result.add(quoteShape(item, depth + 1, remaining));
+      }
+      return result;
+    }
+    if (node.isTextual()) {
+      String value = node.asText();
+      var result =
+          objectMapper.createObjectNode().put("type", "string").put("length", value.length());
+      String stripped = value.strip();
+      if (value.length() <= 16384 && (stripped.startsWith("{") || stripped.startsWith("["))) {
+        try {
+          JsonNode embedded = objectMapper.readTree(value);
+          result.set("embeddedJson", quoteShape(embedded, depth + 1, remaining));
+        } catch (Exception ignored) {
+          result.put("embeddedJson", "无法解析");
+        }
+      }
+      return result;
+    }
+    return objectMapper.getNodeFactory().textNode("<" + node.getNodeType() + ">");
   }
 
   @SuppressWarnings("unchecked")
@@ -502,6 +660,13 @@ class OfficialDingTalkTransport implements DingTalkTransport {
       }
       String openSpaceId = firstText(value, "openSpaceId");
       if (openSpaceId == null) openSpaceId = firstText(content, "openSpaceId");
+      String callbackConversationId = conversationId(openSpaceId);
+      if (callbackConversationId == null) {
+        // 即使未提供 spaceType，也保留明确的场域编号供持久化投递记录校验。
+        callbackConversationId = firstText(value, "spaceId");
+        if (callbackConversationId == null) callbackConversationId = firstText(content, "spaceId");
+        callbackConversationId = conversationId(callbackConversationId);
+      }
       String cardInstanceId = firstText(value, "outTrackId", "cardInstanceId");
       if (cardInstanceId == null) {
         cardInstanceId = firstText(content, "outTrackId", "cardInstanceId");
@@ -511,7 +676,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
         operatorUserId = firstText(content, "userId", "staffId", "operatorUserId");
       }
       return new DingTalkModels.CardAction(
-          cardInstanceId, conversationId(openSpaceId), operatorUserId, actionId, actionValues);
+          cardInstanceId, callbackConversationId, operatorUserId, actionId, actionValues);
     } catch (Exception error) {
       throw new IllegalArgumentException("无法解析钉钉卡片回调。", error);
     }

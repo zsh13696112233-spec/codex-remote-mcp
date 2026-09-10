@@ -12,6 +12,135 @@ import tools.jackson.databind.node.ObjectNode;
 class DingTalkTransportParsingTest {
 
   @Test
+  void parsesRealCardContentTreeAndKeepsReplyImageSeparate() {
+    var message =
+        transport.toMessage(
+            """
+        {"msgId":"m","conversationId":"g","conversationType":"2","msgtype":"richText",
+         "content":{"richText":[{"text":"这张图呢"},{"type":"picture","downloadCode":"new-image"}],
+          "repliedMsg":{"msgId":"native-id","content":{"cardContent":[
+           {"elementType":"text","value":"任务名"},
+           {"elementType":"markdown","children":[{"elementType":"text","value":"等待确认"},
+            {"elementType":"text","value":"工作流编号：00000000-0000-4000-8000-000000000001"}]}]}}}}
+        """);
+    assertThat(message.quotedText())
+        .isEqualTo("任务名\n等待确认\n工作流编号：00000000-0000-4000-8000-000000000001");
+    assertThat(message.quotedCard()).isTrue();
+    assertThat(message.withContent("继续").quotedCard()).isTrue();
+    assertThat(message.withReference("another").quotedCard()).isTrue();
+    assertThat(message.imageCodes()).containsExactly("new-image");
+    assertThat(message.content()).isEqualTo("这张图呢");
+  }
+
+  @Test
+  void quoteDiagnosticsExposeNestedSchemaWithoutMessageOrCredentialValues() {
+    var quote = objectMapper.createObjectNode();
+    quote.put("msgId", "private-message-id");
+    quote
+        .putObject("content")
+        .put(
+            "cardData",
+            "{\"cardParamMap\":{\"workflowId\":\"private-workflow-id\",\"markdown\":\"秘密正文\"}}");
+    quote.put("sessionWebhook", "https://secret.example/token");
+    quote.put("敏感字段内容", "private-value");
+    String shape = transport.quotedStructure(quote);
+    assertThat(shape)
+        .contains("cardData", "embeddedJson", "cardParamMap", "workflowId", "markdown")
+        .doesNotContain(
+            "private-message-id",
+            "private-workflow-id",
+            "秘密正文",
+            "secret.example",
+            "private-value",
+            "敏感字段内容");
+    var deep = objectMapper.createObjectNode();
+    var cursor = deep;
+    for (int i = 0; i < 20; i++) cursor = cursor.putObject("nested");
+    assertThat(transport.quotedStructure(deep)).contains("已截断");
+    assertThat(transport.quotedStructure(objectMapper.createObjectNode())).isEqualTo("{}");
+  }
+
+  @Test
+  void callbackRetainsExplicitSpaceIdEvenWithoutSpaceType() {
+    var action =
+        transport.toAction(
+            """
+        {"outTrackId":"wait-test","spaceId":"wrong-group","userId":"user",
+         "content":{"cardPrivateData":{"params":{"action":"advance_confirm"}}}}
+        """);
+    assertThat(action.conversationId()).isEqualTo("wrong-group");
+  }
+
+  @Test
+  void officialCardCallbackUsesSpaceIdRatherThanDeliveryOpenSpaceId() {
+    var action =
+        transport.toAction(
+            """
+        {"outTrackId":"wait-test","spaceId":"conversation-1","spaceType":"IM_GROUP","userId":"user-2",
+         "content":{"cardPrivateData":{"actionIds":["button"],"params":{
+           "action":"advance_confirm","workflowId":"workflow-1","gateId":"gate-1"}}}}
+        """);
+    assertThat(action.conversationId()).isEqualTo("conversation-1");
+    assertThat(action.operatorUserId()).isEqualTo("user-2");
+    assertThat(action.actionId()).isEqualTo("advance_confirm");
+    assertThat(action.value())
+        .containsEntry("workflowId", "workflow-1")
+        .containsEntry("gateId", "gate-1");
+  }
+
+  @Test
+  void keepsBothNativeReferenceIdsWhenTopLevelDiffersFromQuotedMessage() {
+    var message =
+        transport.toMessage(
+            """
+        {"msgId":"m","conversationId":"g","conversationType":"2","originalMsgId":"top-level",
+         "text":{"content":"这个有问题","repliedMsg":{"msgId":"carrier-id","content":{}}}}
+        """);
+    assertThat(message.referenceIds()).containsExactly("top-level", "carrier-id");
+    assertThat(message.withContent("新内容").referenceIds()).isEqualTo(message.referenceIds());
+    assertThat(message.withReference("carrier-id").referenceIds()).containsExactly("carrier-id");
+    assertThat(DingTalkModels.referenceFingerprint("carrier-id"))
+        .matches("10:[a-f0-9]{16}")
+        .doesNotContain("carrier-id");
+  }
+
+  @Test
+  void waitingCardReceiptKeepsCarrierAndRejectsUnsuccessfulDelivery() {
+    var response =
+        objectMapper.readTree(
+            """
+        {"success":true,"result":{"deliverResults":[
+          {"spaceType":"IM_GROUP","spaceId":"g","success":true,"carrierId":"platform-message"}]}}
+        """);
+    assertThat(OfficialDingTalkTransport.waitingCardReceipt(response, "GROUP", "g").messageId())
+        .isEqualTo("platform-message");
+    assertThatThrownBy(
+            () -> OfficialDingTalkTransport.waitingCardReceipt(response, "GROUP", "other"))
+        .hasMessage("钉钉卡片缺少目标会话投递结果。");
+    ((ObjectNode) response.path("result").path("deliverResults").get(0)).put("success", false);
+    assertThatThrownBy(() -> OfficialDingTalkTransport.waitingCardReceipt(response, "GROUP", "g"))
+        .hasMessage("钉钉卡片投递未成功。");
+  }
+
+  @Test
+  void explicitQuotedCardIdIsNotHiddenByPlatformMessageId() {
+    var message =
+        transport.toMessage(
+            """
+        {"msgId":"m","conversationId":"g","conversationType":"2","originalMsgId":"platform-message",
+         "text":{"content":"这个有问题","repliedMsg":{"outTrackId":"wait-outbox","msgId":"platform-message"}}}
+        """);
+    assertThat(message.replyToMessageId()).isEqualTo("wait-outbox");
+    var platformOnly =
+        transport.toMessage(
+            """
+        {"msgId":"m","conversationId":"g","conversationType":"2",
+         "text":{"content":"这个有问题","repliedMsg":{"msgId":"platform-message"}}}
+        """);
+    assertThat(platformOnly.replyToMessageId()).isEqualTo("platform-message");
+  }
+
+  @Test
   void acceptsHttpAndHttpsImageUrlsWithoutChangingSignedQuery() {
     for (String scheme : new String[] {"http", "https"}) {
       String address =

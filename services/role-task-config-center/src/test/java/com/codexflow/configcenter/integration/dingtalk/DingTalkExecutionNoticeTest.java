@@ -59,7 +59,7 @@ class DingTalkExecutionNoticeTest {
             DingTalkExecutionNotice.stepLabel(event, snapshot)
                 + "\n"
                 + DingTalkExecutionNotice.execution(event))
-        .isEqualTo("步骤「开发」\n工具调用：修改文件 · 已完成");
+        .isEqualTo("第1步「开发」\n工具调用：修改文件 · 已完成");
   }
 
   @Test
@@ -126,7 +126,7 @@ class DingTalkExecutionNoticeTest {
     var event = event("item/started", "webSearch").put("nodeId", "a");
     var snapshot = json.createObjectNode();
     snapshot.putArray("nodes").addObject().put("id", "a").put("displayName", "资料核对");
-    assertThat(DingTalkExecutionNotice.stepLabel(event, snapshot)).isEqualTo("步骤「资料核对」");
+    assertThat(DingTalkExecutionNotice.stepLabel(event, snapshot)).isEqualTo("第1步「资料核对」");
   }
 
   @Test

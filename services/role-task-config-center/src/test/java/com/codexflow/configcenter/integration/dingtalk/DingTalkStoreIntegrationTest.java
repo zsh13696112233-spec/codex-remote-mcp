@@ -33,6 +33,351 @@ import tools.jackson.databind.node.ObjectNode;
 class DingTalkStoreIntegrationTest {
 
   private String lastTaskName;
+
+  @Test
+  void quotedProgressSurvivesHistoryLimitAndDuplicateDeliveryWithoutMergingDifferentGates() {
+    String client = "quote-history-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("quote-history-start")).workflowId();
+    var original =
+        new DingTalkModels.Message(
+            "source", "quote-history-group", "2", "bob", "问题", true, false, null);
+    String notice = "步骤「PA-20260902-145323-验收角色」：已完成";
+    store.enqueueReply("quote-history-one", workflow, original, notice);
+    store.enqueueReply("quote-history-two", workflow, original, notice);
+    for (int i = 0; i < 205; i++)
+      store.enqueueReply("quote-history-noise-" + i, workflow, original, "其他进度" + i);
+    jdbc.update(
+        "update codex_sop_dingtalk_outbox set status = 'sent' where workflow_id = ?", workflow);
+    var reply =
+        new DingTalkModels.Message(
+            "reply",
+            "quote-history-group",
+            "2",
+            "bob",
+            "为什么",
+            true,
+            false,
+            "unmatched-native-id",
+            null,
+            List.of(),
+            null,
+            "工作流编号：" + workflow + "\r\n" + notice);
+    assertThat(store.conversation(client, reply))
+        .get()
+        .extracting(DingTalkModels.Binding::workflowId)
+        .isEqualTo(workflow);
+    assertThat(store.conversation("another-client", reply)).isEmpty();
+    var forged =
+        new DingTalkModels.Message(
+            "forged",
+            "quote-history-group",
+            "2",
+            "bob",
+            "问题",
+            true,
+            false,
+            "unknown",
+            null,
+            List.of(),
+            null,
+            "工作流编号：" + workflow + "\n没有发送过的正文");
+    assertThat(store.conversation(client, forged)).isEmpty();
+    jdbc.update(
+        "update codex_sop_dingtalk_outbox set advance_gate_id = 'old-gate', delivered_at = CURRENT_TIMESTAMP where dedup_key = 'quote-history-one'");
+    jdbc.update(
+        "update codex_sop_dingtalk_outbox set advance_gate_id = 'new-gate', delivered_at = CURRENT_TIMESTAMP where dedup_key = 'quote-history-two'");
+    assertThat(store.conversation(client, reply)).isEmpty();
+    assertThat(store.quotedAdvance(reply)).isNull();
+  }
+
+  @Test
+  void waitingCompletionDeduplicatesByGateAndHeldReusesExistingCard() {
+    String client = "merge-cards-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("start-merge-cards")).workflowId();
+    var snapshot = objectMapper.createObjectNode();
+    var gate =
+        snapshot
+            .putObject("pendingAdvance")
+            .put("gateId", "one")
+            .put("state", "held")
+            .put("completedNodeId", "first")
+            .put("nextNodeId", "second");
+    String result = "完整结果".repeat(1000);
+    var nodes = snapshot.putArray("nodes");
+    nodes.addObject().put("id", "first").put("displayName", "同名角色").put("response", result);
+    nodes.addObject().put("id", "second").put("displayName", "同名角色");
+    store.recordWaitingCard(workflow, 1, snapshot, true);
+    store.recordWaitingCard(workflow, 2, snapshot, true);
+    store.recordWaitingCard(workflow, 3, snapshot, false);
+    var rows =
+        jdbc.queryForList(
+            "select payload_json from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card'",
+            String.class,
+            workflow);
+    assertThat(rows).hasSize(1);
+    var payload = objectMapper.readTree(rows.get(0));
+    assertThat(payload.path("text").asText()).contains(result);
+    assertThat(payload.path("steps").asText()).contains("第1步「同名角色」", "第2步「同名角色」");
+    assertThat(payload.path("retainResult").asBoolean()).isTrue();
+    String id =
+        jdbc.queryForObject(
+            "select id from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card'",
+            String.class,
+            workflow);
+    store.markAdvanceDelivered(id, "carrier", java.time.Instant.now());
+    store.markOutboxSent(id, "carrier");
+    store.recordWaitingCard(workflow, 4, snapshot, false);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card'",
+                Integer.class,
+                workflow))
+        .isEqualTo(1);
+    gate.put("gateId", "two");
+    store.recordWaitingCard(workflow, 5, snapshot, false);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card'",
+                Integer.class,
+                workflow))
+        .isEqualTo(2);
+    assertThat(store.binding(workflow).orElseThrow().eventCursor()).isEqualTo(5);
+  }
+
+  @Test
+  void waitingCardsKeepMultipleAnswersAndQueueIndependentInvalidation() {
+    String client = "cards-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("start-cards")).workflowId();
+    var snapshot = objectMapper.createObjectNode().put("name", "测试任务");
+    snapshot.putObject("pendingAdvance").put("gateId", "gate-one").put("state", "held");
+    store.recordWaitingCard(workflow, 1, snapshot, true);
+    store.recordWaitingCard(workflow, 1, snapshot, true);
+    var binding = store.binding(workflow).orElseThrow();
+    for (int i = 0; i < 2; i++) {
+      var question =
+          new DingTalkModels.Message(
+              "question-cards-" + i, "other-cards", "2", "asker", "问题", true, false, null);
+      var inbound = store.registerInbound(client, binding, question);
+      store.recordInputGate(question.messageId(), "gate-one");
+      store.completeReply(workflow, inbound.workflowMessageId(), i + 2, "回答" + i, null, snapshot);
+    }
+    var ids =
+        jdbc.queryForList(
+            "select id from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card'",
+            String.class,
+            workflow);
+    assertThat(ids).hasSize(3);
+    var late =
+        new DingTalkModels.Message(
+            "late-cards", "other-cards", "2", "asker", "旧问题", true, false, null);
+    var lateInbound = store.registerInbound(client, binding, late);
+    store.recordInputGate(late.messageId(), "gate-one");
+    store.recordInputGate(late.messageId(), "gate-two");
+    var nextSnapshot = snapshot.deepCopy();
+    ((ObjectNode) nextSnapshot.path("pendingAdvance")).put("gateId", "gate-two");
+    store.completeReply(
+        workflow, lateInbound.workflowMessageId(), 4, "旧问题的迟到回答", null, nextSnapshot);
+    assertThat(
+            jdbc.queryForObject(
+                "select message_kind from codex_sop_dingtalk_outbox where dedup_key = ?",
+                String.class,
+                "assistant:" + lateInbound.workflowMessageId()))
+        .isEqualTo("reply");
+    // 未投递的卡片不创建更新，避免邀请过期后更新不存在的远端实例。
+    store.refreshWaitingCards(workflow, objectMapper.createObjectNode());
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card_update'",
+                Integer.class,
+                workflow))
+        .isZero();
+    for (String id : ids) {
+      store.markAdvanceDelivered(id, "carrier-" + id, java.time.Instant.now());
+      store.markOutboxSent(id, "carrier-" + id);
+    }
+    String answerId =
+        jdbc.queryForObject(
+            "select id from codex_sop_dingtalk_outbox where workflow_id = ? and conversation_id = 'other-cards' order by created_at limit 1",
+            String.class,
+            workflow);
+    var quote =
+        new DingTalkModels.Message(
+            "quote", "other-cards", "2", "asker", "继续", true, false, "wait-" + answerId);
+    assertThat(store.quotedAdvance(quote)).isEqualTo("gate-one");
+    var nativeQuote =
+        new DingTalkModels.Message(
+            "native-quote", "other-cards", "2", "asker", "问题", true, false, "carrier-" + answerId);
+    assertThat(store.conversation(client, nativeQuote))
+        .get()
+        .extracting(DingTalkModels.Binding::workflowId)
+        .isEqualTo(workflow);
+    assertThat(store.quotedAdvance(nativeQuote)).isEqualTo("gate-one");
+    var twoIds =
+        new DingTalkModels.Message(
+            "native-two",
+            "other-cards",
+            "2",
+            "asker",
+            "问题",
+            true,
+            false,
+            "unknown-top-level",
+            null,
+            List.of(),
+            null,
+            "",
+            List.of("carrier-" + answerId));
+    assertThat(store.conversation(client, twoIds))
+        .get()
+        .extracting(DingTalkModels.Binding::workflowId)
+        .isEqualTo(workflow);
+    assertThat(store.quotedAdvance(twoIds)).isEqualTo("gate-one");
+    String secondAnswerId =
+        jdbc.queryForObject(
+            "select id from codex_sop_dingtalk_outbox where workflow_id = ? and conversation_id = 'other-cards' and message_kind = 'waiting_card' and id <> ?",
+            String.class,
+            workflow,
+            answerId);
+    var conflictingIds =
+        new DingTalkModels.Message(
+            "native-conflict",
+            "other-cards",
+            "2",
+            "asker",
+            "问题",
+            true,
+            false,
+            "carrier-" + answerId,
+            null,
+            List.of(),
+            null,
+            "",
+            List.of("carrier-" + secondAnswerId));
+    assertThatThrownBy(() -> store.conversation(client, conflictingIds))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("引用对应多条任务消息");
+    var wrongGroup =
+        new DingTalkModels.Message(
+            "wrong-quote",
+            "unrelated-group",
+            "2",
+            "asker",
+            "问题",
+            true,
+            false,
+            "carrier-" + answerId);
+    assertThat(store.conversation(client, wrongGroup)).isEmpty();
+    assertThat(store.conversation(client, quote))
+        .get()
+        .extracting(DingTalkModels.Binding::workflowId)
+        .isEqualTo(workflow);
+    var action =
+        new DingTalkModels.CardAction(
+            "wait-" + answerId, "other-cards", "asker", "advance_confirm", java.util.Map.of());
+    assertThat(store.ownsWaitingCard(action, workflow, "gate-one")).isTrue();
+    assertThat(store.ownsWaitingCard(action, workflow, "gate-two")).isFalse();
+    var rawQuote =
+        objectMapper
+            .createObjectNode()
+            .put("msgId", "card-question")
+            .put("conversationId", "other-cards")
+            .put("conversationType", "2")
+            .put("senderStaffId", "asker");
+    var cardContent =
+        rawQuote
+            .putObject("text")
+            .put("content", "这是为什么")
+            .putObject("repliedMsg")
+            .put("msgId", "unmatched-platform-id")
+            .putObject("content")
+            .putArray("cardContent");
+    cardContent.addObject().put("value", "任务名称");
+    var children = cardContent.addObject().putArray("children");
+    children.addObject().put("value", "工作流编号：" + workflow);
+    var parser = new OfficialDingTalkTransport(new DingTalkProperties(), objectMapper);
+    var cardQuote = parser.toMessage(rawQuote.toString());
+    assertThat(store.conversation(client, cardQuote))
+        .get()
+        .extracting(DingTalkModels.Binding::workflowId)
+        .isEqualTo(workflow);
+    assertThat(store.quotedAdvance(cardQuote)).isNull();
+    assertThat(store.conversation("other-client", cardQuote)).isEmpty();
+    rawQuote.put("conversationId", "wrong-group");
+    assertThat(store.conversation(client, parser.toMessage(rawQuote.toString()))).isEmpty();
+    rawQuote.put("conversationId", "other-cards");
+    children.addObject().put("value", "工作流编号：00000000-0000-4000-8000-000000000001");
+    assertThatThrownBy(() -> store.conversation(client, parser.toMessage(rawQuote.toString())))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("多个工作流编号");
+    var withoutConversation =
+        new DingTalkModels.CardAction(
+            "wait-" + answerId, null, "asker", "advance_confirm", java.util.Map.of());
+    assertThat(store.ownsWaitingCard(withoutConversation, workflow, "gate-one")).isTrue();
+    assertThat(store.ownsWaitingCard(withoutConversation, workflow, "gate-two")).isFalse();
+    assertThat(store.ownsWaitingCard(withoutConversation, "other-workflow", "gate-one")).isFalse();
+    assertThat(
+            store.ownsWaitingCard(
+                new DingTalkModels.CardAction(
+                    "wait-" + answerId,
+                    "wrong-group",
+                    "asker",
+                    "advance_confirm",
+                    java.util.Map.of()),
+                workflow,
+                "gate-one"))
+        .isFalse();
+    assertThat(
+            store.ownsWaitingCard(
+                new DingTalkModels.CardAction(
+                    "wait-" + answerId, null, null, "advance_confirm", java.util.Map.of()),
+                workflow,
+                "gate-one"))
+        .isFalse();
+    jdbc.update("update codex_sop_dingtalk_outbox set delivered_at = null where id = ?", answerId);
+    assertThat(store.ownsWaitingCard(withoutConversation, workflow, "gate-one")).isFalse();
+    store.markAdvanceDelivered(answerId, "carrier-" + answerId, java.time.Instant.now());
+    jdbc.update(
+        "update codex_sop_dingtalk_outbox set target_type = 'PERSON', target_external_id = 'asker' where id = ?",
+        answerId);
+    assertThat(store.ownsWaitingCard(withoutConversation, workflow, "gate-one")).isTrue();
+    assertThat(
+            store.ownsWaitingCard(
+                new DingTalkModels.CardAction(
+                    "wait-" + answerId, null, "other-user", "advance_confirm", java.util.Map.of()),
+                workflow,
+                "gate-one"))
+        .isFalse();
+    jdbc.update(
+        "update codex_sop_dingtalk_outbox set target_type = 'GROUP', target_external_id = 'other-cards' where id = ?",
+        answerId);
+    store.refreshWaitingCards(workflow, objectMapper.createObjectNode());
+    store.refreshWaitingCards(workflow, objectMapper.createObjectNode());
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card_update'",
+                Integer.class,
+                workflow))
+        .isEqualTo(3);
+    assertThat(store.binding(workflow).orElseThrow().progressCardInstanceId()).isNull();
+    // 关闭更新在投递前可能过时：保存实际展示状态，并允许后续真正关闭时重用更新记录。
+    String source = ids.get(0);
+    String update =
+        jdbc.queryForObject(
+            "select id from codex_sop_dingtalk_outbox where dedup_key = ?",
+            String.class,
+            "waiting-update:" + source + ":closed");
+    store.markWaitingCardRefreshed("wait-" + source, "held");
+    store.markOutboxSent(update, "wait-" + source);
+    store.refreshWaitingCards(workflow, objectMapper.createObjectNode());
+    assertThat(
+            jdbc.queryForObject(
+                "select status from codex_sop_dingtalk_outbox where id = ?", String.class, update))
+        .isEqualTo("pending");
+  }
+
   private final java.util.Map<String, String> namesByConversation = new java.util.HashMap<>();
 
   @Autowired DingTalkStore store;

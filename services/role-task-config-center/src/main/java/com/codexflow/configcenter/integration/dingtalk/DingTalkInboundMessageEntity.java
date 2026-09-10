@@ -39,6 +39,9 @@ class DingTalkInboundMessageEntity {
   @Column(name = "action_id", length = 128)
   String actionId;
 
+  @Column(name = "observed_gate_id", length = 128)
+  String observedGateId;
+
   @Column(nullable = false, length = 32)
   String status;
 
