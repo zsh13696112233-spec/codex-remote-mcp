@@ -111,6 +111,27 @@ class RegistryTests(unittest.TestCase):
             second = self.registry.save_agent({**machine, "port": 4501})
         self.assertNotEqual(machine["agentId"], second["agentId"])
 
+    def test_full_access_defaults_apply_on_save_and_reach_remote(self):
+        machine = self.machine()
+        key = machine['agentId']
+        self.assertFalse(self.registry.configs()[key].allow_full_access)
+        self.config_values['machine_defaults'].update(allow_write=True, allow_full_access=True)
+        self.assertFalse(self.registry.configs()[key].allow_full_access)
+        self.registry.save_agent(machine, key)
+        restored = AgentRegistry(WorkflowStore(self.root / 'runtime.db'))
+        self.assertTrue(restored.configs()[key].allow_full_access)
+        public = next(item for item in self.client.get('/agents').json()['agents'] if item['agentId'] == key)
+        self.assertIn('full_access', public['permissionProfiles'])
+        (self.root / '127.0.0.1.token').write_text('test-only-machine-secret', encoding='utf-8')
+        response = self.client.get('/internal/v1/agents', headers={'Authorization': 'Bearer test-only-machine-secret'})
+        self.assertEqual(response.status_code, 200)
+        remote = response.json()['agents'][key]
+        self.assertTrue(remote['allow_full_access'])
+        self.assertTrue(remote['allow_write'])
+        self.config_values['machine_defaults']['allow_full_access'] = False
+        self.registry.save_agent(machine, key)
+        self.assertNotIn('full_access', self.registry.configs()[key].public_dict()['permission_profiles'])
+
     def test_submission_rejects_unchecked_and_cross_group_before_persistence(self):
         supervisor = self.machine()
         spec = {"workflowId": "registry-run", "supervisorAgentId": supervisor["agentId"],
@@ -163,6 +184,12 @@ class RegistryTests(unittest.TestCase):
     def test_remote_client_parses_fetched_group_and_does_not_read_sqlite(self):
         from workflow_runtime_client import InternalApiClient
         supervisor = self.machine()
+        with self.gateway.store._connect() as db:
+            row = self.registry.rows()[supervisor['agentId']]
+            old_config = json.loads(row['config'])
+            old_config['allow_cwd_override'] = False
+            db.execute('UPDATE registered_agents SET config=? WHERE id=?',
+                       (json.dumps(old_config), supervisor['agentId']))
         self.machine("127.0.0.2", ["executor"])
         (self.root / "127.0.0.1.token").write_text("test-only-machine-secret", encoding="utf-8")
         runtime = InternalApiClient("http://central.test", "registered-machine", token_env="FIXTURE", started_at="2026-09-11T00:00:00+00:00")
@@ -175,6 +202,45 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(len(agents), 2)
         self.assertIn(supervisor["agentId"], agents)
         self.assertTrue(all(agent.sidecar_token_file is None for agent in agents.values()))
+        self.assertTrue(all(agent.allow_cwd_override for agent in agents.values()))
+
+    def test_registered_directory_override_reaches_execution_and_preserves_permissions(self):
+        from tests.mock_app_server import MockAppServer
+        from urllib.parse import urlparse
+        from codex_orchestrator_mcp import Orchestrator
+
+        async def run():
+            async with MockAppServer(delay_sec=0.01) as server:
+                with patch.dict(self.config_values['machine_defaults'], {'token_env': None}):
+                    machine = self.registry.save_agent({
+                        'ip': '127.0.0.1', 'port': urlparse(server.url).port,
+                        'groupId': self.group, 'capabilities': ['executor']})
+                key = machine['agentId']
+                self.assertTrue(self.registry.configs()[key].allow_cwd_override)
+                # 已登记记录中的旧标志不会继续阻止节点目录生效。
+                with self.gateway.store._connect() as db:
+                    stored = json.loads(self.registry.rows()[key]['config'])
+                    stored['allow_cwd_override'] = False
+                    db.execute('UPDATE registered_agents SET config=? WHERE id=?', (json.dumps(stored), key))
+                restored = AgentRegistry(WorkflowStore(self.root / 'runtime.db'))
+                runner = Orchestrator()
+                runner.agent_provider = restored.configs
+                options = dict(agent_id=key, prompt='test', thread_id=None, write=False,
+                               model=None, timeout_sec=10)
+                alternate = str(self.root / 'another-workspace')
+                for cwd in (None, alternate):
+                    job = await runner.dispatch(**options, cwd=cwd)
+                    self.assertEqual((await runner.wait(job.job_id, 2)).status, 'completed')
+                starts = [request['params'] for request in server.requests if request.get('method') == 'thread/start']
+                self.assertEqual([item['cwd'] for item in starts], [str(self.root), alternate])
+                with self.assertRaisesRegex(ValueError, '绝对路径'):
+                    await runner.dispatch(**options, cwd='relative/path')
+                with self.assertRaisesRegex(PermissionError, '写权限'):
+                    await runner.dispatch(**{**options, 'write': True}, cwd=alternate)
+                self.assertFalse(restored.configs()[key].allow_full_access)
+                self.assertTrue(self.client.get('/agents').json()['agents'][0]['allowCwdOverride'])
+
+        asyncio.run(run())
 
 
     def test_no_source_switch_or_import_route(self):

@@ -60,8 +60,15 @@ class AgentRegistry:
             return {row["id"]: dict(row) for row in db.execute("SELECT * FROM registered_agents ORDER BY id")}
 
     def configs(self) -> dict[str, "AgentConfig"]:
+        return {key: self.config_from_row(key, row) for key, row in self.rows().items()}
+
+    @staticmethod
+    def config_from_row(agent_id: str, row: dict[str, Any]) -> "AgentConfig":
         from codex_orchestrator_mcp import AgentConfig
-        return {key: AgentConfig.from_dict(key, json.loads(row["config"])) for key, row in self.rows().items()}
+        # 登记目录是默认值，节点可以指定目录；同样适用于此前登记的机器。
+        config = json.loads(row["config"])
+        config["allow_cwd_override"] = True
+        return AgentConfig.from_dict(agent_id, config)
 
     def public(self) -> list[dict[str, Any]]:
         return [{"agentId": key, "name": row["ip"], "ip": row["ip"], "port": row["port"],
@@ -104,7 +111,10 @@ class AgentRegistry:
             protocol = parsed.scheme or setting("machine_defaults.protocol", "ws")
             url = config["url"] if old and old["ip"] == ip and old["port"] == port else f"{protocol}://{'[' + ip + ']' if ':' in ip else ip}:{port}{parsed.path}"
             config.update(url=url,
-                          capabilities=list(dict.fromkeys(capabilities)), enabled=enabled)
+                          capabilities=list(dict.fromkeys(capabilities)), enabled=enabled,
+                          allow_cwd_override=True,
+                          allow_write=setting("machine_defaults.allow_write", False),
+                          allow_full_access=setting("machine_defaults.allow_full_access", False))
             if "supervisor" in capabilities:
                 config["capacity"] = 1
                 was_supervisor = old is not None and "supervisor" in json.loads(old["config"]).get("capabilities", [])
@@ -143,9 +153,8 @@ class AgentRegistry:
                 raise ValueError("找不到机器。")
 
     def validate(self, supervisor_id: str, executor_ids: list[str], *, require_test: bool = False) -> None:
-        from codex_orchestrator_mcp import AgentConfig
         rows = self.rows()
-        configs = {key: AgentConfig.from_dict(key, json.loads(row["config"])) for key, row in rows.items()}
+        configs = {key: self.config_from_row(key, row) for key, row in rows.items()}
         for key, capability in [(supervisor_id, "supervisor")] + [(key, "executor") for key in executor_ids]:
             if key not in rows:
                 raise ValueError("请选择已登记的机器。")
@@ -170,7 +179,8 @@ def defaults() -> dict[str, Any]:
         raise ValueError("请先在服务配置中设置 machine_defaults.cwd。")
     result = {"cwd": cwd, "model": setting("machine_defaults.model", "gpt-5.6-sol"),
               "allow_write": setting("machine_defaults.allow_write", False),
-              "allow_cwd_override": False, "allow_full_access": False}
+              "allow_cwd_override": True,
+              "allow_full_access": setting("machine_defaults.allow_full_access", False)}
     for key in ("token_env", "token_file", "artifact_root"):
         value = setting("machine_defaults." + key)
         if value:

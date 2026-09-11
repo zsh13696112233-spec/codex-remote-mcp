@@ -1633,8 +1633,7 @@ async def internal_group_agents(request: Request) -> Response:
             if row["group_id"] != own["group_id"]:
                 continue
             from dataclasses import asdict
-            from codex_orchestrator_mcp import AgentConfig
-            config = asdict(AgentConfig.from_dict(key, json.loads(row["config"])))
+            config = asdict(gateway.registry.config_from_row(key, row))
             config.pop("agent_id", None)
             config["capabilities"] = list(config["capabilities"])
             if "supervisor" not in config["capabilities"]:

@@ -18,16 +18,17 @@ Copy-Item config/workflow-service.example.json config/workflow-service.json
 
 中央登记只需要分组和机器两张表。备份中央 SQLite 即包含机器登记；远程仍不读写 SQLite。先前版本遗留的导入记录表不再使用，不主动删除表或数据。
 
-中央网关配置下列统一默认值，新增机器时保存为该机器配置。后续更改这些默认值不追溯覆盖已登记机器：
+中央网关配置下列统一默认值，新增机器时保存为该机器配置。后续更改默认值不自动覆盖已登记机器；网页保存机器时会同步当前的 allow_write、allow_full_access，其他默认值不追溯覆盖：
 
 | `machine_defaults` 字段 | 约定 |
 | --- | --- |
-| `cwd` | 必填，执行机上的统一绝对工作目录，远程需预先创建 |
+| `cwd` | 必填，执行机上的默认绝对工作目录，远程需预先创建；节点留空时使用，填写其他绝对目录时覆盖 |
 | `protocol` | `ws`（默认）或 `wss`；网页端口指执行服务端口，默认填写 4500 |
 | `model` | 默认 `gpt-5.6-sol` |
 | `token_env` / `token_file` | 执行服务凭据引用，最多选一项；必须在中央和所有实际派发的远程主监督上能解析为对应执行服务接受的凭据 |
 | `sidecar_token_template` | 新增远程主监督必填，中央本地的绝对路径模板，如 `C:\codex-secrets\sidecars\{ip}-{port}.token`；IPv6 的冒号替换为下划线 |
-| `allow_write` | 默认 `false`；统一允许工作区写入时明确设置 `true`；不启用完全访问，也不允许请求覆盖目录 |
+| `allow_full_access` | 默认 `false`；与 `allow_write` 同时为 `true` 时，节点才可选择完全访问（不审批）。修改后重启中央网关，已登记机器通过网页编辑并保存应用；节点权限仍需单独选择 |
+| `allow_write` | 默认 `false`；统一允许工作区写入时明确设置 `true`；节点目录覆盖不会改变写权限上限 |
 
 统一的是路径和部署方式。每台主监督的 Sidecar 机器令牌仍必须独立，中央对应文件与该远程机 `sidecar.token_file` 或 `sidecar.token_env` 解析出的值必须匹配。不能多台主监督共用机器令牌，不能与执行服务凭据混用。实际令牌不写入 JSON、数据库配置字段、页面或接口响应。
 
@@ -77,3 +78,5 @@ POST       /api/agents/{id}/test
 中央 `/agents/validate` 供 Java 保存 SOP 时校验，请求为 `supervisorId` 和 `executorIds`；它不校验检测资格。新增内部 `GET /internal/v1/agents` 沿用机器认证，仅返回认证主监督所属组。
 
 检测业务失败返回 `passed:false` 与普通中文提示，错误类型记入服务日志，不回显底层异常。组/机器输入无效返回 400。管理接口只用于原有受保护内网。
+
+节点工作目录指目标执行机上的绝对路径，需提前准备。已登记机器也支持节点覆盖目录，无需重新登记；更新并重启中央网关后，远程 Sidecar 按需取得新配置。本机编排进程需更新并重启。执行服务自身的文件访问策略仍然有效。

@@ -12,7 +12,7 @@ FIELDS = {
     name: tuple(name.split("."))
     for name in (
         "workflow_db", "machine_defaults.cwd", "machine_defaults.protocol",
-        "machine_defaults.model", "machine_defaults.allow_write",
+        "machine_defaults.model", "machine_defaults.allow_write", "machine_defaults.allow_full_access",
         "machine_defaults.token_env", "machine_defaults.token_file",
         "machine_defaults.sidecar_token_template", "machine_defaults.orchestration_mode",
         "machine_defaults.artifact_root", "sidecar.host", "sidecar.port",
@@ -50,9 +50,9 @@ def _load(path: Path) -> dict[str, Any]:
         if item is None:
             continue
         key = parts[-1]
-        if key == "allow_write":
+        if key in {"allow_write", "allow_full_access"}:
             if not isinstance(item, bool):
-                raise ValueError("allow_write 必须是布尔值。")
+                raise ValueError(f"{key} 必须是布尔值。")
         elif key == "port":
             if isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= 65535:
                 raise ValueError("Sidecar 端口必须为 1–65535 的整数。")
@@ -64,6 +64,9 @@ def _load(path: Path) -> dict[str, Any]:
         raise ValueError("protocol 只能为 ws 或 wss。")
     if value.get("machine_defaults", {}).get("orchestration_mode", "remote_sidecar") not in {"local_db", "remote_sidecar"}:
         raise ValueError("orchestration_mode 只能为 local_db 或 remote_sidecar。")
+    defaults = value.get("machine_defaults", {})
+    if defaults.get("allow_full_access") and not defaults.get("allow_write"):
+        raise ValueError("allow_full_access=true 时必须同时启用 allow_write。")
     return value
 
 

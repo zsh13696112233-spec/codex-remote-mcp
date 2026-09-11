@@ -41,6 +41,8 @@ class ServiceConfigTests(unittest.TestCase):
         cases = [[], {'token': 'secret'}, {'agent_source': 'registry'}, {'agents_file': 'ignored.json'},
                  {'machine_defaults': []}, {'machine_defaults': {'token': 'secret'}},
                  {'machine_defaults': {'allow_write': 'true'}},
+                 {'machine_defaults': {'allow_full_access': 'true'}},
+                 {'machine_defaults': {'allow_full_access': True, 'allow_write': False}},
                  {'machine_defaults': {'protocol': 'http'}},
                  {'sidecar': {'port': True}}, {'sidecar': {'port': 65536}},
                  {'sidecar': {'token_file': 'relative.token'}},
@@ -71,7 +73,7 @@ class ServiceConfigTests(unittest.TestCase):
     def test_gateway_and_registry_use_file_defaults(self):
         from workflow_gateway import create_app
         self.write({'machine_defaults': {
-            'cwd': str(self.path.parent), 'allow_write': True,
+            'cwd': str(self.path.parent), 'allow_write': True, 'allow_full_access': True,
             'sidecar_token_template': str(self.path.parent / '{ip}-{port}.token')}})
         with patch.dict(os.environ, {'CODEX_AGENT_SOURCE': 'file'}):
             registry = create_app(db_path=self.path.parent / 'runtime.db').state.gateway.registry
@@ -79,6 +81,7 @@ class ServiceConfigTests(unittest.TestCase):
             machine = registry.save_agent({'ip': '192.0.2.2', 'port': 4500, 'groupId': group,
                                            'capabilities': ['supervisor', 'executor']})
             self.assertTrue(registry.configs()[machine['agentId']].allow_write)
+            self.assertTrue(registry.configs()[machine['agentId']].allow_full_access)
 
     def test_removed_list_arguments_are_rejected(self):
         import io
