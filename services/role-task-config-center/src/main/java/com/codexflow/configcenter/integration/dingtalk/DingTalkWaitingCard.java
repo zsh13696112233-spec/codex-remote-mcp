@@ -7,7 +7,7 @@ import tools.jackson.databind.JsonNode;
 
 /** 单轮等待卡片：正文快照独立保存，状态与按钮读取中央当前等待。 */
 final class DingTalkWaitingCard {
-  static final String TEMPLATE_ID = "59418790-6cad-43f9-b1d8-55cf9f18ed1a.schema";
+  static final String TEMPLATE_ID = "82792b55-07fb-4c4e-a579-60b16f3da560.schema";
 
   private DingTalkWaitingCard() {}
 
