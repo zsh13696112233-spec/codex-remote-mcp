@@ -557,7 +557,7 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   if(b.dataset.page===state.page)return;
   if(state.page==="sops"){const dirty=isSopDirty();if(!confirmDiscard())return;if(dirty)discardSopChanges()}
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
-  const map={machines:["机器管理","按分组登记机器，检测通过后用于任务。",""],roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、钉钉通知、运行并追溯不可变快照。","＋ 新建任务"],runtime:["运行状态","查看 Python 网关和全部主监督执行机的实时状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接并查看主动通知配置。",""],"dingtalk-targets":["钉钉通知对象","维护任务定义可选择的人员或群聊。",""]};
+  const map={machines:["机器管理","",""],roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、钉钉通知、运行并追溯不可变快照。","＋ 新建任务"],runtime:["运行状态","查看 Python 网关和全部主监督执行机的实时状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接并查看主动通知配置。",""],"dingtalk-targets":["钉钉通知对象","维护任务定义可选择的人员或群聊。",""]};
   [$("#title").textContent,$("#subtitle").textContent,$("#create").textContent]=map[state.page];
   $("#create").classList.toggle("hidden",["machines","runtime","dingtalk","dingtalk-targets"].includes(state.page));
   try{await render()}catch(e){toast(e.message)}

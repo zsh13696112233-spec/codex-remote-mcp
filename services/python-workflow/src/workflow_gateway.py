@@ -19,6 +19,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from codex_orchestrator_mcp import (
+    CredentialError,
     Orchestrator,
     utc_now,
 )
@@ -1594,18 +1595,27 @@ async def manage_machines(request: Request) -> Response:
             if key not in registry.rows():
                 raise ValueError("找不到机器。")
             passed = False
+            message = "连接检测失败，请检查执行服务的协议、凭据和服务日志。"
             try:
                 await asyncio.wait_for(gateway.orchestrator.probe_agent(key), timeout=8)
                 agent = gateway.orchestrator.get_agent(key)
                 if "supervisor" in agent.capabilities and agent.orchestration_mode == "remote_sidecar":
                     online = await _database_call(gateway.store.sidecar_status, key, timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC)
                     if online.get("connectionStatus") != "online":
+                        message = "执行服务连接成功，但主监督尚未上报有效心跳。"
                         raise RuntimeError("主监督尚未上报有效心跳。")
                 passed = True
+                message = "连接检测通过。"
             except Exception as error:
-                LOGGER.info("机器连接检测失败，类型=%s", type(error).__name__)
+                if isinstance(error, CredentialError):
+                    message = error.public_message
+                elif isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+                    message = "执行服务连接或初始化超时，请检查服务和网络。"
+                elif isinstance(error, ConnectionError):
+                    message = "执行服务连接失败或已断开，请检查服务端口和网络。"
+                LOGGER.info("机器连接检测失败，类型=%s，原因=%s", type(error).__name__, message)
             await _database_call(registry.record_test, key, passed)
-            result = {"passed": passed, "message": "连接检测通过。" if passed else "连接检测失败，请检查服务、凭据和主监督心跳。"}
+            result = {"passed": passed, "message": message}
         elif path.startswith("/agent-groups"):
             if request.method == "GET":
                 result = {"groups": await _database_call(registry.groups)}

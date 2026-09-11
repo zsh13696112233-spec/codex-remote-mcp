@@ -177,6 +177,8 @@ uv pip install --python .venv/bin/python -e services/python-workflow
 
 本分支只支持网页登记，不读取旧机器清单。按[机器管理部署说明](WEBUI_MACHINE_REGISTRATION.zh-CN.md)复制中央服务示例，填写原数据库路径、统一工作目录及凭据引用。
 
+配置文件名为 `config/workflow-service.json`：中央填写 `workflow_db`、`machine_defaults`；远程主监督及监督执行一体机填写 `sidecar`；纯执行机只需执行服务启动配置。各机器令牌文件放置位置、两种认证用途和缺少文件的处理步骤见[一体机配置与两种凭据](WEBUI_MACHINE_REGISTRATION.zh-CN.md#一体机配置与两种凭据)。
+
 ### 2. 启动 MySQL 和初始化配置中心数据库
 
 ```sql

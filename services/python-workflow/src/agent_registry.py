@@ -107,6 +107,18 @@ class AgentRegistry:
             if db.execute("SELECT 1 FROM registered_agents WHERE ip=? AND port=? AND id<>?", (ip, port, agent_id)).fetchone():
                 raise ValueError("该 IP 和端口已登记。")
             config = json.loads(old["config"]) if old else defaults()
+            previous_credentials = (config.get("token_env"), config.get("token_file"))
+            # 保存时同步部署凭据引用；切换来源时移除旧引用，不能同时保留两种来源。
+            for credential_key in ("token_env", "token_file"):
+                config.pop(credential_key, None)
+                value = setting("machine_defaults." + credential_key)
+                if value:
+                    config[credential_key] = value
+            credentials_changed = previous_credentials != (config.get("token_env"), config.get("token_file"))
+            # 未提供目录默认值时保留历史登记。
+            artifact_root = setting("machine_defaults.artifact_root")
+            if artifact_root is not None:
+                config["artifact_root"] = artifact_root
             parsed = urlparse(config.get("url", ""))
             protocol = parsed.scheme or setting("machine_defaults.protocol", "ws")
             url = config["url"] if old and old["ip"] == ip and old["port"] == port else f"{protocol}://{'[' + ip + ']' if ':' in ip else ip}:{port}{parsed.path}"
@@ -135,7 +147,7 @@ class AgentRegistry:
                     other = json.loads(row["config"])
                     if other.get("orchestration_mode") == "remote_sidecar" and reference == (other.get("sidecar_token_env"), other.get("sidecar_token_file")):
                         raise ValueError("主监督凭据引用重复，请在部署路径模板中使用 IP 和端口区分机器。")
-            changed = old is None or (old["ip"], old["port"], old["group_id"], json.loads(old["config"]).get("capabilities")) != (ip, port, body["groupId"], config["capabilities"])
+            changed = old is None or credentials_changed or (old["ip"], old["port"], old["group_id"], json.loads(old["config"]).get("capabilities")) != (ip, port, body["groupId"], config["capabilities"])
             try:
                 db.execute("""INSERT INTO registered_agents VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET group_id=excluded.group_id, ip=excluded.ip,

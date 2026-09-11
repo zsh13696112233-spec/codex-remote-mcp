@@ -80,6 +80,7 @@ class RegistryTests(unittest.TestCase):
         with patch.object(self.gateway.orchestrator, "probe_agent", new=AsyncMock()):
             response = self.client.post(f"/agents/{key}/test", json={})
             self.assertFalse(response.json()["passed"])
+            self.assertIn("尚未上报有效心跳", response.json()["message"])
             self.gateway.store.record_sidecar_heartbeat(key, "instance", "2026-09-11T00:00:00+00:00", lease_timeout_sec=20)
             self.assertTrue(self.client.post(f"/agents/{key}/test", json={}).json()["passed"])
         with patch.object(self.gateway.orchestrator, "probe_agent", new=AsyncMock(side_effect=RuntimeError("private error"))):
@@ -89,6 +90,42 @@ class RegistryTests(unittest.TestCase):
         listing = self.client.get("/agents").json()
         self.assertEqual(listing["source"], "registry")
         self.assertNotIn("token", json.dumps(listing))
+
+    def test_detection_reports_safe_credential_failure_without_connecting(self):
+        token_path = self.root / "private-credential.token"
+        defaults = self.config_values["machine_defaults"]
+        defaults.pop("token_env")
+        defaults["token_file"] = str(token_path)
+        key = self.machine()["agentId"]
+        for content, expected in ((None, "不存在"), (b"", "为空"),
+                                  (b"\xff\xfe", "UTF-8"),
+                                  (b"private-secret\nsecond-line", "一行令牌"),
+                                  (b"x" * 8193, "大小限制")):
+            with self.subTest(expected=expected):
+                if content is not None:
+                    token_path.write_bytes(content)
+                with patch.object(self.gateway.orchestrator, "_client_factory") as factory:
+                    with self.assertLogs("workflow_gateway", level="INFO") as captured:
+                        result = self.client.post(f"/agents/{key}/test", json={}).json()
+                    factory.assert_not_called()
+                self.assertFalse(result["passed"])
+                self.assertIn(expected, result["message"])
+                output = json.dumps(result, ensure_ascii=False) + str(captured.output)
+                for private in (str(token_path), key, "private-secret"):
+                    self.assertNotIn(private, output)
+                self.assertEqual(self.registry.rows()[key]["test_status"], "failed")
+
+    def test_detection_reports_network_failure_without_raw_exception(self):
+        key = self.machine()["agentId"]
+        for error, expected in ((TimeoutError("private"), "超时"),
+                                (ConnectionError("private"), "连接失败")):
+            with self.subTest(expected=expected), patch.object(
+                self.gateway.orchestrator, "probe_agent", new=AsyncMock(side_effect=error)
+            ):
+                result = self.client.post(f"/agents/{key}/test", json={}).json()
+                self.assertFalse(result["passed"])
+                self.assertIn(expected, result["message"])
+                self.assertNotIn("private", result["message"])
 
     def test_remote_group_fetch_is_authenticated_and_filtered(self):
         supervisor = self.machine()
@@ -132,6 +169,42 @@ class RegistryTests(unittest.TestCase):
         self.registry.save_agent(machine, key)
         self.assertNotIn('full_access', self.registry.configs()[key].public_dict()['permission_profiles'])
 
+    def test_artifact_root_sync_on_save_is_persistent_and_reaches_remote(self):
+        machine = self.machine()
+        key = machine["agentId"]
+        before = self.registry.configs()[key]
+        self.registry.record_test(key, True)
+        defaults = self.config_values["machine_defaults"]
+        root = str(self.root / "conversation-artifacts")
+        defaults.update(artifact_root=root, allow_write=True)
+        self.assertIsNone(self.registry.configs()[key].artifact_root)
+        response = self.client.put(f"/agents/{key}", json={
+            **machine, "artifact_root": "ignored-request-path"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["agentId"], key)
+        restored = AgentRegistry(WorkflowStore(self.root / "runtime.db"))
+        config = restored.configs()[key]
+        self.assertEqual(config.artifact_root, root)
+        self.assertTrue(config.allow_write)
+        self.assertEqual(config.cwd, before.cwd)
+        self.assertEqual(config.sidecar_token_file, before.sidecar_token_file)
+        self.assertEqual(restored.rows()[key]["test_status"], "passed")
+        (self.root / "127.0.0.1.token").write_text("test-only-machine-secret", encoding="utf-8")
+        remote = self.client.get("/internal/v1/agents", headers={
+            "Authorization": "Bearer test-only-machine-secret"})
+        self.assertEqual(remote.status_code, 200)
+        self.assertEqual(remote.json()["agents"][key]["artifact_root"], root)
+        defaults.pop("artifact_root")
+        self.registry.save_agent(machine, key)
+        self.assertEqual(restored.configs()[key].artifact_root, root)
+        defaults["artifact_root"] = "relative/path"
+        with self.assertRaisesRegex(ValueError, "绝对路径"):
+            self.registry.save_agent(machine, key)
+        self.assertEqual(restored.configs()[key].artifact_root, root)
+        defaults["artifact_root"] = None
+        self.registry.save_agent(machine, key)
+        self.assertEqual(restored.configs()[key].artifact_root, root)
+
     def test_submission_rejects_unchecked_and_cross_group_before_persistence(self):
         supervisor = self.machine()
         spec = {"workflowId": "registry-run", "supervisorAgentId": supervisor["agentId"],
@@ -171,7 +244,41 @@ class RegistryTests(unittest.TestCase):
         self.registry.save_agent({**worker, "capabilities": ["supervisor", "executor"]}, worker["agentId"])
         self.assertEqual(self.registry.configs()[worker["agentId"]].orchestration_mode, "remote_sidecar")
 
-    def test_default_changes_do_not_rewrite_existing_credentials(self):
+    def test_save_syncs_execution_credentials_and_invalidates_only_when_changed(self):
+        machine = self.machine()
+        key = machine["agentId"]
+        before = self.registry.configs()[key]
+        defaults = self.config_values["machine_defaults"]
+        for source in ({"token_file": str(self.root / "new.token")},
+                       {"token_env": "NEW_TEST_TOKEN"}, {}):
+            with self.subTest(source=source):
+                self.registry.record_test(key, True)
+                defaults.pop("token_env", None)
+                defaults.pop("token_file", None)
+                defaults.update(source)
+                response = self.client.put(f"/agents/{key}", json={
+                    **machine, "token_file": "ignored-request.token"})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["agentId"], key)
+                self.assertEqual(response.json()["testStatus"], "untested")
+                self.assertIsNone(response.json()["testedAt"])
+                restored = AgentRegistry(WorkflowStore(self.root / "runtime.db"))
+                config = restored.configs()[key]
+                self.assertEqual(config.token_file, source.get("token_file"))
+                self.assertEqual(config.token_env, source.get("token_env"))
+                self.assertEqual(config.sidecar_token_file, before.sidecar_token_file)
+                self.assertEqual(config.cwd, before.cwd)
+                self.assertEqual(config.url, before.url)
+                self.registry.validate(key, [key])
+                with self.assertRaisesRegex(ValueError, "检测"):
+                    self.registry.validate(key, [key], require_test=True)
+                self.registry.record_test(key, True)
+                tested_at = self.registry.rows()[key]["tested_at"]
+                self.client.put(f"/agents/{key}", json=machine)
+                self.assertEqual(self.registry.rows()[key]["test_status"], "passed")
+                self.assertEqual(self.registry.rows()[key]["tested_at"], tested_at)
+
+    def test_default_changes_do_not_rewrite_existing_sidecar_credentials(self):
         machine = self.machine()
         key = machine["agentId"]
         before = self.registry.configs()[key].sidecar_token_file

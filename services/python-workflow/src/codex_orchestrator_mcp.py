@@ -412,6 +412,25 @@ class Job:
         return result
 
 
+class CredentialError(RuntimeError):
+    """凭据读取失败；公开提示仅使用固定文案，不包含路径或令牌。"""
+
+    MESSAGES = {
+        "env_missing": "中央网关未设置登记凭据引用的环境变量。",
+        "env_invalid": "中央网关的凭据环境变量必须是有效的单行令牌。",
+        "file_missing": "中央网关上的登记凭据文件不存在或不是普通文件。",
+        "file_large": "中央网关上的凭据文件超过大小限制（8192 字节）。",
+        "file_unreadable": "中央网关无法读取凭据文件，请检查运行账户的文件权限。",
+        "file_encoding": "中央网关上的凭据文件必须使用 UTF-8 编码。",
+        "file_empty": "中央网关上的凭据文件为空。",
+        "file_multiline": "中央网关上的凭据文件必须只包含一行令牌，且不能包含空字符。",
+    }
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.public_message = self.MESSAGES[reason]
+
+
 class AppServerRpcError(RuntimeError):
     def __init__(self, message: str, *, code: int | None = None) -> None:
         self.code = code
@@ -825,7 +844,7 @@ class Orchestrator:
         if token_env:
             token = os.getenv(token_env)
             if not token:
-                raise RuntimeError(f"环境变量 {token_env} 未设置。")
+                raise CredentialError(f"环境变量 {token_env} 未设置。", "env_missing")
             token = token.strip()
             if (
                 not token
@@ -834,7 +853,7 @@ class Orchestrator:
                 or "\n" in token
                 or "\0" in token
             ):
-                raise RuntimeError(f"环境变量 {token_env} 必须包含一个有效的单行令牌。")
+                raise CredentialError(f"环境变量 {token_env} 必须包含一个有效的单行令牌。", "env_invalid")
             return token
         if not token_file:
             return None
@@ -842,35 +861,35 @@ class Orchestrator:
         token_path = Path(token_file)
         try:
             if not token_path.is_file():
-                raise RuntimeError(
-                    f"{label} {agent_id} 的令牌文件不存在或不是普通文件。"
+                raise CredentialError(
+                    f"{label} {agent_id} 的令牌文件不存在或不是普通文件。", "file_missing"
                 )
             if token_path.stat().st_size > MAX_TOKEN_FILE_BYTES:
-                raise RuntimeError(
-                    f"{label} {agent_id} 的令牌文件不能超过 {MAX_TOKEN_FILE_BYTES} 字节。"
+                raise CredentialError(
+                    f"{label} {agent_id} 的令牌文件不能超过 {MAX_TOKEN_FILE_BYTES} 字节。", "file_large"
                 )
             content = token_path.read_bytes()
         except RuntimeError:
             raise
         except OSError as error:
-            raise RuntimeError(
-                f"无法读取{label} {agent_id} 的令牌文件。"
+            raise CredentialError(
+                f"无法读取{label} {agent_id} 的令牌文件。", "file_unreadable"
             ) from error
         if len(content) > MAX_TOKEN_FILE_BYTES:
-            raise RuntimeError(
-                f"{label} {agent_id} 的令牌文件不能超过 {MAX_TOKEN_FILE_BYTES} 字节。"
+            raise CredentialError(
+                f"{label} {agent_id} 的令牌文件不能超过 {MAX_TOKEN_FILE_BYTES} 字节。", "file_large"
             )
         try:
             token = content.decode("utf-8").strip()
         except UnicodeDecodeError as error:
-            raise RuntimeError(
-                f"{label} {agent_id} 的令牌文件必须使用 UTF-8 编码。"
+            raise CredentialError(
+                f"{label} {agent_id} 的令牌文件必须使用 UTF-8 编码。", "file_encoding"
             ) from error
         if not token:
-            raise RuntimeError(f"{label} {agent_id} 的令牌文件为空。")
+            raise CredentialError(f"{label} {agent_id} 的令牌文件为空。", "file_empty")
         if "\r" in token or "\n" in token or "\0" in token:
-            raise RuntimeError(
-                f"{label} {agent_id} 的令牌文件必须只包含一行令牌。"
+            raise CredentialError(
+                f"{label} {agent_id} 的令牌文件必须只包含一行令牌。", "file_multiline"
             )
         return token
 
