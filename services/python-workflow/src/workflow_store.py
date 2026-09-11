@@ -3114,6 +3114,13 @@ class WorkflowStore(InputImageStore):
         lease_token: str | None = None,
         sidecar_dispatch_id: str | None = None,
     ) -> dict[str, Any]:
+        if os.getenv("CODEX_AGENT_SOURCE", "file") == "registry":
+            from agent_registry import AgentRegistry
+            spec = self.get_spec(workflow_id)
+            node = next((value for value in spec["nodes"] if value["id"] == node_id), None)
+            if node is None:
+                raise ValueError("找不到步骤。")
+            AgentRegistry(self).validate(spec["supervisorAgentId"], [node["agentId"]], require_test=True)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if sidecar_supervisor_id is not None:

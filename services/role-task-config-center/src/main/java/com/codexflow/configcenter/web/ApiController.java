@@ -1,5 +1,6 @@
 package com.codexflow.configcenter.web;
 
+import com.codexflow.configcenter.application.MachineService;
 import com.codexflow.configcenter.application.WorkflowRunService;
 import com.codexflow.configcenter.domain.ConfigService;
 import com.codexflow.configcenter.dto.RoleSaveRequest;
@@ -29,11 +30,14 @@ public class ApiController {
 
   private final ConfigService service;
   private final WorkflowRunService workflowRuns;
+  private final MachineService machines;
 
   /** 注入配置领域服务和工作流运行应用服务。 */
-  public ApiController(ConfigService service, WorkflowRunService workflowRuns) {
+  public ApiController(
+      ConfigService service, WorkflowRunService workflowRuns, MachineService machines) {
     this.service = service;
     this.workflowRuns = workflowRuns;
+    this.machines = machines;
   }
 
   /** 按可选关键字查询角色列表。 */
@@ -78,12 +82,14 @@ public class ApiController {
   @PostMapping("/sops")
   @ResponseStatus(HttpStatus.CREATED)
   public ObjectNode createSop(@Valid @RequestBody SopSaveRequest body) {
+    machines.validateSop(body);
     return service.createSop(body);
   }
 
   /** 根据 ID 更新 SOP 及其完整步骤集合。 */
   @PutMapping("/sops/{id}")
   public ObjectNode updateSop(@PathVariable String id, @Valid @RequestBody SopSaveRequest body) {
+    machines.validateSop(body);
     return service.updateSop(id, body);
   }
 

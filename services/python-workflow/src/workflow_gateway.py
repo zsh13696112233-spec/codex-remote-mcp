@@ -68,6 +68,14 @@ class WorkflowGateway:
     ) -> None:
         self.store = store
         self.orchestrator = orchestrator
+        self.registry = None
+        source = os.getenv("CODEX_AGENT_SOURCE", "file")
+        if source not in {"file", "registry"}:
+            raise ValueError("CODEX_AGENT_SOURCE 只能为 file 或 registry。")
+        if source == "registry":
+            from agent_registry import AgentRegistry
+            self.registry = AgentRegistry(store)
+            orchestrator.agent_provider = self.registry.configs
         if assistant_orchestrator is not None:
             self.assistant_orchestrator = assistant_orchestrator
         elif isinstance(orchestrator, Orchestrator):
@@ -78,6 +86,8 @@ class WorkflowGateway:
             )
         else:
             self.assistant_orchestrator = orchestrator
+        if self.registry is not None:
+            self.assistant_orchestrator.agent_provider = self.registry.configs
         self.event_batcher = AsyncEventBatcher(store)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._chat_tasks: dict[str, asyncio.Task[None]] = {}
@@ -139,6 +149,9 @@ class WorkflowGateway:
 
     async def submit(self, raw_spec: dict[str, Any]) -> dict[str, Any]:
         spec = WorkflowStore.normalize_spec(raw_spec)
+        if self.registry is not None:
+            await _database_call(self.registry.validate, spec["supervisorAgentId"],
+                                 [node["agentId"] for node in spec["nodes"]], require_test=True)
         agent_values = self.orchestrator.list_agents()
         agents_by_id = {item["agent_id"]: item for item in agent_values}
         available_agents = set(agents_by_id)
@@ -280,6 +293,7 @@ class WorkflowGateway:
             else set()
         )
         result: list[dict[str, Any]] = []
+        registry_metadata = {row["agentId"]: row for row in self.registry.public()} if self.registry else {}
         for item in self.orchestrator.list_agents():
             agent_id = str(item["agent_id"])
             capabilities = list(
@@ -329,6 +343,9 @@ class WorkflowGateway:
                         "lastOnlineAt": runtime.get("lastOnlineAt"),
                     }
                 )
+            if self.registry is not None:
+                metadata = registry_metadata.get(agent_id, {})
+                value.update(metadata)
             result.append(value)
         return result
 
@@ -1563,7 +1580,88 @@ async def ready(_: Request) -> Response:
 
 async def list_agents(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
-    return JSONResponse({"agents": await asyncio.to_thread(gateway.public_agents)})
+    return JSONResponse({"agents": await asyncio.to_thread(gateway.public_agents),
+                         "source": "registry" if gateway.registry else "file"})
+
+
+async def manage_machines(request: Request) -> Response:
+    gateway = request.app.state.gateway
+    registry = gateway.registry
+    if registry is None:
+        return JSONResponse({"error": "请先在网关启用 registry 机器登记模式。"}, status_code=409)
+    try:
+        body = await request.json() if request.method in {"POST", "PUT"} else {}
+        if not isinstance(body, dict):
+            raise ValueError("请求体必须是 JSON 对象。")
+        path = request.url.path
+        key = request.path_params.get("agent_id") or request.path_params.get("group_id")
+        if path == "/agents/import":
+            result = await _database_call(registry.import_file, gateway.orchestrator.config_path)
+        elif path == "/agents/validate":
+            ids = body.get("executorIds")
+            if not isinstance(body.get("supervisorId"), str) or not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
+                raise ValueError("请选择主监督和执行机。")
+            await _database_call(registry.validate, body["supervisorId"], ids)
+            result = {"valid": True}
+        elif path.endswith("/test"):
+            if key not in registry.rows():
+                raise ValueError("找不到机器。")
+            passed = False
+            try:
+                await asyncio.wait_for(gateway.orchestrator.probe_agent(key), timeout=8)
+                agent = gateway.orchestrator.get_agent(key)
+                if "supervisor" in agent.capabilities and agent.orchestration_mode == "remote_sidecar":
+                    online = await _database_call(gateway.store.sidecar_status, key, timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC)
+                    if online.get("connectionStatus") != "online":
+                        raise RuntimeError("主监督尚未上报有效心跳。")
+                passed = True
+            except Exception as error:
+                LOGGER.info("机器连接检测失败，类型=%s", type(error).__name__)
+            await _database_call(registry.record_test, key, passed)
+            result = {"passed": passed, "message": "连接检测通过。" if passed else "连接检测失败，请检查服务、凭据和主监督心跳。"}
+        elif path.startswith("/agent-groups"):
+            if request.method == "GET":
+                result = {"groups": await _database_call(registry.groups)}
+            elif request.method == "DELETE":
+                await _database_call(registry.delete_group, key)
+                result = {"deleted": True}
+            else:
+                result = await _database_call(registry.save_group, body, key)
+        else:
+            result = await _database_call(registry.save_agent, body, key)
+        return JSONResponse(result)
+    except (ValueError, RuntimeError) as error:
+        return _error_response(error, 400)
+    except OSError:
+        return JSONResponse({"error": "无法读取或保存机器配置，请检查服务部署。"}, status_code=400)
+
+
+async def internal_group_agents(request: Request) -> Response:
+    try:
+        gateway, supervisor_id = _sidecar_identity(request)
+        if gateway.registry is None:
+            raise ValueError("中央未启用机器登记模式。")
+        rows = await _database_call(gateway.registry.rows)
+        own = rows[supervisor_id]
+        values = {}
+        for key, row in rows.items():
+            if row["group_id"] != own["group_id"]:
+                continue
+            from dataclasses import asdict
+            from codex_orchestrator_mcp import AgentConfig
+            config = asdict(AgentConfig.from_dict(key, json.loads(row["config"])))
+            config.pop("agent_id", None)
+            config["capabilities"] = list(config["capabilities"])
+            if "supervisor" not in config["capabilities"]:
+                config.pop("capacity", None)
+            # 远程只需要执行连接；机器认证引用不下发。
+            config.pop("sidecar_token_env", None)
+            config.pop("sidecar_token_file", None)
+            config["orchestration_mode"] = "local_db"
+            values[key] = config
+        return JSONResponse({"agents": values})
+    except (PermissionError, ValueError, RuntimeError) as error:
+        return _internal_error_response(error)
 
 
 def _sidecar_identity(request: Request) -> tuple[WorkflowGateway, str]:
@@ -1967,6 +2065,14 @@ def create_app(
             Route("/internal/v1/workflows/{workflow_id}/nodes/{node_id}/input-images", internal_node_images, methods=["POST"]),
             Route("/readyz", ready, methods=["GET"]),
             Route("/agents", list_agents, methods=["GET"]),
+            Route("/agent-groups", manage_machines, methods=["GET", "POST"]),
+            Route("/agent-groups/{group_id}", manage_machines, methods=["PUT", "DELETE"]),
+            Route("/agents", manage_machines, methods=["POST"]),
+            Route("/agents/import", manage_machines, methods=["POST"]),
+            Route("/agents/validate", manage_machines, methods=["POST"]),
+            Route("/agents/{agent_id}/test", manage_machines, methods=["POST"]),
+            Route("/agents/{agent_id}", manage_machines, methods=["PUT"]),
+            Route("/internal/v1/agents", internal_group_agents, methods=["GET"]),
             Route(
                 "/internal/v1/sidecars/heartbeat",
                 sidecar_heartbeat,

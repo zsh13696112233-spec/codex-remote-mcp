@@ -39,6 +39,14 @@ public class GatewayClient {
     return exchange("POST", path, body);
   }
 
+  public JsonNode put(String path, JsonNode body) {
+    return exchange("PUT", path, body);
+  }
+
+  public JsonNode delete(String path) {
+    return exchange("DELETE", path, null);
+  }
+
   public JsonNode uploadImage(String workflowId, byte[] content) {
     try {
       var request =

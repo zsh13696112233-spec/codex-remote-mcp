@@ -74,6 +74,8 @@ def main() -> None:
         raise ValueError("Sidecar 只能监听本机回环地址。")
     if not 1 <= args.port <= 65535:
         raise ValueError("Sidecar 端口必须在 1 到 65535 之间。")
+    if not args.agent_id and os.getenv("CODEX_AGENT_SOURCE", "file") == "registry":
+        args.agent_id = "registered-machine"
     if not args.agent_id:
         raise ValueError("必须配置 CODEX_SIDECAR_AGENT_ID。")
     if not args.gateway_url:
@@ -95,6 +97,8 @@ def main() -> None:
     )
     configure_workflow_runtime(runtime)
     mcp_module.orchestrator = Orchestrator(Path(args.agents).expanduser())
+    if os.getenv("CODEX_AGENT_SOURCE", "file") == "registry":
+        mcp_module.orchestrator.agent_provider = runtime.group_agents
 
     stopped = threading.Event()
 

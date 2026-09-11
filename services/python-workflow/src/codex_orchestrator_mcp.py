@@ -764,8 +764,14 @@ class Orchestrator:
         self._serialize_agent_jobs = serialize_agent_jobs
         self._agents_cache: dict[str, AgentConfig] | None = None
         self._agents_cache_signature: tuple[int, int] | None = None
+        self.agent_provider: Callable[[], dict[str, AgentConfig]] | None = None
 
     def load_agents(self) -> dict[str, AgentConfig]:
+        if self.agent_provider is not None:
+            return self.agent_provider()
+        if os.getenv("CODEX_AGENT_SOURCE", "file") == "registry":
+            from agent_registry import AgentRegistry
+            return AgentRegistry(get_workflow_store()).configs()
         if not self.config_path.exists():
             raise FileNotFoundError(
                 f"找不到执行机配置：{self.config_path}。请复制 config/agents.example.json 为 config/agents.json。"

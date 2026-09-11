@@ -106,6 +106,11 @@ class InternalApiClient:
             self.current_lease = lease if isinstance(lease, dict) else None
         return result
 
+    def group_agents(self):
+        from codex_orchestrator_mcp import AgentConfig
+        result = self._request("GET", "/internal/v1/agents", None)
+        return {key: AgentConfig.from_dict(key, value) for key, value in result["agents"].items()}
+
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self._request("GET", self._workflow_path(workflow_id))
 

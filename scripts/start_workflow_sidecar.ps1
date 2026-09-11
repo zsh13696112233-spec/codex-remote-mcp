@@ -1,8 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [ValidateLength(1, 128)]
-    [string]$AgentId,
+    [string]$AgentId = "",
     [Parameter(Mandatory = $true)]
     [string]$GatewayUrl,
     [string]$TokenEnv = "",
@@ -28,9 +26,16 @@ $sidecarScript = Join-Path $projectRoot "services\python-workflow\src\workflow_s
 if (-not $AgentsFile) {
     $AgentsFile = Join-Path $projectRoot "config\agents.json"
 }
-$resolvedAgentsFile = (Resolve-Path -LiteralPath $AgentsFile).Path
+$registryMode = $env:CODEX_AGENT_SOURCE -eq "registry"
+if (-not $AgentId) {
+    if (-not $registryMode) { throw "AgentId is required in file mode." }
+    $AgentId = "registered-machine"
+}
+$resolvedAgentsFile = if ($registryMode) { [IO.Path]::GetFullPath($AgentsFile) } else { (Resolve-Path -LiteralPath $AgentsFile).Path }
 
-foreach ($requiredFile in @($pythonExe, $sidecarScript, $resolvedAgentsFile)) {
+$requiredFiles = @($pythonExe, $sidecarScript)
+if (-not $registryMode) { $requiredFiles += $resolvedAgentsFile }
+foreach ($requiredFile in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Required file not found: $requiredFile"
     }

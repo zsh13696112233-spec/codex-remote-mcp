@@ -38,6 +38,8 @@ python-workflow/
 
 ## 执行机配置
 
+可选 `CODEX_AGENT_SOURCE=registry` 启用中央 SQLite 机器登记，由 8091 网页管理分组、机器及手动检测。缺省 `file` 保持下述文件模式。登记模式的默认目录、协议、凭据部署、远程组内清单及显式旧配置导入见[机器管理部署说明](../../docs/WEBUI_MACHINE_REGISTRATION.zh-CN.md)。远程 Sidecar 仍不访问 SQLite；本机 MCP 必须与网关选择同一来源和数据库。登记模式的 SOP 运行要求主监督与步骤执行机同组，机器已启用并通过检测。
+
 | 环境变量 | 说明 |
 | --- | --- |
 | `CODEX_AGENTS_FILE` | 执行机配置文件，推荐使用仓库的 `config/agents.json` |

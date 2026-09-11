@@ -86,6 +86,8 @@ SOP 还可选择全自动或半自动流转。全自动保持步骤成功后立�
 
 ## 快速启动
 
+如需通过网页登记分组、主监督和执行机，按[机器管理部署说明](docs/WEBUI_MACHINE_REGISTRATION.zh-CN.md)启用 `CODEX_AGENT_SOURCE=registry`。此模式由中央 SQLite 保存机器配置，网页手动检测后用于同组任务；下面的执行机 JSON 启动步骤为默认文件模式。
+
 ### 1. 准备执行机配置
 
 ```powershell
