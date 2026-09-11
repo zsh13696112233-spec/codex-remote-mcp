@@ -19,6 +19,8 @@ from workflow_gateway import create_app
 from workflow_runtime_client import InternalApiClient
 
 
+from tests.registry_fixtures import (fixture_orchestrator, fixture_gateway, fixture_app, FixtureWorkflowStore)
+
 async def start_http_server(app, *, lifespan: str) -> tuple[str, uvicorn.Server, asyncio.Task]:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -105,25 +107,8 @@ class SidecarHttpMcpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     encoding="utf-8",
                 )
-                sidecar_config = root / "sidecar-agents.json"
-                sidecar_config.write_text(
-                    json.dumps(
-                        {
-                            "agents": {
-                                "supervisor-a": {
-                                    "url": app_server.url,
-                                    "cwd": "/srv/work",
-                                    "capabilities": ["supervisor", "executor"],
-                                    "capacity": 1,
-                                }
-                            }
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-
                 with patch.dict(os.environ, {"PHASE_B_HTTP_TOKEN": "test-token"}):
-                    central_app = create_app(
+                    central_app = fixture_app(
                         db_path=root / "workflows.db", config_path=central_config
                     )
                     central_url, central_server, central_thread = await asyncio.to_thread(
@@ -165,7 +150,8 @@ class SidecarHttpMcpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             started_at=started_at,
                             instance_id="instance-http",
                         )
-                        sidecar_orchestrator = service.Orchestrator(sidecar_config)
+                        sidecar_orchestrator = service.Orchestrator()
+                        sidecar_orchestrator.agent_provider = runtime.group_agents
 
                         service.mcp.settings.streamable_http_path = "/mcp"
                         mcp_app = service.mcp.streamable_http_app()

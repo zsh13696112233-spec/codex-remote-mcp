@@ -1,0 +1,8 @@
+{
+  "sidecar": {
+    "gateway_url": "http://192.0.2.10:8080",
+    "token_file": "C:\\codex-secrets\\sidecar.token",
+    "host": "127.0.0.1",
+    "port": 8082
+  }
+}

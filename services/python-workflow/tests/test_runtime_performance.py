@@ -12,7 +12,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
 from starlette.testclient import TestClient
-from workflow_gateway import WorkflowGateway, create_app, _database_call
+from tests.registry_fixtures import fixture_gateway as WorkflowGateway
+from workflow_gateway import create_app, _database_call
 
 from workflow_store import WorkflowStore
 

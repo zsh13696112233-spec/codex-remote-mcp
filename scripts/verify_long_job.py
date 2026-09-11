@@ -47,29 +47,21 @@ async def verify(delay_sec: float, wait_sec: int) -> dict[str, Any]:
     secret = "long-job-verification-token"
     async with MockAppServer(delay_sec=delay_sec) as app_server:
         with tempfile.TemporaryDirectory() as directory:
-            config_path = Path(directory, "agents.json")
-            config_path.write_text(
-                json.dumps(
-                    {
-                        "agents": {
-                            "mock-remote": {
-                                "url": app_server.url,
-                                "cwd": r"D:\codex",
-                                "token_env": "VERIFY_REMOTE_CODEX_TOKEN",
-                                "allow_write": False,
-                                "allow_cwd_override": False,
-                            }
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
+            from tests.registry_fixtures import seed_agents
+            from workflow_store import WorkflowStore
+            db_path = Path(directory, "runtime.db")
+            seed_agents(WorkflowStore(db_path), {"mock-remote": {
+                "url": app_server.url, "cwd": r"D:\codex",
+                "token_env": "VERIFY_REMOTE_CODEX_TOKEN", "allow_write": False,
+                "allow_cwd_override": False}})
             child_env = os.environ.copy()
-            child_env["CODEX_AGENTS_FILE"] = str(config_path)
             child_env["VERIFY_REMOTE_CODEX_TOKEN"] = secret
             server = StdioServerParameters(
                 command=sys.executable,
-                args=[str(PYTHON_SOURCE / "codex_orchestrator_mcp.py")],
+                args=["-c", "import sys; from pathlib import Path; "
+                      "sys.path.insert(0, sys.argv[1]); import codex_orchestrator_mcp as service; "
+                      "service.WORKFLOW_DB_PATH = Path(sys.argv[2]); service.mcp.run()",
+                      str(PYTHON_SOURCE), str(db_path)],
                 cwd=PYTHON_SERVICE,
                 env=child_env,
             )

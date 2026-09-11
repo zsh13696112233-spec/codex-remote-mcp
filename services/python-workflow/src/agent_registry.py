@@ -2,12 +2,10 @@
 
 import ipaddress
 import json
-import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from dataclasses import asdict
-from pathlib import Path
+from workflow_service_config import setting
 from typing import Any, TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -28,8 +26,6 @@ class AgentRegistry:
                     ip TEXT NOT NULL, port INTEGER NOT NULL, config TEXT NOT NULL,
                     test_status TEXT NOT NULL DEFAULT 'untested', tested_at TEXT,
                     UNIQUE(ip, port));
-                CREATE TABLE IF NOT EXISTS agent_registry_imports (
-                    name TEXT PRIMARY KEY);
             """)
 
     def groups(self) -> list[dict[str, str]]:
@@ -76,16 +72,12 @@ class AgentRegistry:
 
     def save_agent(self, body: dict[str, Any], agent_id: str | None = None) -> dict[str, Any]:
         from codex_orchestrator_mcp import AgentConfig
-        previous = self.rows().get(agent_id) if agent_id else None
         if not isinstance(body.get("ip"), str) or "%" in body["ip"]:
             raise ValueError("请输入有效的 IP 地址，不支持域名。")
         try:
             ip = str(ipaddress.ip_address(body.get("ip", "")))
         except ValueError as error:
-            if previous and not json.loads(previous["config"]).get("registry_managed") and body["ip"] == previous["ip"]:
-                ip = body["ip"]
-            else:
-                raise ValueError("请输入有效的 IP 地址，不支持域名。") from error
+            raise ValueError("请输入有效的 IP 地址，不支持域名。") from error
         port = body.get("port")
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise ValueError("端口必须为 1–65535 的整数。")
@@ -109,26 +101,23 @@ class AgentRegistry:
                 raise ValueError("该 IP 和端口已登记。")
             config = json.loads(old["config"]) if old else defaults()
             parsed = urlparse(config.get("url", ""))
-            protocol = parsed.scheme or os.getenv("CODEX_MACHINE_PROTOCOL", "ws")
+            protocol = parsed.scheme or setting("machine_defaults.protocol", "ws")
             url = config["url"] if old and old["ip"] == ip and old["port"] == port else f"{protocol}://{'[' + ip + ']' if ':' in ip else ip}:{port}{parsed.path}"
             config.update(url=url,
                           capabilities=list(dict.fromkeys(capabilities)), enabled=enabled)
             if "supervisor" in capabilities:
                 config["capacity"] = 1
                 was_supervisor = old is not None and "supervisor" in json.loads(old["config"]).get("capabilities", [])
-                if config.get("registry_managed") or not was_supervisor:
-                    config["orchestration_mode"] = "remote_sidecar"
-                config.setdefault("orchestration_mode", "local_db" if was_supervisor else "remote_sidecar")
+                if not was_supervisor:
+                    config["orchestration_mode"] = setting("machine_defaults.orchestration_mode", "remote_sidecar")
                 if config["orchestration_mode"] == "remote_sidecar":
                     endpoint_changed = old is None or old["ip"] != ip or old["port"] != port
-                    if config.get("registry_managed") and (endpoint_changed or not was_supervisor):
-                        config["sidecar_token_file"] = sidecar_token_path(ip, port)
-                    elif not config.get("sidecar_token_env") and not config.get("sidecar_token_file"):
+                    if endpoint_changed or not was_supervisor:
                         config["sidecar_token_file"] = sidecar_token_path(ip, port)
             else:
                 for key in ("capacity", "sidecar_token_env", "sidecar_token_file"):
                     config.pop(key, None)
-                config["orchestration_mode"] = "local_db"
+                config.pop("orchestration_mode", None)
             AgentConfig.from_dict(agent_id, config)
             if config.get("orchestration_mode") == "remote_sidecar":
                 reference = (config.get("sidecar_token_env"), config.get("sidecar_token_file"))
@@ -167,61 +156,23 @@ class AgentRegistry:
             if require_test and (not configs[key].enabled or rows[key]["test_status"] != "passed"):
                 raise ValueError("机器必须启用并通过连接检测后才能运行。")
 
-    def import_file(self, path: Path) -> dict[str, int]:
-        from codex_orchestrator_mcp import AgentConfig
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        agents = raw.get("agents") if isinstance(raw, dict) else None
-        if not isinstance(agents, dict) or not agents:
-            raise ValueError("旧配置必须包含非空的 agents 对象。")
-        values = []
-        for key, value in agents.items():
-            if not isinstance(key, str) or not key.strip() or not isinstance(value, dict):
-                raise ValueError("旧配置机器格式无效。")
-            agent = AgentConfig.from_dict(key, value)
-            parsed = urlparse(agent.url)
-            try:
-                host = str(ipaddress.ip_address(parsed.hostname))
-            except ValueError:
-                host = parsed.hostname
-            # 导入保留旧地址（含历史域名），网页新登记仍只接受 IP。
-            config = asdict(agent)
-            config.pop("agent_id")
-            config["capabilities"] = list(agent.capabilities)
-            if "supervisor" not in agent.capabilities:
-                config.pop("capacity")
-            values.append((key, host, parsed.port or (443 if parsed.scheme == "wss" else 80), json.dumps(config)))
-        with self.store._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM agent_registry_imports WHERE name='legacy'").fetchone():
-                raise ValueError("旧配置已经导入，不能重复导入。")
-            existing = db.execute("SELECT id FROM agent_groups WHERE name='默认分组'").fetchone()
-            group_id = existing["id"] if existing else "default"
-            db.execute("INSERT OR IGNORE INTO agent_groups VALUES (?, '默认分组')", (group_id,))
-            try:
-                for key, ip, port, config in values:
-                    db.execute("INSERT INTO registered_agents(id,group_id,ip,port,config) VALUES (?, ?, ?, ?, ?)", (key, group_id, ip, port, config))
-            except sqlite3.IntegrityError as error:
-                raise ValueError("旧配置与已登记机器冲突，未导入任何机器。") from error
-            db.execute("INSERT INTO agent_registry_imports VALUES ('legacy')")
-        return {"imported": len(values)}
-
 
 def sidecar_token_path(ip: str, port: int) -> str:
-    template = os.getenv("CODEX_MACHINE_SIDECAR_TOKEN_TEMPLATE", "")
+    template = setting("machine_defaults.sidecar_token_template", "")
     if not template:
         raise ValueError("请先配置统一的主监督凭据路径模板。")
     return template.replace("{ip}", ip.replace(":", "_")).replace("{port}", str(port))
 
 
 def defaults() -> dict[str, Any]:
-    cwd = os.getenv("CODEX_MACHINE_CWD", "")
+    cwd = setting("machine_defaults.cwd", "")
     if not cwd:
-        raise ValueError("请先配置统一工作目录 CODEX_MACHINE_CWD。")
-    result = {"registry_managed": True, "cwd": cwd, "model": os.getenv("CODEX_MACHINE_MODEL", "gpt-5.6-sol"),
-              "allow_write": os.getenv("CODEX_MACHINE_ALLOW_WRITE", "false").lower() == "true",
+        raise ValueError("请先在服务配置中设置 machine_defaults.cwd。")
+    result = {"cwd": cwd, "model": setting("machine_defaults.model", "gpt-5.6-sol"),
+              "allow_write": setting("machine_defaults.allow_write", False),
               "allow_cwd_override": False, "allow_full_access": False}
-    for key in ("token_env", "token_file"):
-        value = os.getenv("CODEX_MACHINE_" + key.upper())
+    for key in ("token_env", "token_file", "artifact_root"):
+        value = setting("machine_defaults." + key)
         if value:
             result[key] = value
     return result

@@ -1,63 +1,37 @@
 [CmdletBinding()]
 param(
     [string]$AgentId = "",
-    [Parameter(Mandatory = $true)]
-    [string]$GatewayUrl,
+    [string]$GatewayUrl = "",
     [string]$TokenEnv = "",
     [string]$TokenFile = "",
-    [string]$AgentsFile = "",
-    [string]$ListenHost = "127.0.0.1",
-    [ValidateRange(1, 65535)]
-    [int]$Port = 8082
+    [string]$ListenHost = "",
+    [int]$Port = 0
 )
 
 $ErrorActionPreference = "Stop"
-
-if (($TokenEnv.Length -gt 0) -eq ($TokenFile.Length -gt 0)) {
-    throw "Specify exactly one of -TokenEnv or -TokenFile."
-}
-if ($ListenHost -notin @("127.0.0.1", "::1", "localhost")) {
-    throw "Workflow Sidecar may only listen on a loopback address."
-}
-
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $pythonExe = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $sidecarScript = Join-Path $projectRoot "services\python-workflow\src\workflow_sidecar.py"
-if (-not $AgentsFile) {
-    $AgentsFile = Join-Path $projectRoot "config\agents.json"
-}
-$registryMode = $env:CODEX_AGENT_SOURCE -eq "registry"
-if (-not $AgentId) {
-    if (-not $registryMode) { throw "AgentId is required in file mode." }
-    $AgentId = "registered-machine"
-}
-$resolvedAgentsFile = if ($registryMode) { [IO.Path]::GetFullPath($AgentsFile) } else { (Resolve-Path -LiteralPath $AgentsFile).Path }
-
-$requiredFiles = @($pythonExe, $sidecarScript)
-if (-not $registryMode) { $requiredFiles += $resolvedAgentsFile }
-foreach ($requiredFile in $requiredFiles) {
+foreach ($requiredFile in @($pythonExe, $sidecarScript)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Required file not found: $requiredFile"
     }
 }
 
-$arguments = @(
-    $sidecarScript,
-    "--host", $ListenHost,
-    "--port", $Port,
-    "--agent-id", $AgentId,
-    "--gateway-url", $GatewayUrl,
-    "--agents", $resolvedAgentsFile
-)
-if ($TokenEnv) {
-    $arguments += @("--token-env", $TokenEnv)
-} else {
-    $resolvedTokenFile = (Resolve-Path -LiteralPath $TokenFile).Path
-    $arguments += @("--token-file", $resolvedTokenFile)
+# Python 统一读取 config/workflow-service.json 并校验参数。
+# 只传递显式指定的启动参数，不用脚本默认值覆盖文件。
+$arguments = @($sidecarScript)
+$optionNames = @{
+    AgentId = "--agent-id"; GatewayUrl = "--gateway-url"
+    TokenEnv = "--token-env"; TokenFile = "--token-file"
+    ListenHost = "--host"; Port = "--port"
+}
+foreach ($entry in $PSBoundParameters.GetEnumerator()) {
+    if ($optionNames.ContainsKey($entry.Key)) {
+        $arguments += @($optionNames[$entry.Key], [string]$entry.Value)
+    }
 }
 
-Write-Host "Starting workflow Sidecar on ${ListenHost}:$Port for agent $AgentId"
-Write-Host "Agent configuration: $resolvedAgentsFile"
-
+Write-Host "Starting workflow Sidecar with service configuration."
 & $pythonExe @arguments
 exit $LASTEXITCODE

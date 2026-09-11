@@ -44,6 +44,7 @@ class ConfigCenterApplicationTest {
             .flatMap(mapping -> mapping.getPatternValues().stream())
             .toList();
     assertThat(routes).noneMatch(route -> route.startsWith("/api/feishu"));
+    assertThat(routes).doesNotContain("/api/agents/import");
     assertThat(routes).contains("/api/dingtalk/config", "/api/dingtalk/config/test");
   }
 
@@ -170,7 +171,7 @@ class ConfigCenterApplicationTest {
         .contains("styles.css?v=20260904-dialog-cancel")
         .contains("sync-wait.css?v=20260905")
         .contains("id=\"syncWait\"")
-        .contains("app.js?v=20260911-machine-registry")
+        .contains("app.js?v=20260911-registry-only")
         .contains("任务目标")
         .contains("发送给所有步骤")
         .contains("type=\"hidden\" name=\"additionalNotes\"");

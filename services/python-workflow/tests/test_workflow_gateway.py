@@ -14,6 +14,8 @@ from workflow_gateway import WorkflowGateway, build_argument_parser, create_app
 from workflow_store import SINGLE_OUTPUT_CONSTRAINT, WorkflowStore, utc_now
 
 
+from tests.registry_fixtures import (fixture_orchestrator, fixture_gateway, fixture_app, FixtureWorkflowStore)
+
 class GatewayCommandLineTests(unittest.TestCase):
     def test_default_host_listens_on_all_interfaces(self) -> None:
         args = build_argument_parser().parse_args([])
@@ -106,7 +108,7 @@ class SupervisorPromptTests(unittest.TestCase):
 
     def test_restart_confirmation_displays_summarized_instruction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkflowStore(Path(directory, "workflows.db"))
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
             store.create_workflow(
                 {
                     "workflowId": "revision-demo",
@@ -118,7 +120,7 @@ class SupervisorPromptTests(unittest.TestCase):
             store.accept_chat_message(
                 "revision-demo", message_id, "没有 logo、没有涂装，重新生成"
             )
-            gateway = WorkflowGateway(store, object())
+            gateway = fixture_gateway(store, object())
             answer = gateway._apply_assistant_decision(
                 "revision-demo",
                 message_id,
@@ -145,7 +147,7 @@ class SupervisorPromptTests(unittest.TestCase):
                     ],
                 }]
 
-        gateway = WorkflowGateway(None, FakeOrchestrator())
+        gateway = fixture_gateway(None, FakeOrchestrator())
         value = gateway.public_agents()[0]
         self.assertEqual(value["agentId"], "local")
         self.assertEqual(value["permissionProfiles"], [
@@ -183,7 +185,7 @@ class SupervisorReachabilityTests(unittest.IsolatedAsyncioTestCase):
                     raise ConnectionError("secret address must not be exposed")
 
         orchestrator = FakeOrchestrator()
-        gateway = WorkflowGateway(None, orchestrator)
+        gateway = fixture_gateway(None, orchestrator)
 
         await gateway._probe_supervisors_once()
         first = gateway.public_agents()[0]
@@ -216,7 +218,7 @@ class SupervisorReachabilityTests(unittest.IsolatedAsyncioTestCase):
                     "permission_profiles": ["read_only"],
                 }]
 
-        gateway = WorkflowGateway(FakeStore(), FakeOrchestrator())
+        gateway = fixture_gateway(FakeStore(), FakeOrchestrator())
         self.assertEqual(gateway.public_agents()[0]["availability"], "busy")
 
 
@@ -232,8 +234,8 @@ class WorkflowSubmissionPermissionTests(unittest.IsolatedAsyncioTestCase):
                 ]
 
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkflowStore(Path(directory, "workflows.db"))
-            gateway = WorkflowGateway(store, ReadOnlyOrchestrator())
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            gateway = fixture_gateway(store, ReadOnlyOrchestrator())
             with self.assertRaisesRegex(PermissionError, "不允许节点"):
                 await gateway.submit(
                     {
@@ -284,39 +286,39 @@ class WorkflowSubmissionPermissionTests(unittest.IsolatedAsyncioTestCase):
                 ]
 
         cases = [
-            ("unknown", "missing", "executor-ok", ValueError, "未知执行机"),
+            ("unknown", "missing", "executor-ok", ValueError, "已登记"),
             (
                 "disabled-supervisor",
                 "supervisor-disabled",
                 "executor-ok",
-                PermissionError,
-                "已停用",
+                ValueError,
+                "启用",
             ),
             (
                 "wrong-supervisor-capability",
                 "executor-ok",
                 "executor-ok",
-                PermissionError,
-                "主监督能力",
+                ValueError,
+                "能力",
             ),
             (
                 "disabled-executor",
                 "supervisor-ok",
                 "executor-disabled",
-                PermissionError,
-                "已停用",
+                ValueError,
+                "启用",
             ),
             (
                 "wrong-executor-capability",
                 "supervisor-ok",
                 "supervisor-ok",
-                PermissionError,
-                "步骤执行能力",
+                ValueError,
+                "能力",
             ),
         ]
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkflowStore(Path(directory, "workflows.db"))
-            gateway = WorkflowGateway(store, CapabilityOrchestrator())
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            gateway = fixture_gateway(store, CapabilityOrchestrator())
             gateway._schedule_pending = AsyncMock()
             for workflow_id, supervisor_id, executor_id, error_type, message in cases:
                 with self.subTest(workflow_id=workflow_id):
@@ -363,8 +365,8 @@ class WorkflowSubmissionPermissionTests(unittest.IsolatedAsyncioTestCase):
                 ]
 
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkflowStore(Path(directory, "workflows.db"))
-            gateway = WorkflowGateway(store, CapabilityOrchestrator())
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            gateway = fixture_gateway(store, CapabilityOrchestrator())
             gateway._schedule_pending = AsyncMock()
 
             snapshot = await gateway.submit(
@@ -495,9 +497,9 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkflowStore(Path(directory, "workflows.db"))
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
             orchestrator = self.FakeOrchestrator()
-            gateway = WorkflowGateway(store, orchestrator)
+            gateway = fixture_gateway(store, orchestrator)
             try:
                 await gateway.submit(self.spec("first", "supervisor-a"))
                 await gateway.submit(self.spec("second", "supervisor-a"))
@@ -534,9 +536,9 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_connection_failure_releases_slot_for_next_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkflowStore(Path(directory, "workflows.db"))
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
             orchestrator = self.FakeOrchestrator(fail_first=True)
-            gateway = WorkflowGateway(store, orchestrator)
+            gateway = fixture_gateway(store, orchestrator)
             try:
                 await gateway.submit(self.spec("offline", "supervisor-a"))
                 await gateway.submit(self.spec("next", "supervisor-a"))
@@ -559,7 +561,7 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                 json.dumps({"agents": {"local": {"url": "ws://127.0.0.1:1", "cwd": "/work"}}}),
                 encoding="utf-8",
             )
-            app = create_app(
+            app = fixture_app(
                 db_path=Path(directory, "workflows.db"), config_path=config
             )
             store = app.state.gateway.store
@@ -609,7 +611,7 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                 json.dumps({"agents": {"local": {"url": "ws://127.0.0.1:1", "cwd": "/work"}}}),
                 encoding="utf-8",
             )
-            app = create_app(
+            app = fixture_app(
                 db_path=Path(directory, "workflows.db"), config_path=config
             )
             store = app.state.gateway.store
@@ -710,7 +712,7 @@ class AdvanceControlConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         store = FakeStore()
-        gateway = WorkflowGateway(store, object())
+        gateway = fixture_gateway(store, object())
         pause_started = asyncio.Event()
         allow_pause_to_finish = asyncio.Event()
 
@@ -744,8 +746,8 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 config.write_text(json.dumps({"agents": {"local": {
                     "url": server.url, "cwd": "/work", "allow_cwd_override": True,
                 }}}), encoding="utf-8")
-                store = WorkflowStore(Path(directory, "workflows.db"))
-                gateway = WorkflowGateway(store, Orchestrator(config))
+                store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+                gateway = fixture_gateway(store, fixture_orchestrator(config))
                 await gateway.submit({
                     "workflowId": "commentary-demo", "supervisorAgentId": "local",
                     "nodes": [{"id": "a", "prompt": "demo", "timeoutSec": 10}],
@@ -801,8 +803,8 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 config.write_text(json.dumps({"agents": {"local": {
                     "url": server.url, "cwd": "/work", "allow_cwd_override": True,
                 }}}), encoding="utf-8")
-                store = WorkflowStore(Path(directory, "workflows.db"))
-                gateway = WorkflowGateway(store, Orchestrator(config))
+                store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+                gateway = fixture_gateway(store, fixture_orchestrator(config))
                 try:
                     await gateway.submit({
                         "workflowId": "resume-demo", "supervisorAgentId": "local",
@@ -843,8 +845,8 @@ class WorkflowChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 config.write_text(json.dumps({"agents": {"local": {
                     "url": server.url, "cwd": "/work", "allow_cwd_override": True,
                 }}}), encoding="utf-8")
-                store = WorkflowStore(Path(directory, "workflows.db"))
-                gateway = WorkflowGateway(store, Orchestrator(config))
+                store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+                gateway = fixture_gateway(store, fixture_orchestrator(config))
                 await gateway.submit({
                     "workflowId": "chat-demo", "supervisorAgentId": "local",
                     "nodes": [{"id": "a", "prompt": "demo", "timeoutSec": 10}],
@@ -906,7 +908,7 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _running_store(path: Path) -> WorkflowStore:
-        store = WorkflowStore(path)
+        store = FixtureWorkflowStore(path)
         store.create_workflow({
             "workflowId": "control-demo",
             "supervisorAgentId": "local",
@@ -942,7 +944,7 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         {"status": "interrupted", "error": "已安全停止", "finished_at": "now"},
                     )
 
-            gateway = WorkflowGateway(store, InterruptingOrchestrator())
+            gateway = fixture_gateway(store, InterruptingOrchestrator())
             gateway._resume_supervisor_if_needed = AsyncMock()
             store.sync_node_job("control-demo", "b", {"status": "completed", "response": "B", "finished_at": utc_now()})
             gateway.orchestrator.interrupt_turn = AsyncMock(side_effect=AssertionError("不能中断业务步骤"))
@@ -976,7 +978,7 @@ class WorkflowControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 async def interrupt_turn(self, **_: object) -> None:
                     raise RuntimeError("远端拒绝中止")
 
-            gateway = WorkflowGateway(store, FailingOrchestrator())
+            gateway = fixture_gateway(store, FailingOrchestrator())
             gateway._resume_supervisor_if_needed = AsyncMock()
             gateway.orchestrator.interrupt_turn = AsyncMock()
             gateway.orchestrator.cancel = AsyncMock()

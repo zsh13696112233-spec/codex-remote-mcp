@@ -14,6 +14,7 @@ import warnings
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from workflow_service_config import setting
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlparse
@@ -33,12 +34,9 @@ from workflow_event_batcher import AsyncEventBatcher
 from workflow_store import ARTIFACT_LIMIT, WorkflowStore
 from workflow_runtime_client import InternalApiClient
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "agents.json"
-CONFIG_PATH = Path(os.getenv("CODEX_AGENTS_FILE", DEFAULT_CONFIG_PATH)).expanduser()
 DEFAULT_WORKFLOW_DB_PATH = Path(__file__).with_name("workflows.db")
 WORKFLOW_DB_PATH = Path(
-    os.getenv("CODEX_WORKFLOW_DB", DEFAULT_WORKFLOW_DB_PATH)
+    setting("workflow_db", DEFAULT_WORKFLOW_DB_PATH)
 ).expanduser()
 MAX_PROMPT_LENGTH = 100_000
 DEFAULT_REQUEST_TIMEOUT_SEC = 30.0
@@ -748,7 +746,6 @@ class AppServerClient:
 class Orchestrator:
     def __init__(
         self,
-        config_path: Path,
         *,
         client_factory: Callable[..., AppServerClient] = AppServerClient,
         max_retained_jobs: int = 1000,
@@ -756,52 +753,18 @@ class Orchestrator:
     ) -> None:
         if max_retained_jobs < 1:
             raise ValueError("max_retained_jobs 必须大于 0。")
-        self.config_path = config_path
         self.jobs: dict[str, Job] = {}
         self._agent_locks: dict[str, asyncio.Lock] = {}
         self._client_factory = client_factory
         self._max_retained_jobs = max_retained_jobs
         self._serialize_agent_jobs = serialize_agent_jobs
-        self._agents_cache: dict[str, AgentConfig] | None = None
-        self._agents_cache_signature: tuple[int, int] | None = None
         self.agent_provider: Callable[[], dict[str, AgentConfig]] | None = None
 
     def load_agents(self) -> dict[str, AgentConfig]:
         if self.agent_provider is not None:
             return self.agent_provider()
-        if os.getenv("CODEX_AGENT_SOURCE", "file") == "registry":
-            from agent_registry import AgentRegistry
-            return AgentRegistry(get_workflow_store()).configs()
-        if not self.config_path.exists():
-            raise FileNotFoundError(
-                f"找不到执行机配置：{self.config_path}。请复制 config/agents.example.json 为 config/agents.json。"
-            )
-        stat = self.config_path.stat()
-        signature = (stat.st_mtime_ns, stat.st_size)
-        if (
-            self._agents_cache is not None
-            and self._agents_cache_signature == signature
-        ):
-            return dict(self._agents_cache)
-        try:
-            raw = json.loads(self.config_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as error:
-            raise ValueError(f"执行机配置不是有效 JSON：{error}") from error
-
-        values = raw.get("agents") if isinstance(raw, dict) else None
-        if not isinstance(values, dict) or not values:
-            raise ValueError("配置必须包含非空的 agents 对象。")
-
-        agents: dict[str, AgentConfig] = {}
-        for agent_id, value in values.items():
-            if not isinstance(agent_id, str) or not agent_id.strip():
-                raise ValueError("agent_id 必须是非空字符串。")
-            if not isinstance(value, dict):
-                raise ValueError(f"{agent_id} 的配置必须是对象。")
-            agents[agent_id] = AgentConfig.from_dict(agent_id, value)
-        self._agents_cache = agents
-        self._agents_cache_signature = signature
-        return dict(agents)
+        from agent_registry import AgentRegistry
+        return AgentRegistry(get_workflow_store()).configs()
 
     def list_agents(self) -> list[dict[str, Any]]:
         return [agent.public_dict() for agent in self.load_agents().values()]
@@ -1770,7 +1733,7 @@ class Orchestrator:
         return str(value["id"])
 
 
-orchestrator = Orchestrator(CONFIG_PATH)
+orchestrator = Orchestrator()
 _workflow_store: WorkflowStore | InternalApiClient | None = None
 _workflow_event_batcher: AsyncEventBatcher | None = None
 _workflow_monitors: set[asyncio.Task[None]] = set()
@@ -1872,9 +1835,8 @@ mcp = FastMCP("Codex Orchestrator")
 
 @mcp.tool()
 def list_agents() -> dict[str, Any]:
-    """读取当前可调度的 Codex 执行机白名单。配置文件修改后会自动重新读取。"""
+    """读取中央登记的 Codex 执行机清单。"""
     return {
-        "config_path": str(orchestrator.config_path),
         "agents": orchestrator.list_agents(),
     }
 

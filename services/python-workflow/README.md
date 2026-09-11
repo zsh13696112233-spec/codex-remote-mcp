@@ -38,35 +38,13 @@ python-workflow/
 
 ## 执行机配置
 
-可选 `CODEX_AGENT_SOURCE=registry` 启用中央 SQLite 机器登记，由 8091 网页管理分组、机器及手动检测。缺省 `file` 保持下述文件模式。登记模式的默认目录、协议、凭据部署、远程组内清单及显式旧配置导入见[机器管理部署说明](../../docs/WEBUI_MACHINE_REGISTRATION.zh-CN.md)。远程 Sidecar 仍不访问 SQLite；本机 MCP 必须与网关选择同一来源和数据库。登记模式的 SOP 运行要求主监督与步骤执行机同组，机器已启用并通过检测。
+机器只能通过 8091 网页登记，中央 SQLite 为唯一机器清单来源。没有来源开关、旧机器导入、独立远程清单或机器配置环境变量回退。统一目录、协议、模型和凭据引用保存在 `config/workflow-service.json`；示例、字段约定、本机与远程执行方式见[机器管理部署说明](../../docs/WEBUI_MACHINE_REGISTRATION.zh-CN.md)。
 
-| 环境变量 | 说明 |
-| --- | --- |
-| `CODEX_AGENTS_FILE` | 执行机配置文件，推荐使用仓库的 `config/agents.json` |
-| `CODEX_WORKFLOW_DB` | 网关与 MCP 共同使用的 SQLite 数据库绝对路径 |
-| `CODEX_SIDECAR_AGENT_ID` | 远程 Sidecar 对应的稳定主监督 ID |
-| `CODEX_GATEWAY_INTERNAL_URL` | Sidecar 访问的中央 `8080` 地址 |
-| `CODEX_GATEWAY_TOKEN_ENV` / `CODEX_GATEWAY_TOKEN_FILE` | Sidecar 读取中央机器令牌的二选一来源 |
-| `CODEX_SIDECAR_HOST` / `CODEX_SIDECAR_PORT` | Sidecar 监听地址和端口，默认 `127.0.0.1:8082` |
+本机编排进程与网关读取同一配置和同一 SQLite；远程 Sidecar 通过中央认证接口按需获取同组机器。SOP 保存时校验登记、能力和分组；提交及中央步骤派发时额外校验启用和手动检测资格。工作目录覆盖和权限上限继续在执行边界校验。
 
-先从仓库根目录复制配置示例：
+凭据支持 `token_file`（绝对路径）或 `token_env`（环境变量名称），严格二选一。这里的环境变量仅用于解析凭据，不切换机器来源。令牌文件为 UTF-8 单行、最多 8 KiB，每次连接重新读取；实际值不写入登记字段或网页响应。
 
-```powershell
-Copy-Item .\config\agents.example.json .\config\agents.json
-```
-
-`agents.json` 是本机配置并已被 Git 忽略。令牌可以使用 `token_env` 引用环境变量，或使用 `token_file` 引用网关所在机器上的绝对文件路径；两者只能配置一个，不要把令牌明文写入配置文件。令牌文件使用 UTF-8 编码，只包含一行令牌且不能超过 8 KiB；网关在每次建立连接时重新读取，便于轮换令牌。请通过 Windows ACL 或 Linux 文件权限限制网关运行账号以外的访问。
-
-每个执行机可以配置：
-
-- `enabled`：是否允许新工作流使用，默认 `true`。
-- `capabilities`：只允许 `supervisor` 和 `executor`。旧配置未声明时，`local` 默认同时具备两种能力，其他执行机默认仅具备 `executor`。
-- `capacity`：具备 `supervisor` 能力时默认且仅允许为 `1`；纯执行机不配置该字段。
-- `token_env` / `token_file`：可选的认证令牌来源，分别表示环境变量名和网关本机的绝对文件路径，严格二选一。
-- `orchestration_mode`：`local_db`（默认）或 `remote_sidecar`。旧配置保持本机兼容行为。
-- `sidecar_token_env` / `sidecar_token_file`：仅 `remote_sidecar` 主监督使用的中央机器令牌来源，严格二选一；与 app-server 的连接令牌彼此独立。
-
-`GET /agents` 只返回脱敏后的 ID、默认目录/模型、启停、能力、主监督容量和权限上限。对于具备主监督能力的执行机，还返回 `connectionStatus`（`online`、`offline`、`unknown`）、基于持久租约计算的 `availability`（`idle`、`busy`）、`checkedAt` 和 `lastOnlineAt`；不返回地址、令牌或原始连接异常。`local_db` 每 10 秒执行轻量 WebSocket 探测；`remote_sidecar` 使用 SQLite 中的权威心跳，5 秒上报一次，20 秒未续租即离线。`POST /workflows` 在写入 SQLite 前校验主监督和每个步骤执行机是否存在、启用、能力匹配，并继续执行权限档位校验；不要求各步骤使用相同执行机或工作目录。
+`GET /agents` 返回登记 ID、IP、端口、分组、检测记录、默认目录/模型、启停、能力、主监督容量和权限上限。对于具备主监督能力的执行机，还返回 `connectionStatus`（`online`、`offline`、`unknown`）、基于持久租约计算的 `availability`（`idle`、`busy`）、`checkedAt` 和 `lastOnlineAt`；不返回令牌或原始连接异常。`local_db` 每 10 秒执行轻量 WebSocket 探测；`remote_sidecar` 使用 SQLite 中的权威心跳，5 秒上报一次，20 秒未续租即离线。`POST /workflows` 在写入 SQLite 前校验主监督和每个步骤执行机是否存在、启用、能力匹配，并继续执行权限档位校验；不要求各步骤使用相同执行机或工作目录。
 
 提交成功的工作流先进入 `queued`。调度器按主监督分别以 `created_at + workflow_id` 领取最早任务；同一主监督固定只运行一个工作流，不同主监督可以并行。远程租约包含不可预测令牌、Sidecar 实例 ID、续租时间和过期时间；写接口在同一个 SQLite 写事务中重新校验租约，旧实例和旧令牌不能回写。完成、失败和取消时与终态在同一事务释放，半自动暂停继续占用。远程主监督离线时新工作流立即失败；运行中失联、实例更换或心跳超时会失败并释放租约，不自动迁移。网关重启仍把遗留的 `running/cancelling` 工作流直接标记失败、清空租约并继续排队任务，不重新附着旧外部会话。
 
@@ -110,7 +88,7 @@ Copy-Item .\config\agents.example.json .\config\agents.json
 - `handoffMode: "legacy_text"`：保留历史行为，把直接依赖步骤的文字结果追加到下一步。字段缺失时使用此模式。
 - `handoffMode: "cumulative_files"`：不传递任何前序文字结果，返工要求也只属于目标步骤。第 N 步获得第 1 至 N-1 步的全部当前有效文件。
 
-当前文件流水线要求编排器与 app-server 位于同一台机器，并在 `config/agents.json` 配置本机绝对路径 `artifact_root`。编排器直接在该根目录内为每次尝试创建 `inputs/step-N/` 和空 `output/`，提示词只交付绝对路径，不使用 Base64 传输，也不扫描业务工作区。所有步骤都允许只返回文字；任务本身需要发布文件时最多发布一个。步骤是否完成只取决于节点执行结果，不因没有附件而失败，后续步骤自行检查所需业务文件。`write` 只表示是否允许写入，不代表必须生成附件。`allow_write` 是执行机的工作区写入上限；`allow_full_access` 是独立的完全访问上限，只有两者都为 `true` 时才开放 `full_access`。前三档文件交接继续只开放受控写入根目录并关闭网络；`full_access` 会取消文件系统和网络隔离，但仍只从托管输出目录收集最多一个交付文件。前序文件仅作为可用输入；当前要求未明确要求使用时，Agent 不得打开或合并它们。阶段 B 的远程主监督只支持 `legacy_text`；提交 `cumulative_files` 会在持久化前拒绝，跨机器附件传输仍留到后续阶段。
+当前文件流水线要求编排器与 app-server 位于同一台机器，并在统一部署配置中设置本机绝对路径 `machine_defaults.artifact_root`。编排器直接在该根目录内为每次尝试创建 `inputs/step-N/` 和空 `output/`，提示词只交付绝对路径，不使用 Base64 传输，也不扫描业务工作区。所有步骤都允许只返回文字；任务本身需要发布文件时最多发布一个。步骤是否完成只取决于节点执行结果，不因没有附件而失败，后续步骤自行检查所需业务文件。`write` 只表示是否允许写入，不代表必须生成附件。`allow_write` 是执行机的工作区写入上限；`allow_full_access` 是独立的完全访问上限，只有两者都为 `true` 时才开放 `full_access`。前三档文件交接继续只开放受控写入根目录并关闭网络；`full_access` 会取消文件系统和网络隔离，但仍只从托管输出目录收集最多一个交付文件。前序文件仅作为可用输入；当前要求未明确要求使用时，Agent 不得打开或合并它们。阶段 B 的远程主监督只支持 `legacy_text`；提交 `cumulative_files` 会在持久化前拒绝，跨机器附件传输仍留到后续阶段。
 
 节点权限映射遵循 OpenAI 的 [Sandboxing](https://learn.chatgpt.com/docs/sandboxing) 与 [Agent approvals & security](https://learn.chatgpt.com/docs/agent-approvals-security) 语义：`read_only = read-only + never`，`workspace_write = workspace-write + never`，`auto_review = workspace-write + on-request + auto_review`，`full_access = danger-full-access + never`。启动节点前会读取 `configRequirements/read`；执行机管理策略明确不允许时不会启动 thread。旧 app-server 不支持该方法时保持兼容。
 
@@ -118,35 +96,25 @@ Copy-Item .\config\agents.example.json .\config\agents.json
 
 ## 启动网关
 
-在仓库根目录执行：
+先按部署说明准备 `config/workflow-service.json`，在仓库根目录执行：
 
 ```powershell
-$env:CODEX_AGENTS_FILE = (Resolve-Path .\config\agents.json)
-$env:CODEX_WORKFLOW_DB = "$PWD\workflows.db"
-
-uv run --project .\services\python-workflow `
-  python .\services\python-workflow\src\workflow_gateway.py `
-  --host 0.0.0.0 --port 8080 `
-  --db $env:CODEX_WORKFLOW_DB --agents $env:CODEX_AGENTS_FILE
+.\scripts\start_workflow_gateway.ps1
 ```
 
-MCP 进程需要运行 `src/codex_orchestrator_mcp.py`，并传入完全相同的 `CODEX_AGENTS_FILE` 和 `CODEX_WORKFLOW_DB`。
+也可使用已有 Python 环境运行 `src/workflow_gateway.py --host 0.0.0.0 --port 8080`。数据库路径由服务配置提供；本机编排进程运行 `src/codex_orchestrator_mcp.py`，必须使用同一配置文件和同一运行库。不再接受 `--agents`。
 
 网关默认监听所有网络接口以支持可信内网中的 Java 服务访问，但没有内置用户认证。必须通过主机防火墙限制 `8080` 的访问来源，不得直接暴露到公网；只需本机访问时可显式传入 `--host 127.0.0.1`。
 
 ## 启动远程 Sidecar
 
-远程主监督机只运行 app-server `4500` 和 Sidecar `127.0.0.1:8082`，不运行完整网关，也不得配置 `CODEX_WORKFLOW_DB`。先准备该机器可见的执行机清单，再启动 Sidecar：
+远程主监督机只运行执行服务与 Sidecar，不运行完整网关，不填写 SQLite 路径。将 `config/workflow-sidecar.example.json` 复制为本机仓库的 `config/workflow-service.json`，填写中央地址和凭据文件路径后启动：
 
 ```powershell
-Copy-Item .\config\agents.remote-sidecar.example.json .\config\agents.sidecar.json
-$env:SUPERVISOR_B_SIDECAR_TOKEN = "请通过密钥系统注入"
-.\scripts\start_workflow_sidecar.ps1 `
-  -AgentId supervisor-b `
-  -GatewayUrl http://central.internal:8080 `
-  -TokenEnv SUPERVISOR_B_SIDECAR_TOKEN `
-  -AgentsFile .\config\agents.sidecar.json
+.\scripts\start_workflow_sidecar.ps1
 ```
+
+机器身份由中央根据独立凭据识别；未登记时心跳会重试。登记后从中央按需获取同组清单，不需要复制机器编号或执行机文件。
 
 Codex app-server 使用 Streamable HTTP MCP：
 
@@ -162,7 +130,7 @@ default_tools_approval_mode = "approve"
 
 Sidecar 启动时先确认 `8082` 已监听，再向中央登记上线，之后每 5 秒心跳。中央 `/internal/v1` 提供心跳、工作流/步骤上下文、原子准备派发、步骤状态同步和最多 64 项的事件批量上报。Bearer Token 唯一映射到一个启用的 `remote_sidecar` 主监督；所有写操作还必须携带 `X-Workflow-Lease`。认证失败、越权、未找到和租约冲突分别返回 `401`、`403`、`404`、`409`。事件使用工作流内幂等键，网络重试不会重复写入。
 
-机器令牌可以通过 `CODEX_GATEWAY_TOKEN_ENV` 间接引用环境变量，也可以用 `CODEX_GATEWAY_TOKEN_FILE` 指向绝对文件。两者严格二选一；文件必须是 UTF-8 单行且不超过 8 KiB。Sidecar 每次请求重新读取令牌以支持轮换。机器令牌不能复用 app-server 的连接令牌，响应和公开执行机接口也不会回传令牌、网络地址或底层 thread/turn 标识。
+机器令牌可以通过 `sidecar.token_env` 间接引用环境变量，也可以用 `sidecar.token_file` 指向绝对文件。两者严格二选一；文件必须是 UTF-8 单行且不超过 8 KiB。Sidecar 每次请求重新读取令牌以支持轮换。机器令牌不能复用 app-server 的连接令牌，响应不会回传令牌；机器管理接口展示人工登记的 IP 和端口，监控页面仍隐藏机器连接信息。
 
 `8082` 只能绑定回环地址，不需要也不应开放防火墙。中央 `8080` 只允许 `8090`、`8091` 和已登记主监督机访问；跨机器链路应位于可信内网、VPN 或 TLS 反向代理之后。
 

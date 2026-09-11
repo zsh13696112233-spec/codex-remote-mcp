@@ -17,14 +17,14 @@ class RegistryTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.env = patch.dict(os.environ, {
-            "CODEX_AGENT_SOURCE": "registry", "CODEX_MACHINE_CWD": str(self.root),
-            "CODEX_MACHINE_PROTOCOL": "ws", "CODEX_MACHINE_TOKEN_ENV": "REGISTRY_TEST_APP_TOKEN",
-            "CODEX_MACHINE_SIDECAR_TOKEN_TEMPLATE": str(self.root / "{ip}.token"),
-        })
-        self.env.start()
-        self.addCleanup(self.env.stop)
-        self.app = create_app(db_path=self.root / "runtime.db", config_path=self.root / "legacy.json")
+        import workflow_service_config as config
+        self.config_values = {'machine_defaults': {
+            'cwd': str(self.root), 'protocol': 'ws', 'token_env': 'REGISTRY_TEST_APP_TOKEN',
+            'sidecar_token_template': str(self.root / '{ip}.token')}}
+        self.config_patch = patch.object(config, '_load', return_value=self.config_values)
+        self.config_patch.start()
+        self.addCleanup(self.config_patch.stop)
+        self.app = create_app(db_path=self.root / 'runtime.db')
         self.gateway = self.app.state.gateway
         self.registry = self.gateway.registry
         self.client = TestClient(self.app)
@@ -103,35 +103,11 @@ class RegistryTests(unittest.TestCase):
         self.assertNotIn("test-only-machine-secret", response.text)
         self.assertNotIn("sidecar_token", response.text)
 
-    def test_import_once_preserves_ids_and_settings(self):
-        path = self.root / "legacy.json"
-        path.write_text(json.dumps({"agents": {"local": {"url": "ws://127.0.0.1:4500", "cwd": str(self.root), "allow_write": True}}}), encoding="utf-8")
-        self.assertEqual(self.registry.import_file(path), {"imported": 1})
-        config = self.registry.configs()["local"]
-        self.assertTrue(config.allow_write)
-        self.assertEqual(config.orchestration_mode, "local_db")
-        self.assertEqual(self.registry.rows()["local"]["test_status"], "untested")
-        machine = next(row for row in self.registry.public() if row["agentId"] == "local")
-        self.registry.save_agent({**machine, "enabled": False}, "local")
-        self.assertEqual(self.registry.configs()["local"].orchestration_mode, "local_db")
-        with self.assertRaisesRegex(ValueError, "已经导入"):
-            self.registry.import_file(path)
-        self.assertTrue(path.exists())
-
-    def test_imported_domain_can_be_disabled_without_rewriting_url(self):
-        path = self.root / "legacy.json"
-        path.write_text(json.dumps({"agents": {"old": {"url": "wss://worker.internal/codex", "cwd": str(self.root)}}}), encoding="utf-8")
-        self.registry.import_file(path)
-        machine = next(row for row in self.registry.public() if row["agentId"] == "old")
-        self.registry.save_agent({**machine, "enabled": False}, "old")
-        self.assertEqual(self.registry.configs()["old"].url, "wss://worker.internal/codex")
-        self.assertFalse(self.registry.configs()["old"].enabled)
-
     def test_distinct_supervisors_require_distinct_credential_references(self):
         machine = self.machine()
         with self.assertRaisesRegex(ValueError, "凭据引用重复"):
             self.registry.save_agent({**machine, "port": 4501})
-        with patch.dict(os.environ, {"CODEX_MACHINE_SIDECAR_TOKEN_TEMPLATE": str(self.root / "{ip}-{port}.token")}):
+        with patch.dict(self.config_values["machine_defaults"], {"sidecar_token_template": str(self.root / "{ip}-{port}.token")}):
             second = self.registry.save_agent({**machine, "port": 4501})
         self.assertNotEqual(machine["agentId"], second["agentId"])
 
@@ -168,18 +144,6 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "同一分组"):
             self.gateway.store.prepare_node_dispatch("registered-run", "step")
 
-    def test_import_conflict_rolls_back_whole_batch(self):
-        self.machine()
-        path = self.root / "legacy.json"
-        path.write_text(json.dumps({"agents": {
-            "new": {"url": "ws://127.0.0.3:4500", "cwd": str(self.root)},
-            "collision": {"url": "ws://127.0.0.1:4500", "cwd": str(self.root)},
-        }}), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "冲突"):
-            self.registry.import_file(path)
-        self.assertNotIn("new", self.registry.rows())
-        self.assertFalse(any(group["id"] == "default" for group in self.registry.groups()))
-
     def test_executor_can_become_supervisor_and_ipv6_is_bracketed(self):
         worker = self.machine("::1", ["executor"])
         self.assertEqual(self.registry.configs()[worker["agentId"]].url, "ws://[::1]:4500")
@@ -191,7 +155,7 @@ class RegistryTests(unittest.TestCase):
         key = machine["agentId"]
         before = self.registry.configs()[key].sidecar_token_file
         self.registry.record_test(key, True)
-        with patch.dict(os.environ, {"CODEX_MACHINE_SIDECAR_TOKEN_TEMPLATE": str(self.root / "changed-{ip}-{port}.token")}):
+        with patch.dict(self.config_values["machine_defaults"], {"sidecar_token_template": str(self.root / "changed-{ip}-{port}.token")}):
             self.registry.save_agent({**machine, "enabled": False}, key)
         self.assertEqual(self.registry.configs()[key].sidecar_token_file, before)
         self.assertEqual(self.registry.rows()[key]["test_status"], "passed")
@@ -212,12 +176,30 @@ class RegistryTests(unittest.TestCase):
         self.assertIn(supervisor["agentId"], agents)
         self.assertTrue(all(agent.sidecar_token_file is None for agent in agents.values()))
 
-    def test_file_mode_management_is_disabled(self):
-        with patch.dict(os.environ, {"CODEX_AGENT_SOURCE": "file"}):
-            app = create_app(db_path=self.root / "file.db", config_path=self.root / "legacy.json")
-            client = TestClient(app, raise_server_exceptions=False)
-            self.addCleanup(client.close)
-            self.assertEqual(client.post("/agents", json={}).status_code, 409)
+
+    def test_no_source_switch_or_import_route(self):
+        with patch.dict(os.environ, {'CODEX_AGENT_SOURCE': 'file', 'CODEX_AGENTS_FILE': 'not-used.json'}):
+            app = create_app(db_path=self.root / 'new.db')
+            with TestClient(app) as client:
+                self.assertEqual(client.get('/agents').json()['agents'], [])
+                self.assertIn(client.post('/agents/import', json={}).status_code, (404, 405))
+                response = client.post('/agent-groups', json={'name': '新部署'})
+                self.assertEqual(response.status_code, 200)
+
+    def test_local_supervisor_is_registered_and_dispatches_from_sqlite(self):
+        with patch.dict(self.config_values['machine_defaults'], {'orchestration_mode': 'local_db'}):
+            machine = self.machine()
+        key = machine['agentId']
+        self.assertEqual(self.registry.configs()[key].orchestration_mode, 'local_db')
+        self.assertIsNone(self.registry.configs()[key].sidecar_token_file)
+        self.registry.record_test(key, True)
+        from codex_orchestrator_mcp import Orchestrator
+        with patch('codex_orchestrator_mcp.get_workflow_store', return_value=self.gateway.store):
+            self.assertIn(key, Orchestrator().load_agents())
+        with patch.object(self.gateway, '_schedule_pending', new=AsyncMock()):
+            asyncio.run(self.gateway.submit({'workflowId': 'local-registered', 'supervisorAgentId': key,
+                'nodes': [{'id': 'a', 'agentId': key, 'prompt': 'test'}]}))
+        self.assertEqual(self.gateway.store.prepare_node_dispatch('local-registered', 'a')['agentId'], key)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ from workflow_event_batcher import AsyncEventBatcher
 from workflow_store import WorkflowStore, utc_now
 
 
+from tests.registry_fixtures import (fixture_orchestrator, fixture_gateway, fixture_app, FixtureWorkflowStore)
+
 def remote_workflow(workflow_id: str, supervisor_id: str = "supervisor-a") -> dict:
     return {
         "workflowId": workflow_id,
@@ -96,7 +98,7 @@ class SidecarStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.store = WorkflowStore(Path(self.directory.name, "workflows.db"))
+        self.store = FixtureWorkflowStore(Path(self.directory.name, "workflows.db"))
         self.started_a = (datetime.now(UTC) - timedelta(seconds=2)).isoformat()
         self.started_b = datetime.now(UTC).isoformat()
 
@@ -267,7 +269,7 @@ class SidecarInternalApiTests(unittest.TestCase):
         self.environment = patch.dict(os.environ, self.tokens)
         self.environment.start()
         self.addCleanup(self.environment.stop)
-        self.app = create_app(
+        self.app = fixture_app(
             db_path=Path(self.directory.name, "workflows.db"), config_path=config
         )
         self.client = TestClient(self.app)
@@ -432,8 +434,8 @@ class InternalApiClientTests(unittest.TestCase):
                 ]
 
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkflowStore(Path(directory, "workflows.db"))
-            gateway = WorkflowGateway(store, RemoteOrchestrator())
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            gateway = fixture_gateway(store, RemoteOrchestrator())
             value = remote_workflow("file-handoff")
             value["handoffMode"] = "cumulative_files"
             with self.assertRaisesRegex(ValueError, "legacy_text"):
@@ -466,9 +468,9 @@ class RemoteSidecarSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("离线远程主监督不应启动 app-server 会话。")
 
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkflowStore(Path(directory, "workflows.db"))
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
             orchestrator = OfflineRemoteOrchestrator()
-            gateway = WorkflowGateway(store, orchestrator)
+            gateway = fixture_gateway(store, orchestrator)
 
             snapshot = await gateway.submit(remote_workflow("offline-submit"))
 

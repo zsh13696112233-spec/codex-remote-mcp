@@ -17,6 +17,7 @@ from codex_orchestrator_mcp import (
     is_absolute_remote_path,
     remote_path_join,
 )
+from tests.registry_fixtures import fixture_orchestrator
 from tests.mock_app_server import MockAppServer
 
 
@@ -276,7 +277,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_probe_agent_only_initializes_connection(self) -> None:
         async with MockAppServer() as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
 
                 await orchestrator.probe_agent("remote", timeout_sec=0.5)
 
@@ -522,7 +523,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_repeated_waits_do_not_cancel_long_job(self) -> None:
         async with MockAppServer(delay_sec=2.5) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 job = await self._dispatch(orchestrator)
 
                 first = await orchestrator.wait(job.job_id, 1)
@@ -542,7 +543,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         async with MockAppServer() as server:
             with tempfile.TemporaryDirectory() as directory:
                 artifact_root = Path(directory, "workflow-artifacts")
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(
                         directory, server.url, artifact_root=str(artifact_root)
                     )
@@ -593,7 +594,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_auto_review_file_handoff_keeps_scoped_roots_and_network_off(self) -> None:
         async with MockAppServer() as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(
                         directory,
                         server.url,
@@ -629,7 +630,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_access_file_handoff_keeps_full_access_turn_policy(self) -> None:
         async with MockAppServer() as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(
                         directory,
                         server.url,
@@ -663,7 +664,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_multiple_output_files_fail_validation(self) -> None:
         async with MockAppServer() as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(
                         directory,
                         server.url,
@@ -687,7 +688,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_output_directory_fails_validation(self) -> None:
         async with MockAppServer() as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(
                         directory,
                         server.url,
@@ -711,7 +712,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_oversized_output_fails_validation(self) -> None:
         async with MockAppServer(delay_sec=0.2) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(
                         directory,
                         server.url,
@@ -735,7 +736,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_cumulative_mode_requires_artifact_root(self) -> None:
         async with MockAppServer() as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 with self.assertRaisesRegex(ValueError, "artifact_root"):
                     await self._dispatch(
                         orchestrator,
@@ -750,7 +751,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_agent_jobs_are_strictly_serial(self) -> None:
         async with MockAppServer(delay_sec=0.3) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 first = await self._dispatch(orchestrator)
                 second = await self._dispatch(orchestrator)
                 for _ in range(100):
@@ -769,7 +770,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         schema = {"type": "object", "properties": {"text": {"type": "string"}}}
         async with MockAppServer(delay_sec=0.3) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(directory, server.url),
                     serialize_agent_jobs=False,
                 )
@@ -799,7 +800,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_jobs_are_bounded(self) -> None:
         async with MockAppServer(delay_sec=0.01) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(directory, server.url),
                     max_retained_jobs=2,
                 )
@@ -816,7 +817,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         observed: list[dict[str, object]] = []
         async with MockAppServer(delay_sec=0.01, send_message_delta=True) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 job = await self._dispatch(
                     orchestrator,
                     event_callback=lambda message, _: observed.append(message),
@@ -843,7 +844,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_steer_uses_current_turn_and_client_message_id(self) -> None:
         async with MockAppServer(delay_sec=1) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 job = await self._dispatch(orchestrator)
                 for _ in range(100):
                     if job.turn_id:
@@ -862,7 +863,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_steer_completed_turn_has_typed_error(self) -> None:
         async with MockAppServer(delay_sec=0.01) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 job = await self._dispatch(orchestrator)
                 await orchestrator.wait(job.job_id, 1)
                 with self.assertRaises(TurnNotActiveError):
@@ -871,7 +872,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_scoped_approval_settings_are_forwarded(self) -> None:
         async with MockAppServer(delay_sec=0.01) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 job = await self._dispatch(
                     orchestrator,
                     approval_policy="on-request",
@@ -900,7 +901,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(profile=profile):
                 async with MockAppServer(delay_sec=0.01) as server:
                     with tempfile.TemporaryDirectory() as directory:
-                        orchestrator = Orchestrator(
+                        orchestrator = fixture_orchestrator(
                             self._write_config(
                                 directory,
                                 server.url,
@@ -934,7 +935,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_permission_profile_rejects_write_cap_and_field_conflict(self) -> None:
         async with MockAppServer() as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 with self.assertRaisesRegex(PermissionError, "未启用写权限"):
                     await self._dispatch(
                         orchestrator,
@@ -947,7 +948,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                         write=False,
                         permission_profile="auto_review",
                     )
-                writable = Orchestrator(
+                writable = fixture_orchestrator(
                     self._write_config(directory, server.url, allow_write=True)
                 )
                 with self.assertRaisesRegex(PermissionError, "未启用完全访问权限"):
@@ -965,7 +966,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
             }
         ) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(directory, server.url, allow_write=True)
                 )
                 job = await self._dispatch(
@@ -989,7 +990,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
             }
         ) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(
                         directory,
                         server.url,
@@ -1016,7 +1017,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
             turn_error={"code": "approval_rejected", "message": "auto review rejected"},
         ) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(directory, server.url, allow_write=True)
                 )
                 job = await self._dispatch(
@@ -1031,7 +1032,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         async with MockAppServer(delay_sec=10) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(directory, server.url, allow_write=True)
                 )
                 job = await self._dispatch(
@@ -1045,7 +1046,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_disconnect_wakes_waiter_and_marks_job_failed(self) -> None:
         async with MockAppServer(close_after_turn_start=(4101, "test disconnect")) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 started = time.monotonic()
                 job = await self._dispatch(orchestrator)
                 final = await orchestrator.wait(job.job_id, 1)
@@ -1072,7 +1073,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                                 url, request_timeout_sec=0.25, **kwargs
                             )
 
-                        orchestrator = Orchestrator(
+                        orchestrator = fixture_orchestrator(
                             self._write_config(directory, server.url),
                             client_factory=fast_client,
                         )
@@ -1089,7 +1090,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
             turn_status="failed", turn_error=remote_error
         ) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 job = await self._dispatch(orchestrator)
                 final = await orchestrator.wait(job.job_id, 1)
 
@@ -1104,7 +1105,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
             delay_sec=10, interrupt_error="interrupt rejected"
         ) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 job = await self._dispatch(orchestrator)
                 job.timeout_sec = 0.15
                 final = await orchestrator.wait(job.job_id, 1)
@@ -1122,7 +1123,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_total_timeout_also_bounds_connect_and_initialize(self) -> None:
         async with MockAppServer(ignore_methods={"initialize"}) as server:
             with tempfile.TemporaryDirectory() as directory:
-                orchestrator = Orchestrator(self._write_config(directory, server.url))
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
                 job = await self._dispatch(orchestrator)
                 job.timeout_sec = 0.15
                 started = time.monotonic()
@@ -1145,7 +1146,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                     token_env="TEST_REMOTE_CODEX_TOKEN",
                 )
                 with patch.dict(os.environ, {"TEST_REMOTE_CODEX_TOKEN": secret}):
-                    orchestrator = Orchestrator(config_path)
+                    orchestrator = fixture_orchestrator(config_path)
                     job = await self._dispatch(orchestrator)
                     final = await orchestrator.wait(job.job_id, 1)
 
@@ -1170,7 +1171,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                     server.url,
                     token_file=str(token_path.resolve()),
                 )
-                orchestrator = Orchestrator(config_path)
+                orchestrator = fixture_orchestrator(config_path)
                 first = await orchestrator.wait(
                     (await self._dispatch(orchestrator)).job_id, 1
                 )
@@ -1194,7 +1195,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         async with MockAppServer(delay_sec=0.01) as server:
             with tempfile.TemporaryDirectory() as directory:
                 token_path = Path(directory, "missing-secret.token").resolve()
-                orchestrator = Orchestrator(
+                orchestrator = fixture_orchestrator(
                     self._write_config(
                         directory,
                         server.url,

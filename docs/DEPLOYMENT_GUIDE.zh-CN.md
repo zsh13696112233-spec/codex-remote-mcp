@@ -173,21 +173,9 @@ uv pip install --python .venv/bin/python -e services/python-workflow
 
 中央服务机可以同时部署 `8080`、`8090`、`8091` 和 MySQL。生产环境也可以把 MySQL 单独部署，但逻辑职责不变。
 
-### 1. 准备中央执行机配置
+### 1. 准备中央服务配置
 
-```powershell
-Copy-Item .\config\agents.example.json .\config\agents.json
-```
-
-`config/agents.json` 是中央权威执行机清单，不得提交 Git。它需要列出：
-
-- 所有主监督 app-server。
-- 所有可能被 SOP 步骤使用的业务执行机。
-- 启停状态、能力、默认目录和权限上限。
-- app-server 连接令牌来源。
-- 远程主监督的 `remote_sidecar` 模式和独立 Sidecar 机器令牌来源。
-
-完整字段示例见本文“中央 `agents.json` 配置”一节。
+本分支只支持网页登记，不读取旧机器清单。按[机器管理部署说明](WEBUI_MACHINE_REGISTRATION.zh-CN.md)复制中央服务示例，填写原数据库路径、统一工作目录及凭据引用。
 
 ### 2. 启动 MySQL 和初始化配置中心数据库
 
@@ -205,32 +193,7 @@ FLUSH PRIVILEGES;
 
 ### 3. 启动中央 Python 网关 `8080`
 
-Windows：
-
-```powershell
-Set-Location C:\path\to\codex-remote-mcp
-.\scripts\start_workflow_gateway.ps1 -ListenHost 0.0.0.0 -Port 8080
-```
-
-Linux：
-
-```bash
-cd /opt/codex-remote-mcp
-export CODEX_AGENTS_FILE=/opt/codex-remote-mcp/config/agents.json
-export CODEX_WORKFLOW_DB=/opt/codex-remote-mcp/workflows.db
-
-.venv/bin/python services/python-workflow/src/workflow_gateway.py \
-  --host 0.0.0.0 --port 8080 \
-  --db "$CODEX_WORKFLOW_DB" --agents "$CODEX_AGENTS_FILE"
-```
-
-检查：
-
-```powershell
-Invoke-WebRequest http://127.0.0.1:8080/readyz -UseBasicParsing
-```
-
-应返回 HTTP `200`。
+Windows 从仓库根目录执行 `scripts/start_workflow_gateway.ps1`。Linux/macOS 使用已有 Python 环境执行 `services/python-workflow/src/workflow_gateway.py`。进程读取本机仓库的 `config/workflow-service.json`，不再通过清单参数启动。
 
 ### 4. 启动监控中心 `8090`
 
@@ -272,207 +235,15 @@ mvn spring-boot:run
 java -jar .\target\role-task-config-center-0.1.0.jar
 ```
 
-## 六、中央 `agents.json` 配置
+## 六、中央网页登记
 
-下面示例同时包含纯主监督、纯执行机和混合机：
-
-```json
-{
-  "agents": {
-    "supervisor-a": {
-      "url": "ws://supervisor-a.internal:4500",
-      "cwd": "C:\\codex-workspaces\\supervisor-a",
-      "enabled": true,
-      "capabilities": ["supervisor"],
-      "capacity": 1,
-      "token_file": "C:\\codex-secrets\\supervisor-a-app-server.token",
-      "orchestration_mode": "remote_sidecar",
-      "sidecar_token_file": "C:\\codex-secrets\\supervisor-a-sidecar.token",
-      "allow_write": false,
-      "allow_full_access": false,
-      "allow_cwd_override": false
-    },
-    "worker-a": {
-      "url": "ws://worker-a.internal:4500",
-      "cwd": "D:\\codex-workspaces\\worker-a",
-      "enabled": true,
-      "capabilities": ["executor"],
-      "token_file": "C:\\codex-secrets\\worker-a-app-server.token",
-      "allow_write": true,
-      "allow_full_access": false,
-      "allow_cwd_override": true
-    },
-    "hybrid-a": {
-      "url": "ws://hybrid-a.internal:4500",
-      "cwd": "D:\\codex-workspaces\\hybrid-a",
-      "enabled": true,
-      "capabilities": ["supervisor", "executor"],
-      "capacity": 1,
-      "token_file": "C:\\codex-secrets\\hybrid-a-app-server.token",
-      "orchestration_mode": "remote_sidecar",
-      "sidecar_token_file": "C:\\codex-secrets\\hybrid-a-sidecar.token",
-      "allow_write": true,
-      "allow_full_access": false,
-      "allow_cwd_override": true
-    }
-  }
-}
-```
-
-关键规则：
-
-- `capabilities` 只允许 `supervisor` 和 `executor`。
-- 具备 `supervisor` 能力时，`capacity` 当前固定为 `1`。
-- 纯执行机不要配置 `capacity`、`orchestration_mode` 和 Sidecar 令牌。
-- 远程主监督必须配置 `orchestration_mode: "remote_sidecar"`。
-- `token_env` 与 `token_file` 二选一，用于连接 app-server。
-- `sidecar_token_env` 与 `sidecar_token_file` 二选一，用于 Sidecar 调用中央 `8080`。
-- app-server 令牌和 Sidecar 机器令牌必须相互独立，不得复用。
-- `sidecar_token_file` 是中央网关机器上可读的绝对路径，不是远程主监督机上的路径。
-- 使用环境变量时，变量必须存在于读取该配置的进程环境中。中央 `agents.json` 的 `token_env` 和 `sidecar_token_env` 由中央网关进程读取。
-- 不允许在 JSON 中直接写明文令牌。
-- `allow_write` 控制工作区写入上限；只有同时显式设置 `allow_full_access: true` 才向该执行机开放 `full_access`。完全访问没有文件系统和网络沙箱，默认必须保持关闭。
-
-### 中央机兼任本地主监督或执行机（可选）
-
-如果中央机还运行一个本机 app-server，可以保留现有的 `local_db` 兼容方式，不必为这个本地主监督部署 Sidecar：
-
-```json
-{
-  "local": {
-    "url": "ws://127.0.0.1:4500",
-    "cwd": "C:\\codex-workspaces\\local",
-    "enabled": true,
-    "capabilities": ["supervisor", "executor"],
-    "capacity": 1,
-    "orchestration_mode": "local_db",
-    "allow_write": true,
-    "allow_full_access": false,
-    "allow_cwd_override": true
-  }
-}
-```
-
-本机 app-server 使用 stdio MCP，并与中央网关指向同一个 SQLite 绝对路径：
-
-```toml
-[mcp_servers.codex_orchestrator]
-command = "uv"
-args = [
-  "run", "--project", "C:\\path\\to\\codex-remote-mcp\\services\\python-workflow",
-  "python", "C:\\path\\to\\codex-remote-mcp\\services\\python-workflow\\src\\codex_orchestrator_mcp.py"
-]
-required = true
-
-[mcp_servers.codex_orchestrator.env]
-CODEX_AGENTS_FILE = "C:\\path\\to\\codex-remote-mcp\\config\\agents.json"
-CODEX_WORKFLOW_DB = "C:\\path\\to\\codex-remote-mcp\\workflows.db"
-```
-
-这种方式只适用于与中央 `workflows.db` 同机的 app-server。中央机如果同时作为执行机，`capabilities` 保留两种能力即可；远程机器不得照搬这段 stdio/SQLite 配置。
+启动中央和 8091 后，在“机器管理”建立分组并登记机器。表单只填写 IP、执行服务端口、分组、能力。检测通过后选用于 SOP；无旧配置导入。详细流程及本机 `local_db` 配置见[机器管理部署说明](WEBUI_MACHINE_REGISTRATION.zh-CN.md)。
 
 ## 七、纯远程主监督机部署
 
-纯主监督机运行两个进程：
+远程使用 `config/workflow-sidecar.example.json` 生成本机 `config/workflow-service.json`，填写中央地址及独立 Sidecar 令牌文件路径。无需维护本地执行机清单，按中央认证接口获取同组机器。
 
-1. Codex app-server `4500`。
-2. Workflow Sidecar `127.0.0.1:8082`。
-
-不部署中央网关、监控中心、配置中心、MySQL 或 SQLite。
-
-### 1. 准备主监督机本地执行机清单
-
-```powershell
-Copy-Item .\config\agents.remote-sidecar.example.json `
-  .\config\agents.sidecar.json
-```
-
-主监督机本地的 `agents.sidecar.json` 至少应列出：
-
-- 自己的逻辑 ID。
-- 该主监督可能派发的所有业务执行机。
-- 从这台主监督机访问各 app-server 时应使用的 URL 和令牌来源。
-
-注意中央和远程机器的 URL 视角可能不同。例如中央通过内网域名连接 `hybrid-a`，而 `hybrid-a` 本机 Sidecar 连接自己的 app-server 时可以使用 `ws://127.0.0.1:4500`。
-
-### 2. 准备独立 Sidecar 机器令牌
-
-每个远程主监督使用一个独立随机令牌。中央机和对应主监督机各保存一份内容相同的令牌；文件路径可以不同。
-
-```text
-中央机：C:\codex-secrets\supervisor-a-sidecar.token
-主监督机：C:\codex-secrets\supervisor-a-sidecar.token
-```
-
-中央 `agents.json` 的 `sidecar_token_file` 指向中央机文件；启动 Sidecar 时的 `-TokenFile` 指向主监督机文件。
-
-### 3. 配置主监督 app-server 的 HTTP MCP
-
-编辑运行 app-server 的操作系统账号所使用的 `~/.codex/config.toml`：
-
-```toml
-[mcp_servers.codex_orchestrator]
-url = "http://127.0.0.1:8082/mcp"
-required = true
-```
-
-Streamable HTTP MCP 只使用 `url`。不要在该表下面保留 stdio 的 `command`、`args`、`cwd` 或 `[mcp_servers.codex_orchestrator.env]`。
-
-### 4. 启动 Sidecar `8082`
-
-Windows：
-
-```powershell
-Set-Location C:\path\to\codex-remote-mcp
-
-.\scripts\start_workflow_sidecar.ps1 `
-  -AgentId supervisor-a `
-  -GatewayUrl http://central.internal:8080 `
-  -TokenFile C:\codex-secrets\supervisor-a-sidecar.token `
-  -AgentsFile .\config\agents.sidecar.json
-```
-
-也可以使用环境变量：
-
-```powershell
-$env:SUPERVISOR_A_SIDECAR_TOKEN = "由密钥系统注入"
-
-.\scripts\start_workflow_sidecar.ps1 `
-  -AgentId supervisor-a `
-  -GatewayUrl http://central.internal:8080 `
-  -TokenEnv SUPERVISOR_A_SIDECAR_TOKEN `
-  -AgentsFile .\config\agents.sidecar.json
-```
-
-`-TokenEnv` 和 `-TokenFile` 必须二选一。
-
-Linux：
-
-```bash
-cd /opt/codex-remote-mcp
-
-.venv/bin/python services/python-workflow/src/workflow_sidecar.py \
-  --host 127.0.0.1 --port 8082 \
-  --agent-id supervisor-a \
-  --gateway-url http://central.internal:8080 \
-  --token-file /etc/codex/secrets/supervisor-a-sidecar.token \
-  --agents /etc/codex/agents.sidecar.json
-```
-
-Sidecar 必须保持常驻。生产环境使用 Windows 服务、systemd 或其他进程管理器拉起，并配置失败重启。
-
-### 5. 启动主监督 app-server `4500`
-
-Sidecar 已监听后再启动或重启 app-server，使 HTTP MCP 配置生效：
-
-```powershell
-codex app-server `
-  --listen ws://0.0.0.0:4500 `
-  --ws-auth capability-token `
-  --ws-token-file C:\codex-secrets\supervisor-a-app-server.token
-```
-
-中央 `agents.json` 中对应主监督的 `token_file` 或 `token_env` 必须能解析出同一个 app-server 连接令牌。
+执行服务的 HTTP MCP 配置及 Sidecar 启动命令见 [Python README](../services/python-workflow/README.md#启动远程-sidecar)。执行服务端口通常为 `4500`；Sidecar 仅监听回环地址 `8082`，不要对外开放。启动执行服务仍使用部署好的 app-server 认证规则，凭据必须与中央及派发方解析出的执行服务凭据匹配。
 
 ## 八、纯业务执行机部署
 
@@ -500,153 +271,19 @@ codex app-server `
 
 ### 3. 配置调用方
 
-- 中央 `agents.json` 需要有该执行机 ID，以便提交工作流时校验。
-- 每台可能向它派发步骤的主监督机，其 `agents.sidecar.json` 也需要有同一个执行机 ID。
-- Sidecar 本地配置中的 URL 必须从主监督机网络视角可达。
-- Sidecar 本地配置中的 `token_file` 是主监督机本地保存的客户端令牌文件，不是执行机上的路径。
+在网页将执行机登记到主监督所在分组，选择执行机能力并手动检测。统一执行凭据引用必须在中央与所有派发方可解析。同一登记 IP／端口必须从组内派发方可达，不维护不同来源的独立地址。
 
-纯执行机不需要：
-
-- `8080`、`8090`、`8091`。
-- MySQL 或 SQLite。
-- `workflow_sidecar.py`。
-- `[mcp_servers.codex_orchestrator]`。
-- `CODEX_WORKFLOW_DB`。
+纯执行机无需网关、Java 服务、SQLite 或 Sidecar。
 
 ## 九、主监督和业务执行混合机部署
 
-混合机仍然只需要一套 Codex app-server，再加一个 Sidecar：
+混合机运行一套执行服务和一个 Sidecar，网页同时勾选主监督、执行机两种能力。主监督容量仍为 1；监督和业务步骤使用独立会话。无需额外维护机器清单，执行凭据与 Sidecar 身份凭据仍是两种用途。
 
-```text
-Codex app-server 4500：承载主监督会话，也承载业务步骤会话
-Workflow Sidecar 8082：给主监督提供工作流工具，并派发业务步骤
-```
+## 十、使用本分支替换旧部署
 
-不需要为监督角色和执行角色分别启动两个 app-server。一个 app-server 可以承载多个独立 Codex 会话；主监督容量 `1` 只限制活动工作流数量，不等同于执行步骤容量。
+等待活动任务结束，备份中央运行库后更新代码。按[机器管理部署说明](WEBUI_MACHINE_REGISTRATION.zh-CN.md#首次登记与升级)准备新服务配置并重新网页登记，不自动迁移旧机器。不删除旧配置文件或业务数据。
 
-中央配置：
-
-```json
-{
-  "hybrid-a": {
-      "url": "ws://hybrid-a.internal:4500",
-    "cwd": "D:\\codex-workspaces\\hybrid-a",
-    "enabled": true,
-    "capabilities": ["supervisor", "executor"],
-    "capacity": 1,
-    "token_file": "C:\\codex-secrets\\hybrid-a-app-server.token",
-    "orchestration_mode": "remote_sidecar",
-    "sidecar_token_file": "C:\\codex-secrets\\hybrid-a-sidecar.token",
-    "allow_write": true,
-    "allow_full_access": false,
-    "allow_cwd_override": true
-  }
-}
-```
-
-混合机本地 `agents.sidecar.json`：
-
-```json
-{
-  "agents": {
-    "hybrid-a": {
-      "url": "ws://127.0.0.1:4500",
-      "cwd": "D:\\codex-workspaces\\hybrid-a",
-      "enabled": true,
-      "capabilities": ["supervisor", "executor"],
-      "capacity": 1,
-      "allow_write": true,
-      "allow_full_access": false,
-      "allow_cwd_override": true
-    },
-    "worker-a": {
-      "url": "ws://worker-a.internal:4500",
-      "cwd": "D:\\codex-workspaces\\worker-a",
-      "enabled": true,
-      "capabilities": ["executor"],
-      "token_file": "C:\\codex-secrets\\worker-a-app-server.token",
-      "allow_write": true,
-      "allow_full_access": false,
-      "allow_cwd_override": true
-    }
-  }
-}
-```
-
-如果业务步骤选择 `hybrid-a`，Sidecar 通过回环地址把步骤派回同一 app-server；如果步骤选择 `worker-a`，Sidecar通过内网连接远程执行机。
-
-混合机启动顺序：
-
-1. 确认中央 `8080` 已启动。
-2. 启动本机 Sidecar `8082`。
-3. 启动或重启本机 app-server `4500`。
-4. 从中央 `GET /agents` 确认 `hybrid-a` 为 `online`。
-
-## 十、从旧 stdio MCP 迁移到 Sidecar
-
-### 哪些机器需要迁移
-
-- 中央机上继续使用 `local_db` 的本地主监督可以保留 stdio MCP。
-- 任何作为远程主监督的机器，都应迁移到 HTTP Sidecar。
-- 纯业务执行机不应该有 Orchestrator MCP；如果以前误配，可以删除整个 `codex_orchestrator` MCP 配置。
-
-### 迁移前准备
-
-1. 停止提交新工作流。
-2. 等待当前工作流结束；不要在活动工作流中重启中央网关或主监督。
-3. 部署当前代码和 Python 依赖。
-4. 在中央 `agents.json` 给目标主监督增加 `remote_sidecar` 和独立机器令牌。
-5. 在远程主监督机准备 `agents.sidecar.json` 和相同内容的 Sidecar 令牌。
-
-### 删除旧 stdio 配置
-
-旧配置通常类似：
-
-```toml
-[mcp_servers.codex_orchestrator]
-command = "uv"
-args = ["run", "..."]
-required = true
-
-[mcp_servers.codex_orchestrator.env]
-CODEX_AGENTS_FILE = "..."
-CODEX_WORKFLOW_DB = "..."
-```
-
-迁移后必须替换为：
-
-```toml
-[mcp_servers.codex_orchestrator]
-url = "http://127.0.0.1:8082/mcp"
-required = true
-```
-
-必须同时删除：
-
-- `command`。
-- `args`。
-- `cwd`。
-- 整个 `[mcp_servers.codex_orchestrator.env]` 子段。
-- 远程机器服务配置中的 `CODEX_WORKFLOW_DB`。
-- 远程机器上的中央 SQLite 副本或共享挂载配置。
-
-只把 `command` 改成 `url` 而保留旧 `env` 子段会导致 app-server 报错：
-
-```text
-env is not supported for streamable_http
-```
-
-此时 Codex 会把 MCP 配置视为无效，主监督无法取得工作流工具。
-
-### 迁移启动顺序
-
-1. 重启中央网关，让 `remote_sidecar` 配置生效。
-2. 启动远程 Sidecar，确认 `8082` 监听且中央显示主监督在线。
-3. 重启远程主监督 app-server，让新的 HTTP MCP 配置生效。
-4. 提交一个只读、单步骤、`legacy_text` 测试工作流。
-5. 测试通过后恢复业务提交。
-
-迁移不是“重新安装 MCP”。旧 stdio 和新 Sidecar 提供的是同一组工作流工具；改变的是 Codex 连接 MCP 的方式，以及 MCP 访问中央运行状态的方式。
+远程主监督将原 stdio 编排配置替换为本机 HTTP Sidecar 入口；中央本机主监督可继续使用读取同一中央 SQLite 的 `local_db`。
 
 ## 十一、推荐的全系统启动和停机顺序
 
@@ -731,7 +368,7 @@ availability = idle 或 busy
 2. 同一主监督连续提交两个工作流，确认第二个排队并在第一个终态后启动。
 3. 运行中停止 Sidecar，确认 20 秒内任务失败并释放租约。
 4. 恢复 Sidecar 后提交新任务，确认可以重新运行。
-5. 混合机同时作为主监督和步骤执行机，确认步骤能通过回环 app-server 执行。
+5. 混合机同时作为主监督和步骤执行机，确认步骤能通过登记 IP 和端口派回本机执行服务。
 
 ## 十三、常见故障
 
@@ -741,7 +378,7 @@ availability = idle 或 busy
 
 - Sidecar 是否监听 `127.0.0.1:8082`。
 - Sidecar 能否访问中央 `8080`。
-- `AgentId` 是否与中央 `agents.json` 完全一致。
+- 机器是否已网页登记，Sidecar 凭据是否唯一匹配该主监督。
 - Sidecar 机器令牌内容是否与中央配置解析出的令牌一致。
 - 中央目标执行机是否启用并具有 `supervisor` 能力。
 
@@ -772,7 +409,7 @@ Sidecar 令牌不匹配或中央找不到该令牌对应的唯一主监督。检
 
 ### 步骤执行机未知或能力不匹配
 
-中央 `agents.json` 必须存在该步骤的执行机 ID，且包含 `executor` 能力；远程主监督的 `agents.sidecar.json` 也必须存在相同 ID，并配置从主监督机视角可达的 app-server 地址。
+网页必须登记该步骤执行机，具备执行能力、与主监督同组、启用且检测通过；中央及主监督均须能访问登记的 IP 和端口。
 
 ## 十四、运维检查清单
 
@@ -784,7 +421,7 @@ Sidecar 令牌不匹配或中央找不到该令牌对应的唯一主监督。检
 - [ ] 每个主监督 ID 唯一，`capacity` 为 `1`。
 - [ ] 每个远程主监督有独立 Sidecar 令牌。
 - [ ] app-server 连接令牌与 Sidecar 令牌没有复用。
-- [ ] 私有 `agents.json`、令牌文件、数据库和日志未提交 Git。
+- [ ] 实际服务配置、令牌文件、数据库和日志未提交 Git。
 - [ ] `8082` 只监听回环地址。
 - [ ] `8080`、`8090`、`8091` 和 `4500` 已设置内网防火墙规则。
 - [ ] 远程主监督没有 `CODEX_WORKFLOW_DB`。

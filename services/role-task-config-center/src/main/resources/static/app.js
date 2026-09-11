@@ -38,7 +38,7 @@ async function loadGatewayReady(){
 }
 async function loadAgents({preserveOnFailure=false}={}){
   try{
-    const a=await api("/api/agents");state.agents=a.agents||[];state.agentSource=a.source||"file";state.agentsAvailable=true;
+    const a=await api("/api/agents");state.agents=a.agents||[];state.agentsAvailable=true;
   }catch{
     state.agentsAvailable=false;if(!preserveOnFailure)state.agents=[];
   }
@@ -186,7 +186,7 @@ function taskRequirements(x={}){return[x.objective||"",x.additionalNotes?`补充
 function syncTaskDingTalkTargetFields(f=$("#taskForm"),selectedId=""){const type=f.querySelector('[name="dingtalkTargetType"]:checked')?.value||"NONE",field=f.querySelector("[data-task-target-select]"),select=f.dingtalkTargetId;if(type==="NONE"){field.classList.add("hidden");select.required=false;select.innerHTML='<option value="">不配置主动通知</option>';return}const typeLabel=type==="PERSON"?"人员":"群聊",used=new Set(state.tasks.filter(t=>t.id!==f.id.value&&t.dingtalkTargetId).map(t=>t.dingtalkTargetId)),targets=state.dingtalkTargets.filter(t=>t.targetType===type&&((t.enabled&&t.available&&true)||t.id===selectedId));field.querySelector("[data-task-target-label]").textContent=`选择${typeLabel}`;field.classList.remove("hidden");select.required=true;select.innerHTML=`<option value="">${targets.length?`请选择${typeLabel}`:`暂无可选${typeLabel}`}</option>${targets.map(t=>`<option value="${t.id}" ${t.id===selectedId?"selected":""}>${esc(t.displayName)}${!t.enabled||!t.available?"（已不可用）":""}</option>`).join("")}`;select.value=selectedId||""}
 function openTask(x={enabled:true}){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=taskRequirements(x);f.additionalNotes.value="";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");const selectedTarget=x.dingtalkTarget||state.dingtalkTargets.find(t=>t.id===x.dingtalkTargetId),selectedType=selectedTarget?.targetType||"NONE",typeInput=f.querySelector(`[name="dingtalkTargetType"][value="${selectedType}"]`);if(typeInput)typeInput.checked=true;syncTaskDingTalkTargetFields(f,x.dingtalkTargetId||"");f.scheduleEnabled.checked=x.scheduleEnabled===true;f.scheduleMode.value=x.scheduleMode||"daily";f.scheduleTime.value=x.scheduleTime||"";f.scheduleIntervalMinutes.value=x.scheduleIntervalMinutes||"";syncTaskScheduleFields(f);f.notifyDingTalk.checked=x.notifyDingTalk===true;f.enabled.checked=x.enabled!==false;$("#taskDialog").showModal()}
 
-function blankSop(){return{id:"",name:"",description:"",supervisorAgentId:state.agentSource==="registry"?(suggestedAgents("supervisor")[0]?.agentId||""):"local",supervisorTimeoutSec:7200,maxRetryCount:10,advanceMode:"automatic",handoffMode:"legacy_text",defaultStepModel:"gpt-5.6-sol",enabled:true,steps:[]}}
+function blankSop(){return{id:"",name:"",description:"",supervisorAgentId:(suggestedAgents("supervisor")[0]?.agentId||""),supervisorTimeoutSec:7200,maxRetryCount:10,advanceMode:"automatic",handoffMode:"legacy_text",defaultStepModel:"gpt-5.6-sol",enabled:true,steps:[]}}
 function normalizeStep(s){const permissionProfile=s.permissionProfile||(s.writeEnabled===true?"workspace_write":"read_only");return{...s,_clientId:s._clientId||uid(),displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",permissionProfile,writeEnabled:permissionProfile!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
 function setDraft(sop){
   const copy={...blankSop(),...sop,steps:(sop.steps||[]).map(normalizeStep)};
@@ -265,7 +265,7 @@ function workflowInspectorHtml(){
 }
 function suggestedAgents(capability){
   const supervisor=state.agents.find(a=>a.agentId===state.sop.draft?.supervisorAgentId);
-  return state.agents.filter(a=>a.enabled!==false&&(!Array.isArray(a.capabilities)||a.capabilities.includes(capability))&&(state.agentSource!=="registry"||capability!=="executor"||a.groupId===supervisor?.groupId));
+  return state.agents.filter(a=>a.enabled!==false&&a.capabilities?.includes(capability)&&(capability!=="executor"||a.groupId===supervisor?.groupId));
 }
 function supervisorRuntimeView(agentId){
   if(!state.gatewayOnline)return{state:"unknown",label:"状态未知",detail:"Python 网关不可用"};
@@ -334,7 +334,7 @@ function nodeInspectorHtml(s){
 
 function addRoleNode(roleId,index){
   const role=roleById(roleId);if(!role||!role.enabled)return;
-  const suggested=suggestedAgents("executor")[0];const node=normalizeStep({roleId:role.id,roleName:role.name,roleDuty:role.duty,displayName:role.name,instruction:role.duty,agentId:suggested?.agentId||(state.agentSource==="registry"?"":"local")});
+  const suggested=suggestedAgents("executor")[0];const node=normalizeStep({roleId:role.id,roleName:role.name,roleDuty:role.duty,displayName:role.name,instruction:role.duty,agentId:suggested?.agentId||""});
   state.sop.draft.steps.splice(index,0,node);state.sop.selectedNodeId=node._clientId;state.sop.tab="node";renderSopWorkspace();
 }
 function moveNode(nodeId,index){
@@ -356,11 +356,9 @@ function updateField(target,obj,field){
 function validateSop(){
   const d=state.sop.draft;if(!d)return"请先选择或新建工作流。";if(!d.name.trim())return"请输入工作流名称。";
   if(!(d.supervisorAgentId||"").trim())return"请输入主监督执行机 ID。";
-  if(state.agentSource==="registry"){
-    const supervisor=state.agents.find(a=>a.agentId===d.supervisorAgentId);
-    if(!supervisor?.capabilities.includes("supervisor"))return"请选择已登记的主监督。";
-    for(const step of d.steps){const executor=state.agents.find(a=>a.agentId===step.agentId);if(!executor?.capabilities.includes("executor")||executor.groupId!==supervisor.groupId)return"所有步骤必须选择与主监督同组的执行机。"}
-  }
+  const supervisor=state.agents.find(a=>a.agentId===d.supervisorAgentId);
+  if(!supervisor?.capabilities?.includes("supervisor"))return"请选择已登记的主监督。";
+  for(const step of d.steps){const executor=state.agents.find(a=>a.agentId===step.agentId);if(!executor?.capabilities?.includes("executor")||executor.groupId!==supervisor.groupId)return"所有步骤必须选择与主监督同组的执行机。"}
   if(!d.steps.length)return"请至少拖入一个角色节点。";
   if(d.supervisorTimeoutSec<10||d.supervisorTimeoutSec>7200)return"主监督最长时间必须在 10 到 7200 秒之间。";
   if(d.maxRetryCount<0||d.maxRetryCount>100)return"单次任务最多重跑次数必须在 0 到 100 之间。";

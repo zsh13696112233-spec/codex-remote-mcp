@@ -8,6 +8,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
+from workflow_service_config import setting
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,6 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from codex_orchestrator_mcp import (
-    CONFIG_PATH,
     Orchestrator,
     utc_now,
 )
@@ -68,26 +68,19 @@ class WorkflowGateway:
     ) -> None:
         self.store = store
         self.orchestrator = orchestrator
-        self.registry = None
-        source = os.getenv("CODEX_AGENT_SOURCE", "file")
-        if source not in {"file", "registry"}:
-            raise ValueError("CODEX_AGENT_SOURCE 只能为 file 或 registry。")
-        if source == "registry":
-            from agent_registry import AgentRegistry
-            self.registry = AgentRegistry(store)
-            orchestrator.agent_provider = self.registry.configs
+        from agent_registry import AgentRegistry
+        self.registry = AgentRegistry(store)
+        orchestrator.agent_provider = self.registry.configs
         if assistant_orchestrator is not None:
             self.assistant_orchestrator = assistant_orchestrator
         elif isinstance(orchestrator, Orchestrator):
             self.assistant_orchestrator = Orchestrator(
-                orchestrator.config_path,
                 client_factory=orchestrator._client_factory,
                 serialize_agent_jobs=False,
             )
         else:
             self.assistant_orchestrator = orchestrator
-        if self.registry is not None:
-            self.assistant_orchestrator.agent_provider = self.registry.configs
+        self.assistant_orchestrator.agent_provider = self.registry.configs
         self.event_batcher = AsyncEventBatcher(store)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._chat_tasks: dict[str, asyncio.Task[None]] = {}
@@ -149,9 +142,8 @@ class WorkflowGateway:
 
     async def submit(self, raw_spec: dict[str, Any]) -> dict[str, Any]:
         spec = WorkflowStore.normalize_spec(raw_spec)
-        if self.registry is not None:
-            await _database_call(self.registry.validate, spec["supervisorAgentId"],
-                                 [node["agentId"] for node in spec["nodes"]], require_test=True)
+        await _database_call(self.registry.validate, spec["supervisorAgentId"],
+                             [node["agentId"] for node in spec["nodes"]], require_test=True)
         agent_values = self.orchestrator.list_agents()
         agents_by_id = {item["agent_id"]: item for item in agent_values}
         available_agents = set(agents_by_id)
@@ -293,7 +285,7 @@ class WorkflowGateway:
             else set()
         )
         result: list[dict[str, Any]] = []
-        registry_metadata = {row["agentId"]: row for row in self.registry.public()} if self.registry else {}
+        registry_metadata = {row["agentId"]: row for row in self.registry.public()}
         for item in self.orchestrator.list_agents():
             agent_id = str(item["agent_id"])
             capabilities = list(
@@ -343,9 +335,8 @@ class WorkflowGateway:
                         "lastOnlineAt": runtime.get("lastOnlineAt"),
                     }
                 )
-            if self.registry is not None:
-                metadata = registry_metadata.get(agent_id, {})
-                value.update(metadata)
+            metadata = registry_metadata.get(agent_id, {})
+            value.update(metadata)
             result.append(value)
         return result
 
@@ -1581,23 +1572,19 @@ async def ready(_: Request) -> Response:
 async def list_agents(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     return JSONResponse({"agents": await asyncio.to_thread(gateway.public_agents),
-                         "source": "registry" if gateway.registry else "file"})
+                         "source": "registry"})
 
 
 async def manage_machines(request: Request) -> Response:
     gateway = request.app.state.gateway
     registry = gateway.registry
-    if registry is None:
-        return JSONResponse({"error": "请先在网关启用 registry 机器登记模式。"}, status_code=409)
     try:
         body = await request.json() if request.method in {"POST", "PUT"} else {}
         if not isinstance(body, dict):
             raise ValueError("请求体必须是 JSON 对象。")
         path = request.url.path
         key = request.path_params.get("agent_id") or request.path_params.get("group_id")
-        if path == "/agents/import":
-            result = await _database_call(registry.import_file, gateway.orchestrator.config_path)
-        elif path == "/agents/validate":
+        if path == "/agents/validate":
             ids = body.get("executorIds")
             if not isinstance(body.get("supervisorId"), str) or not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
                 raise ValueError("请选择主监督和执行机。")
@@ -1639,8 +1626,6 @@ async def manage_machines(request: Request) -> Response:
 async def internal_group_agents(request: Request) -> Response:
     try:
         gateway, supervisor_id = _sidecar_identity(request)
-        if gateway.registry is None:
-            raise ValueError("中央未启用机器登记模式。")
         rows = await _database_call(gateway.registry.rows)
         own = rows[supervisor_id]
         values = {}
@@ -2037,15 +2022,13 @@ async def internal_add_events(request: Request) -> Response:
 def create_app(
     *,
     db_path: Path | str | None = None,
-    config_path: Path | str = CONFIG_PATH,
     orchestrator: Orchestrator | None = None,
 ) -> Starlette:
     selected_db_path = Path(
-        db_path or os.getenv("CODEX_WORKFLOW_DB", DEFAULT_DB_PATH)
+        db_path or setting("workflow_db", DEFAULT_DB_PATH)
     ).expanduser()
     store = WorkflowStore(selected_db_path)
-    selected_config_path = Path(config_path).expanduser()
-    supervisor_orchestrator = orchestrator or Orchestrator(selected_config_path)
+    supervisor_orchestrator = orchestrator or Orchestrator()
     gateway = WorkflowGateway(store, supervisor_orchestrator)
 
     @asynccontextmanager
@@ -2068,7 +2051,6 @@ def create_app(
             Route("/agent-groups", manage_machines, methods=["GET", "POST"]),
             Route("/agent-groups/{group_id}", manage_machines, methods=["PUT", "DELETE"]),
             Route("/agents", manage_machines, methods=["POST"]),
-            Route("/agents/import", manage_machines, methods=["POST"]),
             Route("/agents/validate", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}/test", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}", manage_machines, methods=["PUT"]),
@@ -2169,10 +2151,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument(
-        "--db", default=os.getenv("CODEX_WORKFLOW_DB", str(DEFAULT_DB_PATH))
-    )
-    parser.add_argument(
-        "--agents", default=os.getenv("CODEX_AGENTS_FILE", str(CONFIG_PATH))
+        "--db", default=setting("workflow_db", str(DEFAULT_DB_PATH))
     )
     return parser
 
@@ -2180,7 +2159,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_argument_parser().parse_args()
     uvicorn.run(
-        create_app(db_path=args.db, config_path=args.agents),
+        create_app(db_path=args.db),
         host=args.host,
         port=args.port,
     )

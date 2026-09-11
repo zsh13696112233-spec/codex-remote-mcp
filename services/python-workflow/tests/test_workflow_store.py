@@ -11,10 +11,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.registry_fixtures import FixtureWorkflowStore as WorkflowStore
 from workflow_event_batcher import AsyncEventBatcher
 from workflow_store import (
     SINGLE_OUTPUT_CONSTRAINT,
-    WorkflowStore,
     utc_now,
 )
 

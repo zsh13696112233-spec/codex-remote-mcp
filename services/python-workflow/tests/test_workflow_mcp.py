@@ -10,6 +10,8 @@ from tests.mock_app_server import MockAppServer
 from workflow_store import WorkflowStore
 
 
+from tests.registry_fixtures import (fixture_orchestrator, fixture_gateway, fixture_app, FixtureWorkflowStore)
+
 class WorkflowMcpTests(unittest.IsolatedAsyncioTestCase):
     async def test_dispatch_rechecks_deadline_when_release_loses_to_delivery(self) -> None:
         store = Mock()
@@ -47,7 +49,7 @@ class WorkflowMcpTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     encoding="utf-8",
                 )
-                store = WorkflowStore(Path(directory, "workflows.db"))
+                store = FixtureWorkflowStore(Path(directory, "workflows.db"))
                 store.create_workflow(
                     {
                         "workflowId": "mcp-demo",
@@ -67,7 +69,7 @@ class WorkflowMcpTests(unittest.IsolatedAsyncioTestCase):
                         ],
                     }
                 )
-                orchestrator = service.Orchestrator(config)
+                orchestrator = fixture_orchestrator(config)
                 with (
                     patch.object(service, "orchestrator", orchestrator),
                     patch.object(service, "_workflow_store", store),
@@ -113,7 +115,7 @@ class WorkflowMcpTests(unittest.IsolatedAsyncioTestCase):
                     }),
                     encoding="utf-8",
                 )
-                store = WorkflowStore(Path(directory, "workflows.db"))
+                store = FixtureWorkflowStore(Path(directory, "workflows.db"))
                 for workflow_id, write in (("write-demo", True), ("read-demo", False)):
                     nodes = [
                         {
@@ -140,7 +142,7 @@ class WorkflowMcpTests(unittest.IsolatedAsyncioTestCase):
                             "nodes": nodes,
                         }
                     )
-                orchestrator = service.Orchestrator(config)
+                orchestrator = fixture_orchestrator(config)
                 with (
                     patch.object(service, "orchestrator", orchestrator),
                     patch.object(service, "_workflow_store", store),

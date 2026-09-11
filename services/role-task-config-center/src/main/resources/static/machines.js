@@ -5,11 +5,8 @@ async function renderMachines(){
   content.innerHTML='<div class="empty">正在加载机器…</div>';
   try{
     await loadRuntime();
-    if(state.agentSource!=='registry'){
-      content.innerHTML='<div class="empty">机器管理需要在中央网关和配置中心启用 CODEX_AGENT_SOURCE=registry。现有文件模式保持不变。</div>';return;
-    }
     machineGroups=(await api('/api/agent-groups')).groups;
-    content.innerHTML=`<div class="actions"><button data-machine-action="group-add">＋ 新建分组</button><button data-machine-action="add" ${machineGroups.length?'':'disabled'}>＋ 添加机器</button><button data-machine-action="import">导入旧配置（一次）</button><button data-machine-action="refresh">刷新</button></div>${machineGroups.length?machineGroups.map(g=>`<section class="card" style="display:block"><div class="actions"><h3>${esc(g.name)}</h3><button data-machine-action="group-edit" data-id="${esc(g.id)}">重命名</button><button data-machine-action="group-delete" data-id="${esc(g.id)}">删除分组</button></div>${state.agents.filter(a=>a.groupId===g.id).map(a=>`<article class="card"><div><h3>${esc(a.name)} : ${a.port} ${status(a)}</h3><p>${(a.capabilities||[]).map(c=>c==='supervisor'?'主监督':'执行机').join(' / ')} · ${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}${a.connectionStatus?` · ${a.connectionStatus==='online'?'在线':a.connectionStatus==='offline'?'离线':'在线状态未知'}`:''}</p><small>编号：${esc(a.agentId)} · 最近检测：${time(a.testedAt)}</small></div><div class="actions"><button data-machine-action="test" data-id="${esc(a.agentId)}">检测连接</button><button data-machine-action="edit" data-id="${esc(a.agentId)}">编辑</button><button data-machine-action="toggle" data-id="${esc(a.agentId)}">${a.enabled?'停用':'启用'}</button></div></article>`).join('')||'<p>暂无机器，请添加机器。</p>'}</section>`).join(''):'<div class="empty">请先建立分组，再添加机器。</div>'}`;
+    content.innerHTML=`<div class="actions"><button data-machine-action="group-add">＋ 新建分组</button><button data-machine-action="add" ${machineGroups.length?'':'disabled'}>＋ 添加机器</button><button data-machine-action="refresh">刷新</button></div>${machineGroups.length?machineGroups.map(g=>`<section class="card" style="display:block"><div class="actions"><h3>${esc(g.name)}</h3><button data-machine-action="group-edit" data-id="${esc(g.id)}">重命名</button><button data-machine-action="group-delete" data-id="${esc(g.id)}">删除分组</button></div>${state.agents.filter(a=>a.groupId===g.id).map(a=>`<article class="card"><div><h3>${esc(a.name)} : ${a.port} ${status(a)}</h3><p>${(a.capabilities||[]).map(c=>c==='supervisor'?'主监督':'执行机').join(' / ')} · ${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}${a.connectionStatus?` · ${a.connectionStatus==='online'?'在线':a.connectionStatus==='offline'?'离线':'在线状态未知'}`:''}</p><small>编号：${esc(a.agentId)} · 最近检测：${time(a.testedAt)}</small></div><div class="actions"><button data-machine-action="test" data-id="${esc(a.agentId)}">检测连接</button><button data-machine-action="edit" data-id="${esc(a.agentId)}">编辑</button><button data-machine-action="toggle" data-id="${esc(a.agentId)}">${a.enabled?'停用':'启用'}</button></div></article>`).join('')||'<p>暂无机器，请添加机器。</p>'}</section>`).join(''):'<div class="empty">请先建立分组，再添加机器。</div>'}`;
   }catch(error){content.innerHTML=`<div class="empty">${esc(error.message)} <button data-machine-action="refresh">重试</button></div>`}
 }
 
@@ -58,9 +55,6 @@ document.addEventListener('click',async event=>{
       const result=await api(`/api/agents/${encodeURIComponent(id)}/test`,{method:'POST',body:'{}'});toast(result.message);
     }else if(action==='toggle'){
       await api(`/api/agents/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify({...machineBody(a),enabled:!a.enabled})});
-    }else if(action==='import'){
-      if(!confirm('将网关部署的旧配置一次性导入默认分组？已有登记不会被覆盖。'))return;
-      const result=await api('/api/agents/import',{method:'POST',body:'{}'});toast(`已导入 ${result.imported} 台机器，请逐台检测。`);
     }
     await renderMachines();
   }catch(error){toast(error.message)}finally{button.disabled=false;if(action==='test')button.textContent='检测连接'}

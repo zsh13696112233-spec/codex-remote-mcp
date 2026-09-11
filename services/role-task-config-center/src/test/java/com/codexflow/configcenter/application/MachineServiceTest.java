@@ -8,7 +8,6 @@ import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
 import java.util.List;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
 import tools.jackson.databind.node.JsonNodeFactory;
 
 class MachineServiceTest {
@@ -16,17 +15,7 @@ class MachineServiceTest {
   private final MachineService service = new MachineService(gateway);
 
   @Test
-  void fileModeKeepsOfflineSopSave() {
-    ReflectionTestUtils.setField(service, "source", "file");
-    service.validateSop(null);
-    verifyNoInteractions(gateway);
-  }
-
-  @Test
   void registrySopSaveValidatesBothSides() {
-    ReflectionTestUtils.setField(service, "source", "registry");
-    when(gateway.get("/agents"))
-        .thenReturn(JsonNodeFactory.instance.objectNode().put("source", "registry"));
     var body = mock(SopSaveRequest.class);
     var step = mock(SopStepRequest.class);
     when(body.supervisorAgentId()).thenReturn("supervisor");
@@ -43,6 +32,16 @@ class MachineServiceTest {
   }
 
   @Test
+  void gatewayFailureCannotBypassSopValidation() {
+    var body = mock(SopSaveRequest.class);
+    when(body.supervisorAgentId()).thenReturn("supervisor");
+    when(body.steps()).thenReturn(List.of());
+    when(gateway.post(eq("/agents/validate"), any())).thenThrow(new IllegalStateException("网关不可用"));
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.validateSop(body))
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
   void managementUsesGatewayAndEncodesIdentifiers() {
     var body = JsonNodeFactory.instance.objectNode().put("name", "第一组");
     service.createGroup(body);
@@ -51,13 +50,11 @@ class MachineServiceTest {
     service.createMachine(body);
     service.updateMachine("worker", body);
     service.testMachine("worker");
-    service.importMachines();
     verify(gateway).post("/agent-groups", body);
     verify(gateway).put("/agent-groups/group%2Fa", body);
     verify(gateway).delete("/agent-groups/empty");
     verify(gateway).post("/agents", body);
     verify(gateway).put("/agents/worker", body);
     verify(gateway).post(eq("/agents/worker/test"), any());
-    verify(gateway).post(eq("/agents/import"), any());
   }
 }

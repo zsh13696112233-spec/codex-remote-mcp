@@ -48,7 +48,7 @@ class DingTalkProcessEventTests(unittest.IsolatedAsyncioTestCase):
                 spec["supervisorAgentId"] = "local"
                 store.create_workflow(spec)
                 agent = AgentConfig.from_dict("local", {"url": server.url, "cwd": "/tasks"})
-                orchestrator = Orchestrator(Path("unused-test-config"))
+                orchestrator = Orchestrator()
                 orchestrator.load_agents = lambda: {"local": agent}
                 gateway = WorkflowGateway(store, orchestrator, orchestrator)
                 try:

@@ -30,7 +30,7 @@
 - `8091` 配置中心负责角色、SOP、任务定义、运行快照以及提交、取消、重试等控制操作；浏览器不得直接调用 Python 网关。
 - `8090` 监控中心只展示 URL 中指定的单个工作流，并代理进度、事件和任务助手消息；不得增加任务编辑、直接提交、直接取消、直接重试、直接跳过等控制接口，也不得连接配置中心的 MySQL。
 - `8080` Python 网关是 Java 系统访问工作流运行时的 HTTP 边界；Java 不直接调用 MCP、Python 脚本或 app-server WebSocket。
-- 本机 `local_db` 模式的网关与 MCP 进程必须使用完全相同的 `CODEX_WORKFLOW_DB` 绝对路径；远程 `remote_sidecar` 通过带机器认证和租约的内部 HTTP API 访问中央状态，不配置或读取 SQLite。变更状态模型时，同时检查 `workflow_store.py`、网关、MCP、Java 客户端和前端状态映射。
+- 本机 `local_db` 模式的网关与 MCP 进程必须从服务配置读取完全相同的 `workflow_db` 绝对路径；远程 `remote_sidecar` 通过带机器认证和租约的内部 HTTP API 访问中央状态，不配置或读取 SQLite。变更状态模型时，同时检查 `workflow_store.py`、网关、MCP、Java 客户端和前端状态映射。
 - 节点执行顺序由 `dependsOn` 决定，不能依赖 JSON 数组顺序。依赖未全部完成或经确认跳过时不得启动后续节点。
 - 主监督会话负责编排，不代替业务节点完成任务。用户可见消息应使用普通中文和“步骤”等业务说法，不暴露 MCP、thread、turn、agent、内部英文状态码或原始事件 JSON。
 - Skill/MCP 字段当前只是配置标签：不得据此自动安装、启用、授予权限或注入提示词。
@@ -82,8 +82,8 @@
 
 ## 配置与安全
 
-- 不读取、打印或提交 `config/agents.json`、`.env`、数据库文件、访问令牌或数据库密码。需要示例时只修改 `config/agents.example.json`，使用虚构值和 `token_env`。
-- 不支持在执行机 JSON 中直接写 `token`；使用 `token_env` 引用环境变量名，或 `token_file` 引用服务所在机器上的绝对文件路径，严格二选一。远程机器认证另用 `sidecar_token_env` / `sidecar_token_file`；不得读取或回显实际令牌文件内容。
+- 不读取、打印或提交 `config/agents.json`、`.env`、数据库文件、访问令牌或数据库密码。机器登记只使用中央 SQLite，不恢复文件来源或导入接口。部署示例维护在 `config/workflow-service.example.json` 和 `config/workflow-sidecar.example.json`，使用虚构值和凭据引用；不读取、打印或提交实际 `config/workflow-service.json`。
+- 不支持在服务配置或机器登记字段中直接写 `token`；使用 `token_env` 引用环境变量名，或 `token_file` 引用服务所在机器上的绝对文件路径，严格二选一。远程机器认证另用 `sidecar_token_env` / `sidecar_token_file`；不得读取或回显实际令牌文件内容。
 - 三个服务默认监听 `0.0.0.0` 以支持可信内网访问，必须通过主机防火墙限制来源。不要建议将 `8080`、`8090` 或 `8091` 直接暴露到公网；只需本机访问时应显式改为 `127.0.0.1`。
 - 尊重 `allow_write` 和 `allow_cwd_override`；不能通过请求参数绕过执行机侧限制。
 - 不提交 `.venv/`、`.uv-cache/`、`target/`、`*.db*`、IDE 文件或其他 `.gitignore` 中的本地产物。

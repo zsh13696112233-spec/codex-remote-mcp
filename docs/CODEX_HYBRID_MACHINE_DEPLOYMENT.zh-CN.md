@@ -11,7 +11,7 @@ Codex 开始操作前必须遵守以下约束：
 - 先阅读仓库根目录的 `AGENTS.md`、`README.md`、本文和 `services/python-workflow/README.md`。
 - 不读取、显示、复制到聊天、写入日志或提交任何 Token 内容。
 - 不把真实 Token 写入 JSON、TOML、PowerShell 脚本或 Markdown。
-- 不提交 `*.token`、`config/agents.json`、`config/agents.sidecar.json`、`.env` 或数据库文件。
+- 不提交 `*.token`、`config/workflow-service.json`、`.env` 或数据库文件。
 - 不使用 `git reset --hard`、`git checkout --` 或其他会丢失旧部署修改的命令。
 - 如果仓库有未提交修改，先停止升级并报告文件清单，等待用户决定如何处理。
 - 不删除旧分支。切换新分支成功后保留旧分支作为回退入口。
@@ -25,10 +25,10 @@ Codex 必须先取得以下信息。缺少任何必填项时只询问缺少的�
 | 变量 | 示例 | 必填 |
 | --- | --- | --- |
 | `REPOSITORY_URL` | `https://git.example/codex-remote-mcp.git` | 是 |
-| `TARGET_BRANCH` | `codex/multi-supervisor-phase-b` | 是 |
+| `TARGET_BRANCH` | `codex/webui-machine-registration` | 是 |
 | `TARGET_COMMIT` | 完整 Git 提交号 | 是 |
 | `CENTRAL_GATEWAY_URL` | `http://192.168.1.10:8080` | 是 |
-| `AGENT_ID` | `hybrid-02` | 是 |
+| `GROUP_NAME` | `业务一组` | 是 |
 | `MACHINE_IP` | `192.168.1.22` | 是 |
 | `PROJECT_ROOT` | `D:\services\codex-remote-mcp` | 是 |
 | `WORKSPACE_ROOT` | `D:\codex-workspaces\hybrid-02` | 是 |
@@ -53,7 +53,7 @@ Codex 必须先取得以下信息。缺少任何必填项时只询问缺少的�
 - 一个全局共享 app-server Token。
 - 每台远程主监督一个独立 Sidecar Token。
 
-同一对令牌文件在中央机和目标机上的路径可以不同，但对应文件内容必须一致：
+执行服务的客户端凭据引用路径必须在中央和派发方统一；服务端监听凭据文件及 Sidecar 身份凭据文件的路径可以不同，但对应内容必须一致：
 
 | Token | 中央机 | 目标混合机 |
 | --- | --- | --- |
@@ -133,33 +133,11 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent '<SIDECAR_TOKEN_FI
 - 监控中心 `8090`。
 - MySQL 或中央 SQLite。
 
-远程混合机也不得设置 `CODEX_WORKFLOW_DB`。
+远程混合机的服务配置不填写 `workflow_db`，不访问中央 SQLite。
 
-## 七、创建目标机 Sidecar 执行机配置
+## 七、准备目标机服务配置
 
-创建被 Git 忽略的 `config/agents.sidecar.json`：
-
-```json
-{
-  "agents": {
-    "<AGENT_ID>": {
-      "url": "ws://127.0.0.1:4500",
-      "cwd": "<WORKSPACE_ROOT>",
-      "enabled": true,
-      "capabilities": ["supervisor", "executor"],
-      "capacity": 1,
-      "token_file": "<APP_SERVER_TOKEN_FILE>",
-      "allow_write": true,
-      "allow_full_access": false,
-      "allow_cwd_override": true
-    }
-  }
-}
-```
-
-所有占位符都要替换为真实值，并使用 JSON 合法的 Windows 路径转义。不得把 Token 原文写进此文件。
-
-如果该 Sidecar 还要向其他业务执行机派发步骤，再把那些执行机加入此文件；每个条目的 `token_file` 都必须是目标主监督机本地可读的客户端令牌文件路径。
+将 `config/workflow-sidecar.example.json` 复制为目标机仓库的 `config/workflow-service.json`，填写中央地址及自身 Sidecar 凭据文件路径。该文件不纳入 Git；不配置 SQLite、不维护独立执行机清单。完整字段约定见[机器管理部署说明](WEBUI_MACHINE_REGISTRATION.zh-CN.md)。
 
 ## 八、把旧 stdio MCP 迁移为 HTTP Sidecar
 
@@ -174,7 +152,6 @@ args = ["run", "..."]
 cwd = "..."
 
 [mcp_servers.codex_orchestrator.env]
-CODEX_AGENTS_FILE = "..."
 CODEX_WORKFLOW_DB = "..."
 ```
 
@@ -192,29 +169,11 @@ default_tools_approval_mode = "approve"
 
 修改前为 `config.toml` 创建带时间戳的本机备份，但不得提交备份。
 
-## 九、中央机登记
+## 九、中央网页登记
 
-中央机私有 `config/agents.json` 必须包含目标 agent。以下只是结构示例，不能直接提交：
+中央准备服务配置后，在 8091 “机器管理”建立组，按目标 IP、执行服务端口登记机器，同时选择主监督和执行机能力。中央凭据路径模板解析出的文件内容需与目标 Sidecar 身份凭据一致。启动目标服务后手动检测，检测通过才能运行。
 
-```json
-{
-  "url": "ws://<MACHINE_IP>:4500",
-  "cwd": "<WORKSPACE_ROOT>",
-  "enabled": true,
-  "capabilities": ["supervisor", "executor"],
-  "capacity": 1,
-  "token_file": "<中央机上的共享app-server令牌文件绝对路径>",
-  "orchestration_mode": "remote_sidecar",
-  "sidecar_token_file": "<中央机上的本agent专属Sidecar令牌文件绝对路径>",
-  "allow_write": true,
-  "allow_full_access": false,
-  "allow_cwd_override": true
-}
-```
-
-其中 `cwd` 是目标远程机器上的路径，网关只把它作为执行参数发送给 app-server，不会在中央机本地访问该目录。两个 `*_token_file` 则必须是中央网关进程所在机器能读取的中央机本地路径。`allow_full_access` 默认保持 `false`；只有确需取消目标机器文件系统和网络沙箱时，才在 `allow_write: true` 的同时显式开启。
-
-如果当前 Codex 不能访问中央机，它必须输出不含秘密的待办清单并停止在本节，等待中央管理员完成登记、同步 Sidecar Token并重启网关。不得假设中央配置已经生效。
+机器编号由中央生成，无需复制到远程；远程按认证身份获取同组清单。不支持旧机器导入。
 
 ## 十、停止旧服务并启动新服务
 
@@ -223,11 +182,7 @@ default_tools_approval_mode = "approve"
 先在独立的受控后台进程、服务或终端中启动 Sidecar：
 
 ```powershell
-.\scripts\start_workflow_sidecar.ps1 `
-  -AgentId '<AGENT_ID>' `
-  -GatewayUrl '<CENTRAL_GATEWAY_URL>' `
-  -TokenFile '<SIDECAR_TOKEN_FILE>' `
-  -AgentsFile '.\config\agents.sidecar.json'
+.\scripts\start_workflow_sidecar.ps1
 ```
 
 Sidecar 必须只监听 `127.0.0.1:8082`，不得对内网或公网开放 `8082`。
@@ -252,7 +207,7 @@ OpenAI 官方文档要求非回环 WebSocket 监听配置鉴权，并建议通�
 Codex 必须依次完成以下验证：
 
 1. `TARGET_COMMIT` 与 `git rev-parse HEAD` 完全一致。
-2. `config/agents.sidecar.json` 能解析，且不包含直接 `token` 字段。
+2. `config/workflow-service.json` 能解析，只包含凭据文件引用，中央已完成网页登记和检测。
 3. `~/.codex/config.toml` 只保留 HTTP `url`，不存在旧 stdio 字段和旧 MCP `env` 子段。
 4. 当前机器没有 `CODEX_WORKFLOW_DB`。
 5. `GET http://127.0.0.1:4500/readyz` 返回成功。

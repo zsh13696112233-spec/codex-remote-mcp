@@ -48,9 +48,4 @@ public class MachineController {
   public JsonNode testMachine(@PathVariable String id) {
     return service.testMachine(id);
   }
-
-  @PostMapping("/agents/import")
-  public JsonNode importMachines() {
-    return service.importMachines();
-  }
 }

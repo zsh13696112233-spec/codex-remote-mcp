@@ -101,7 +101,7 @@ class InputImageTests(unittest.TestCase):
         self.assertEqual(self.store.node_input_images("serial-demo", "a"), [])
 
     def test_upload_and_read_http_preserve_original_content(self):
-        app = create_app(db_path=self.store.path, config_path=Path(self.directory.name, "unused.json"))
+        app = create_app(db_path=self.store.path)
         client = TestClient(app)
         self.addCleanup(client.close)
         uploaded = client.post("/workflows/serial-demo/input-images", content=PNG)
@@ -116,7 +116,7 @@ class InputImageTests(unittest.TestCase):
 
 class ImageDispatchTests(unittest.IsolatedAsyncioTestCase):
     def orchestrator(self, agent):
-        value = Orchestrator(Path("unused-test-config"))
+        value = Orchestrator()
         value.load_agents = lambda: {"remote": agent}
         return value
 

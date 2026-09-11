@@ -1,14 +1,14 @@
-# 执行机配置
+# 服务部署配置
 
-`agents.example.json` 是中央网关可提交的配置模板。将其复制为 `agents.json` 后填写本机或远程 Codex app-server 信息；`agents.json` 已被 Git 忽略。
+本分支只支持网页登记机器，中央 SQLite 保存唯一清单，不再提供执行机 JSON 清单或旧机器导入。
 
-`agents.remote-sidecar.example.json` 是远程主监督机本地 Sidecar 使用的执行机清单模板。
+- 中央网关：复制 [workflow-service.example.json](workflow-service.example.json) 为本机 `workflow-service.json`，填写原数据库路径、统一工作目录和凭据文件引用。
+- 远程主监督：复制 [workflow-sidecar.example.json](workflow-sidecar.example.json) 为远程仓库的同名文件，填写中央地址和独立 Sidecar 身份凭据文件路径。
+- 纯执行机：提前部署执行服务；机器信息在 8091 登记，远程主监督按需获取本组清单。
 
-app-server 访问令牌通过 `token_env` 或 `token_file` 配置，远程主监督的独立机器令牌通过 `sidecar_token_env` 或 `sidecar_token_file` 配置；每一组都严格二选一，不要把令牌值直接写入 JSON。
+实际 `workflow-service.json` 已被 Git 忽略。不存在机器来源开关，不接受 `agent_source` 或 `agents_file` 字段。实际令牌仍保存在独立文件；两类凭据不能混用。
 
-中央模板中的 `supervisor-b` 演示环境变量令牌，`remote-build` 演示文件令牌。`token_file` 必须是中央网关机器可读取的绝对路径；如果改用 `token_env`，应删除同一执行机的 `token_file`，反之亦然。模板中的完全访问权限默认关闭，需要时必须同时显式开启 `allow_write` 和 `allow_full_access`。
-
-中央配置、远程 Sidecar 配置和各机器部署步骤见[完整部署指南](../docs/DEPLOYMENT_GUIDE.zh-CN.md)。
+统一参数、端口、本机执行和首次登记步骤见[机器管理部署说明](../docs/WEBUI_MACHINE_REGISTRATION.zh-CN.md)。
 
 ## 等待互动卡片模板
 

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import socket
 import threading
 from datetime import UTC, datetime
-from pathlib import Path
+from workflow_service_config import setting
 
 import codex_orchestrator_mcp as mcp_module
 from codex_orchestrator_mcp import Orchestrator, configure_workflow_runtime, mcp
@@ -44,26 +43,22 @@ def run_heartbeat_loop(
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Codex 工作流远程主监督 Sidecar")
     parser.add_argument(
-        "--host", default=os.getenv("CODEX_SIDECAR_HOST", "127.0.0.1")
+        "--host", default=setting("sidecar.host", "127.0.0.1")
     )
     parser.add_argument(
-        "--port", type=int, default=int(os.getenv("CODEX_SIDECAR_PORT", "8082"))
+        "--port", type=int, default=int(setting("sidecar.port", "8082"))
     )
     parser.add_argument(
-        "--agent-id", default=os.getenv("CODEX_SIDECAR_AGENT_ID", "")
+        "--agent-id", default="registered-machine"
     )
     parser.add_argument(
-        "--gateway-url", default=os.getenv("CODEX_GATEWAY_INTERNAL_URL", "")
+        "--gateway-url", default=setting("sidecar.gateway_url", "")
     )
     parser.add_argument(
-        "--token-env", default=os.getenv("CODEX_GATEWAY_TOKEN_ENV")
+        "--token-env", default=setting("sidecar.token_env")
     )
     parser.add_argument(
-        "--token-file", default=os.getenv("CODEX_GATEWAY_TOKEN_FILE")
-    )
-    parser.add_argument(
-        "--agents",
-        default=os.getenv("CODEX_AGENTS_FILE", str(mcp_module.CONFIG_PATH)),
+        "--token-file", default=setting("sidecar.token_file")
     )
     return parser
 
@@ -74,12 +69,8 @@ def main() -> None:
         raise ValueError("Sidecar 只能监听本机回环地址。")
     if not 1 <= args.port <= 65535:
         raise ValueError("Sidecar 端口必须在 1 到 65535 之间。")
-    if not args.agent_id and os.getenv("CODEX_AGENT_SOURCE", "file") == "registry":
-        args.agent_id = "registered-machine"
-    if not args.agent_id:
-        raise ValueError("必须配置 CODEX_SIDECAR_AGENT_ID。")
     if not args.gateway_url:
-        raise ValueError("必须配置 CODEX_GATEWAY_INTERNAL_URL。")
+        raise ValueError("必须配置 sidecar.gateway_url 或 --gateway-url。")
     # 启动时先验证令牌来源；请求时仍会重新读取，以支持不重启轮换。
     resolve_token(
         token_env=args.token_env,
@@ -96,9 +87,8 @@ def main() -> None:
         started_at=started_at,
     )
     configure_workflow_runtime(runtime)
-    mcp_module.orchestrator = Orchestrator(Path(args.agents).expanduser())
-    if os.getenv("CODEX_AGENT_SOURCE", "file") == "registry":
-        mcp_module.orchestrator.agent_provider = runtime.group_agents
+    mcp_module.orchestrator = Orchestrator()
+    mcp_module.orchestrator.agent_provider = runtime.group_agents
 
     stopped = threading.Event()
 

@@ -29,3 +29,4 @@ target/
 .env
 config/agents.json
 config/agents.sidecar.json
+config/workflow-service.json

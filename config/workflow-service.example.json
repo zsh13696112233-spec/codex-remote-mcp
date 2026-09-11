@@ -1,0 +1,11 @@
+{
+  "workflow_db": "workflows.db",
+  "machine_defaults": {
+    "cwd": "C:\\codex-work",
+    "protocol": "ws",
+    "model": "gpt-5.6-sol",
+    "allow_write": false,
+    "token_file": "C:\\codex-secrets\\app-server.token",
+    "sidecar_token_template": "C:\\codex-secrets\\sidecars\\{ip}-{port}.token"
+  }
+}

@@ -19,7 +19,7 @@ Python 工作流网关（8080）── 主监督 App Server（4500）
 
 中央 Python 网关与本机兼容 MCP 使用同一 SQLite 工作流运行库；阶段 B 的远程 Sidecar 只使用带机器认证的中央内部 API，不读取 SQLite，也不配置数据库账号。配置中心另外使用 MySQL 保存角色、SOP、任务定义和运行快照。
 
-网关支持本机和远程多个主监督 app-server。每个主监督固定容量为 `1`：同一主监督的工作流按 `created_at + workflowId` 排队，不同主监督可以并行。远程主监督由 Sidecar 每 5 秒上报权威心跳，20 秒未收到心跳即离线；本机兼容模式继续使用轻量连接探测。配置中心提供独立“运行状态”页面，并在 SOP 主监督建议列表中显示在线空闲、在线忙碌、离线或状态未知。配置中心允许为 SOP 自由填写主监督和各步骤执行机 ID；保存不依赖网关在线，提交运行时才由网关校验执行机是否存在、启用且能力匹配。步骤执行机和工作目录不要求一致，空目录继承执行机默认值。
+网关支持本机和远程多个主监督 app-server。每个主监督固定容量为 `1`：同一主监督的工作流按 `created_at + workflowId` 排队，不同主监督可以并行。远程主监督由 Sidecar 每 5 秒上报权威心跳，20 秒未收到心跳即离线；本机兼容模式继续使用轻量连接探测。配置中心提供独立“运行状态”页面，并在 SOP 主监督建议列表中显示在线空闲、在线忙碌、离线或状态未知。配置中心根据已登记的主监督筛选同组执行机；保存和提交都需要网关在线并校验能力、分组，提交时额外要求启用且检测通过。步骤执行机和工作目录不要求一致，空目录继承执行机默认值。
 
 配置中心可选接入一个全局钉钉机器人，使用官方 Java SDK 主动建立长连接，无需公网入站端口。所有能接触机器人的用户均可发送 `@机器人 任务定义名称` 启动任务，后续通过 `工作流ID + 问题` 或引用任务消息对话，回答在提问会话中 @ 提问人。启动不带图片，后续对话可以将原图交给 Codex；确认按图返工后，原图交给重跑步骤及其后续步骤。同一任务定义仍只允许一个未结束运行。通知对象仅用于已启用主动通知的网页、定时运行，允许多个任务使用同一对象；钉钉启动在启动会话按顺序发送普通进度消息、工具调用、可读思考摘要和最终结果，不额外推送给配置对象。部署要求和限制见 [钉钉统一入口升级说明](docs/DINGTALK_UNIFIED_ENTRY_UPGRADE.zh-CN.md)。
 
@@ -86,74 +86,37 @@ SOP 还可选择全自动或半自动流转。全自动保持步骤成功后立�
 
 ## 快速启动
 
-如需通过网页登记分组、主监督和执行机，按[机器管理部署说明](docs/WEBUI_MACHINE_REGISTRATION.zh-CN.md)启用 `CODEX_AGENT_SOURCE=registry`。此模式由中央 SQLite 保存机器配置，网页手动检测后用于同组任务；下面的执行机 JSON 启动步骤为默认文件模式。
+本分支只支持网页登记机器，中央 SQLite 保存分组、机器和检测结果；不读取旧执行机清单，也不提供导入。完整参数及凭据约定见[机器管理部署说明](docs/WEBUI_MACHINE_REGISTRATION.zh-CN.md)。
 
-### 1. 准备执行机配置
+### 1. 准备统一部署配置
 
-```powershell
-Copy-Item .\config\agents.example.json .\config\agents.json
-```
-
-编辑 `config/agents.json`，为每个执行机配置 Codex app-server WebSocket 地址、默认工作目录、`enabled`、`capabilities` 和权限上限。能力只允许 `supervisor`、`executor`；具备主监督能力时 `capacity` 固定为 `1`。旧配置中未声明能力的 `local` 同时具备两种能力，其他执行机默认为 `executor`。业务步骤支持 `read_only`、`workspace_write`、`auto_review`、`full_access` 四档；前三档分别对应只读且不审批、工作区写入且不审批、工作区写入并由 Auto-review 审核越界请求。`full_access` 对应无沙箱且不审批，只有执行机同时配置 `allow_write: true` 和 `allow_full_access: true` 时才可选。访问令牌通过 `token_env` 引用环境变量，或通过 `token_file` 引用网关本机的绝对文件路径，两者只能配置一个；不要直接把令牌写入 JSON。
-
-远程主监督在中央配置中增加 `"orchestration_mode": "remote_sidecar"`，并使用 `sidecar_token_env` 或 `sidecar_token_file` 配置独立机器令牌。该令牌只认证 Sidecar 到中央 `8080`，不能与中央网关连接主监督 app-server 的 `token_env`/`token_file` 混用。完整示例见 `config/agents.example.json`；远程机本地执行机清单见 `config/agents.remote-sidecar.example.json`。
-
-### 2. 启动 Python 网关
-
-以下是本机兼容模式：网关和 MCP 必须使用同一个 `CODEX_WORKFLOW_DB` 绝对路径；远程 Sidecar 不设置此变量。
+在中央仓库复制示例（已有文件直接编辑，勿覆盖），填写实际目录、原数据库路径和凭据引用：
 
 ```powershell
-$ProjectRoot = (Resolve-Path .).Path
-$env:CODEX_AGENTS_FILE = (Resolve-Path .\config\agents.json).Path
-$env:CODEX_WORKFLOW_DB = Join-Path $ProjectRoot "workflows.db"
-
-uv run --project .\services\python-workflow `
-  python .\services\python-workflow\src\workflow_gateway.py `
-  --host 0.0.0.0 --port 8080 `
-  --db $env:CODEX_WORKFLOW_DB --agents $env:CODEX_AGENTS_FILE
+Copy-Item .\config\workflow-service.example.json .\config\workflow-service.json
 ```
 
-主监督 app-server 的 MCP 配置示例。`<PROJECT_ROOT>` 必须替换为仓库的真实绝对路径；Windows TOML 双引号字符串中的反斜杠需要写成 `\\`，Linux/macOS 直接使用 `/absolute/path`：
+远程主监督使用 `config/workflow-sidecar.example.json` 生成其本机同名文件，填写中央网关地址和独立机器凭据文件路径。纯执行机不需要 Sidecar。实际令牌保存在独立文件，不写入 JSON。
 
-```toml
-[mcp_servers.codex_orchestrator]
-command = "uv"
-args = [
-  "run", "--project", "<PROJECT_ROOT>\\services\\python-workflow",
-  "python", "<PROJECT_ROOT>\\services\\python-workflow\\src\\codex_orchestrator_mcp.py"
-]
-required = true
+### 2. 启动 Python 服务
 
-[mcp_servers.codex_orchestrator.env]
-CODEX_AGENTS_FILE = "<PROJECT_ROOT>\\config\\agents.json"
-CODEX_WORKFLOW_DB = "<PROJECT_ROOT>\\workflows.db"
-```
-
-远程主监督不使用上面的 stdio/SQLite 配置。在远程机启动 app-server `4500` 和 Sidecar `8082` 后，为该 app-server 配置官方 Streamable HTTP MCP：
-
-```toml
-[mcp_servers.codex_orchestrator]
-url = "http://127.0.0.1:8082/mcp"
-required = true
-enabled_tools = ["dispatch_node", "wait_node", "node_status", "cancel_node", "workflow_status"]
-default_tools_approval_mode = "approve"
-```
-
-这里仅预批准主监督完成编排所需的五个工具，避免每次派发和等待都触发 Auto-review；不要把未使用的 MCP 工具加入允许列表。主监督本身仍保持只读沙箱，业务步骤继续使用各自的权限档位。
-
-Sidecar 默认且只允许监听回环地址。示例启动命令如下；`SUPERVISOR_B_SIDECAR_TOKEN` 的值必须与中央配置解析出的机器令牌一致：
+中央 Windows：
 
 ```powershell
-Copy-Item .\config\agents.remote-sidecar.example.json .\config\agents.sidecar.json
-$env:SUPERVISOR_B_SIDECAR_TOKEN = "请通过密钥系统注入"
-.\scripts\start_workflow_sidecar.ps1 `
-  -AgentId supervisor-b `
-  -GatewayUrl http://central.internal:8080 `
-  -TokenEnv SUPERVISOR_B_SIDECAR_TOKEN `
-  -AgentsFile .\config\agents.sidecar.json
+.\scripts\start_workflow_gateway.ps1
 ```
 
-远程主监督当前只接受 `handoffMode: "legacy_text"`。提交 `cumulative_files` 会在写入运行库前稳定拒绝；跨机器附件传输留到后续阶段。
+远程主监督 Windows：
+
+```powershell
+.\scripts\start_workflow_sidecar.ps1
+```
+
+其他系统使用已有 Python 环境执行对应 `workflow_gateway.py` / `workflow_sidecar.py`；均自动读取本机仓库固定位置的服务配置。远程主监督的执行服务仍通过本机 `http://127.0.0.1:8082/mcp` 访问编排服务。配置方法见 [Python README](services/python-workflow/README.md#启动远程-sidecar)。
+
+本机主监督保留 `local_db` 执行方式：统一配置 `machine_defaults.orchestration_mode=local_db`，本机编排进程运行 `services/python-workflow/src/codex_orchestrator_mcp.py`，与网关读取同一服务配置及同一 SQLite。无需机器清单环境变量。
+
+启动 8091 后，在“机器管理”建立分组、登记 IP／端口／能力并手动检测，随后在 SOP 中选择同组机器。远程只支持 `legacy_text` 交接；`cumulative_files` 仍要求本机执行。
 
 ### 3. 启动两个 Java Web 应用
 
@@ -271,7 +234,7 @@ mvn -f services/role-task-config-center/pom.xml fmt:format
 
 - 三个服务（8080、8090、8091）默认监听 `0.0.0.0` 以支持可信内网访问；必须通过主机防火墙限制来源，三者都不能直接暴露到公网。只需本机访问时应显式改为 `127.0.0.1`。
 - 钉钉机器人只需要服务端主动访问平台 HTTPS/WSS `443`；无需给本系统开放公网入站接口。
-- `config/agents.json`、SQLite 数据库、IDE 配置及构建产物均不提交 Git。
+- 实际 `config/workflow-service.json`、SQLite 数据库、IDE 配置及构建产物均不提交 Git。
 - 工作流队列和主监督租约持久化在 SQLite。网关重启时不会重新附着旧 Codex 会话：遗留的运行中或取消中工作流直接标记失败并清除租约，然后继续调度排队任务。
 - 远程 Sidecar 令牌按主监督独立配置；内部 API 认证失败返回 `401`，跨主监督访问返回 `403`，对象不存在返回 `404`，旧实例、旧租约或状态冲突返回 `409`。停止 Sidecar 后，活动工作流会在 20 秒内失败并释放租约，不自动迁移。
 - 远程机不得设置 `CODEX_WORKFLOW_DB` 或复制中央 SQLite；`8082` 不开放防火墙，`8080` 只允许 Java 服务和已登记的主监督机访问，并应位于可信内网、VPN 或 TLS 反向代理之后。
