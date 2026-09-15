@@ -4,11 +4,6 @@ import com.codexflow.configcenter.dto.RoleSaveRequest;
 import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
 import com.codexflow.configcenter.dto.TaskDefinitionSaveRequest;
-import java.time.Instant;
-import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
-import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -29,48 +24,69 @@ public class ConfigService {
   private static final Set<String> HANDOFF_MODES = Set.of("legacy_text", "cumulative_files");
   private static final Set<String> PERMISSION_PROFILES =
       Set.of("read_only", "workspace_write", "auto_review", "full_access");
-  private static final Set<String> SCHEDULE_MODES = Set.of("daily", "interval");
+
   private static final String DEFAULT_EXPECTED_OUTPUT = "完成本步骤，并返回清晰、完整且可验证的结果。";
 
   private final RoleRepository roles;
+  private final GroupService groups;
   private final SopRepository sops;
   private final SopStepRepository steps;
   private final TaskDefinitionRepository tasks;
   private final DomainJsonMapper json;
   private final DingTalkTargetDirectory dingtalkTargets;
   private final String defaultModel;
+  private final TaskScheduleStore schedules;
 
   /** 注入配置数据访问组件、JSON 映射器和默认模型配置。 */
   ConfigService(
       RoleRepository roles,
+      GroupService groups,
       SopRepository sops,
       SopStepRepository steps,
       TaskDefinitionRepository tasks,
       DomainJsonMapper json,
       DingTalkTargetDirectory dingtalkTargets,
+      TaskScheduleStore schedules,
       @Value("${codex.default-step-model:gpt-5.6-sol}") String defaultModel) {
     this.roles = roles;
+    this.groups = groups;
     this.sops = sops;
     this.steps = steps;
     this.tasks = tasks;
     this.json = json;
     this.dingtalkTargets = dingtalkTargets;
     this.defaultModel = defaultModel;
+    this.schedules = schedules;
   }
 
   /** 按可选关键字查询角色列表。 */
   @Transactional(readOnly = true)
   public List<ObjectNode> listRoles(String query) {
-    return roles
-        .findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(normalize(query))
-        .stream()
-        .map(json::role)
-        .toList();
+    return listRoles(query, "");
+  }
+
+  @Transactional(readOnly = true)
+  public List<ObjectNode> listRoles(String query, String groupId) {
+    GroupService.validateFilter(groupId);
+    List<RoleEntity> values;
+    if ("unassigned".equals(groupId))
+      values =
+          roles.findByDeletedFalseAndGroupIdIsNullAndNameContainingIgnoreCaseOrderByCreatedAtDesc(
+              normalize(query));
+    else if (groupId != null && !groupId.isEmpty())
+      values =
+          roles.findByDeletedFalseAndGroupIdAndNameContainingIgnoreCaseOrderByCreatedAtDesc(
+              groupId, normalize(query));
+    else
+      values =
+          roles.findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(normalize(query));
+    return values.stream().map(json::role).toList();
   }
 
   /** 创建角色并返回稳定的 API JSON。 */
   @Transactional
   public ObjectNode createRole(RoleSaveRequest body) {
+    groups.lock();
     RoleEntity role = new RoleEntity();
     role.id = newId();
     applyRole(role, body, false);
@@ -80,6 +96,7 @@ public class ConfigService {
   /** 按乐观锁版本更新角色，避免并发编辑相互覆盖。 */
   @Transactional
   public ObjectNode updateRole(String id, RoleSaveRequest body) {
+    groups.lock();
     RoleEntity role = findRole(id);
     if (body.version() == null) {
       throw new IllegalArgumentException("version 必须提供。");
@@ -99,6 +116,7 @@ public class ConfigService {
   /** 软删除未被有效 SOP 步骤引用的角色，同时保留历史 SOP 步骤的外键关系。 */
   @Transactional
   public void deleteRole(String id) {
+    groups.lock();
     RoleEntity role = findRole(id);
     if (steps.existsByRoleIdAndSopDeletedFalse(id)) {
       throw new ConflictFailure("角色已被 SOP 引用，只能停用。");
@@ -111,11 +129,25 @@ public class ConfigService {
   /** 按可选关键字查询 SOP 列表。 */
   @Transactional(readOnly = true)
   public List<ObjectNode> listSops(String query) {
-    return sops
-        .findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(normalize(query))
-        .stream()
-        .map(json::sop)
-        .toList();
+    return listSops(query, "");
+  }
+
+  @Transactional(readOnly = true)
+  public List<ObjectNode> listSops(String query, String groupId) {
+    GroupService.validateFilter(groupId);
+    List<SopEntity> values;
+    if ("unassigned".equals(groupId))
+      values =
+          sops.findByDeletedFalseAndGroupIdIsNullAndNameContainingIgnoreCaseOrderByCreatedAtDesc(
+              normalize(query));
+    else if (groupId != null && !groupId.isEmpty())
+      values =
+          sops.findByDeletedFalseAndGroupIdAndNameContainingIgnoreCaseOrderByCreatedAtDesc(
+              groupId, normalize(query));
+    else
+      values =
+          sops.findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(normalize(query));
+    return values.stream().map(json::sop).toList();
   }
 
   /** 根据 ID 获取包含完整步骤的 SOP。 */
@@ -127,6 +159,7 @@ public class ConfigService {
   /** 创建 SOP 及其全部串行步骤。 */
   @Transactional
   public ObjectNode createSop(SopSaveRequest body) {
+    groups.lock();
     SopEntity sop = new SopEntity();
     sop.id = newId();
     applySop(sop, body);
@@ -136,6 +169,7 @@ public class ConfigService {
   /** 使用请求中的完整步骤集合替换现有 SOP 内容。 */
   @Transactional
   public ObjectNode updateSop(String id, SopSaveRequest body) {
+    groups.lock();
     SopEntity sop = findSop(id);
     applySop(sop, body);
     return json.sop(sops.save(sop));
@@ -144,6 +178,7 @@ public class ConfigService {
   /** 软删除未被有效任务定义引用的 SOP，同时保留历史任务的外键关系。 */
   @Transactional
   public void deleteSop(String id) {
+    groups.lock();
     SopEntity sop = findSop(id);
     if (tasks.existsBySopIdAndDeletedFalse(id)) {
       throw new ConflictFailure("SOP 已被任务定义引用，只能停用。");
@@ -156,11 +191,25 @@ public class ConfigService {
   /** 查询未软删除且名称匹配的任务定义。 */
   @Transactional(readOnly = true)
   public List<ObjectNode> listTasks(String query) {
-    return tasks
-        .findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(normalize(query))
-        .stream()
-        .map(json::task)
-        .toList();
+    return listTasks(query, "");
+  }
+
+  @Transactional(readOnly = true)
+  public List<ObjectNode> listTasks(String query, String groupId) {
+    GroupService.validateFilter(groupId);
+    List<TaskDefinitionEntity> values;
+    if ("unassigned".equals(groupId))
+      values =
+          tasks.findByDeletedFalseAndGroupIdIsNullAndNameContainingIgnoreCaseOrderByCreatedAtDesc(
+              normalize(query));
+    else if (groupId != null && !groupId.isEmpty())
+      values =
+          tasks.findByDeletedFalseAndGroupIdAndNameContainingIgnoreCaseOrderByCreatedAtDesc(
+              groupId, normalize(query));
+    else
+      values =
+          tasks.findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(normalize(query));
+    return values.stream().map(json::task).toList();
   }
 
   /** 根据 ID 获取任务定义，历史场景允许读取已软删除记录。 */
@@ -172,6 +221,7 @@ public class ConfigService {
   /** 创建可重复运行的任务定义。 */
   @Transactional
   public ObjectNode createTask(TaskDefinitionSaveRequest body) {
+    groups.lock();
     TaskDefinitionEntity task = new TaskDefinitionEntity();
     task.id = newId();
     applyTask(task, body);
@@ -181,6 +231,7 @@ public class ConfigService {
   /** 更新未软删除的任务定义。 */
   @Transactional
   public ObjectNode updateTask(String id, TaskDefinitionSaveRequest body) {
+    groups.lock();
     TaskDefinitionEntity task = findTaskForUpdate(id);
     applyTask(task, body);
     return json.task(tasks.save(task));
@@ -189,9 +240,13 @@ public class ConfigService {
   /** 复制任务定义并将副本默认设为停用。 */
   @Transactional
   public ObjectNode copyTask(String id) {
+    groups.lock();
     TaskDefinitionEntity source = findTask(id, true);
     TaskDefinitionEntity copy = new TaskDefinitionEntity();
     copy.id = newId();
+    groups.require(source.groupId);
+    GroupService.same(source.groupId, source.sop.groupId);
+    copy.groupId = source.groupId;
     copy.name = source.name + "（副本）";
     copy.objective = source.objective;
     copy.sop = source.sop;
@@ -208,10 +263,12 @@ public class ConfigService {
   /** 通过设置删除标记和停用标记软删除任务定义。 */
   @Transactional
   public void deleteTask(String id) {
+    groups.lock();
     TaskDefinitionEntity task = findTaskForUpdate(id);
     if (task.activeWorkflowId != null || task.dingtalkActiveWorkflowId != null) {
       throw new ConflictFailure("当前任务仍在运行，不能删除任务定义。");
     }
+    schedules.disableTask(task.id);
     task.deleted = true;
     task.enabled = false;
     task.scheduleEnabled = false;
@@ -222,8 +279,9 @@ public class ConfigService {
 
   /** 将角色请求字段应用到实体，并执行名称唯一性检查。 */
   private void applyRole(RoleEntity role, RoleSaveRequest body, boolean updating) {
+    assignRole(role, body.groupId());
     String name = body.name().trim();
-    if (roles.existsByNameIgnoreCaseAndIdNot(name, role.id)) {
+    if (roles.existsByDeletedFalseAndNameIgnoreCaseAndIdNot(name, role.id)) {
       throw new ConflictFailure("角色名称已存在。");
     }
     role.name = name;
@@ -233,6 +291,11 @@ public class ConfigService {
 
   /** 将 SOP 请求字段和完整步骤列表应用到聚合根。 */
   private void applySop(SopEntity sop, SopSaveRequest body) {
+    assignSop(sop, body.groupId(), false);
+    groups.validateMachines(
+        body.groupId(),
+        body.supervisorAgentId(),
+        body.steps().stream().map(SopStepRequest::agentId).toList());
     sop.name = body.name().trim();
     sop.description = normalizeNullable(body.description());
     sop.supervisorAgentId = body.supervisorAgentId().trim();
@@ -269,6 +332,7 @@ public class ConfigService {
     step.positionNo = position;
     step.displayName = body.displayName().trim();
     step.role = findRole(body.roleId().trim());
+    GroupService.same(sop.groupId, step.role.groupId);
     step.instruction = body.instruction().trim();
     step.expectedOutput = normalizeNullable(body.expectedOutput());
     if (step.expectedOutput == null) step.expectedOutput = DEFAULT_EXPECTED_OUTPUT;
@@ -302,13 +366,13 @@ public class ConfigService {
 
   /** 将任务定义请求字段应用到实体，并解析其关联 SOP。 */
   private void applyTask(TaskDefinitionEntity task, TaskDefinitionSaveRequest body) {
-    boolean wasEnabled = task.enabled;
-    boolean wasScheduleEnabled = task.scheduleEnabled;
-    String previousScheduleMode = task.scheduleMode;
-    Integer previousIntervalMinutes = task.scheduleIntervalMinutes;
+    if (Boolean.TRUE.equals(body.scheduleEnabled()))
+      throw new IllegalArgumentException("定时配置已移至定时任务管理，请从新入口创建。");
+    assignTask(task, body.groupId(), false);
     task.name = body.name().trim();
     task.objective = body.objective().trim();
     task.sop = findSop(body.sopId().trim());
+    GroupService.same(task.groupId, task.sop.groupId);
     task.additionalNotes = normalizeNullable(body.additionalNotes());
     if (body.enabled() != null) task.enabled = body.enabled();
     String targetId = normalizeNullable(body.dingtalkTargetId());
@@ -320,53 +384,9 @@ public class ConfigService {
       task.dingtalkTarget =
           targetId == null ? null : dingtalkTargets.requiredSelectable(targetId, task.id);
     }
-    if (body.scheduleEnabled() != null) {
-      task.scheduleEnabled = body.scheduleEnabled();
-    }
-    if (body.scheduleMode() != null) task.scheduleMode = body.scheduleMode().trim();
-    if (task.scheduleMode == null) task.scheduleMode = "daily";
-    if (!SCHEDULE_MODES.contains(task.scheduleMode)) {
-      throw new IllegalArgumentException("scheduleMode 只能是 daily 或 interval。");
-    }
-    if (body.scheduleTime() != null) {
-      LocalTime scheduleTime = parseScheduleTime(body.scheduleTime());
-      if (!java.util.Objects.equals(task.scheduleTime, scheduleTime)) {
-        task.scheduleTime = scheduleTime;
-        task.lastScheduleDate = null;
-      }
-    }
-    if (body.scheduleIntervalMinutes() != null) {
-      task.scheduleIntervalMinutes = body.scheduleIntervalMinutes();
-    }
+    task.scheduleEnabled = false;
+    task.nextIntervalAt = null;
     if (body.notifyDingTalk() != null) task.notifyDingTalk = body.notifyDingTalk();
-    if ("daily".equals(task.scheduleMode)) {
-      task.scheduleIntervalMinutes = null;
-      task.nextIntervalAt = null;
-      if (task.scheduleEnabled && body.scheduleTime() == null) {
-        task.scheduleTime = null;
-        throw new IllegalArgumentException("每天一次模式必须填写每天执行时间。");
-      }
-    } else {
-      task.scheduleTime = null;
-      task.lastScheduleDate = null;
-      if (task.scheduleEnabled
-          && (body.scheduleIntervalMinutes() == null
-              || task.scheduleIntervalMinutes == null
-              || task.scheduleIntervalMinutes < 5
-              || task.scheduleIntervalMinutes > 1440)) {
-        throw new IllegalArgumentException("间隔运行分钟数必须在 5 到 1440 之间。");
-      }
-      boolean intervalConfigurationChanged =
-          !"interval".equals(previousScheduleMode)
-              || !java.util.Objects.equals(previousIntervalMinutes, task.scheduleIntervalMinutes)
-              || (!wasScheduleEnabled && task.scheduleEnabled)
-              || (!wasEnabled && task.enabled);
-      if (!task.scheduleEnabled || !task.enabled) {
-        task.nextIntervalAt = null;
-      } else if (intervalConfigurationChanged || task.nextIntervalAt == null) {
-        task.nextIntervalAt = Instant.now().plus(task.scheduleIntervalMinutes, ChronoUnit.MINUTES);
-      }
-    }
     if (task.notifyDingTalk) {
       if (task.dingtalkTarget == null) {
         throw new IllegalArgumentException("启用钉钉通知时必须选择钉钉通知对象。");
@@ -375,13 +395,77 @@ public class ConfigService {
     }
   }
 
-  /** 解析页面提交的每日执行时间，并拒绝秒级或非标准格式。 */
-  private static LocalTime parseScheduleTime(String value) {
-    try {
-      return LocalTime.parse(value.trim(), DateTimeFormatter.ofPattern("HH:mm"));
-    } catch (DateTimeParseException error) {
-      throw new IllegalArgumentException("scheduleTime 必须使用 HH:mm 格式。");
+  @Transactional
+  public void assignGroups(String kind, List<String> ids, String groupId) {
+    if (kind == null || !java.util.Set.of("roles", "sops", "tasks").contains(kind))
+      throw new IllegalArgumentException("不支持的归组数据类型。");
+    groups.lock();
+    groups.require(groupId);
+    if (ids == null
+        || ids.isEmpty()
+        || ids.size() > 200
+        || ids.stream().anyMatch(id -> id == null || id.isBlank() || id.length() > 36))
+      throw new IllegalArgumentException("请选择 1 至 200 条数据。");
+    for (String id : ids.stream().distinct().sorted().toList()) {
+      switch (kind) {
+        case "roles" -> {
+          RoleEntity r = findRole(id);
+          assignRole(r, groupId);
+          roles.save(r);
+        }
+        case "sops" -> {
+          SopEntity s = findSop(id);
+          assignSop(s, groupId, true);
+          sops.save(s);
+        }
+        case "tasks" -> {
+          TaskDefinitionEntity t = findTaskForUpdate(id);
+          assignTask(t, groupId, true);
+          tasks.save(t);
+        }
+        default -> throw new IllegalArgumentException("不支持的归组数据类型。");
+      }
     }
+  }
+
+  private void assignRole(RoleEntity r, String id) {
+    groups.require(id);
+    if (r.groupId != null && !r.groupId.equals(id) && steps.existsByRoleIdAndSopDeletedFalse(r.id))
+      throw new ConflictFailure("角色已被有效 SOP 引用，请先解除引用后再改组。");
+    if (r.groupId == null
+        && groups.count(
+                "SELECT COUNT(*) FROM codex_sop_steps n JOIN codex_sop_sops s ON s.id=n.sop_id WHERE n.role_id=? AND s.deleted=FALSE AND s.group_id IS NOT NULL AND s.group_id<>?",
+                r.id,
+                id)
+            > 0) throw new ConflictFailure("角色存在其他分组的 SOP 引用。");
+    r.groupId = id;
+  }
+
+  private void assignSop(SopEntity s, String id, boolean validateExisting) {
+    groups.require(id);
+    if (s.groupId != null && !s.groupId.equals(id) && tasks.existsBySopIdAndDeletedFalse(s.id))
+      throw new ConflictFailure("SOP 已被有效任务引用，请先解除引用后再改组。");
+    if (validateExisting) {
+      for (SopStepEntity step : s.steps) GroupService.same(id, step.role.groupId);
+      groups.validateMachines(
+          id, s.supervisorAgentId, s.steps.stream().map(n -> n.agentId).toList());
+    }
+    s.groupId = id;
+  }
+
+  private void assignTask(TaskDefinitionEntity t, String id, boolean validateExisting) {
+    groups.require(id);
+    boolean changed = !java.util.Objects.equals(t.groupId, id);
+    if (changed && (t.activeWorkflowId != null || t.dingtalkActiveWorkflowId != null))
+      throw new ConflictFailure("任务仍在运行，暂时不能归组或改组。");
+    if (t.groupId != null
+        && changed
+        && groups.count(
+                "SELECT COUNT(*) FROM codex_task_schedules WHERE task_definition_id=?", t.id)
+            > 0) throw new ConflictFailure("任务存在定时规则，请先删除规则后再改组。");
+    if (validateExisting) GroupService.same(id, t.sop.groupId);
+    if (t.groupId == null && changed) schedules.resetAfterGrouping(t.id);
+    t.groupId = id;
   }
 
   /** 根据 ID 查询角色，不存在时抛出领域未找到异常。 */

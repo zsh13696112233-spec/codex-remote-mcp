@@ -532,6 +532,10 @@ class WorkflowStore(InputImageStore):
             raise ValueError("taskDefinitionId 必须是 1 到 128 个字符。")
         if not workflow_id or len(workflow_id) > 128:
             raise ValueError("workflowId 必须是 1 到 128 个字符。")
+        if "groupId" in value:
+            group_id = value["groupId"]
+            if not isinstance(group_id, str) or not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", group_id):
+                raise ValueError("groupId 必须是有效的分组编号。")
         supervisor_agent_id = str(
             value.get("supervisorAgentId") or value.get("supervisor_agent_id") or "local"
         ).strip()
@@ -661,6 +665,7 @@ class WorkflowStore(InputImageStore):
             "taskDefinitionId": task_id.strip() if task_id is not None else None,
             "name": value.get("name"),
             "failurePolicy": failure_policy,
+            **({"groupId": value["groupId"]} if "groupId" in value else {}),
             "supervisorAgentId": supervisor_agent_id,
             "supervisorCwd": value.get("supervisorCwd"),
             "supervisorWrite": bool(value.get("supervisorWrite", False)),
@@ -702,6 +707,14 @@ class WorkflowStore(InputImageStore):
             connection.execute("BEGIN IMMEDIATE")
             if spec.get("taskDefinitionId"):
                 self._require_task_idle(connection, spec["taskDefinitionId"], spec["workflowId"])
+            if spec.get("groupId"):
+                # 与机器改组使用同一 SQLite 写事务，关闭网关预检之后的并发窗口。
+                for agent_id in {spec["supervisorAgentId"], *(node["agentId"] for node in spec["nodes"])}:
+                    registered = connection.execute(
+                        "SELECT group_id FROM registered_agents WHERE id=?", (agent_id,)
+                    ).fetchone()
+                    if registered is None or registered["group_id"] != spec["groupId"]:
+                        raise ValueError("所选机器必须属于工作流的分组。")
             try:
                 connection.execute(
                     """
@@ -3231,9 +3244,14 @@ class WorkflowStore(InputImageStore):
             )
             if row["thread_id"]:
                 resume_notice = "\n\n用户已确认新一轮返工。请基于本会话上一版产物完成本次修改，未要求改变的内容保留。本轮允许重新修改并交付一个版本。"
-                if len(actual_prompt) + len(resume_notice) > PROMPT_LIMIT:
-                    actual_prompt = actual_prompt[:PROMPT_LIMIT - len(resume_notice) - len(TRUNCATION_NOTICE)] + TRUNCATION_NOTICE
-                actual_prompt += resume_notice
+                prompt_body = actual_prompt[:-len(SINGLE_OUTPUT_CONSTRAINT)]
+                suffix = resume_notice + SINGLE_OUTPUT_CONSTRAINT
+                if len(prompt_body) + len(suffix) > PROMPT_LIMIT:
+                    prompt_body = (
+                        prompt_body[: max(0, PROMPT_LIMIT - len(suffix) - len(TRUNCATION_NOTICE))]
+                        + TRUNCATION_NOTICE
+                    )
+                actual_prompt = prompt_body + suffix
 
             timestamp = utc_now()
             connection.execute(

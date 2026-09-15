@@ -200,7 +200,7 @@ public class WorkflowRunService {
     boolean notifyDingTalk = store.notifyDingTalk(taskId);
     if (notifyDingTalk) dingtalkNotifications.validate(taskId);
     releaseTerminalOccupant(taskId);
-    TaskLaunchStore.LaunchReservation reservation = launches.reserveLatest(taskId);
+    TaskLaunchStore.LaunchReservation reservation = launches.reserveLatest(taskId, source);
     PreparedRun prepared = reservation.prepared();
     boolean notificationReserved = false;
     boolean submissionStarted = false;

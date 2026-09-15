@@ -12,9 +12,12 @@ import tools.jackson.databind.node.JsonNodeFactory;
 @Service
 public class MachineService {
   private final GatewayClient gateway;
+  private final com.codexflow.configcenter.domain.GroupService groups;
 
-  public MachineService(GatewayClient gateway) {
+  public MachineService(
+      GatewayClient gateway, com.codexflow.configcenter.domain.GroupService groups) {
     this.gateway = gateway;
+    this.groups = groups;
   }
 
   public JsonNode groups() {
@@ -26,22 +29,28 @@ public class MachineService {
   }
 
   public JsonNode createGroup(JsonNode body) {
-    return gateway.post("/agent-groups", body);
+    return groups.save(null, body);
   }
 
   public JsonNode updateGroup(String id, JsonNode body) {
-    return gateway.put("/agent-groups/" + segment(id), body);
+    return groups.save(id, body);
   }
 
   public JsonNode deleteGroup(String id) {
-    return gateway.delete("/agent-groups/" + segment(id));
+    return groups.delete(id);
   }
 
+  @org.springframework.transaction.annotation.Transactional
   public JsonNode createMachine(JsonNode body) {
+    groups.lock();
+    groups.checkMachineMove(null, body);
     return gateway.post("/agents", body);
   }
 
+  @org.springframework.transaction.annotation.Transactional
   public JsonNode updateMachine(String id, JsonNode body) {
+    groups.lock();
+    groups.checkMachineMove(id, body);
     return gateway.put("/agents/" + segment(id), body);
   }
 
@@ -51,7 +60,10 @@ public class MachineService {
 
   public void validateSop(SopSaveRequest body) {
     var request =
-        JsonNodeFactory.instance.objectNode().put("supervisorId", body.supervisorAgentId());
+        JsonNodeFactory.instance
+            .objectNode()
+            .put("supervisorId", body.supervisorAgentId())
+            .put("groupId", body.groupId());
     var executors = request.putArray("executorIds");
     body.steps().forEach(step -> executors.add(step.agentId()));
     gateway.post("/agents/validate", request);

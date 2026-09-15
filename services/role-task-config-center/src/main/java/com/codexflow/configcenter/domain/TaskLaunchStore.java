@@ -12,21 +12,32 @@ public class TaskLaunchStore {
   private final TaskDefinitionRepository tasks;
   private final TaskRunRepository runs;
   private final WorkflowRunStore workflowRuns;
+  private final TaskScheduleStore schedules;
 
   TaskLaunchStore(
-      TaskDefinitionRepository tasks, TaskRunRepository runs, WorkflowRunStore workflowRuns) {
+      TaskDefinitionRepository tasks,
+      TaskRunRepository runs,
+      WorkflowRunStore workflowRuns,
+      TaskScheduleStore schedules) {
     this.tasks = tasks;
     this.runs = runs;
     this.workflowRuns = workflowRuns;
+    this.schedules = schedules;
   }
 
   /** 锁定任务定义，使用最新配置创建运行，并立即占用任务运行槽。 */
   @Transactional
   public LaunchReservation reserveLatest(String taskId) {
+    return reserveLatest(taskId, "web");
+  }
+
+  @Transactional
+  public LaunchReservation reserveLatest(String taskId, String triggerSource) {
     TaskDefinitionEntity task = requiredTaskForUpdate(taskId);
     validateStartable(task);
     requireIdle(task);
-    PreparedRun prepared = workflowRuns.prepareLatest(taskId);
+    if ("schedule".equals(triggerSource)) schedules.requireEnabled(taskId);
+    PreparedRun prepared = workflowRuns.prepareLatest(taskId, triggerSource);
     task.activeWorkflowId = prepared.workflowId();
     tasks.saveAndFlush(task);
     return new LaunchReservation(task.id, prepared, task.notifyDingTalk);

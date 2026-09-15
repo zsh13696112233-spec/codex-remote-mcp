@@ -1,0 +1,116 @@
+/* Shared management panel for roles, tasks and SOP workflows. */
+main:has(.role-grid, .sop-content) {
+  padding: 36px clamp(24px, 3.5vw, 64px);
+  font-size: 14px;
+  line-height: 1.5;
+}
+main:has(.role-grid, .sop-content) > header { margin-bottom: 28px; gap: 20px; }
+main:has(.role-grid, .sop-content) h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: -.6px; }
+main:has(.role-grid, .sop-content) > header p { color: #7a8293; font-size: 13px; }
+main:has(.role-grid, .sop-content) #create { flex: none; padding: 10px 18px; font-weight: 600; box-shadow: 0 3px 8px #625bd822; }
+.group-layout:has(.role-grid, .sop-content) {
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 0;
+  background: #fff;
+  border: 1px solid #e3e5ee;
+  border-radius: 16px;
+  box-shadow: 0 4px 24px #25304704;
+  min-height: 460px;
+}
+.group-layout:has(.role-grid, .sop-content) .group-sidebar {
+  position: static;
+  align-self: stretch;
+  padding: 24px 14px;
+  background: #fafafe;
+  border: 0;
+  border-right: 1px solid #edeef4;
+  border-radius: 16px 0 0 16px;
+}
+.group-layout:has(.role-grid, .sop-content) .group-sidebar-title { padding: 0 10px 20px; color: #666e80; font-size: 12px; }
+.group-layout:has(.role-grid, .sop-content) .group-sidebar-title button { border: 0; padding: 2px 0; color: #79738d; background: transparent; }
+.group-layout:has(.role-grid, .sop-content) .group-sidebar-list { gap: 6px; }
+.group-layout:has(.role-grid, .sop-content) .group-sidebar-list button { min-height: 42px; padding: 10px 12px; color: #687084; font-size: 13px; }
+.group-layout:has(.role-grid, .sop-content) .group-sidebar-list button:hover { background: #f0eff8; }
+.group-layout:has(.role-grid, .sop-content) .group-sidebar-list button.active { color: #625bd8; background: #eeecfc; }
+.group-layout:has(.role-grid, .sop-content) .group-sidebar-list small { min-width: 22px; padding: 1px 5px; border-radius: 5px; background: #eeeff5; color: #7c8295; text-align: center; font-size: 11px; }
+.group-layout:has(.role-grid, .sop-content) .group-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto 1fr;
+  align-content: start;
+  padding: 24px;
+  column-gap: 16px;
+  container-type: normal;
+}
+.group-main:has(.role-grid, .sop-content) > .toolbar { min-width: 0; margin: 0; align-items: center; gap: 8px; padding-bottom: 20px; }
+.group-main:has(.role-grid, .sop-content) > .toolbar input { width: 100%; min-width: 0; max-width: 280px; padding: 9px 12px; background: #f8f9fc; font-size: 13px; }
+.group-main:has(.role-grid, .sop-content) > .toolbar button { flex: none; padding: 9px 12px; font-size: 13px; color: #667085; }
+.group-main:has(.role-grid, .sop-content) > .group-actions { margin: 0; padding-bottom: 20px; gap: 12px; color: #868b9b; }
+.group-main:has(.role-grid, .sop-content) > .group-actions button { font-size: 12px; padding: 8px 12px; color: #625bd8; }
+.group-main:has(.role-grid, .sop-content) > .group-actions button:disabled { color: #969cac; background: #f8f9fc; cursor: not-allowed; }
+.content.role-grid {
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr));
+  align-content: start;
+  align-items: stretch;
+  padding-top: 22px;
+  border-top: 1px solid #eeeff5;
+  gap: 16px;
+}
+.role-grid .role-card { padding: 20px; border-color: #e8e9f0; box-shadow: none; }
+.role-grid .role-card:hover { border-color: #c7c2ed; box-shadow: 0 4px 14px #625bd80a; }
+.role-grid .role-card-heading h3 { font-size: 16px; }
+.role-grid .role-card-selection { top: 22px; right: 20px; }
+.role-grid input[data-group-item] { accent-color: #625bd8; }
+.role-grid .role-card-group { margin: 10px 0 14px; }
+.role-grid .group-tag { background: #f3f2f9; color: #7b7593; }
+.role-grid p.role-card-duty { margin-bottom: 20px; color: #737c8e; }
+.role-grid .role-card-footer { padding-top: 14px; }
+:is(.role-grid, .sop-content) .role-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 340px;
+  padding: 38px 20px 52px;
+  border: 0;
+  background: transparent;
+}
+.role-empty-icon { display: grid; place-items: center; width: 68px; height: 76px; margin-bottom: 20px; color: #8a80cb; background: #f3f1fc; border: 1px solid #eae6f7; border-radius: 18px; transform: rotate(-5deg); }
+.role-empty-icon svg { width: 40px; height: 40px; transform: rotate(5deg); }
+.role-empty h2 { margin: 0 0 8px; color: #424960; font-size: 18px; font-weight: 600; }
+.role-empty p { margin: 0 0 24px; color: #848b9d; font-size: 13px; line-height: 1.8; }
+.role-empty button { padding: 9px 18px; font-size: 13px; }
+main:has(.role-grid, .sop-content) :is(button, input, select):focus-visible { outline: 3px solid #c4bdf6; outline-offset: 3px; }
+/* Preserve container breakpoints for the editor's list, canvas and settings. */
+.group-layout:has(.sop-content) .group-main { display: block; container-type: inline-size; }
+.group-main:has(.sop-content) > .group-actions { align-items: center; padding-bottom: 20px; }
+.group-main:has(.sop-content) > .group-actions span { max-width: none; }
+.group-main:has(.sop-content) > .sop-content { padding-top: 22px; border-top: 1px solid #eeeff5; }
+.group-layout .sop-workspace { border-color: #e8e9f0; border-radius: 12px; }
+.content.task-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 290px), 1fr)); }
+@media (min-width: 951px) and (max-width: 1350px) {
+  .group-layout.has-groups:has(.sop-content) { display: grid; }
+  .group-layout:has(.sop-content) .group-sidebar { margin-bottom: 0; }
+  .group-layout:has(.sop-content) .group-sidebar-list { display: grid; }
+  .group-layout:has(.sop-content) .group-mobile { display: none; }
+}
+@media (max-width: 1150px) {
+  .group-layout:has(.role-grid, .sop-content) { grid-template-columns: 160px minmax(0, 1fr); }
+  .group-main:has(.role-grid, .sop-content) > .toolbar { grid-column: 1 / -1; padding-bottom: 14px; }
+  .group-main:has(.role-grid, .sop-content) > .group-actions { grid-column: 1 / -1; padding-bottom: 16px; }
+  .group-layout:has(.role-grid, .sop-content) .group-main { grid-template-rows: auto auto 1fr; }
+}
+@media (max-width: 950px) {
+  .group-layout:has(.role-grid, .sop-content) { display: block; }
+  .group-layout:has(.role-grid, .sop-content) .group-sidebar { padding: 16px 20px; margin: 0; border-right: 0; border-bottom: 1px solid #edeef4; border-radius: 16px 16px 0 0; }
+  .group-layout:has(.role-grid, .sop-content) .group-sidebar-title { padding: 0 0 10px; }
+}
+@media (max-width: 600px) {
+  main:has(.role-grid, .sop-content) { padding: 24px 16px; }
+  main:has(.role-grid, .sop-content) > header { align-items: flex-start; gap: 12px; }
+  main:has(.role-grid, .sop-content) h1 { font-size: 22px; }
+  main:has(.role-grid, .sop-content) #create { padding: 9px 12px; font-size: 12px; }
+  .group-layout:has(.role-grid, .sop-content) .group-main { padding: 18px 16px; }
+  :is(.role-grid, .sop-content) .role-empty { min-height: 300px; padding: 28px 6px; }
+}

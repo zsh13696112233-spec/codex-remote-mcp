@@ -14,6 +14,8 @@ import java.util.List;
 @Entity
 @Table(name = "codex_sop_sops")
 class SopEntity extends Timestamped {
+  @jakarta.persistence.Column(name = "group_id", length = 36)
+  String groupId;
 
   /** SOP 主键，使用应用生成的 UUID。 */
   @Id String id;

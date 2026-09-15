@@ -103,6 +103,14 @@ class AgentRegistry:
             old = db.execute("SELECT * FROM registered_agents WHERE id=?", (agent_id,)).fetchone() if agent_id else None
             if agent_id and old is None:
                 raise ValueError("找不到机器。")
+            if old is not None and old["group_id"] != body["groupId"]:
+                active = db.execute("""SELECT 1 FROM workflows w
+                    WHERE w.status IN ('queued','running','cancelling') AND
+                    (w.supervisor_agent_id=? OR EXISTS
+                     (SELECT 1 FROM workflow_nodes n WHERE n.workflow_id=w.workflow_id AND n.agent_id=?))
+                    LIMIT 1""", (agent_id, agent_id)).fetchone()
+                if active:
+                    raise ValueError("机器仍有关联任务运行，请结束运行后再改组。")
             agent_id = agent_id or "machine-" + uuid.uuid4().hex
             if db.execute("SELECT 1 FROM registered_agents WHERE ip=? AND port=? AND id<>?", (ip, port, agent_id)).fetchone():
                 raise ValueError("该 IP 和端口已登记。")
@@ -164,12 +172,19 @@ class AgentRegistry:
                               ("passed" if passed else "failed", datetime.now(timezone.utc).isoformat(), agent_id)).rowcount:
                 raise ValueError("找不到机器。")
 
-    def validate(self, supervisor_id: str, executor_ids: list[str], *, require_test: bool = False) -> None:
+    def validate(self, supervisor_id: str, executor_ids: list[str], *, require_test: bool = False, group_id: str | None = None) -> None:
+        if group_id is not None:
+            try:
+                uuid.UUID(group_id)
+            except (ValueError, TypeError, AttributeError):
+                raise ValueError("请选择有效分组。") from None
         rows = self.rows()
         configs = {key: self.config_from_row(key, row) for key, row in rows.items()}
         for key, capability in [(supervisor_id, "supervisor")] + [(key, "executor") for key in executor_ids]:
             if key not in rows:
                 raise ValueError("请选择已登记的机器。")
+            if group_id is not None and rows[key]["group_id"] != group_id:
+                raise ValueError("所选机器必须属于工作流的分组。")
             if capability not in configs[key].capabilities:
                 raise ValueError("机器能力与所选职责不匹配。")
             if rows[key]["group_id"] != rows[supervisor_id]["group_id"]:

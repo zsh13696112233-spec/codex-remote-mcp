@@ -24,7 +24,7 @@ import tools.jackson.databind.node.ObjectNode;
 /** 验证 SOP 删除在任务软删除和历史外键存在时仍保持稳定。 */
 @SpringBootTest
 @Transactional
-class SopDeletionIntegrationTest {
+class SopDeletionIntegrationTest extends com.codexflow.configcenter.GroupedFixtureSupport {
 
   @Autowired JdbcTemplate jdbc;
   @Autowired ConfigService service;
@@ -36,7 +36,8 @@ class SopDeletionIntegrationTest {
     ObjectNode sop = createSop("历史任务引用的 SOP");
     String sopId = sop.path("id").asText();
     ObjectNode task =
-        service.createTask(new TaskDefinitionSaveRequest("待删除任务", "验证 SOP 软删除", sopId, null, true));
+        service.createTask(
+            grouped(new TaskDefinitionSaveRequest("待删除任务", "验证 SOP 软删除", sopId, null, true)));
 
     service.deleteTask(task.path("id").asText());
     service.deleteSop(sopId);
@@ -59,7 +60,7 @@ class SopDeletionIntegrationTest {
   void rejectsDeletingSopReferencedByActiveTask() {
     ObjectNode sop = createSop("有效任务引用的 SOP");
     String sopId = sop.path("id").asText();
-    service.createTask(new TaskDefinitionSaveRequest("有效任务", "验证删除保护", sopId, null, true));
+    service.createTask(grouped(new TaskDefinitionSaveRequest("有效任务", "验证删除保护", sopId, null, true)));
 
     assertThatThrownBy(() -> service.deleteSop(sopId))
         .isInstanceOf(ConflictFailure.class)
@@ -70,7 +71,8 @@ class SopDeletionIntegrationTest {
   /** SOP 软删除后，其历史步骤不再阻止角色删除。 */
   @Test
   void deletesRoleReferencedOnlyBySoftDeletedSop() {
-    ObjectNode role = service.createRole(new RoleSaveRequest("待删除历史角色", "验证历史 SOP 引用", true, null));
+    ObjectNode role =
+        service.createRole(grouped(new RoleSaveRequest("待删除历史角色", "验证历史 SOP 引用", true, null)));
     String roleId = role.path("id").asText();
     ObjectNode sop = createSop("引用待删除角色的 SOP", roleId);
 
@@ -94,7 +96,7 @@ class SopDeletionIntegrationTest {
   @Test
   void rejectsDeletingRoleReferencedByActiveSop() {
     ObjectNode role =
-        service.createRole(new RoleSaveRequest("有效 SOP 使用的角色", "验证角色删除保护", true, null));
+        service.createRole(grouped(new RoleSaveRequest("有效 SOP 使用的角色", "验证角色删除保护", true, null)));
     String roleId = role.path("id").asText();
     createSop("有效角色引用 SOP", roleId);
 
@@ -117,6 +119,7 @@ class SopDeletionIntegrationTest {
         new SopStepRequest(
             "执行步骤", roleId, "完成删除测试", null, "local", "local", null, false, null, null, 1800,
             Set.of(), Set.of());
-    return service.createSop(new SopSaveRequest(name, null, null, null, true, List.of(step)));
+    return service.createSop(
+        grouped(new SopSaveRequest(name, null, null, null, true, List.of(step))));
   }
 }

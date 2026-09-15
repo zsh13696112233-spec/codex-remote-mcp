@@ -25,7 +25,7 @@ public class DingTalkTaskBindingDirectory {
     validateStartable(task, clientId);
     String active = taskLaunches.activeWorkflowId(task.id).orElse(null);
     if (active != null) return new StartRoute("busy", task.id, active, view(task), null);
-    PreparedRun prepared = taskLaunches.reserveLatest(task.id).prepared();
+    PreparedRun prepared = taskLaunches.reserveLatest(task.id, "dingtalk").prepared();
     task.dingtalkActiveWorkflowId = prepared.workflowId();
     tasks.saveAndFlush(task);
     return new StartRoute("started", task.id, prepared.workflowId(), view(task), prepared);
@@ -46,7 +46,7 @@ public class DingTalkTaskBindingDirectory {
     }
     String active = taskLaunches.activeWorkflowId(task.id).orElse(null);
     if (active != null) return new StartRoute("busy", task.id, active, null, null);
-    PreparedRun prepared = taskLaunches.reserveLatest(task.id).prepared();
+    PreparedRun prepared = taskLaunches.reserveLatest(task.id, "dingtalk").prepared();
     task.dingtalkActiveWorkflowId = prepared.workflowId();
     tasks.saveAndFlush(task);
     return new StartRoute("started", task.id, prepared.workflowId(), null, prepared);

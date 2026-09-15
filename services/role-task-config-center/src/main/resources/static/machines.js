@@ -2,6 +2,7 @@ let machineGroups=[];
 let selectedMachineGroupId=null;
 const pendingMachineActions=new Set();
 async function renderMachines(){
+  selectedMachineGroupId=concreteGroup();
   document.querySelector('.toolbar').classList.add('hidden');
   const content=document.querySelector('#content');content.className='content machine-content';
   content.innerHTML='<div class="empty">正在加载机器…</div>';
@@ -14,9 +15,9 @@ async function renderMachines(){
   }catch(error){if(state.page==='machines')content.innerHTML=`<div class="empty">${esc(error.message)} <button data-machine-action="refresh">重试</button></div>`}
 }
 function renderMachineBoard(){
-  const group=machineGroups.find(g=>g.id===selectedMachineGroupId)||machineGroups[0];
-  selectedMachineGroupId=group?.id||null;
-  const members=state.agents.filter(a=>a.groupId===selectedMachineGroupId);
+  const group=machineGroups.find(g=>g.id===concreteGroup());
+  selectedMachineGroupId=concreteGroup();
+  const members=state.agents.filter(groupMatches);
   document.querySelector('#content').innerHTML=`
 
     <div class="machine-board">
@@ -27,8 +28,8 @@ function renderMachineBoard(){
         ${group?`<div class="machine-group-tools"><button data-machine-action="group-edit" data-id="${esc(group.id)}">重命名</button><button data-machine-action="group-delete" data-id="${esc(group.id)}" ${members.length?'disabled title="仅空分组可删除"':''}>删除分组</button></div>`:''}
       </section>
       <div class="machine-group-detail">
-        <div class="machine-group-heading"><div><h2>${group?esc(group.name):'尚未选择分组'}</h2><p>${group?`${members.length} 台机器`:'新建分组后，即可登记主监督机和执行机。'}</p></div><button data-machine-action="refresh">刷新列表</button></div>
-        <div class="machine-role-columns">${machineRoleColumn(members,'supervisor',!!group)}${machineRoleColumn(members,'executor',!!group)}</div>
+        <div class="machine-group-heading"><div><h2>${group?esc(group.name):groupState.selected==='unassigned'?'待归组':'全部机器'}</h2><p>${group?`${members.length} 台机器`:'先选择分组，再登记机器。'}</p></div><button data-machine-action="refresh">刷新列表</button></div>
+        <div class="machine-role-columns">${machineRoleColumn(members,'supervisor',true)}${machineRoleColumn(members,'executor',true)}</div>
       </div>
     </div>`;
 }
@@ -39,7 +40,7 @@ function machineRoleColumn(members,role,hasGroup){
 function machineCard(a,role){
   const online=a.connectionStatus==='online',offline=a.connectionStatus==='offline';
   const tested=a.testStatus==='passed',failed=a.testStatus==='failed';
-  return `<article class="machine-card"><div class="machine-card-heading"><div><h3>${esc(a.name||a.ip)}<small> : ${esc(a.port)}</small></h3></div>${status(a)}</div><div class="machine-state-row"><span class="machine-state ${online?'online':offline?'offline':''}">● ${online?'在线':offline?'离线':'在线状态未知'}</span><span class="machine-state ${tested?'online':failed?'offline':''}">${tested?'检测通过':failed?'检测失败':'未检测'}</span>${(a.capabilities||[]).length>1?'<span class="machine-dual-role">兼任监督 / 执行</span>':''}</div><p class="machine-last-tested">最近检测 <span>${time(a.testedAt)}</span></p><div class="machine-card-actions">${['test','edit','toggle'].map(action=>`<button data-machine-action="${action}" data-id="${esc(a.agentId)}" ${pendingMachineActions.has(a.agentId)?'disabled':''}>${action==='test'?'检测连接':action==='edit'?'编辑':a.enabled?'停用':'启用'}</button>`).join('')}</div></article>`;
+  return `<article class="machine-card"><div class="machine-card-heading"><div><h3>${esc(a.name||a.ip)} ${groupMark(a)}<small> : ${esc(a.port)}</small></h3></div>${status(a)}</div><div class="machine-state-row"><span class="machine-state ${online?'online':offline?'offline':''}">● ${online?'在线':offline?'离线':'在线状态未知'}</span><span class="machine-state ${tested?'online':failed?'offline':''}">${tested?'检测通过':failed?'检测失败':'未检测'}</span>${(a.capabilities||[]).length>1?'<span class="machine-dual-role">兼任监督 / 执行</span>':''}</div><p class="machine-last-tested">最近检测 <span>${time(a.testedAt)}</span></p><div class="machine-card-actions">${['test','edit','toggle'].map(action=>`<button data-machine-action="${action}" data-id="${esc(a.agentId)}" ${pendingMachineActions.has(a.agentId)?'disabled':''}>${action==='test'?'检测连接':action==='edit'?'编辑':a.enabled?'停用':'启用'}</button>`).join('')}</div></article>`;
 }
 
 function machineBody(a){return {ip:a.ip,port:a.port,groupId:a.groupId,capabilities:a.capabilities,enabled:a.enabled}}
@@ -50,11 +51,12 @@ function openMachineGroup(group){
   dialog.querySelector('[type=button]').onclick=()=>dialog.close();
   dialog.querySelector('form').onsubmit=async event=>{
     event.preventDefault();const form=event.target,button=form.querySelector('[type=submit]');button.disabled=true;
-    try{await api(group?`/api/agent-groups/${encodeURIComponent(group.id)}`:'/api/agent-groups',{method:group?'PUT':'POST',body:JSON.stringify({name:form.elements.groupName.value.trim()})});dialog.close();await renderMachines()}
+    try{await api(group?`/api/agent-groups/${encodeURIComponent(group.id)}`:'/api/agent-groups',{method:group?'PUT':'POST',body:JSON.stringify({name:form.elements.groupName.value.trim()})});dialog.close();await render()}
     catch(error){form.querySelector('[role=alert]').textContent=error.message}finally{button.disabled=false}
   };dialog.showModal();
 }
 function openMachine(a,role='executor'){
+  if(!a&&!concreteGroup())return chooseGroup(()=>openMachine(a,role));
   let dialog=document.querySelector('#machineDialog');
   if(!dialog){dialog=document.createElement('dialog');dialog.id='machineDialog';document.body.append(dialog)}
   dialog.innerHTML=`<form><h2>${a?'编辑':'添加'}机器</h2><label>IP 地址<input name="ip" required maxlength="45" value="${esc(a?.ip||'')}"></label><label>执行服务端口<input name="port" type="number" min="1" max="65535" required value="${a?.port||4500}"></label><label>分组<select name="groupId">${machineGroups.map(g=>`<option value="${esc(g.id)}" ${g.id===(a?.groupId||selectedMachineGroupId)?'selected':''}>${esc(g.name)}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="supervisor" ${(a?a.capabilities.includes('supervisor'):role==='supervisor')?'checked':''}>主监督</label><label class="check"><input type="checkbox" name="executor" ${(a?a.capabilities.includes('executor'):role==='executor')?'checked':''}>执行机</label><p role="alert" class="machine-error"></p><footer><button type="button" data-close-machine>取消</button><button type="submit" class="primary">保存</button></footer></form>`;
@@ -65,7 +67,7 @@ function openMachine(a,role='executor'){
     try{
       if(!capabilities.length)throw new Error('请至少选择一种能力。');
       await api(a?`/api/agents/${encodeURIComponent(a.agentId)}`:'/api/agents',{method:a?'PUT':'POST',body:JSON.stringify({ip:f.elements.ip.value.trim(),port:Number(f.elements.port.value),groupId:f.elements.groupId.value,capabilities,enabled:a?.enabled??true})});
-      selectedMachineGroupId=f.elements.groupId.value;dialog.close();await renderMachines();toast('已保存，请检测连接。');
+      selectedMachineGroupId=f.elements.groupId.value;dialog.close();await render();toast('已保存，请检测连接。');
     }catch(error){f.querySelector('.machine-error').textContent=error.message}finally{button.disabled=false}
   };dialog.showModal();
 }
@@ -74,7 +76,7 @@ document.addEventListener('click',async event=>{
   const button=event.target.closest('[data-machine-action]');if(!button)return;
   const action=button.dataset.machineAction,id=button.dataset.id,a=state.agents.find(x=>x.agentId===id);
   if(pendingMachineActions.has(id))return;
-  if(action==='group-select'){selectedMachineGroupId=id;renderMachineBoard();return}
+  if(action==='group-select'){await selectGroup(id);return}
   button.disabled=true;
   if(action==='test'||action==='toggle'){
     pendingMachineActions.add(id);
@@ -82,9 +84,9 @@ document.addEventListener('click',async event=>{
   }
   try{
     if(action==='add'||action==='edit'){openMachine(a,button.dataset.role);return}
-    if(action==='refresh'){await renderMachines();return}
+    if(action==='refresh'){await render();return}
     if(action==='group-add'||action==='group-edit'){
-      openMachineGroup(machineGroups.find(g=>g.id===id));return;
+      editGroup(id);return;
     }else if(action==='group-delete'){
       if(!confirm('删除这个空分组？'))return;
       await api(`/api/agent-groups/${encodeURIComponent(id)}`,{method:'DELETE'});
@@ -94,6 +96,6 @@ document.addEventListener('click',async event=>{
     }else if(action==='toggle'){
       await api(`/api/agents/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify({...machineBody(a),enabled:!a.enabled})});
     }
-    await renderMachines();
+    await render();
   }catch(error){toast(error.message)}finally{pendingMachineActions.delete(id);document.querySelectorAll('.machine-card-actions [data-id]').forEach(b=>{if(b.dataset.id===id)b.disabled=false});button.disabled=false;if(action==='test')button.textContent='检测连接'}
 });

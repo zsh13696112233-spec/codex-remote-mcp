@@ -15,6 +15,8 @@ import java.time.LocalTime;
 @Entity
 @Table(name = "codex_sop_task_definitions")
 class TaskDefinitionEntity extends Timestamped {
+  @jakarta.persistence.Column(name = "group_id", length = 36)
+  String groupId;
 
   /** 任务定义主键，使用应用生成的 UUID。 */
   @Id String id;

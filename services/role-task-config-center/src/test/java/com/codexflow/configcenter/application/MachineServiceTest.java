@@ -12,7 +12,9 @@ import tools.jackson.databind.node.JsonNodeFactory;
 
 class MachineServiceTest {
   private final GatewayClient gateway = mock(GatewayClient.class);
-  private final MachineService service = new MachineService(gateway);
+  private final com.codexflow.configcenter.domain.GroupService groups =
+      mock(com.codexflow.configcenter.domain.GroupService.class);
+  private final MachineService service = new MachineService(gateway, groups);
 
   @Test
   void registrySopSaveValidatesBothSides() {
@@ -50,9 +52,9 @@ class MachineServiceTest {
     service.createMachine(body);
     service.updateMachine("worker", body);
     service.testMachine("worker");
-    verify(gateway).post("/agent-groups", body);
-    verify(gateway).put("/agent-groups/group%2Fa", body);
-    verify(gateway).delete("/agent-groups/empty");
+    verify(groups).save(null, body);
+    verify(groups).save("group/a", body);
+    verify(groups).delete("empty");
     verify(gateway).post("/agents", body);
     verify(gateway).put("/agents/worker", body);
     verify(gateway).post(eq("/agents/worker/test"), any());

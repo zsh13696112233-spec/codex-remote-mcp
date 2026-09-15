@@ -27,7 +27,7 @@ import tools.jackson.databind.node.ObjectNode;
 
 /** 验证配置中心的数据库迁移、JPA 关系加载和请求参数校验。 */
 @SpringBootTest
-class ConfigCenterApplicationTest {
+class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixtureSupport {
   @Autowired JdbcTemplate jdbc;
   @Autowired ConfigService service;
   @Autowired WorkflowRunStore runStore;
@@ -112,12 +112,14 @@ class ConfigCenterApplicationTest {
         new SopStepRequest(
             "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
-    SopSaveRequest sopBody = new SopSaveRequest("关系加载回归测试", null, null, null, null, List.of(step));
+    SopSaveRequest sopBody =
+        grouped(new SopSaveRequest("关系加载回归测试", null, null, null, null, List.of(step)));
     ObjectNode createdSop = service.createSop(sopBody);
 
     TaskDefinitionSaveRequest taskBody =
-        new TaskDefinitionSaveRequest(
-            "关系加载任务", "验证任务关联的 SOP 可在新事务中加载", createdSop.path("id").asText(), null, null);
+        grouped(
+            new TaskDefinitionSaveRequest(
+                "关系加载任务", "验证任务关联的 SOP 可在新事务中加载", createdSop.path("id").asText(), null, null));
     ObjectNode createdTask = service.createTask(taskBody);
 
     ObjectNode loadedSop = service.getSop(createdSop.path("id").asText());
@@ -131,20 +133,23 @@ class ConfigCenterApplicationTest {
   /** 确认 Bean Validation 会拒绝名称和职责均为空的角色请求。 */
   @Test
   void requestValidationRejectsBlankRoleFields() {
-    RoleSaveRequest request = new RoleSaveRequest(" ", "", null, null);
+    RoleSaveRequest request = grouped(new RoleSaveRequest(" ", "", null, null));
 
     assertThat(validator.validate(request))
         .extracting(violation -> violation.getPropertyPath().toString())
         .containsExactlyInAnyOrder("name", "duty");
   }
 
-  /** 独立运行状态入口必须展示四类主监督状态，并通过配置中心代理定时刷新。 */
+  /** 分组管理为统一入口，主监督状态仍通过配置中心代理刷新。 */
   @Test
-  void staticPageIncludesStandaloneRuntimeStatusDashboard() throws IOException {
+  void staticPageIncludesSharedGroupsAndSupervisorStatus() throws IOException {
     String index = readClasspath("static/index.html");
     String script = readClasspath("static/app.js");
 
-    assertThat(index).contains("data-page=\"runtime\">运行状态");
+    assertThat(index)
+        .contains("data-page=\"groups\">分组管理")
+        .contains("id=\"groupSidebar\"")
+        .doesNotContain("data-page=\"runtime\"");
     assertThat(script)
         .contains("/api/gateway/ready")
         .contains("在线空闲")
@@ -171,7 +176,7 @@ class ConfigCenterApplicationTest {
         .contains("styles.css?v=20260904-dialog-cancel")
         .contains("sync-wait.css?v=20260905")
         .contains("id=\"syncWait\"")
-        .contains("app.js?v=20260911-registry-only")
+        .contains("app.js?v=20260914-render-race")
         .contains("任务目标")
         .contains("发送给所有步骤")
         .contains("type=\"hidden\" name=\"additionalNotes\"");
@@ -179,10 +184,7 @@ class ConfigCenterApplicationTest {
         .containsPattern(
             "(?s)<button type=\"button\" data-dialog-close>取消</button>.*<button type=\"button\" data-dialog-close>关闭</button>");
     assertThat(index)
-        .contains("name=\"scheduleEnabled\"")
-        .contains("name=\"scheduleMode\"")
-        .contains("name=\"scheduleTime\"")
-        .contains("name=\"scheduleIntervalMinutes\"")
+        .doesNotContain("name=\"scheduleEnabled\"")
         .contains("name=\"notifyDingTalk\"");
     assertThat(script)
         .contains("/api/dingtalk/targets/sync-people")
@@ -199,9 +201,6 @@ class ConfigCenterApplicationTest {
         .contains("f.additionalNotes.value=\"\"")
         .contains("button.closest(\"dialog\")?.close()")
         .contains("dingtalkTargetId:f.dingtalkTargetId.value||null")
-        .contains("scheduleEnabled:f.scheduleEnabled.checked")
-        .contains("scheduleMode:f.scheduleMode.value")
-        .contains("scheduleIntervalMinutes:interval")
         .contains("notifyDingTalk:f.notifyDingTalk.checked")
         .contains("首次同步的人员默认停用");
   }
@@ -209,20 +208,22 @@ class ConfigCenterApplicationTest {
   @Test
   void requestValidationRejectsInvalidSupervisorAgentId() {
     SopSaveRequest blank =
-        new SopSaveRequest(
-            "测试", null, " ", null, null, true, 10, "automatic", "legacy_text", List.of());
+        grouped(
+            new SopSaveRequest(
+                "测试", null, " ", null, null, true, 10, "automatic", "legacy_text", List.of()));
     SopSaveRequest tooLong =
-        new SopSaveRequest(
-            "测试",
-            null,
-            "s".repeat(129),
-            null,
-            null,
-            true,
-            10,
-            "automatic",
-            "legacy_text",
-            List.of());
+        grouped(
+            new SopSaveRequest(
+                "测试",
+                null,
+                "s".repeat(129),
+                null,
+                null,
+                true,
+                10,
+                "automatic",
+                "legacy_text",
+                List.of()));
 
     assertThat(validator.validate(blank))
         .extracting(violation -> violation.getPropertyPath().toString())
@@ -255,36 +256,39 @@ class ConfigCenterApplicationTest {
             Set.of(),
             Set.of());
     SopSaveRequest firstBody =
-        new SopSaveRequest(
-            "多主监督快照",
-            null,
-            "supervisor-offline-a",
-            7200,
-            null,
-            true,
-            10,
-            "automatic",
-            "cumulative_files",
-            List.of(step));
+        grouped(
+            new SopSaveRequest(
+                "多主监督快照",
+                null,
+                "supervisor-offline-a",
+                7200,
+                null,
+                true,
+                10,
+                "automatic",
+                "cumulative_files",
+                List.of(step)));
     ObjectNode sop = service.createSop(firstBody);
     ObjectNode task =
         service.createTask(
-            new TaskDefinitionSaveRequest(
-                "多主监督任务", "验证主监督快照", sop.path("id").asText(), null, true));
+            grouped(
+                new TaskDefinitionSaveRequest(
+                    "多主监督任务", "验证主监督快照", sop.path("id").asText(), null, true)));
     PreparedRun original = runStore.prepareLatest(task.path("id").asText());
 
     SopSaveRequest updatedBody =
-        new SopSaveRequest(
-            "多主监督快照",
-            null,
-            "supervisor-offline-b",
-            7200,
-            null,
-            true,
-            10,
-            "automatic",
-            "cumulative_files",
-            List.of(step));
+        grouped(
+            new SopSaveRequest(
+                "多主监督快照",
+                null,
+                "supervisor-offline-b",
+                7200,
+                null,
+                true,
+                10,
+                "automatic",
+                "cumulative_files",
+                List.of(step)));
     ObjectNode updated = service.updateSop(sop.path("id").asText(), updatedBody);
     PreparedRun latest = runStore.prepareLatest(task.path("id").asText());
     PreparedRun historicalRetry = runStore.prepareRetry(original.workflowId());
@@ -325,11 +329,12 @@ class ConfigCenterApplicationTest {
             Set.of());
     ObjectNode sop =
         service.createSop(
-            new SopSaveRequest("权限档位测试", null, null, null, true, List.of(fullAccess)));
+            grouped(new SopSaveRequest("权限档位测试", null, null, null, true, List.of(fullAccess))));
     ObjectNode task =
         service.createTask(
-            new TaskDefinitionSaveRequest(
-                "权限档位任务", "验证权限档位快照", sop.path("id").asText(), null, true));
+            grouped(
+                new TaskDefinitionSaveRequest(
+                    "权限档位任务", "验证权限档位快照", sop.path("id").asText(), null, true)));
     PreparedRun run = runStore.prepareLatest(task.path("id").asText());
     PreparedRun retried = runStore.prepareRetry(run.workflowId());
 
@@ -360,7 +365,9 @@ class ConfigCenterApplicationTest {
     assertThatThrownBy(
             () ->
                 service.createSop(
-                    new SopSaveRequest("矛盾权限", null, null, null, true, List.of(contradictory))))
+                    grouped(
+                        new SopSaveRequest(
+                            "矛盾权限", null, null, null, true, List.of(contradictory)))))
         .hasMessageContaining("矛盾");
     SopStepRequest unknown =
         new SopStepRequest(
@@ -380,7 +387,7 @@ class ConfigCenterApplicationTest {
     assertThatThrownBy(
             () ->
                 service.createSop(
-                    new SopSaveRequest("非法权限", null, null, null, true, List.of(unknown))))
+                    grouped(new SopSaveRequest("非法权限", null, null, null, true, List.of(unknown)))))
         .hasMessageContaining("permissionProfile");
   }
 
@@ -394,12 +401,14 @@ class ConfigCenterApplicationTest {
         new SopStepRequest(
             "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
-    SopSaveRequest sopBody = new SopSaveRequest("额度快照测试", null, null, null, true, 7, List.of(step));
+    SopSaveRequest sopBody =
+        grouped(new SopSaveRequest("额度快照测试", null, null, null, true, 7, List.of(step)));
     ObjectNode createdSop = service.createSop(sopBody);
     ObjectNode createdTask =
         service.createTask(
-            new TaskDefinitionSaveRequest(
-                "额度任务", "验证运行额度快照", createdSop.path("id").asText(), null, true));
+            grouped(
+                new TaskDefinitionSaveRequest(
+                    "额度任务", "验证运行额度快照", createdSop.path("id").asText(), null, true)));
 
     PreparedRun first = runStore.prepareLatest(createdTask.path("id").asText());
     PreparedRun retried = runStore.prepareRetry(first.workflowId());
@@ -423,7 +432,8 @@ class ConfigCenterApplicationTest {
     assertThatThrownBy(
             () ->
                 service.createSop(
-                    new SopSaveRequest("非法额度", null, null, null, true, 101, List.of(step))))
+                    grouped(
+                        new SopSaveRequest("非法额度", null, null, null, true, 101, List.of(step)))))
         .hasMessageContaining("maxRetryCount");
   }
 
@@ -439,12 +449,14 @@ class ConfigCenterApplicationTest {
             Set.of());
     ObjectNode sop =
         service.createSop(
-            new SopSaveRequest(
-                "半自动快照", null, null, null, true, 10, "semi_automatic", List.of(step)));
+            grouped(
+                new SopSaveRequest(
+                    "半自动快照", null, null, null, true, 10, "semi_automatic", List.of(step))));
     ObjectNode task =
         service.createTask(
-            new TaskDefinitionSaveRequest(
-                "半自动任务", "验证流转模式快照", sop.path("id").asText(), null, true));
+            grouped(
+                new TaskDefinitionSaveRequest(
+                    "半自动任务", "验证流转模式快照", sop.path("id").asText(), null, true)));
 
     PreparedRun first = runStore.prepareLatest(task.path("id").asText());
     PreparedRun retried = runStore.prepareRetry(first.workflowId());
@@ -454,8 +466,9 @@ class ConfigCenterApplicationTest {
     assertThatThrownBy(
             () ->
                 service.createSop(
-                    new SopSaveRequest(
-                        "非法模式", null, null, null, true, 10, "manual", List.of(step))))
+                    grouped(
+                        new SopSaveRequest(
+                            "非法模式", null, null, null, true, 10, "manual", List.of(step)))))
         .hasMessageContaining("advanceMode");
   }
 
@@ -471,12 +484,22 @@ class ConfigCenterApplicationTest {
             Set.of());
     ObjectNode sop =
         service.createSop(
-            new SopSaveRequest(
-                "文字交接快照", null, null, null, true, 10, "automatic", "legacy_text", List.of(step)));
+            grouped(
+                new SopSaveRequest(
+                    "文字交接快照",
+                    null,
+                    null,
+                    null,
+                    true,
+                    10,
+                    "automatic",
+                    "legacy_text",
+                    List.of(step))));
     ObjectNode task =
         service.createTask(
-            new TaskDefinitionSaveRequest(
-                "文字交接任务", "验证文字交接模式快照", sop.path("id").asText(), null, true));
+            grouped(
+                new TaskDefinitionSaveRequest(
+                    "文字交接任务", "验证文字交接模式快照", sop.path("id").asText(), null, true)));
 
     PreparedRun first = runStore.prepareLatest(task.path("id").asText());
     PreparedRun retried = runStore.prepareRetry(first.workflowId());
@@ -486,16 +509,17 @@ class ConfigCenterApplicationTest {
     assertThatThrownBy(
             () ->
                 service.createSop(
-                    new SopSaveRequest(
-                        "非法交接模式",
-                        null,
-                        null,
-                        null,
-                        true,
-                        10,
-                        "automatic",
-                        "unsupported",
-                        List.of(step))))
+                    grouped(
+                        new SopSaveRequest(
+                            "非法交接模式",
+                            null,
+                            null,
+                            null,
+                            true,
+                            10,
+                            "automatic",
+                            "unsupported",
+                            List.of(step)))))
         .hasMessageContaining("handoffMode");
   }
 

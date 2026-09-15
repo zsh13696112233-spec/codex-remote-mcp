@@ -13,6 +13,11 @@ import java.time.Instant;
 @Entity
 @Table(name = "codex_sop_task_runs")
 class TaskRunEntity {
+  @jakarta.persistence.Column(name = "group_id", length = 36)
+  String groupId;
+
+  @jakarta.persistence.Column(name = "group_name", length = 100)
+  String groupName;
 
   /** 工作流 ID，同时作为运行记录主键。 */
   @Id
@@ -31,6 +36,12 @@ class TaskRunEntity {
   /** 重试运行对应的源工作流 ID；首次运行时为空。 */
   @Column(name = "source_workflow_id")
   String sourceWorkflowId;
+
+  @Column(name = "trigger_source", nullable = false, length = 16)
+  String triggerSource = "unknown";
+
+  @Column(name = "run_name", nullable = false)
+  String runName = "";
 
   /** 最近一次已知的提交或执行状态。 */
   @Column(nullable = false)

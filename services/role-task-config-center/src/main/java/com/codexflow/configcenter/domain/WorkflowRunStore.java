@@ -14,12 +14,18 @@ import tools.jackson.databind.node.ObjectNode;
 public class WorkflowRunStore {
 
   private final TaskDefinitionRepository tasks;
+  private final GroupService groups;
   private final TaskRunRepository runs;
   private final DomainJsonMapper json;
 
   /** 注入任务定义、运行记录数据访问组件和 JSON 映射器。 */
-  WorkflowRunStore(TaskDefinitionRepository tasks, TaskRunRepository runs, DomainJsonMapper json) {
+  WorkflowRunStore(
+      TaskDefinitionRepository tasks,
+      TaskRunRepository runs,
+      DomainJsonMapper json,
+      GroupService groups) {
     this.tasks = tasks;
+    this.groups = groups;
     this.runs = runs;
     this.json = json;
   }
@@ -27,19 +33,32 @@ public class WorkflowRunStore {
   /** 使用任务定义的最新配置创建一条待提交运行记录。 */
   @Transactional
   public PreparedRun prepareLatest(String taskId) {
+    return prepareLatest(taskId, "web");
+  }
+
+  @Transactional
+  public PreparedRun prepareLatest(String taskId, String triggerSource) {
+    if (!java.util.Set.of("web", "schedule", "dingtalk").contains(triggerSource))
+      throw new IllegalArgumentException("运行来源无效。");
     TaskDefinitionEntity task = findTask(taskId, false);
     if (!task.enabled) throw new ConflictFailure("任务定义已停用。");
     if (!task.sop.enabled) throw new ConflictFailure("所选 SOP 已停用。");
     String workflowId = UUID.randomUUID().toString();
+    String groupName = groups.require(task.groupId);
+    GroupService.same(task.groupId, task.sop.groupId);
+    for (SopStepEntity step : task.sop.steps) GroupService.same(task.groupId, step.role.groupId);
     ObjectNode payload = workflowPayload(task, workflowId);
     ObjectNode snapshot = taskSnapshot(task, payload);
-    return persistPrepared(task, null, payload, snapshot);
+    snapshot.put("groupName", groupName);
+    return persistPrepared(task, null, payload, snapshot, triggerSource);
   }
 
   /** 从指定历史运行的不可变快照创建一条重试记录。 */
   @Transactional
   public PreparedRun prepareRetry(String sourceWorkflowId) {
     TaskRunEntity source = findRun(sourceWorkflowId);
+    if (source.groupId == null) throw new ConflictFailure("旧运行未归组，请使用已归组任务的最新配置运行。");
+    groups.require(source.groupId);
     ObjectNode payload = (ObjectNode) json.read(source.submittedJson);
     String workflowId = UUID.randomUUID().toString();
     payload.put("workflowId", workflowId);
@@ -48,7 +67,7 @@ public class WorkflowRunStore {
     snapshot.put("workflowId", workflowId);
     snapshot.put("sourceWorkflowId", sourceWorkflowId);
     snapshot.set("submittedJson", payload.deepCopy());
-    return persistPrepared(source.taskDefinition, sourceWorkflowId, payload, snapshot);
+    return persistPrepared(source.taskDefinition, sourceWorkflowId, payload, snapshot, "web");
   }
 
   /** 读取已经持久化的提交载荷，用于提交响应丢失后的幂等恢复。 */
@@ -96,6 +115,8 @@ public class WorkflowRunStore {
             row -> {
               ObjectNode value = json.newObject();
               value.put("workflowId", row.getWorkflowId());
+              value.put("groupId", row.getGroupId());
+              value.put("groupName", row.getGroupName());
               value.put("taskDefinitionId", taskId);
               value.put("monitorUrl", monitorUrl(row.getWorkflowId()));
               value.put("sourceWorkflowId", row.getSourceWorkflowId());
@@ -187,12 +208,20 @@ public class WorkflowRunStore {
 
   /** 持久化尚未提交到网关的运行记录及其冻结快照。 */
   private PreparedRun persistPrepared(
-      TaskDefinitionEntity task, String sourceWorkflowId, ObjectNode payload, ObjectNode snapshot) {
+      TaskDefinitionEntity task,
+      String sourceWorkflowId,
+      ObjectNode payload,
+      ObjectNode snapshot,
+      String triggerSource) {
     TaskRunEntity run = new TaskRunEntity();
     run.workflowId = payload.path("workflowId").asText();
     run.taskDefinition = task;
     run.sourceWorkflowId = sourceWorkflowId;
     run.status = "submitting";
+    run.triggerSource = triggerSource;
+    run.runName = snapshot.path("name").asText("");
+    run.groupId = snapshot.path("groupId").asText(null);
+    run.groupName = snapshot.path("groupName").asText(null);
     run.snapshotJson = json.write(snapshot);
     run.submittedJson = json.write(payload);
     run.submittedAt = Instant.now();
@@ -209,6 +238,7 @@ public class WorkflowRunStore {
     ObjectNode root = json.newObject();
     root.put("workflowId", workflowId);
     root.put("taskDefinitionId", task.id);
+    root.put("groupId", task.groupId);
     root.put("name", task.name);
     root.put("supervisorAgentId", task.sop.supervisorAgentId);
     root.put("failurePolicy", "stop");

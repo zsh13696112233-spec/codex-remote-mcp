@@ -41,6 +41,7 @@ class DomainJsonMapper {
   ObjectNode role(RoleEntity role) {
     ObjectNode result = newObject();
     result.put("id", role.id);
+    result.put("groupId", role.groupId);
     result.put("name", role.name);
     result.put("duty", role.duty);
     result.put("enabled", role.enabled);
@@ -53,6 +54,7 @@ class DomainJsonMapper {
   ObjectNode sop(SopEntity sop) {
     ObjectNode result = newObject();
     result.put("id", sop.id);
+    result.put("groupId", sop.groupId);
     result.put("name", sop.name);
     putNullable(result, "description", sop.description);
     result.put("supervisorAgentId", sop.supervisorAgentId);
@@ -94,6 +96,7 @@ class DomainJsonMapper {
   ObjectNode task(TaskDefinitionEntity task) {
     ObjectNode result = newObject();
     result.put("id", task.id);
+    result.put("groupId", task.groupId);
     result.put("name", task.name);
     result.put("objective", task.objective);
     result.put("sopId", task.sop.id);
@@ -164,6 +167,8 @@ class DomainJsonMapper {
   ObjectNode run(TaskRunEntity run) {
     ObjectNode result = newObject();
     result.put("workflowId", run.workflowId);
+    result.put("groupId", run.groupId);
+    result.put("groupName", run.groupName);
     result.put("taskDefinitionId", run.taskDefinition.id);
     result.put("monitorUrl", monitorUrl + "/?workflowId=" + run.workflowId);
     putNullable(result, "sourceWorkflowId", run.sourceWorkflowId);

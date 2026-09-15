@@ -32,6 +32,17 @@ class WorkflowRunServiceTest {
   private PreparedRun prepared;
 
   @Test
+  void webAndSchedulePersistTheirOwnSourceWithoutNotifications() {
+    when(launches.reserveLatest("task", "web")).thenThrow(new ConflictFailure("reserved-web"));
+    when(launches.reserveLatest("task", "schedule"))
+        .thenThrow(new ConflictFailure("reserved-schedule"));
+    assertThatThrownBy(() -> service.runLatest("task")).hasMessage("reserved-web");
+    assertThatThrownBy(() -> service.runScheduled("task")).hasMessage("reserved-schedule");
+    verify(launches).reserveLatest("task", "web");
+    verify(launches).reserveLatest("task", "schedule");
+  }
+
+  @Test
   void executingStepRejectsCancelBeforePostingControl() {
     ObjectNode live = objectMapper.createObjectNode().put("status", "running");
     live.putArray("nodes").addObject().put("status", "running");

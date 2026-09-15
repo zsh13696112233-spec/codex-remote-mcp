@@ -33,7 +33,34 @@ public record TaskDefinitionSaveRequest(
     @Pattern(regexp = "^([01]\\d|2[0-3]):[0-5]\\d$", message = "必须使用 HH:mm 格式") String scheduleTime,
     @Min(value = 5, message = "不能小于 5") @Max(value = 1440, message = "不能大于 1440")
         Integer scheduleIntervalMinutes,
-    Boolean notifyDingTalk) {
+    Boolean notifyDingTalk,
+    @NotBlank @Size(max = 36) String groupId) {
+  public TaskDefinitionSaveRequest(
+      String name,
+      String objective,
+      String sopId,
+      String additionalNotes,
+      Boolean enabled,
+      String dingtalkTargetId,
+      Boolean scheduleEnabled,
+      String scheduleMode,
+      String scheduleTime,
+      Integer scheduleIntervalMinutes,
+      Boolean notifyDingTalk) {
+    this(
+        name,
+        objective,
+        sopId,
+        additionalNotes,
+        enabled,
+        dingtalkTargetId,
+        scheduleEnabled,
+        scheduleMode,
+        scheduleTime,
+        scheduleIntervalMinutes,
+        notifyDingTalk,
+        null);
+  }
 
   public TaskDefinitionSaveRequest(
       String name,

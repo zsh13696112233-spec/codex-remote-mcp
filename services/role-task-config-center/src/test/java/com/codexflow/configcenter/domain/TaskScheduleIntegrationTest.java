@@ -6,10 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.codexflow.configcenter.dto.SopSaveRequest;
 import com.codexflow.configcenter.dto.SopStepRequest;
 import com.codexflow.configcenter.dto.TaskDefinitionSaveRequest;
+import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
-import java.time.LocalTime;
-import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.List;
@@ -23,9 +21,87 @@ import tools.jackson.databind.node.ObjectNode;
 
 /** 验证每日与间隔配置、幂等领取和任务级单实例占用。 */
 @SpringBootTest
-class TaskScheduleIntegrationTest {
+class TaskScheduleIntegrationTest extends com.codexflow.configcenter.GroupedFixtureSupport {
 
+  @Autowired RunCatalogStore catalog;
   @Autowired ConfigService config;
+
+  @Test
+  void catalogFiltersFrozenNameSourcesAndBeijingDates() {
+    ObjectNode task = createTask(false, null, false);
+    String id = task.path("id").asText(), name = task.path("name").asText();
+    String scheduled = workflowRuns.prepareLatest(id, "schedule").workflowId();
+    String manual = workflowRuns.prepareLatest(id, "dingtalk").workflowId();
+    assertThat(
+            catalog
+                .list(name, "schedule", "", "", 0, 20)
+                .path("items")
+                .get(0)
+                .path("submittedAt")
+                .asText())
+        .isEqualTo(workflowRuns.runDetail(scheduled).path("submittedAt").asText());
+    workflowRuns.prepareLatest(id);
+    String retry = workflowRuns.prepareRetry(scheduled).workflowId();
+    jdbc.update(
+        "update codex_sop_task_runs set submitted_at = ? where workflow_id = ?",
+        Instant.parse("2026-09-13T16:00:00Z"),
+        scheduled);
+    jdbc.update(
+        "update codex_sop_task_runs set submitted_at = ? where workflow_id = ?",
+        Instant.parse("2026-09-14T16:00:00Z"),
+        manual);
+    jdbc.update(
+        "update codex_sop_task_definitions set name = ?, deleted = true where id = ?", "已改名", id);
+    var rows = catalog.list(name, "", "", "", 0, 20);
+    assertThat(rows.path("total").asInt()).isEqualTo(2);
+    assertThat(rows.path("items").toString())
+        .doesNotContain(retry, "snapshot", "submittedJson")
+        .contains(name);
+    assertThat(
+            catalog.list(name, "schedule", "2026-09-14", "2026-09-14", 0, 20).path("total").asInt())
+        .isEqualTo(1);
+    assertThat(
+            catalog.list(name, "dingtalk", "2026-09-14", "2026-09-14", 0, 20).path("total").asInt())
+        .isZero();
+    assertThat(
+            catalog.list(name, "dingtalk", "2026-09-15", "2026-09-15", 0, 20).path("total").asInt())
+        .isEqualTo(1);
+    assertThat(catalog.list("已改名", "", "", "", 0, 20).path("total").asInt()).isZero();
+  }
+
+  @Test
+  void catalogPaginationIsStableAndNameWildcardsAreLiteral() {
+    ObjectNode task = createTask(false, null, false);
+    String id = task.path("id").asText();
+    List<String> ids = new java.util.ArrayList<>();
+    for (int i = 0; i < 23; i++) ids.add(workflowRuns.prepareLatest(id, "schedule").workflowId());
+    String name = "测试%_!" + id;
+    jdbc.update(
+        "update codex_sop_task_runs set run_name = ?, submitted_at = ? where task_definition_id = ?",
+        name,
+        Instant.parse("2026-09-14T00:00:00Z"),
+        id);
+    var first = catalog.list(name, "", "", "", 0, 20);
+    var second = catalog.list(name, "", "", "", 1, 20);
+    assertThat(first.path("items").size()).isEqualTo(20);
+    assertThat(second.path("items").size()).isEqualTo(3);
+    List<String> actual = new java.util.ArrayList<>();
+    first.path("items").forEach(row -> actual.add(row.path("workflowId").asText()));
+    second.path("items").forEach(row -> actual.add(row.path("workflowId").asText()));
+    assertThat(actual)
+        .containsExactlyElementsOf(
+            ids.stream().sorted(java.util.Comparator.reverseOrder()).toList());
+    assertThat(catalog.list("测试%_!不存在", "", "", "", 0, 20).path("total").asInt()).isZero();
+    assertThatThrownBy(() -> catalog.list("", "web", "", "", 0, 20))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> catalog.list("", "", "2026-02-30", "", 0, 20))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> catalog.list("", "", "2026-09-15", "2026-09-14", 0, 20))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> catalog.list("", "", "", "", -1, 20))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
   @Autowired TaskScheduleStore schedules;
   @Autowired TaskLaunchStore launches;
   @Autowired JdbcTemplate jdbc;
@@ -90,175 +166,6 @@ class TaskScheduleIntegrationTest {
   }
 
   @Test
-  void schedulerDoesNotConsumeMoreDueTasksThanWorkerCapacity() {
-    String first = createTask(true, "06:42", false).path("id").asText();
-    String second = createTask(true, "06:42", false).path("id").asText();
-    var now = ZonedDateTime.of(2026, 9, 5, 6, 42, 0, 0, ZoneId.of("Asia/Shanghai"));
-    var claimed = schedules.claim(now, 1);
-    assertThat(claimed).hasSize(1);
-    assertThat(schedules.claim(now.plusSeconds(20), 1))
-        .hasSize(1)
-        .doesNotContainAnyElementsOf(claimed);
-    jdbc.update(
-        "update codex_sop_task_definitions set schedule_enabled = false where id in (?, ?)",
-        first,
-        second);
-  }
-
-  @Test
-  void dailyScheduleIsClaimedOncePerDateAndOnlyAtConfiguredMinute() {
-    String scheduleTime = "03:17";
-    ObjectNode task = createTask(true, scheduleTime, false);
-    LocalDate firstDate = LocalDate.of(2026, 9, 4);
-
-    assertThat(task.path("scheduleEnabled").asBoolean()).isTrue();
-    assertThat(task.path("scheduleTime").asText()).isEqualTo(scheduleTime);
-    assertThat(task.path("nextScheduleAt").asText())
-        .matches("\\d{4}-\\d{2}-\\d{2}T03:17:00\\+08:00");
-    assertThat(schedules.claim(firstDate, LocalTime.of(3, 16))).isEmpty();
-    assertThat(schedules.claim(firstDate, LocalTime.of(3, 17)))
-        .containsExactly(task.path("id").asText());
-    config.updateTask(
-        task.path("id").asText(),
-        new TaskDefinitionSaveRequest(
-            task.path("name").asText(),
-            task.path("objective").asText(),
-            task.path("sopId").asText(),
-            null,
-            true,
-            null,
-            true,
-            scheduleTime,
-            false));
-    assertThat(schedules.claim(firstDate, LocalTime.of(3, 17))).isEmpty();
-    assertThat(schedules.claim(firstDate, LocalTime.of(3, 18))).isEmpty();
-    assertThat(schedules.claim(firstDate.plusDays(1), LocalTime.of(3, 17)))
-        .containsExactly(task.path("id").asText());
-  }
-
-  @Test
-  void intervalScheduleUsesPersistedCadenceAndSkipsMissedMinutes() {
-    ObjectNode task = createIntervalTask(true, 15);
-    String taskId = task.path("id").asText();
-    jdbc.update(
-        "update codex_sop_task_definitions set schedule_enabled = false where id <> ?", taskId);
-    ZoneId zone = ZoneId.of("Asia/Shanghai");
-    ZonedDateTime due = ZonedDateTime.of(2026, 9, 4, 3, 17, 20, 0, zone);
-    jdbc.update(
-        "update codex_sop_task_definitions set next_interval_at = ? where id = ?",
-        due.toInstant(),
-        taskId);
-
-    assertThat(task.path("scheduleMode").asText()).isEqualTo("interval");
-    assertThat(task.path("scheduleIntervalMinutes").asInt()).isEqualTo(15);
-    assertThat(task.path("scheduleTime").isNull()).isTrue();
-    assertThat(task.path("nextScheduleAt").asText()).isNotBlank();
-    assertThat(schedules.claim(due.minusSeconds(10))).isEmpty();
-    assertThat(schedules.claim(due.plusSeconds(45))).containsExactly(taskId);
-    assertThat(schedules.claim(due.plusSeconds(50))).isEmpty();
-    assertThat(
-            jdbc.queryForObject(
-                "select next_interval_at from codex_sop_task_definitions where id = ?",
-                Instant.class,
-                taskId))
-        .isEqualTo(due.plusMinutes(15).toInstant());
-
-    ZonedDateTime missed = due.plusHours(2);
-    jdbc.update(
-        "update codex_sop_task_definitions set next_interval_at = ? where id = ?",
-        due.toInstant(),
-        taskId);
-    assertThat(schedules.claim(missed)).isEmpty();
-    assertThat(
-            jdbc.queryForObject(
-                "select next_interval_at from codex_sop_task_definitions where id = ?",
-                Instant.class,
-                taskId))
-        .isAfter(missed.toInstant());
-  }
-
-  @Test
-  void intervalScheduleResetsOnlyWhenSchedulingConfigurationChanges() {
-    ObjectNode task = createIntervalTask(true, 30);
-    String taskId = task.path("id").asText();
-    Instant firstNext = OffsetDateTime.parse(task.path("nextScheduleAt").asText()).toInstant();
-    TaskDefinitionSaveRequest unchanged =
-        new TaskDefinitionSaveRequest(
-            "修改后的名称",
-            task.path("objective").asText(),
-            task.path("sopId").asText(),
-            null,
-            true,
-            null,
-            true,
-            "interval",
-            null,
-            30,
-            false);
-
-    ObjectNode renamed = config.updateTask(taskId, unchanged);
-    assertThat(OffsetDateTime.parse(renamed.path("nextScheduleAt").asText()).toInstant())
-        .isEqualTo(firstNext);
-
-    ObjectNode changed =
-        config.updateTask(
-            taskId,
-            new TaskDefinitionSaveRequest(
-                "修改后的名称",
-                task.path("objective").asText(),
-                task.path("sopId").asText(),
-                null,
-                true,
-                null,
-                true,
-                "interval",
-                null,
-                45,
-                false));
-    assertThat(OffsetDateTime.parse(changed.path("nextScheduleAt").asText()).toInstant())
-        .isAfter(firstNext);
-
-    ObjectNode disabled =
-        config.updateTask(
-            taskId,
-            new TaskDefinitionSaveRequest(
-                "修改后的名称",
-                task.path("objective").asText(),
-                task.path("sopId").asText(),
-                null,
-                true,
-                null,
-                false,
-                "interval",
-                null,
-                45,
-                false));
-    assertThat(disabled.path("nextScheduleAt").isNull()).isTrue();
-    ObjectNode reenabled =
-        config.updateTask(
-            taskId,
-            new TaskDefinitionSaveRequest(
-                "修改后的名称",
-                task.path("objective").asText(),
-                task.path("sopId").asText(),
-                null,
-                true,
-                null,
-                true,
-                "interval",
-                null,
-                45,
-                false));
-    assertThat(reenabled.path("nextScheduleAt").isTextual()).isTrue();
-
-    ObjectNode copy = config.copyTask(taskId);
-    assertThat(copy.path("scheduleEnabled").asBoolean()).isFalse();
-    assertThat(copy.path("scheduleMode").asText()).isEqualTo("interval");
-    assertThat(copy.path("scheduleIntervalMinutes").asInt()).isEqualTo(45);
-    assertThat(copy.path("nextScheduleAt").isNull()).isTrue();
-  }
-
-  @Test
   void oneTaskDefinitionKeepsOnlyOneActiveWorkflow() {
     String taskId = createTask(false, null, false).path("id").asText();
     TaskLaunchStore.LaunchReservation first = launches.reserveLatest(taskId);
@@ -280,106 +187,234 @@ class TaskScheduleIntegrationTest {
   }
 
   @Test
-  void enabledScheduleRequiresTimeAndCopyKeepsOnlyTheTime() {
-    ObjectNode task = createTask(true, "08:45", false);
-    String taskId = task.path("id").asText();
-
-    assertThatThrownBy(
-            () ->
-                config.updateTask(
-                    taskId,
-                    new TaskDefinitionSaveRequest(
-                        task.path("name").asText(),
-                        task.path("objective").asText(),
-                        task.path("sopId").asText(),
-                        null,
-                        true,
-                        null,
-                        true,
-                        null,
-                        false)))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("必须填写每天执行时间");
-
-    ObjectNode copy = config.copyTask(taskId);
-    assertThat(copy.path("scheduleTime").asText()).isEqualTo("08:45");
-    assertThat(copy.path("scheduleEnabled").asBoolean()).isFalse();
-    assertThat(copy.path("scheduleMode").asText()).isEqualTo("daily");
-    assertThat(copy.path("notifyDingTalk").asBoolean()).isFalse();
-    assertThat(copy.path("dingtalkTargetId").isNull()).isTrue();
+  void independentIntervalKeepsCadenceAndResetsOnlyOnRuleChanges() {
+    ObjectNode task = createTask(false, null, false);
+    String taskId = task.path("id").asText(), sopId = task.path("sopId").asText();
+    var request =
+        grouped(
+            new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                "间隔", sopId, taskId, "interval", null, 40, true));
+    var saved = schedules.save(null, request);
+    String id = (String) saved.get("id");
+    Instant initial = Instant.parse((String) saved.get("nextScheduleAt"));
+    assertThat(Duration.between(Instant.now(), initial).toMinutes()).isBetween(39L, 40L);
+    assertThat(
+            schedules
+                .save(
+                    id,
+                    grouped(
+                        new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                            "改名", sopId, taskId, "interval", null, 40, true)))
+                .get("nextScheduleAt"))
+        .isEqualTo(saved.get("nextScheduleAt"));
+    assertThatThrownBy(() -> schedules.save(null, request)).isInstanceOf(ConflictFailure.class);
+    jdbc.update("update codex_task_schedules set enabled=false where id<>?", id);
+    Instant due = Instant.parse("2030-01-01T00:00:00Z");
+    jdbc.update("update codex_task_schedules set next_at=? where id=?", due, id);
+    assertThat(schedules.claim(due.minusSeconds(1).atZone(ZoneId.of("Asia/Shanghai")))).isEmpty();
+    assertThat(schedules.claim(due.plusSeconds(30).atZone(ZoneId.of("Asia/Shanghai"))))
+        .containsExactly(taskId);
+    assertThat(schedules.claim(due.plusSeconds(35).atZone(ZoneId.of("Asia/Shanghai")))).isEmpty();
+    assertThat(
+            jdbc.queryForObject(
+                    "select next_at from codex_task_schedules where id=?",
+                    java.sql.Timestamp.class,
+                    id)
+                .toInstant())
+        .isEqualTo(due.plusSeconds(2400));
+    assertThat(schedules.claim(due.plusSeconds(5000).atZone(ZoneId.of("Asia/Shanghai")))).isEmpty();
+    schedules.save(
+        id,
+        grouped(
+            new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                "间隔", sopId, taskId, "interval", null, 40, false)));
+    assertThatThrownBy(() -> launches.reserveLatest(taskId, "schedule"))
+        .isInstanceOf(ConflictFailure.class);
+    assertThat(schedules.save(id, request).get("nextScheduleAt")).isNotNull();
+    config.deleteTask(taskId);
+    assertThat(
+            schedules.list("间隔").stream()
+                .filter(r -> r.get("id").equals(id))
+                .findFirst()
+                .orElseThrow()
+                .get("enabled"))
+        .isEqualTo(false);
+    schedules.delete(id);
   }
 
   @Test
-  void enabledIntervalRequiresMinutesWithinSupportedRange() {
-    String suffix = UUID.randomUUID().toString();
-    String sopId = createSop(suffix);
+  void dailyClaimsOnceAndDeletedRulesCannotLaunch() {
+    ObjectNode task = createTask(false, null, false);
+    String taskId = task.path("id").asText(), sopId = task.path("sopId").asText();
+    var request =
+        grouped(
+            new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                "每日", sopId, taskId, "daily", "09:00", null, true));
+    String id = (String) schedules.save(null, request).get("id");
+    jdbc.update("update codex_task_schedules set enabled=false where id<>?", id);
+    ZonedDateTime due = ZonedDateTime.of(2030, 1, 1, 9, 0, 0, 0, ZoneId.of("Asia/Shanghai"));
+    jdbc.update("update codex_task_schedules set next_at=? where id=?", due.toInstant(), id);
+    assertThat(schedules.claim(due, 1)).containsExactly(taskId);
+    assertThat(schedules.claim(due.plusSeconds(20), 1)).isEmpty();
+    assertThat(schedules.claim(due.plusDays(1), 1)).containsExactly(taskId);
+    jdbc.update("update codex_sop_task_definitions set enabled=false where id=?", taskId);
+    assertThat(schedules.claim(due.plusDays(2), 1)).isEmpty();
+    jdbc.update("update codex_sop_task_definitions set enabled=true where id=?", taskId);
+    schedules.delete(id);
+    assertThatThrownBy(() -> launches.reserveLatest(taskId, "schedule"))
+        .isInstanceOf(ConflictFailure.class);
+    assertThat(schedules.save(null, request)).isNotNull();
+  }
+
+  @Test
+  void rejectsLegacyEnablingAndInvalidRules() {
+    assertThatThrownBy(() -> createTask(true, "09:00", false))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("定时任务管理");
+    ObjectNode task = createTask(false, null, false);
+    String taskId = task.path("id").asText(), sopId = task.path("sopId").asText();
     assertThatThrownBy(
             () ->
-                config.createTask(
-                    new TaskDefinitionSaveRequest(
-                        "缺少间隔-" + suffix,
-                        "验证间隔校验",
-                        sopId,
-                        null,
-                        true,
-                        null,
-                        true,
-                        "interval",
-                        null,
-                        null,
-                        false)))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("5 到 1440");
+                schedules.save(
+                    null,
+                    grouped(
+                        new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                            "错误", sopId, taskId, "interval", null, 4, true))))
+        .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(
             () ->
-                config.createTask(
-                    new TaskDefinitionSaveRequest(
-                        "非法间隔-" + suffix,
-                        "验证间隔校验",
-                        sopId,
-                        null,
-                        true,
-                        null,
-                        true,
-                        "interval",
-                        null,
-                        1441,
-                        false)))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("5 到 1440");
+                schedules.save(
+                    null,
+                    grouped(
+                        new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                            "错误", sopId, taskId, "daily", "25:00", null, true))))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () ->
+                schedules.save(
+                    null,
+                    grouped(
+                        new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                            "错误", "other", taskId, "daily", "09:00", null, true))))
+        .isInstanceOf(ConflictFailure.class);
+    assertThat(config.copyTask(taskId).path("scheduleEnabled").asBoolean()).isFalse();
+  }
+
+  @Test
+  void concurrentScansClaimDueRuleOnlyOnce() throws Exception {
+    ObjectNode task = createTask(false, null, false);
+    String taskId = task.path("id").asText();
+    String id =
+        (String)
+            schedules
+                .save(
+                    null,
+                    grouped(
+                        new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                            "并发", task.path("sopId").asText(), taskId, "interval", null, 40, true)))
+                .get("id");
+    jdbc.update("update codex_task_schedules set enabled=false where id<>?", id);
+    var due = ZonedDateTime.of(2031, 1, 1, 9, 0, 0, 0, ZoneId.of("Asia/Shanghai"));
+    jdbc.update("update codex_task_schedules set next_at=? where id=?", due.toInstant(), id);
+    var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+    var start = new java.util.concurrent.CountDownLatch(1);
+    try {
+      java.util.concurrent.Callable<List<String>> scan =
+          () -> {
+            start.await();
+            return schedules.claim(due, 1);
+          };
+      var first = pool.submit(scan);
+      var second = pool.submit(scan);
+      start.countDown();
+      var all =
+          new java.util.ArrayList<String>(first.get(10, java.util.concurrent.TimeUnit.SECONDS));
+      all.addAll(second.get(10, java.util.concurrent.TimeUnit.SECONDS));
+      assertThat(all).containsExactly(taskId);
+    } finally {
+      pool.shutdownNow();
+      schedules.delete(id);
+    }
+  }
+
+  @Test
+  void ruleChangesResetTimeAndRunsFreezeLatestTaskConfiguration() {
+    ObjectNode task = createTask(false, null, false);
+    String taskId = task.path("id").asText(), sopId = task.path("sopId").asText();
+    String id =
+        (String)
+            schedules
+                .save(
+                    null,
+                    grouped(
+                        new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                            "规则", sopId, taskId, "daily", "09:00", null, true)))
+                .get("id");
+    var interval =
+        schedules.save(
+            id,
+            grouped(
+                new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                    "规则", sopId, taskId, "interval", null, 40, true)));
+    assertThat(
+            Duration.between(Instant.now(), Instant.parse((String) interval.get("nextScheduleAt")))
+                .toMinutes())
+        .isBetween(39L, 40L);
+    String newSop = createSop(UUID.randomUUID().toString());
+    config.updateTask(
+        taskId, grouped(new TaskDefinitionSaveRequest("最新任务", "最新目标", newSop, null, true)));
+    assertThat(
+            schedules.list("规则").stream()
+                .filter(r -> r.get("id").equals(id))
+                .findFirst()
+                .orElseThrow()
+                .get("sopId"))
+        .isEqualTo(newSop);
+    Instant trigger = Instant.parse((String) interval.get("nextScheduleAt"));
+    assertThat(schedules.claim(trigger.atZone(ZoneId.of("Asia/Shanghai")))).contains(taskId);
+    schedules.save(
+        id,
+        grouped(
+            new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                "规则", newSop, taskId, "interval", null, 40, false)));
+    var reenabled =
+        schedules.save(
+            id,
+            grouped(
+                new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                    "规则", newSop, taskId, "interval", null, 40, true)));
+    assertThatThrownBy(() -> launches.reserveLatest(taskId, "schedule"))
+        .isInstanceOf(ConflictFailure.class);
+    assertThat(
+            schedules.claim(
+                Instant.parse((String) reenabled.get("nextScheduleAt"))
+                    .atZone(ZoneId.of("Asia/Shanghai"))))
+        .contains(taskId);
+    var run = launches.reserveLatest(taskId, "schedule");
+    assertThat(run.prepared().payload().toString()).contains("最新目标");
+    assertThatThrownBy(() -> launches.reserveLatest(taskId, "schedule"))
+        .isInstanceOf(ConflictFailure.class)
+        .hasMessageContaining("仍在运行");
+    schedules.delete(id);
+    assertThat(workflowRuns.runDetail(run.prepared().workflowId()).toString()).contains("最新任务");
+    launches.release(run.prepared().workflowId());
   }
 
   private ObjectNode createTask(
       boolean scheduleEnabled, String scheduleTime, boolean notifyDingTalk) {
     String suffix = UUID.randomUUID().toString();
     return config.createTask(
-        new TaskDefinitionSaveRequest(
-            "定时任务-" + suffix,
-            "验证每日定时运行",
-            createSop(suffix),
-            null,
-            true,
-            null,
-            scheduleEnabled,
-            scheduleTime,
-            notifyDingTalk));
-  }
-
-  private ObjectNode createIntervalTask(boolean scheduleEnabled, Integer intervalMinutes) {
-    String suffix = UUID.randomUUID().toString();
-    return config.createTask(
-        new TaskDefinitionSaveRequest(
-            "间隔任务-" + suffix,
-            "验证间隔定时运行",
-            createSop(suffix),
-            null,
-            true,
-            null,
-            scheduleEnabled,
-            "interval",
-            null,
-            intervalMinutes,
-            false));
+        grouped(
+            new TaskDefinitionSaveRequest(
+                "定时任务-" + suffix,
+                "验证每日定时运行",
+                createSop(suffix),
+                null,
+                true,
+                null,
+                scheduleEnabled,
+                scheduleTime,
+                notifyDingTalk)));
   }
 
   private String createSop(String suffix) {
@@ -392,18 +427,19 @@ class TaskScheduleIntegrationTest {
             Set.of());
     return config
         .createSop(
-            new SopSaveRequest(
-                "定时SOP-" + suffix,
-                null,
-                "local",
-                null,
-                null,
-                true,
-                3,
-                "automatic",
-                null,
-                null,
-                List.of(step)))
+            grouped(
+                new SopSaveRequest(
+                    "定时SOP-" + suffix,
+                    null,
+                    "local",
+                    null,
+                    null,
+                    true,
+                    3,
+                    "automatic",
+                    null,
+                    null,
+                    List.of(step))))
         .path("id")
         .asText();
   }

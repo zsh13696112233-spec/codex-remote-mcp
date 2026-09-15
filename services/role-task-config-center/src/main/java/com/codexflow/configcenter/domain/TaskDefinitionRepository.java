@@ -12,6 +12,14 @@ import org.springframework.data.repository.query.Param;
 /** 任务定义的 Spring Data JPA 数据访问接口。 */
 interface TaskDefinitionRepository extends JpaRepository<TaskDefinitionEntity, String> {
 
+  List<TaskDefinitionEntity>
+      findByDeletedFalseAndGroupIdAndNameContainingIgnoreCaseOrderByCreatedAtDesc(
+          String groupId, String query);
+
+  List<TaskDefinitionEntity>
+      findByDeletedFalseAndGroupIdIsNullAndNameContainingIgnoreCaseOrderByCreatedAtDesc(
+          String query);
+
   interface NamedTask {
     String getId();
 

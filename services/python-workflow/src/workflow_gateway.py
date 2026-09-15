@@ -144,7 +144,7 @@ class WorkflowGateway:
     async def submit(self, raw_spec: dict[str, Any]) -> dict[str, Any]:
         spec = WorkflowStore.normalize_spec(raw_spec)
         await _database_call(self.registry.validate, spec["supervisorAgentId"],
-                             [node["agentId"] for node in spec["nodes"]], require_test=True)
+                             [node["agentId"] for node in spec["nodes"]], require_test=True, group_id=spec.get("groupId"))
         agent_values = self.orchestrator.list_agents()
         agents_by_id = {item["agent_id"]: item for item in agent_values}
         available_agents = set(agents_by_id)
@@ -1589,7 +1589,9 @@ async def manage_machines(request: Request) -> Response:
             ids = body.get("executorIds")
             if not isinstance(body.get("supervisorId"), str) or not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
                 raise ValueError("请选择主监督和执行机。")
-            await _database_call(registry.validate, body["supervisorId"], ids)
+            if "groupId" in body and not isinstance(body["groupId"], str):
+                raise ValueError("请选择有效分组。")
+            await _database_call(registry.validate, body["supervisorId"], ids, group_id=body.get("groupId"))
             result = {"valid": True}
         elif path.endswith("/test"):
             if key not in registry.rows():

@@ -1,0 +1,11 @@
+ALTER TABLE codex_sop_roles ADD COLUMN group_id VARCHAR(36) NULL;
+CREATE INDEX idx_roles_group ON codex_sop_roles(group_id);
+ALTER TABLE codex_sop_sops ADD COLUMN group_id VARCHAR(36) NULL;
+CREATE INDEX idx_sops_group ON codex_sop_sops(group_id);
+ALTER TABLE codex_sop_task_definitions ADD COLUMN group_id VARCHAR(36) NULL;
+CREATE INDEX idx_task_definitions_group ON codex_sop_task_definitions(group_id);
+ALTER TABLE codex_sop_task_runs ADD COLUMN group_id VARCHAR(36) NULL;
+CREATE INDEX idx_task_runs_group ON codex_sop_task_runs(group_id);
+ALTER TABLE codex_sop_task_runs ADD COLUMN group_name VARCHAR(100) NULL;
+CREATE TABLE codex_group_write_lock (id INT PRIMARY KEY);
+INSERT INTO codex_group_write_lock(id) VALUES (1);

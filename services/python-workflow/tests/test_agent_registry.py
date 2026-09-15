@@ -35,6 +35,53 @@ class RegistryTests(unittest.TestCase):
         return self.registry.save_agent({"ip": ip, "port": 4500, "groupId": group or self.group,
                                          "capabilities": capabilities or ["supervisor", "executor"]})
 
+    def test_active_runtime_blocks_machine_move_and_creation_rechecks_group(self):
+        machine = self.machine()
+        key = machine["agentId"]
+        other = self.registry.save_group({"name": "运行归组"})["id"]
+        spec = {"workflowId": "group-atomic", "name": "分组事务", "groupId": self.group,
+                "supervisorAgentId": key,
+                "nodes": [{"id": "one", "prompt": "测试", "executor": {"agentId": key}}]}
+        self.gateway.store.create_workflow(spec)
+        self.assertEqual(self.gateway.store.get_spec("group-atomic")["groupId"], self.group)
+        with self.assertRaisesRegex(ValueError, "关联任务运行"):
+            self.registry.save_agent({**machine, "groupId": other}, key)
+        self.assertEqual(self.registry.rows()[key]["group_id"], self.group)
+        with self.gateway.store._connect() as db:
+            db.execute("UPDATE workflows SET status='completed' WHERE workflow_id='group-atomic'")
+        self.registry.save_agent({**machine, "groupId": other}, key)
+        with self.assertRaisesRegex(ValueError, "工作流的分组"):
+            self.gateway.store.create_workflow({**spec, "workflowId": "group-race"})
+        with self.gateway.store._connect() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM workflows WHERE workflow_id='group-race'").fetchone())
+
+    def test_workflow_group_is_checked_at_registry_boundary(self):
+        machine = self.machine()
+        key = machine["agentId"]
+        other = self.registry.save_group({"name": "另一业务组"})["id"]
+        self.registry.validate(key, [key], group_id=self.group)
+        # Legacy independent callers remain compatible without groupId.
+        self.registry.validate(key, [key])
+        for group in (other, "bad", "", 123):
+            with self.subTest(group=group), self.assertRaises(ValueError):
+                self.registry.validate(key, [key], group_id=group)
+        response = self.client.post("/agents/validate", json={
+            "supervisorId": key, "executorIds": [key], "groupId": other})
+        self.assertEqual(response.status_code, 400)
+
+    def test_workflow_group_survives_normalization_and_invalid_values_rejected(self):
+        spec = {"workflowId": "group-test", "name": "分组测试", "groupId": self.group,
+                "nodes": [{"id": "one", "prompt": "测试", "executor": {"agentId": "local"}}]}
+        normalized = WorkflowStore.normalize_spec(spec)
+        self.assertEqual(normalized["groupId"], self.group)
+        self.assertEqual(WorkflowStore.normalize_spec(normalized)["groupId"], self.group)
+        for invalid in (None, "", "missing", 10, {}, []):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "groupId"):
+                WorkflowStore.normalize_spec({**spec, "groupId": invalid})
+        legacy = dict(spec)
+        del legacy["groupId"]
+        self.assertNotIn("groupId", WorkflowStore.normalize_spec(legacy))
+
     def test_persistence_and_test_invalidation(self):
         machine = self.machine()
         key = machine["agentId"]
@@ -234,7 +281,12 @@ class RegistryTests(unittest.TestCase):
         prepared = self.gateway.store.prepare_node_dispatch("registered-run", "step")
         self.assertEqual(prepared["agentId"], worker["agentId"])
         other = self.registry.save_group({"name": "移动目标"})["id"]
-        self.registry.save_agent({**worker, "groupId": other}, worker["agentId"])
+        with self.assertRaisesRegex(ValueError, "仍有关联任务运行"):
+            self.registry.save_agent({**worker, "groupId": other}, worker["agentId"])
+        # Simulate an out-of-band change to retain dispatch boundary coverage.
+        with self.gateway.store._connect() as connection:
+            connection.execute("UPDATE registered_agents SET group_id = ? WHERE id = ?",
+                               (other, worker["agentId"]))
         with self.assertRaisesRegex(ValueError, "同一分组"):
             self.gateway.store.prepare_node_dispatch("registered-run", "step")
 

@@ -15,4 +15,9 @@ public record RoleSaveRequest(
     @NotBlank @Size(max = 100) String name,
     @NotBlank @Size(max = 2000) String duty,
     Boolean enabled,
-    Long version) {}
+    Long version,
+    @NotBlank @Size(max = 36) String groupId) {
+  public RoleSaveRequest(String name, String duty, Boolean enabled, Long version) {
+    this(name, duty, enabled, version, null);
+  }
+}

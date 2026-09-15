@@ -17,6 +17,10 @@ interface TaskRunRepository extends JpaRepository<TaskRunEntity, String> {
   interface Summary {
     String getWorkflowId();
 
+    String getGroupId();
+
+    String getGroupName();
+
     String getSourceWorkflowId();
 
     String getStatus();
@@ -28,7 +32,7 @@ interface TaskRunRepository extends JpaRepository<TaskRunEntity, String> {
 
   @Query(
       "SELECT r.workflowId AS workflowId, r.sourceWorkflowId AS sourceWorkflowId, "
-          + "r.status AS status, r.submittedAt AS submittedAt, r.updatedAt AS updatedAt "
+          + "r.groupId AS groupId, r.groupName AS groupName, r.status AS status, r.submittedAt AS submittedAt, r.updatedAt AS updatedAt "
           + "FROM TaskRunEntity r WHERE r.taskDefinition.id = :taskId "
           + "ORDER BY r.submittedAt DESC, r.workflowId DESC")
   List<Summary> summaries(@Param("taskId") String taskId, Pageable pageable);

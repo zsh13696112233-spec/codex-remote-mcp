@@ -10,12 +10,14 @@ import jakarta.persistence.Version;
 @Entity
 @Table(name = "codex_sop_roles")
 class RoleEntity extends Timestamped {
+  @jakarta.persistence.Column(name = "group_id", length = 36)
+  String groupId;
 
   /** 角色主键，使用应用生成的 UUID，对应表的 {@code id} 字段。 */
   @Id String id;
 
-  /** 角色名称；数据库非空且唯一，用于页面展示和名称检索。 */
-  @Column(nullable = false, unique = true)
+  /** 角色名称；未删除角色的名称唯一，用于页面展示和名称检索。 */
+  @Column(nullable = false)
   String name;
 
   /** 角色职责说明，对应最长 2000 字符的 {@code duty} 字段。 */

@@ -30,7 +30,7 @@ import tools.jackson.databind.node.ObjectNode;
 
 /** 验证钉钉任务级并发锁、目标路由、消息幂等、事件游标和可靠发送状态。 */
 @SpringBootTest
-class DingTalkStoreIntegrationTest {
+class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFixtureSupport {
 
   private String lastTaskName;
 
@@ -39,6 +39,12 @@ class DingTalkStoreIntegrationTest {
     String client = "quote-history-" + UUID.randomUUID();
     createTask(client);
     String workflow = store.reserveStart(client, message("quote-history-start")).workflowId();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT trigger_source FROM codex_sop_task_runs WHERE workflow_id = ?",
+                String.class,
+                workflow))
+        .isEqualTo("dingtalk");
     var original =
         new DingTalkModels.Message(
             "source", "quote-history-group", "2", "bob", "问题", true, false, null);
@@ -987,7 +993,11 @@ class DingTalkStoreIntegrationTest {
         "任务进度",
         "**状态：** 运行中");
 
-    DingTalkModels.Outbox item = store.claimDue().get(0);
+    DingTalkModels.Outbox item =
+        store.claimDue().stream()
+            .filter(row -> reservation.workflowId().equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
     assertThat(item.messageKind()).isEqualTo("markdown");
     assertThat(item.replyToMessageId()).isEqualTo("markdown-trigger");
     assertThat(item.payload().path("title").asText()).isEqualTo("任务进度");
@@ -1089,7 +1099,10 @@ class DingTalkStoreIntegrationTest {
                 payload,
                 false))
         .isFalse();
-    List<DingTalkModels.Outbox> claimed = store.claimDue();
+    List<DingTalkModels.Outbox> claimed =
+        store.claimDue().stream()
+            .filter(row -> binding.workflowId().equals(row.workflowId()))
+            .toList();
     assertThat(claimed).hasSize(1);
     store.markOutboxSent(claimed.get(0).id(), "bot-message-1");
     DingTalkModels.Message replyToBot =
@@ -1396,6 +1409,7 @@ class DingTalkStoreIntegrationTest {
     store.enqueueTargetText(client + "3", otherWorkflow, group, "GROUP", group, null, "其他任务");
     store.enqueueTargetText(
         client + "4", firstWorkflow, group + "2", "GROUP", group + "2", null, "其他群");
+    entityManager.flush();
     var batch =
         store.claimDue().stream().filter(item -> item.conversationId().startsWith(group)).toList();
     assertThat(batch)
@@ -1437,6 +1451,7 @@ class DingTalkStoreIntegrationTest {
     assertThat(first.payload().path("text").asText()).isEqualTo("甲".repeat(850));
     assertThat(store.claimDue()).noneMatch(item -> group.equals(item.conversationId()));
     store.initialize("app");
+    entityManager.flush();
     var recovered =
         store.claimDue().stream()
             .filter(item -> group.equals(item.conversationId()))
@@ -1511,18 +1526,19 @@ class DingTalkStoreIntegrationTest {
             Set.of());
     ObjectNode sop =
         config.createSop(
-            new SopSaveRequest(
-                "钉钉SOP-" + UUID.randomUUID(),
-                null,
-                "local",
-                null,
-                null,
-                true,
-                3,
-                "semi_automatic",
-                null,
-                null,
-                List.of(step)));
+            grouped(
+                new SopSaveRequest(
+                    "钉钉SOP-" + UUID.randomUUID(),
+                    null,
+                    "local",
+                    null,
+                    null,
+                    true,
+                    3,
+                    "semi_automatic",
+                    null,
+                    null,
+                    List.of(step))));
     return sop.path("id").asText();
   }
 
@@ -1544,7 +1560,9 @@ class DingTalkStoreIntegrationTest {
     namesByConversation.put(conversationId, lastTaskName);
     return config
         .createTask(
-            new TaskDefinitionSaveRequest(lastTaskName, "验证钉钉任务启动", sopId, null, true, targetId))
+            grouped(
+                new TaskDefinitionSaveRequest(
+                    lastTaskName, "验证钉钉任务启动", sopId, null, true, targetId)))
         .path("id")
         .asText();
   }
