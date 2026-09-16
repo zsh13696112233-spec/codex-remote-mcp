@@ -30,3 +30,5 @@ target/
 config/agents.json
 config/agents.sidecar.json
 config/workflow-service.json
+*.skills.lock
+skill-packages/

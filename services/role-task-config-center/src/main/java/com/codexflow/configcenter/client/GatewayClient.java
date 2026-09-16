@@ -47,6 +47,37 @@ public class GatewayClient {
     return exchange("DELETE", path, null);
   }
 
+  /** Skill 管理保留网关的校验、冲突和异步接收状态，不改变其他代理契约。 */
+  public org.springframework.http.ResponseEntity<JsonNode> skillExchange(
+      String method, String path, byte[] content, String contentType) {
+    try {
+      var request =
+          HttpRequest.newBuilder(gatewayBaseUri.resolve(path))
+              .timeout(Duration.ofSeconds(60))
+              .header("Content-Type", contentType)
+              .method(
+                  method,
+                  content == null
+                      ? HttpRequest.BodyPublishers.noBody()
+                      : HttpRequest.BodyPublishers.ofByteArray(content))
+              .build();
+      var response =
+          httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+      return org.springframework.http.ResponseEntity.status(response.statusCode())
+          .body(objectMapper.readTree(response.body()));
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      return skillUnavailable();
+    } catch (IOException | RuntimeException error) {
+      return skillUnavailable();
+    }
+  }
+
+  private org.springframework.http.ResponseEntity<JsonNode> skillUnavailable() {
+    return org.springframework.http.ResponseEntity.status(502)
+        .body(objectMapper.createObjectNode().put("error", "Skill 网关暂不可用，请稍后重试。"));
+  }
+
   public JsonNode uploadImage(String workflowId, byte[] content) {
     try {
       var request =

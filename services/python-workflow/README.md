@@ -44,6 +44,15 @@ python-workflow/
 
 `POST /agents/validate` 同样接受可选 `groupId`，用于 SOP 保存的同组验证。配置中心负责业务引用保护和跨实例分组写入互斥，不把角色或任务数据复制到中央 SQLite；浏览器仍通过配置中心访问。先升级中央网关再升级配置中心，详见[统一分组升级说明](../../docs/SHARED_GROUPS_UPGRADE.zh-CN.md)。
 
+## Skill 压缩包下发
+
+中央网关新增 `/skills`、`/skills/machines`、`/skill-deployments` 和 `/skill-deployment-tasks/{id}/retry|check` 管理接口，经配置中心代理使用。ZIP 与解包文件保存到专用目录，包清单、逐机任务、安装归属及进度保存在同一中央 SQLite。使用独立执行服务文件连接，不经过业务模型会话，纯执行机无需 Sidecar。
+
+默认关闭，需配置 `skill_deployment.package_root`，再在机器管理网页保存逐机安装目录和授权（中央 SQLite 持久化、立即生效）；同时尊重机器 `allow_write`。只支持首次安装，不覆盖同名不同内容，不执行安装脚本、不自动安装依赖或启用能力。根 `SKILL.md` 最后发布，回读校验及 `skills/list` 刷新通过后才报告已安装。配置、容量、接口状态和重启恢复边界见 [Skill 下发部署说明](../../docs/SKILL_DEPLOYMENT.zh-CN.md)。
+
+
+Skill 包通过中央 `skill_group_packages` 关联表加入一个或多个现有机器分组；上传及新下发必须提供 `groupId`，查询可按组筛选。下发在写事务内校验组、包收录和全部机器归属，新批次冻结分组编号及名称。机器有待处理 Skill 操作时禁止改组；存在收录或新批次历史的组禁止删除。安装汇总按机器当前组展示完整平台记录，不扫描人工安装内容。旧包手动归组，旧批次不推测归属；迁移、旧队列恢复和接口细节见 [Skill 下发部署说明](../../docs/SKILL_DEPLOYMENT.zh-CN.md#统一分组升级)。
+
 ## 执行机配置
 
 带图咨询所用的主监督机器以及接收图片的步骤执行机需要配置 `machine_defaults.artifact_root` 和 `allow_write: true`。已有机器缺少图片目录时，在中央服务配置中补齐目标执行机的绝对目录，待无活动工作流后升级并重启网关，再在机器管理中编辑保存对应机器；保存同步目录并保留机器编号和 SOP 引用，远程通过同组清单获取。省略目录配置保留已有值，目录不能配置为空字符串。任务助手自身仍以只读沙箱执行。

@@ -8,17 +8,18 @@ const vm=require('node:vm');
 // payloads and rendered markup; it intentionally does not claim visual coverage.
 function fixture(search='') {
   const nodes=new Map();
-  function element(){return {innerHTML:'',value:'',textContent:'',dataset:{},style:{},classList:{add(){},remove(){},toggle(){}},addEventListener(){},querySelector(){return element()},querySelectorAll(){return []},closest(){return element()}}}
-  const document={querySelector(selector){if(!nodes.has(selector))nodes.set(selector,element());return nodes.get(selector)},querySelectorAll(){return []},addEventListener(){},createElement:element};
+  function element(){return {innerHTML:'',value:'',textContent:'',dataset:{},close(){},style:{},classList:{add(){},remove(){},toggle(){}},addEventListener(){},querySelector(){return element()},querySelectorAll(){return []},closest(){return element()}}}
+  const navButtons=['roles','groups','skills'].map(page=>({...element(),dataset:{page}}));
+  const document={querySelector(selector){if(!nodes.has(selector))nodes.set(selector,element());return nodes.get(selector)},querySelectorAll(selector){return selector==='nav button'?navButtons:[]},addEventListener(){},createElement:element};
   const context=vm.createContext({document,window:{addEventListener(){}},location:{search,href:'http://localhost/'+search},history:{replaceState(){}},URL,URLSearchParams,console,setInterval(){},setTimeout(){},confirm(){return false},fetch(){throw Error('Unexpected network request')}});
-  for(const name of ['groups.js','machines.js','run-catalog.js','task-schedules.js','app.js']) {
+  for(const name of ['groups.js','machines.js','run-catalog.js','task-schedules.js','skills.js','app.js']) {
     let script=fs.readFileSync(path.join(__dirname,'../../main/resources/static',name),'utf8');
     if(name==='app.js')script=script.slice(0,script.indexOf('const initialPage='));
     vm.runInContext(script,context,{filename:name});
   }
   const run=code=>vm.runInContext(code,context);
   run(`groupState.items=[{id:'a',name:'甲组'},{id:'b',name:'乙组'}];state.roles=[{id:'ra',name:'甲角色',duty:'职责',groupId:'a',enabled:true},{id:'rb',name:'乙角色',duty:'职责',groupId:'b',enabled:true},{id:'old',name:'旧角色',duty:'职责',groupId:null,enabled:true}];state.agents=[{agentId:'ma',groupId:'a',enabled:true,capabilities:['supervisor','executor']},{agentId:'mb',groupId:'b',enabled:true,capabilities:['supervisor','executor']}];`);
-  return {run,nodes,context};
+  return {run,nodes,context,navButtons};
 }
 
 test('all, unassigned and concrete filters preserve their distinct meanings',()=>{
@@ -153,4 +154,19 @@ test('empty SOP panel shows creation guidance but keeps an unsaved draft editabl
   assert.match(nodes.get('#content').innerHTML,/data-sop-save/);
   assert.match(nodes.get('#content').innerHTML,/data-flow-canvas/);
   assert.match(nodes.get('#groupActions').innerHTML,/共 0 个工作流/);
+});
+
+
+test('entering Skill management always opens the library and clears old targets',async()=>{
+  const {run,navButtons}=fixture();
+  run("state.page='groups';skillView.tab='history';skillView.selected.add('old');render=async()=>{}");
+  await navButtons.find(b=>b.dataset.page==='skills').onclick();
+  assert.equal(run('state.page'),'skills');assert.equal(run('skillView.tab'),'library');assert.equal(run('skillView.selected.size'),0);
+});
+
+test('shared group navigation clears Skill selections while preserving current tab',async()=>{
+  const {run}=fixture();
+  run("state.page='skills';skillView.tab='machines';skillView.selected.add('old');skillView.checked.add('p');render=async()=>{}");
+  await run("selectGroup('b')");
+  assert.equal(run('groupState.selected'),'b');assert.equal(run('skillView.tab'),'machines');assert.equal(run('skillView.selected.size'),0);assert.equal(run('skillView.checked.size'),0);
 });

@@ -26,11 +26,39 @@ class AgentRegistry:
                     ip TEXT NOT NULL, port INTEGER NOT NULL, config TEXT NOT NULL,
                     test_status TEXT NOT NULL DEFAULT 'untested', tested_at TEXT,
                     UNIQUE(ip, port));
+                CREATE TABLE IF NOT EXISTS agent_skill_settings (
+                    agent_id TEXT PRIMARY KEY REFERENCES registered_agents(id),
+                    enabled INTEGER NOT NULL DEFAULT 0, root TEXT NOT NULL DEFAULT '',
+                    checked_at TEXT, check_message TEXT);
             """)
+            # 旧部署授权仅导入一次；此后网页保存的数据库记录是唯一事实来源。
+            legacy = setting("skill_deployment", {}).get("agents", {})
+            for row in db.execute("SELECT id FROM registered_agents").fetchall():
+                rule = legacy.get(row["id"], {})
+                db.execute("INSERT OR IGNORE INTO agent_skill_settings(agent_id,enabled,root) VALUES(?,?,?)",
+                           (row["id"], int(rule.get("enabled") is True), rule.get("root", "")))
+
+    def skill_settings(self, agent_id: str) -> dict[str, Any]:
+        with self.store._connect() as db:
+            row = db.execute("SELECT * FROM agent_skill_settings WHERE agent_id=?", (agent_id,)).fetchone()
+        return {"enabled": bool(row["enabled"]), "root": row["root"],
+                "checkedAt": row["checked_at"], "checkMessage": row["check_message"]} if row else {
+                    "enabled": False, "root": "", "checkedAt": None, "checkMessage": None}
+
+    def record_skill_check(self, agent_id, expected_config, expected_root, message):
+        with self.store._connect() as db:
+            db.execute("""UPDATE agent_skill_settings SET checked_at=?, check_message=?
+                WHERE agent_id=? AND root=? AND EXISTS
+                (SELECT 1 FROM registered_agents WHERE id=? AND config=?)""",
+                (datetime.now(timezone.utc).isoformat(), message, agent_id, expected_root, agent_id, expected_config))
 
     def groups(self) -> list[dict[str, str]]:
         with self.store._connect() as db:
-            return [dict(row) for row in db.execute("SELECT id, name FROM agent_groups ORDER BY name")]
+            rows = [dict(row) for row in db.execute("SELECT id, name FROM agent_groups ORDER BY name")]
+            available = db.execute("SELECT 1 FROM sqlite_master WHERE name='skill_group_packages'").fetchone()
+            for row in rows:
+                row["skillCount"] = db.execute("SELECT COUNT(*) FROM skill_group_packages WHERE group_id=?", (row["id"],)).fetchone()[0] if available else 0
+            return rows
 
     def save_group(self, body: dict[str, Any], group_id: str | None = None) -> dict[str, str]:
         name = body.get("name")
@@ -50,6 +78,11 @@ class AgentRegistry:
 
     def delete_group(self, group_id: str) -> None:
         with self.store._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='skill_group_packages'").fetchone():
+                for table in ("skill_group_packages", "skill_batches"):
+                    if db.execute(f"SELECT 1 FROM {table} WHERE group_id=? LIMIT 1", (group_id,)).fetchone():
+                        raise ValueError("分组仍有 Skill 或下发历史引用，不能删除。")
             if db.execute("SELECT 1 FROM registered_agents WHERE group_id=?", (group_id,)).fetchone():
                 raise ValueError("分组内仍有机器，不能删除。")
             if not db.execute("DELETE FROM agent_groups WHERE id=?", (group_id,)).rowcount:
@@ -74,6 +107,7 @@ class AgentRegistry:
         return [{"agentId": key, "name": row["ip"], "ip": row["ip"], "port": row["port"],
                  "groupId": row["group_id"], "testStatus": row["test_status"], "testedAt": row["tested_at"],
                  "enabled": json.loads(row["config"]).get("enabled", True),
+                 "skillInstallation": self.skill_settings(key),
                  "capabilities": json.loads(row["config"]).get("capabilities", [])}
                 for key, row in self.rows().items()]
 
@@ -115,6 +149,31 @@ class AgentRegistry:
             if db.execute("SELECT 1 FROM registered_agents WHERE ip=? AND port=? AND id<>?", (ip, port, agent_id)).fetchone():
                 raise ValueError("该 IP 和端口已登记。")
             config = json.loads(old["config"]) if old else defaults()
+            previous = db.execute("SELECT * FROM agent_skill_settings WHERE agent_id=?", (agent_id,)).fetchone()
+            skill_enabled = bool(previous["enabled"]) if previous else False
+            skill_root = previous["root"] if previous else ""
+            if "skillInstallation" in body:
+                from skill_packages import SkillError, remote_root
+                rule = body["skillInstallation"]
+                if (not isinstance(rule, dict) or not {"enabled", "root"} <= set(rule)
+                        or set(rule) - {"enabled", "root", "checkedAt", "checkMessage"}
+                        or not isinstance(rule["enabled"], bool) or not isinstance(rule["root"], str)):
+                    raise ValueError("Skill 安装设置必须包含启用开关和目录。")
+                skill_enabled, skill_root = rule["enabled"], rule["root"].strip()
+                try:
+                    if skill_root or skill_enabled:
+                        skill_root = str(remote_root(skill_root))
+                except SkillError as error:
+                    raise ValueError(str(error)) from error
+                if skill_enabled and "executor" not in capabilities:
+                    raise ValueError("只有执行机可以授权 Skill 安装。")
+            if "executor" not in capabilities:
+                skill_enabled = False
+            settings_changed = previous is None or (skill_enabled, skill_root) != (bool(previous["enabled"]), previous["root"])
+            if old and (settings_changed or old["ip"] != ip or old["port"] != port or old["group_id"] != body["groupId"]):
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='skill_tasks'").fetchone():
+                    if db.execute("SELECT 1 FROM skill_tasks WHERE agent_id=? AND state IN ('queued','running') LIMIT 1", (agent_id,)).fetchone():
+                        raise ValueError("这台机器仍有待处理的 Skill 下发，请结束后再修改分组、安装设置或连接地址。")
             previous_credentials = (config.get("token_env"), config.get("token_file"))
             # 保存时同步部署凭据引用；切换来源时移除旧引用，不能同时保留两种来源。
             for credential_key in ("token_env", "token_file"):
@@ -164,6 +223,11 @@ class AgentRegistry:
                     "untested" if changed else old["test_status"], None if changed else old["tested_at"]))
             except sqlite3.IntegrityError as error:
                 raise ValueError("该 IP 和端口已登记。") from error
+            db.execute("""INSERT INTO agent_skill_settings(agent_id,enabled,root) VALUES(?,?,?)
+                ON CONFLICT(agent_id) DO UPDATE SET enabled=excluded.enabled,root=excluded.root""",
+                (agent_id, int(skill_enabled), skill_root))
+            if settings_changed or changed:
+                db.execute("UPDATE agent_skill_settings SET checked_at=NULL,check_message=NULL WHERE agent_id=?", (agent_id,))
         return next(row for row in self.public() if row["agentId"] == agent_id)
 
     def record_test(self, agent_id: str, passed: bool) -> None:

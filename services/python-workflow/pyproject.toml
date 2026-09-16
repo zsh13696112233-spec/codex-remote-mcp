@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Dispatch tasks to remote Codex App Server instances."
 requires-python = ">=3.10"
 dependencies = [
+  "PyYAML>=6.0.2,<7",
   "mcp>=1.12,<2",
   "pydantic-settings>=2",
   "starlette>=0.47,<2",
@@ -21,6 +22,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 package-dir = {"" = "src"}
 py-modules = [
+  "skill_packages",
+  "skill_store",
+  "skill_deployment",
+  "skill_routes",
   "codex_orchestrator_mcp",
   "workflow_gateway",
   "workflow_event_batcher",

@@ -42,7 +42,7 @@ class SharedGroupsIntegrationTest {
   @BeforeEach
   void setUp() {
     ObjectNode list = JsonNodeFactory.instance.objectNode();
-    list.putArray("groups").addObject().put("id", A).put("name", "甲组");
+    list.putArray("groups").addObject().put("id", A).put("name", "甲组").put("skillCount", 3);
     list.withArray("groups").addObject().put("id", B).put("name", "乙组");
     when(gateway.get("/agent-groups")).thenReturn(list);
     ObjectNode machines = JsonNodeFactory.instance.objectNode();
@@ -67,6 +67,11 @@ class SharedGroupsIntegrationTest {
   ObjectNode role(String group) {
     return configs.createRole(
         new RoleSaveRequest("角色" + UUID.randomUUID(), "职责", true, null, group));
+  }
+
+  @Test
+  void skillCountsComeFromCentralDirectory() {
+    assertThat(groups.catalog().path("groups").get(0).path("skillCount").asInt()).isEqualTo(3);
   }
 
   ObjectNode sop(String group, String role) {

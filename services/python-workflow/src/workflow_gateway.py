@@ -2041,16 +2041,23 @@ def create_app(
     store = WorkflowStore(selected_db_path)
     supervisor_orchestrator = orchestrator or Orchestrator()
     gateway = WorkflowGateway(store, supervisor_orchestrator)
+    from skill_deployment import SkillDeployment
+    from skill_routes import skill_routes
+    skills = SkillDeployment(gateway)
 
     @asynccontextmanager
     async def lifespan(_: Starlette):
-        await gateway.start()
-        yield
-        await gateway.stop()
+        await skills.start()
         try:
-            await gateway.event_batcher.close()
-        except Exception:
-            LOGGER.exception("关闭监控事件批量写入器失败。")
+            await gateway.start()
+            yield
+        finally:
+            await skills.stop()
+            await gateway.stop()
+            try:
+                await gateway.event_batcher.close()
+            except Exception:
+                LOGGER.exception("关闭监控事件批量写入器失败。")
 
     app = Starlette(
         routes=[
@@ -2151,6 +2158,8 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.gateway = gateway
+    app.state.skills = skills
+    app.router.routes.extend(skill_routes())
     return app
 
 

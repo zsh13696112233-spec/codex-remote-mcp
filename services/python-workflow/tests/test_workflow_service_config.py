@@ -59,6 +59,19 @@ class ServiceConfigTests(unittest.TestCase):
             config.setting('workflow_db')
         self.assertNotIn('secret-value', str(raised.exception))
 
+    def test_skill_deployment_config_and_remote_paths(self):
+        value = {'package_root': str(self.path.parent / 'packages'), 'agents': {
+            'windows': {'enabled': True, 'root': 'C:/Users/worker/.agents/skills'},
+            'mac': {'enabled': True, 'root': '/Users/worker/.agents/skills'}}}
+        self.write({'skill_deployment': value})
+        self.assertEqual(config.setting('skill_deployment'), value)
+        for bad in ({'package_root':'relative'}, {'agents':[]}, {'token':'hidden'},
+                    {'agents':{'x':{'enabled':True,'root':'/work/skills'}}},
+                    {'package_root':str(self.path.parent),'agents':{'x':{'enabled':'yes'}}},
+                    {'package_root':str(self.path.parent),'agents':{'x':{'root':'C:/foo/../bar'}}}):
+            self.write({'skill_deployment': bad})
+            with self.subTest(bad=bad), self.assertRaises(ValueError): config.setting('skill_deployment')
+
     def test_sidecar_parser_reads_file(self):
         from workflow_sidecar import build_argument_parser
         self.write({'sidecar': {

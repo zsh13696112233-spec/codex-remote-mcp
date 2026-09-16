@@ -40,7 +40,7 @@ function machineRoleColumn(members,role,hasGroup){
 function machineCard(a,role){
   const online=a.connectionStatus==='online',offline=a.connectionStatus==='offline';
   const tested=a.testStatus==='passed',failed=a.testStatus==='failed';
-  return `<article class="machine-card"><div class="machine-card-heading"><div><h3>${esc(a.name||a.ip)} ${groupMark(a)}<small> : ${esc(a.port)}</small></h3></div>${status(a)}</div><div class="machine-state-row"><span class="machine-state ${online?'online':offline?'offline':''}">● ${online?'在线':offline?'离线':'在线状态未知'}</span><span class="machine-state ${tested?'online':failed?'offline':''}">${tested?'检测通过':failed?'检测失败':'未检测'}</span>${(a.capabilities||[]).length>1?'<span class="machine-dual-role">兼任监督 / 执行</span>':''}</div><p class="machine-last-tested">最近检测 <span>${time(a.testedAt)}</span></p><div class="machine-card-actions">${['test','edit','toggle'].map(action=>`<button data-machine-action="${action}" data-id="${esc(a.agentId)}" ${pendingMachineActions.has(a.agentId)?'disabled':''}>${action==='test'?'检测连接':action==='edit'?'编辑':a.enabled?'停用':'启用'}</button>`).join('')}</div></article>`;
+  return `<article class="machine-card"><div class="machine-card-heading"><div><h3>${esc(a.name||a.ip)} ${groupMark(a)}<small> : ${esc(a.port)}</small></h3></div>${status(a)}</div><div class="machine-state-row"><span class="machine-state ${online?'online':offline?'offline':''}">● ${online?'在线':offline?'离线':'在线状态未知'}</span><span class="machine-state ${tested?'online':failed?'offline':''}">${tested?'检测通过':failed?'检测失败':'未检测'}</span>${(a.capabilities||[]).length>1?'<span class="machine-dual-role">兼任监督 / 执行</span>':''}</div><p class="machine-last-tested">最近检测 <span>${time(a.testedAt)}</span></p>${role==='executor'?`<p class="machine-last-tested machine-skill-settings">Skill 下发：${a.skillInstallation?.enabled?'已授权':'未授权'}<br>${esc(a.skillInstallation?.root||'尚未配置安装目录')}<br>${esc(a.skillInstallation?.checkMessage||'尚未检测目录')}${a.skillInstallation?.checkedAt?` · ${time(a.skillInstallation.checkedAt)}`:''}</p>`:''}<div class="machine-card-actions">${(role==='executor'?['test','edit','skill-check','toggle']:['test','edit','toggle']).map(action=>`<button data-machine-action="${action}" data-id="${esc(a.agentId)}" ${pendingMachineActions.has(a.agentId)?'disabled':''}>${action==='test'?'检测连接':action==='edit'?'编辑':action==='skill-check'?'检测 Skill 目录':a.enabled?'停用':'启用'}</button>`).join('')}</div></article>`;
 }
 
 function machineBody(a){return {ip:a.ip,port:a.port,groupId:a.groupId,capabilities:a.capabilities,enabled:a.enabled}}
@@ -59,14 +59,14 @@ function openMachine(a,role='executor'){
   if(!a&&!concreteGroup())return chooseGroup(()=>openMachine(a,role));
   let dialog=document.querySelector('#machineDialog');
   if(!dialog){dialog=document.createElement('dialog');dialog.id='machineDialog';document.body.append(dialog)}
-  dialog.innerHTML=`<form><h2>${a?'编辑':'添加'}机器</h2><label>IP 地址<input name="ip" required maxlength="45" value="${esc(a?.ip||'')}"></label><label>执行服务端口<input name="port" type="number" min="1" max="65535" required value="${a?.port||4500}"></label><label>分组<select name="groupId">${machineGroups.map(g=>`<option value="${esc(g.id)}" ${g.id===(a?.groupId||selectedMachineGroupId)?'selected':''}>${esc(g.name)}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="supervisor" ${(a?a.capabilities.includes('supervisor'):role==='supervisor')?'checked':''}>主监督</label><label class="check"><input type="checkbox" name="executor" ${(a?a.capabilities.includes('executor'):role==='executor')?'checked':''}>执行机</label><p role="alert" class="machine-error"></p><footer><button type="button" data-close-machine>取消</button><button type="submit" class="primary">保存</button></footer></form>`;
+  dialog.innerHTML=`<form><h2>${a?'编辑':'添加'}机器</h2><label>IP 地址<input name="ip" required maxlength="45" value="${esc(a?.ip||'')}"></label><label>执行服务端口<input name="port" type="number" min="1" max="65535" required value="${a?.port||4500}"></label><label>分组<select name="groupId">${machineGroups.map(g=>`<option value="${esc(g.id)}" ${g.id===(a?.groupId||selectedMachineGroupId)?'selected':''}>${esc(g.name)}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="supervisor" ${(a?a.capabilities.includes('supervisor'):role==='supervisor')?'checked':''}>主监督</label><label class="check"><input type="checkbox" name="executor" ${(a?a.capabilities.includes('executor'):role==='executor')?'checked':''}>执行机</label><fieldset><legend>Skill 安装设置</legend><label class="check"><input type="checkbox" name="skillEnabled" ${a?.skillInstallation?.enabled?'checked':''}>允许向这台执行机下发 Skill</label><label>执行机上的 Skill 安装目录<input name="skillRoot" maxlength="1024" value="${esc(a?.skillInstallation?.root||'')}" placeholder="填写执行服务可识别的绝对目录"></label><p class="machine-muted">保存后持续有效，无需重启。目录须预先存在，安装仍受执行机写权限限制。保存后可在机器卡片检测目录。</p></fieldset><p role="alert" class="machine-error"></p><footer><button type="button" data-close-machine>取消</button><button type="submit" class="primary">保存</button></footer></form>`;
   dialog.querySelector('[data-close-machine]').onclick=()=>dialog.close();
   dialog.querySelector('form').onsubmit=async event=>{
     event.preventDefault();const f=event.target,button=f.querySelector('[type=submit]');button.disabled=true;
     const capabilities=['supervisor','executor'].filter(c=>f.elements[c].checked);
     try{
       if(!capabilities.length)throw new Error('请至少选择一种能力。');
-      await api(a?`/api/agents/${encodeURIComponent(a.agentId)}`:'/api/agents',{method:a?'PUT':'POST',body:JSON.stringify({ip:f.elements.ip.value.trim(),port:Number(f.elements.port.value),groupId:f.elements.groupId.value,capabilities,enabled:a?.enabled??true})});
+      await api(a?`/api/agents/${encodeURIComponent(a.agentId)}`:'/api/agents',{method:a?'PUT':'POST',body:JSON.stringify({ip:f.elements.ip.value.trim(),port:Number(f.elements.port.value),groupId:f.elements.groupId.value,capabilities,enabled:a?.enabled??true,skillInstallation:{enabled:f.elements.skillEnabled.checked,root:f.elements.skillRoot.value.trim()}})});
       selectedMachineGroupId=f.elements.groupId.value;dialog.close();await render();toast('已保存，请检测连接。');
     }catch(error){f.querySelector('.machine-error').textContent=error.message}finally{button.disabled=false}
   };dialog.showModal();
@@ -78,7 +78,7 @@ document.addEventListener('click',async event=>{
   if(pendingMachineActions.has(id))return;
   if(action==='group-select'){await selectGroup(id);return}
   button.disabled=true;
-  if(action==='test'||action==='toggle'){
+  if(action==='test'||action==='toggle'||action==='skill-check'){
     pendingMachineActions.add(id);
     document.querySelectorAll('.machine-card-actions [data-id]').forEach(b=>{if(b.dataset.id===id)b.disabled=true});
   }
@@ -93,9 +93,12 @@ document.addEventListener('click',async event=>{
     }else if(action==='test'){
       button.textContent='正在检测…';
       const result=await api(`/api/agents/${encodeURIComponent(id)}/test`,{method:'POST',body:'{}'});toast(result.message);
+    }else if(action==='skill-check'){
+      button.textContent='正在检测…';
+      const result=await api(`/api/skills/machines/${encodeURIComponent(id)}/check`,{method:'POST',body:'{}'});toast(result.message);
     }else if(action==='toggle'){
       await api(`/api/agents/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify({...machineBody(a),enabled:!a.enabled})});
     }
     await render();
-  }catch(error){toast(error.message)}finally{pendingMachineActions.delete(id);document.querySelectorAll('.machine-card-actions [data-id]').forEach(b=>{if(b.dataset.id===id)b.disabled=false});button.disabled=false;if(action==='test')button.textContent='检测连接'}
+  }catch(error){toast(error.message)}finally{pendingMachineActions.delete(id);document.querySelectorAll('.machine-card-actions [data-id]').forEach(b=>{if(b.dataset.id===id)b.disabled=false});button.disabled=false;if(action==='test')button.textContent='检测连接';if(action==='skill-check')button.textContent='检测 Skill 目录'}
 });

@@ -11,7 +11,7 @@ SERVICE_CONFIG_PATH = REPOSITORY_ROOT / "config" / "workflow-service.json"
 FIELDS = {
     name: tuple(name.split("."))
     for name in (
-        "workflow_db", "machine_defaults.cwd", "machine_defaults.protocol",
+        "workflow_db", "skill_deployment", "machine_defaults.cwd", "machine_defaults.protocol",
         "machine_defaults.model", "machine_defaults.allow_write", "machine_defaults.allow_full_access",
         "machine_defaults.token_env", "machine_defaults.token_file",
         "machine_defaults.sidecar_token_template", "machine_defaults.orchestration_mode",
@@ -50,6 +50,25 @@ def _load(path: Path) -> dict[str, Any]:
         if item is None:
             continue
         key = parts[-1]
+        if key == "skill_deployment":
+            from skill_packages import remote_root
+            if not isinstance(item, dict) or set(item) - {"package_root", "agents"}:
+                raise ValueError("skill_deployment 仅支持 package_root 和 agents。")
+            if item.get("package_root") is not None and (not isinstance(item["package_root"], str) or not Path(item["package_root"]).is_absolute()):
+                raise ValueError("Skill 包存储目录必须为中央机器绝对路径。")
+            agents = item.get("agents", {})
+            if not isinstance(agents, dict):
+                raise ValueError("Skill 执行机授权必须为对象。")
+            for agent_id, rule in agents.items():
+                if (not isinstance(agent_id, str) or not 1 <= len(agent_id) <= 128
+                        or not isinstance(rule, dict) or set(rule) - {"enabled", "root"}
+                        or not isinstance(rule.get("enabled", False), bool)):
+                    raise ValueError("Skill 执行机授权格式不正确。")
+                if rule.get("enabled") and not item.get("package_root"):
+                    raise ValueError("启用 Skill 安装前必须配置包存储目录。")
+                if rule.get("enabled") or "root" in rule:
+                    remote_root(rule.get("root"))
+            continue
         if key in {"allow_write", "allow_full_access"}:
             if not isinstance(item, bool):
                 raise ValueError(f"{key} 必须是布尔值。")

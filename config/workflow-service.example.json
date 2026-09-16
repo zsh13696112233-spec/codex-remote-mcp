@@ -1,5 +1,8 @@
 {
   "workflow_db": "workflows.db",
+  "skill_deployment": {
+    "package_root": "C:\\codex-data\\skill-packages"
+  },
   "machine_defaults": {
     "cwd": "C:\\codex-work",
     "protocol": "ws",

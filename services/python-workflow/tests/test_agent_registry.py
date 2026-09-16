@@ -35,6 +35,81 @@ class RegistryTests(unittest.TestCase):
         return self.registry.save_agent({"ip": ip, "port": 4500, "groupId": group or self.group,
                                          "capabilities": capabilities or ["supervisor", "executor"]})
 
+    def test_skill_settings_persist_and_do_not_elevate_permissions(self):
+        machine = self.machine(capabilities=["executor"])
+        key = machine["agentId"]
+        rule = {"enabled": True, "root": "C:/Users/worker/.agents/skills"}
+        response = self.client.put("/agents/" + key, json={**machine, "skillInstallation": rule})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["skillInstallation"]["enabled"])
+        self.assertFalse(self.registry.configs()[key].allow_write)
+        reopened = AgentRegistry(WorkflowStore(self.root / 'runtime.db'))
+        self.assertEqual(reopened.skill_settings(key)["root"], "C:\\Users\\worker\\.agents\\skills")
+        # Old clients/toggle actions omit the new field and must preserve it.
+        self.registry.save_agent({k:v for k,v in machine.items() if k != "skillInstallation"}, key)
+        self.assertTrue(reopened.skill_settings(key)["enabled"])
+        public = self.client.get("/agents").json()["agents"][0]
+        self.assertEqual(public["skillInstallation"], reopened.skill_settings(key))
+
+    def test_skill_settings_reject_bad_paths_and_non_executor(self):
+        machine = self.machine(capabilities=["executor"])
+        for rule in ({"enabled": "true", "root": "/work/skills"},
+                     {"enabled": True, "root": "../skills"},
+                     {"enabled": True, "root": ""},
+                     {"enabled": True, "root": "C:/work/../skills"}):
+            response = self.client.put("/agents/" + machine["agentId"], json={**machine, "skillInstallation": rule})
+            self.assertEqual(response.status_code, 400, response.text)
+        response = self.client.put("/agents/" + machine["agentId"], json={**machine,
+            "capabilities": ["supervisor"], "skillInstallation": {"enabled": True, "root": "/work/skills"}})
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(self.registry.skill_settings(machine["agentId"])["enabled"])
+
+    def test_legacy_skill_authorization_imports_once(self):
+        machine = self.machine(capabilities=["executor"])
+        key = machine["agentId"]
+        # Simulate an old database before the additive settings table existed.
+        with self.gateway.store._connect() as db:
+            db.execute("DROP TABLE agent_skill_settings")
+        self.config_values["skill_deployment"] = {"agents": {key: {"enabled": True, "root": "/work/skills"}}}
+        registry = AgentRegistry(self.gateway.store)
+        self.assertTrue(registry.skill_settings(key)["enabled"])
+        registry.save_agent({**machine, "skillInstallation": {"enabled": False, "root": "/work/skills"}}, key)
+        self.assertFalse(AgentRegistry(self.gateway.store).skill_settings(key)["enabled"])
+
+    def test_web_skill_settings_detection_install_and_pending_protection(self):
+        from skill_deployment import SkillDeployment
+        from tests.test_skills import MemoryRemote, bundle
+        import uuid
+        self.config_values["machine_defaults"]["allow_write"] = True
+        machine = self.machine(capabilities=["executor"])
+        key = machine["agentId"]
+        machine = self.registry.save_agent({**machine, "skillInstallation": {"enabled": True, "root": "/work/skills"}}, key)
+        self.registry.record_test(key, True)
+        remote = MemoryRemote()
+        manager = SkillDeployment(self.gateway, {"package_root": str(self.root / "packages")}, remote)
+        self.app.state.skills = manager
+        with patch("skill_deployment.Orchestrator._resolve_agent_token", return_value=None):
+            result = self.client.post("/skills/machines/" + key + "/check", json={})
+            self.assertTrue(result.json()["passed"], result.text)
+            self.assertEqual(remote.writes, [])
+            self.assertIsNotNone(self.registry.skill_settings(key)["checkedAt"])
+            self.assertEqual(self.client.post("/skills/machines/" + key + "/check", json={"root":"/outside"}).status_code, 400)
+            package = manager.upload(bundle(), self.group)
+            batch = manager.create({"groupId": self.group, "requestId":str(uuid.uuid4()), "packageId":package["id"], "agentIds":[key]})
+            with self.assertRaisesRegex(ValueError, "待处理"):
+                self.registry.save_agent({**machine, "skillInstallation":{"enabled":True,"root":"/work/other"}}, key)
+            asyncio.run(manager.run(manager.store.claim()))
+            self.assertEqual(manager.store.batch(batch["id"])["tasks"][0]["state"], "completed")
+            self.registry.save_agent({**machine, "skillInstallation":{"enabled":False,"root":"/work/skills"}}, key)
+            self.assertFalse(manager.eligibility(key)["eligible"])
+            self.assertIn("/work/skills/demo/SKILL.md", remote.files)
+            self.registry.save_agent({**machine, "skillInstallation":{"enabled":True,"root":"/work/other"}}, key)
+            self.assertIsNone(self.registry.skill_settings(key)["checkedAt"])
+            remote.unsupported = "fs/getMetadata"
+            result = self.client.post("/skills/machines/" + key + "/check", json={})
+            self.assertFalse(result.json()["passed"])
+            self.assertNotIn("private", result.text)
+
     def test_active_runtime_blocks_machine_move_and_creation_rechecks_group(self):
         machine = self.machine()
         key = machine["agentId"]
