@@ -2044,14 +2044,19 @@ def create_app(
     from skill_deployment import SkillDeployment
     from skill_routes import skill_routes
     skills = SkillDeployment(gateway)
+    from mcp_deployment import McpDeployment
+    from mcp_routes import mcp_routes
+    mcps = McpDeployment(gateway)
 
     @asynccontextmanager
     async def lifespan(_: Starlette):
         await skills.start()
         try:
+            await mcps.start()
             await gateway.start()
             yield
         finally:
+            await mcps.stop()
             await skills.stop()
             await gateway.stop()
             try:
@@ -2159,6 +2164,8 @@ def create_app(
     )
     app.state.gateway = gateway
     app.state.skills = skills
+    app.state.mcp_deployment = mcps
+    app.router.routes.extend(mcp_routes())
     app.router.routes.extend(skill_routes())
     return app
 

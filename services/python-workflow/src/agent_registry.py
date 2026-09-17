@@ -26,6 +26,8 @@ class AgentRegistry:
                     ip TEXT NOT NULL, port INTEGER NOT NULL, config TEXT NOT NULL,
                     test_status TEXT NOT NULL DEFAULT 'untested', tested_at TEXT,
                     UNIQUE(ip, port));
+                CREATE TABLE IF NOT EXISTS agent_mcp_settings (
+                    agent_id TEXT PRIMARY KEY REFERENCES registered_agents(id), settings TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS agent_skill_settings (
                     agent_id TEXT PRIMARY KEY REFERENCES registered_agents(id),
                     enabled INTEGER NOT NULL DEFAULT 0, root TEXT NOT NULL DEFAULT '',
@@ -37,6 +39,12 @@ class AgentRegistry:
                 rule = legacy.get(row["id"], {})
                 db.execute("INSERT OR IGNORE INTO agent_skill_settings(agent_id,enabled,root) VALUES(?,?,?)",
                            (row["id"], int(rule.get("enabled") is True), rule.get("root", "")))
+
+    def mcp_settings(self, agent_id):
+        from mcp_packages import installation_settings
+        with self.store._connect() as db:
+            row = db.execute("SELECT settings FROM agent_mcp_settings WHERE agent_id=?", (agent_id,)).fetchone()
+        return json.loads(row[0]) if row else installation_settings({})
 
     def skill_settings(self, agent_id: str) -> dict[str, Any]:
         with self.store._connect() as db:
@@ -83,6 +91,10 @@ class AgentRegistry:
                 for table in ("skill_group_packages", "skill_batches"):
                     if db.execute(f"SELECT 1 FROM {table} WHERE group_id=? LIMIT 1", (group_id,)).fetchone():
                         raise ValueError("分组仍有 Skill 或下发历史引用，不能删除。")
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='mcp_package_groups'").fetchone():
+                for table in ("mcp_package_groups", "mcp_batches"):
+                    if db.execute(f"SELECT 1 FROM {table} WHERE group_id=?", (group_id,)).fetchone():
+                        raise ValueError("分组仍有 MCP 包或下发历史引用。")
             if db.execute("SELECT 1 FROM registered_agents WHERE group_id=?", (group_id,)).fetchone():
                 raise ValueError("分组内仍有机器，不能删除。")
             if not db.execute("DELETE FROM agent_groups WHERE id=?", (group_id,)).rowcount:
@@ -108,6 +120,7 @@ class AgentRegistry:
                  "groupId": row["group_id"], "testStatus": row["test_status"], "testedAt": row["tested_at"],
                  "enabled": json.loads(row["config"]).get("enabled", True),
                  "skillInstallation": self.skill_settings(key),
+                 "mcpInstallation": self.mcp_settings(key),
                  "capabilities": json.loads(row["config"]).get("capabilities", [])}
                 for key, row in self.rows().items()]
 
@@ -148,6 +161,16 @@ class AgentRegistry:
             agent_id = agent_id or "machine-" + uuid.uuid4().hex
             if db.execute("SELECT 1 FROM registered_agents WHERE ip=? AND port=? AND id<>?", (ip, port, agent_id)).fetchone():
                 raise ValueError("该 IP 和端口已登记。")
+            from mcp_store import ensure_available
+            from mcp_packages import installation_settings
+            ensure_available(db, [agent_id])
+            previous_mcp = db.execute("SELECT settings FROM agent_mcp_settings WHERE agent_id=?", (agent_id,)).fetchone()
+            mcp_rule = installation_settings(body.get("mcpInstallation", json.loads(previous_mcp[0]) if previous_mcp else {}))
+            if mcp_rule["enabled"] and "executor" not in capabilities:
+                raise ValueError("只有执行机可以授权 MCP 安装。")
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='mcp_tasks'").fetchone():
+                if db.execute("SELECT 1 FROM mcp_tasks WHERE agent_id=? AND state='queued'", (agent_id,)).fetchone():
+                    raise ValueError("机器仍有待处理 MCP 安装，请完成后修改。")
             config = json.loads(old["config"]) if old else defaults()
             previous = db.execute("SELECT * FROM agent_skill_settings WHERE agent_id=?", (agent_id,)).fetchone()
             skill_enabled = bool(previous["enabled"]) if previous else False
@@ -226,6 +249,8 @@ class AgentRegistry:
             db.execute("""INSERT INTO agent_skill_settings(agent_id,enabled,root) VALUES(?,?,?)
                 ON CONFLICT(agent_id) DO UPDATE SET enabled=excluded.enabled,root=excluded.root""",
                 (agent_id, int(skill_enabled), skill_root))
+            db.execute("INSERT INTO agent_mcp_settings VALUES(?,?) ON CONFLICT(agent_id) DO UPDATE SET settings=excluded.settings",
+                       (agent_id, json.dumps(mcp_rule)))
             if settings_changed or changed:
                 db.execute("UPDATE agent_skill_settings SET checked_at=NULL,check_message=NULL WHERE agent_id=?", (agent_id,))
         return next(row for row in self.public() if row["agentId"] == agent_id)

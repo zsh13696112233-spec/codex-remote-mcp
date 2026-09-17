@@ -47,7 +47,7 @@ public class GatewayClient {
     return exchange("DELETE", path, null);
   }
 
-  /** Skill 管理保留网关的校验、冲突和异步接收状态，不改变其他代理契约。 */
+  /** 包管理保留网关的校验、冲突和异步接收状态，不改变其他代理契约。 */
   public org.springframework.http.ResponseEntity<JsonNode> skillExchange(
       String method, String path, byte[] content, String contentType) {
     try {
@@ -75,7 +75,7 @@ public class GatewayClient {
 
   private org.springframework.http.ResponseEntity<JsonNode> skillUnavailable() {
     return org.springframework.http.ResponseEntity.status(502)
-        .body(objectMapper.createObjectNode().put("error", "Skill 网关暂不可用，请稍后重试。"));
+        .body(objectMapper.createObjectNode().put("error", "包管理网关暂不可用，请稍后重试。"));
   }
 
   public JsonNode uploadImage(String workflowId, byte[] content) {

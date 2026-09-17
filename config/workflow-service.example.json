@@ -3,6 +3,9 @@
   "skill_deployment": {
     "package_root": "C:\\codex-data\\skill-packages"
   },
+  "mcp_deployment": {
+    "package_root": "C:\\codex-data\\mcp-packages"
+  },
   "machine_defaults": {
     "cwd": "C:\\codex-work",
     "protocol": "ws",

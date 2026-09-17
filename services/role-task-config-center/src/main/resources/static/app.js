@@ -164,6 +164,7 @@ async function render({reload=true}={}){
   if(state.page==="runs"){await renderRunCatalog();return}
   if(state.page==="machines"){await renderMachines();return}
   if(state.page==="skills"){await renderSkills();return}
+  if(state.page==="mcps"){await renderMcps();return}
   if(reload){if(state.page==="runtime")await loadRuntime();else await loadBase()}
   if(!current())return;
   if(state.page==="dingtalk"){
@@ -602,12 +603,13 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   if(b.dataset.page===state.page)return;
   if(state.page==="sops"){const dirty=isSopDirty();if(!confirmDiscard())return;if(dirty)discardSopChanges()}
   if(state.page==='skills'||b.dataset.page==='skills'){resetSkillSelection();skillView.tab='library'}
+  if(state.page==='mcps'){document.querySelector('#mcpDialog')?.close();mcpView.version++}
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
   if(state.page==="schedules"){const url=new URL(location.href);url.searchParams.set("page","schedules");history.replaceState(null,"",url)}
   {const url=new URL(location.href);url.searchParams.set("page",state.page);history.replaceState(null,"",url)}
-  const map={skills:["Skill 管理","选择 Skill 下发，按执行机查看安装情况。",""],groups:["分组管理","统一组织角色、SOP、任务与机器。","＋ 新建分组"],schedules:["定时任务管理","每天定时或按分钟间隔执行，通知沿用任务定义配置。","＋ 新建定时任务"],runs:["任务运行","查看钉钉触发与定时任务的运行记录。",""],machines:["机器管理","",""],roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、钉钉通知、运行并追溯不可变快照。","＋ 新建任务"],runtime:["运行状态","查看 Python 网关和全部主监督执行机的实时状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接并查看主动通知配置。",""],"dingtalk-targets":["钉钉通知对象","维护任务定义可选择的人员或群聊。",""]};
+  const map={mcps:["MCP 管理","上传程序包，由安装助手安装并验证。",""],skills:["Skill 管理","选择 Skill 下发，按执行机查看安装情况。",""],groups:["分组管理","统一组织角色、SOP、任务与机器。","＋ 新建分组"],schedules:["定时任务管理","每天定时或按分钟间隔执行，通知沿用任务定义配置。","＋ 新建定时任务"],runs:["任务运行","查看钉钉触发与定时任务的运行记录。",""],machines:["机器管理","",""],roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、钉钉通知、运行并追溯不可变快照。","＋ 新建任务"],runtime:["运行状态","查看 Python 网关和全部主监督执行机的实时状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接并查看主动通知配置。",""],"dingtalk-targets":["钉钉通知对象","维护任务定义可选择的人员或群聊。",""]};
   [$("#title").textContent,$("#subtitle").textContent,$("#create").textContent]=map[state.page];
-  $("#create").classList.toggle("hidden",["runs","machines","skills","runtime","dingtalk","dingtalk-targets"].includes(state.page));
+  $("#create").classList.toggle("hidden",["runs","machines","skills","mcps","runtime","dingtalk","dingtalk-targets"].includes(state.page));
   try{await render()}catch(e){toast(e.message)}
 });
 $("#create").onclick=()=>state.page==="groups"?editGroup():state.page==="roles"?openRole():state.page==="sops"?startNewSop():state.page==="tasks"?openTask():state.page==="schedules"?openSchedule().catch(e=>toast(e.message)):null;

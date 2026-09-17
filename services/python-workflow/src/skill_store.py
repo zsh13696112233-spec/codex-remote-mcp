@@ -262,13 +262,18 @@ class SkillStore:
     def claim(self):
         with self.store._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("""SELECT t.* FROM skill_tasks t WHERE state='queued'
+            rows = db.execute("""SELECT t.* FROM skill_tasks t WHERE state='queued'
                 AND NOT EXISTS(SELECT 1 FROM skill_tasks r WHERE r.agent_id=t.agent_id AND r.state='running')
-                ORDER BY created_at,id LIMIT 1""").fetchone()
-            if not row:
-                return None
-            db.execute("UPDATE skill_tasks SET state='running',updated_at=? WHERE id=?", (now(), row["id"]))
-            return dict(row)
+                ORDER BY created_at,id""").fetchall()
+            from mcp_store import ensure_available
+            for row in rows:
+                try:
+                    ensure_available(db, [row["agent_id"]])
+                except ValueError:
+                    continue
+                db.execute("UPDATE skill_tasks SET state='running',updated_at=? WHERE id=?", (now(), row["id"]))
+                return dict(row)
+            return None
 
     def installation(self, task):
         with self.store._connect() as db:

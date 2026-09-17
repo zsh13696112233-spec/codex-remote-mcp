@@ -705,6 +705,8 @@ class WorkflowStore(InputImageStore):
         )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            from mcp_store import ensure_available
+            ensure_available(connection, [spec["supervisorAgentId"], *(node["agentId"] for node in spec["nodes"])])
             if spec.get("taskDefinitionId"):
                 self._require_task_idle(connection, spec["taskDefinitionId"], spec["workflowId"])
             if spec.get("groupId"):
@@ -2396,6 +2398,8 @@ class WorkflowStore(InputImageStore):
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            from mcp_store import ensure_available, workflow_agents
+            ensure_available(connection, workflow_agents(connection, workflow_id))
             self._require_control_idle(connection, workflow_id)
             binding = connection.execute(
                 "SELECT task_definition_id FROM workflow_task_bindings WHERE workflow_id = ?",
@@ -3135,6 +3139,8 @@ class WorkflowStore(InputImageStore):
         AgentRegistry(self).validate(spec["supervisorAgentId"], [node["agentId"]], require_test=True)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            from mcp_store import ensure_available
+            ensure_available(connection, [spec["supervisorAgentId"], node["agentId"]])
             if sidecar_supervisor_id is not None:
                 self._validate_sidecar_access_with_connection(
                     connection,

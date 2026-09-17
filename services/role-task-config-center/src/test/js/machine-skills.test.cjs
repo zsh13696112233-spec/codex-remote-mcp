@@ -5,9 +5,9 @@ const fs=require('node:fs');
 const source=fs.readFileSync('src/main/resources/static/machines.js','utf8');
 function setup(){
   const listeners={},button={},alert={};
-  const form={elements:{ip:{value:'192.0.2.1'},port:{value:'4500'},groupId:{value:'g'},supervisor:{checked:false},executor:{checked:true},skillEnabled:{checked:true},skillRoot:{value:' /work/skills '}},querySelector:s=>s==='[type=submit]'?button:alert};
-  const dialog={innerHTML:'',querySelector:s=>s==='form'?form:{},showModal(){},close(){this.closed=true}};
-  const context=vm.createContext({document:{querySelector:()=>dialog,querySelectorAll:()=>[],addEventListener:(name,fn)=>listeners[name]=fn},state:{agents:[]},concreteGroup:()=> 'g',esc:v=>String(v??'').replaceAll('<','&lt;').replaceAll('"','&quot;'),time:v=>v,status:()=>'',groupMark:()=>'',render:async()=>{},toast:()=>{},api:async()=>({})});
+  const form={elements:{ip:{value:'192.0.2.1'},port:{value:'4500'},groupId:{value:'g'},supervisor:{checked:false},executor:{checked:true},skillEnabled:{checked:true},skillRoot:{value:' /work/skills '},mcpEnabled:{checked:true},mcpRoot:{value:'C:\\deploy\\program'}},querySelector:s=>s==='[type=submit]'?button:alert};
+  const dialog={innerHTML:'',querySelector:s=>s==='form'?form:{before(){}},showModal(){},close(){this.closed=true}};
+  const context=vm.createContext({document:{createElement:()=>({}),querySelector:()=>dialog,querySelectorAll:()=>[],addEventListener:(name,fn)=>listeners[name]=fn},state:{agents:[]},concreteGroup:()=> 'g',esc:v=>String(v??'').replaceAll('<','&lt;').replaceAll('"','&quot;'),time:v=>v,status:()=>'',groupMark:()=>'',render:async()=>{},toast:()=>{},api:async()=>({})});
   vm.runInContext(source,context);
   const run=code=>vm.runInContext(code,context);
   const machine={agentId:'machine-a',ip:'192.0.2.1',port:4500,groupId:'g',enabled:true,capabilities:['executor'],skillInstallation:{enabled:true,root:'/work/skills'}};
@@ -22,12 +22,18 @@ test('machine form restores saved settings and submits them with existing machin
   await h.form.onsubmit({preventDefault(){},target:h.form});
   assert.equal(sent.url,'/api/agents/machine-a');
   assert.deepEqual(sent.body.skillInstallation,{enabled:true,root:'/work/skills'});
+  assert.deepEqual(sent.body.mcpInstallation,{enabled:true,platform:'windows',installRoot:'C:\\deploy\\program'});
   assert.equal(h.dialog.closed,true);
 });
 test('failed save keeps the form and allows retry',async()=>{
   const h=setup();h.context.api=async()=>{throw new Error('目录无效')};h.run('openMachine(machine)');
   await h.form.onsubmit({preventDefault(){},target:h.form});
   assert.equal(h.alert.textContent,'目录无效');assert.equal(h.button.disabled,false);assert.equal(h.dialog.closed,undefined);
+});
+test('group dialog stays independent of machine installation settings',()=>{
+  const h=setup();h.run('openMachineGroup(null)');
+  assert.match(h.dialog.innerHTML,/新建分组/);
+  assert.doesNotMatch(h.dialog.innerHTML,/mcpEnabled/);
 });
 test('directory detection uses saved machine ID, blocks duplicate clicks, and releases failure state',async()=>{
   const h=setup();let reject,calls=0;h.context.api=(url,options)=>{calls++;assert.equal(url,'/api/skills/machines/machine-a/check');assert.equal(options.body,'{}');return new Promise((_,r)=>reject=r)};

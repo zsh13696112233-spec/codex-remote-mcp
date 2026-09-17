@@ -61,12 +61,16 @@ function openMachine(a,role='executor'){
   if(!dialog){dialog=document.createElement('dialog');dialog.id='machineDialog';document.body.append(dialog)}
   dialog.innerHTML=`<form><h2>${a?'编辑':'添加'}机器</h2><label>IP 地址<input name="ip" required maxlength="45" value="${esc(a?.ip||'')}"></label><label>执行服务端口<input name="port" type="number" min="1" max="65535" required value="${a?.port||4500}"></label><label>分组<select name="groupId">${machineGroups.map(g=>`<option value="${esc(g.id)}" ${g.id===(a?.groupId||selectedMachineGroupId)?'selected':''}>${esc(g.name)}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="supervisor" ${(a?a.capabilities.includes('supervisor'):role==='supervisor')?'checked':''}>主监督</label><label class="check"><input type="checkbox" name="executor" ${(a?a.capabilities.includes('executor'):role==='executor')?'checked':''}>执行机</label><fieldset><legend>Skill 安装设置</legend><label class="check"><input type="checkbox" name="skillEnabled" ${a?.skillInstallation?.enabled?'checked':''}>允许向这台执行机下发 Skill</label><label>执行机上的 Skill 安装目录<input name="skillRoot" maxlength="1024" value="${esc(a?.skillInstallation?.root||'')}" placeholder="填写执行服务可识别的绝对目录"></label><p class="machine-muted">保存后持续有效，无需重启。目录须预先存在，安装仍受执行机写权限限制。保存后可在机器卡片检测目录。</p></fieldset><p role="alert" class="machine-error"></p><footer><button type="button" data-close-machine>取消</button><button type="submit" class="primary">保存</button></footer></form>`;
   dialog.querySelector('[data-close-machine]').onclick=()=>dialog.close();
+  const mcpSettings=a?.mcpInstallation||{};
+  const mcpFields=document.createElement('fieldset');
+  mcpFields.innerHTML=`<legend>MCP 安装设置（Windows）</legend><label class="check"><input name="mcpEnabled" type="checkbox" ${mcpSettings.enabled?'checked':''}>允许安装 MCP</label><label>安装目录<input name="mcpRoot" value="${esc(mcpSettings.installRoot||mcpSettings.programRoot||'')}" maxlength="1024"></label><p class="machine-muted">平台在此目录内分别创建程序和临时子目录。Python、Node.js 由安装助手查找，无需填写路径；缺少时不自动安装。附带 Skill 使用上方授权目录。</p>`;
+  dialog.querySelector('form footer').before(mcpFields);
   dialog.querySelector('form').onsubmit=async event=>{
     event.preventDefault();const f=event.target,button=f.querySelector('[type=submit]');button.disabled=true;
     const capabilities=['supervisor','executor'].filter(c=>f.elements[c].checked);
     try{
       if(!capabilities.length)throw new Error('请至少选择一种能力。');
-      await api(a?`/api/agents/${encodeURIComponent(a.agentId)}`:'/api/agents',{method:a?'PUT':'POST',body:JSON.stringify({ip:f.elements.ip.value.trim(),port:Number(f.elements.port.value),groupId:f.elements.groupId.value,capabilities,enabled:a?.enabled??true,skillInstallation:{enabled:f.elements.skillEnabled.checked,root:f.elements.skillRoot.value.trim()}})});
+      await api(a?`/api/agents/${encodeURIComponent(a.agentId)}`:'/api/agents',{method:a?'PUT':'POST',body:JSON.stringify({ip:f.elements.ip.value.trim(),port:Number(f.elements.port.value),groupId:f.elements.groupId.value,capabilities,enabled:a?.enabled??true,mcpInstallation:{enabled:f.elements.mcpEnabled.checked,platform:'windows',installRoot:f.elements.mcpRoot.value.trim()},skillInstallation:{enabled:f.elements.skillEnabled.checked,root:f.elements.skillRoot.value.trim()}})});
       selectedMachineGroupId=f.elements.groupId.value;dialog.close();await render();toast('已保存，请检测连接。');
     }catch(error){f.querySelector('.machine-error').textContent=error.message}finally{button.disabled=false}
   };dialog.showModal();

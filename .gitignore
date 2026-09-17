@@ -32,3 +32,5 @@ config/agents.sidecar.json
 config/workflow-service.json
 *.skills.lock
 skill-packages/
+*.mcp.lock
+mcp-packages/

@@ -17,8 +17,8 @@ from workflow_service_config import setting
 LOGGER = logging.getLogger(__name__)
 
 
-async def storage_call(function, *args):
-    operation = asyncio.create_task(asyncio.to_thread(function, *args))
+async def storage_call(function, *args, **kwargs):
+    operation = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
     try:
         return await asyncio.shield(operation)
     except asyncio.CancelledError:
@@ -31,8 +31,9 @@ async def storage_call(function, *args):
 
 
 class RemoteFiles:
-    def __init__(self, client):
+    def __init__(self, client, file_limit=FILE_LIMIT):
         self.client = client
+        self.file_limit = file_limit
 
     async def call(self, method, **params):
         try:
@@ -70,7 +71,7 @@ class RemoteFiles:
         await self.metadata(path, False)
         response = await self.call("fs/readFile", path=str(path))
         encoded = response.get("dataBase64") if isinstance(response, dict) else None
-        if not isinstance(encoded, str) or len(encoded) > ((FILE_LIMIT + 2) // 3) * 4:
+        if not isinstance(encoded, str) or len(encoded) > ((self.file_limit + 2) // 3) * 4:
             raise SkillError("远程文件响应过大或格式不兼容。", 409)
         try:
             return base64.b64decode(encoded, validate=True)

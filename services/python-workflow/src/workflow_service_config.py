@@ -11,7 +11,7 @@ SERVICE_CONFIG_PATH = REPOSITORY_ROOT / "config" / "workflow-service.json"
 FIELDS = {
     name: tuple(name.split("."))
     for name in (
-        "workflow_db", "skill_deployment", "machine_defaults.cwd", "machine_defaults.protocol",
+        "workflow_db", "skill_deployment", "mcp_deployment", "machine_defaults.cwd", "machine_defaults.protocol",
         "machine_defaults.model", "machine_defaults.allow_write", "machine_defaults.allow_full_access",
         "machine_defaults.token_env", "machine_defaults.token_file",
         "machine_defaults.sidecar_token_template", "machine_defaults.orchestration_mode",
@@ -50,6 +50,12 @@ def _load(path: Path) -> dict[str, Any]:
         if item is None:
             continue
         key = parts[-1]
+        if key == "mcp_deployment":
+            if (not isinstance(item, dict) or set(item) - {"package_root"}
+                    or (item.get("package_root") is not None and
+                        (not isinstance(item["package_root"], str) or not Path(item["package_root"]).is_absolute()))):
+                raise ValueError("mcp_deployment 仅允许中央绝对目录 package_root。")
+            continue
         if key == "skill_deployment":
             from skill_packages import remote_root
             if not isinstance(item, dict) or set(item) - {"package_root", "agents"}:

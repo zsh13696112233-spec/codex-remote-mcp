@@ -1,7 +1,7 @@
 const groupUrl=new URL(location.href);
 if(groupUrl.searchParams.get('groupId')==='unassigned'){groupUrl.searchParams.delete('groupId');history.replaceState(null,'',groupUrl)}
 const groupState={selected:groupUrl.searchParams.get('groupId')||'',items:[],error:''};
-const groupedPages=['roles','sops','tasks','schedules','runs','machines','skills'];
+const groupedPages=['roles','sops','tasks','schedules','runs','machines','skills','mcps'];
 function concreteGroup(){return groupState.items.some(g=>g.id===groupState.selected)?groupState.selected:''}
 function groupMatches(x){return !groupState.selected||(groupState.selected==='unassigned'?!x.groupId:x.groupId===groupState.selected)}
 function visibleSops(){return state.sops.filter(groupMatches)}
@@ -24,6 +24,7 @@ function renderGroupSidebar(){
   actions.innerHTML='<span>选中条目后可统一归组；已有引用时须先处理关联。</span><button data-assign-group>归组 / 改组</button>';
 }
 async function selectGroup(id){
+  if(state.page==='mcps'){if(mcpView.busy)return false;document.querySelector('#mcpDialog')?.close();mcpView.version++}
   if(state.page==='skills')resetSkillSelection();
   if(state.page==='sops'&&!confirmDiscard()){renderGroupSidebar();return false}
   groupState.selected=id;state.sop.draft=null;state.sop.baseline='';state.sop.selectedNodeId=null;
