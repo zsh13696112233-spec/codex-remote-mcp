@@ -149,6 +149,7 @@ class McpStore:
         public = {key: task[key] for key in ("id", "batch_id", "agent_id", "state", "message", "created_at", "updated_at", "package_id")}
         result = json.loads(task["result"]) if task.get("result") else {}
         public["installation"] = {"programPath": result.get("command"), "skillPath": result.get("skillPath"),
+                                  "kind": result.get("kind", "mcp") if result.get("status") == "installed" else None,
                                   "verified": task["state"] == "completed",
                                   "programVerified": bool(task.get("program_verified")),
                                   "skillVerified": bool(task.get("skill_verified"))}
@@ -224,7 +225,7 @@ class McpStore:
                 raise SkillError("请先检测，确认远程安装已停止。", 409)
             db.execute("INSERT INTO mcp_actions VALUES(?,?,?)", (request_id, key, action))
             installed = row["result"] and json.loads(row["result"]).get("status") == "installed"
-            if action == "retry" and row["state"] == "failed" and not installed:
-                db.execute("UPDATE mcp_tasks SET result=NULL,thread_id=NULL,turn_id=NULL,execution_started=0,execution_stopped=0 WHERE id=?", (key,))
+            if action == "retry" and row["state"] in {"failed", "unsupported"} and not installed:
+                db.execute("UPDATE mcp_tasks SET result=NULL,thread_id=NULL,turn_id=NULL,execution_started=0,execution_stopped=0,program_verified=0,skill_verified=0,diagnostics=NULL WHERE id=?", (key,))
             db.execute("UPDATE mcp_tasks SET state='queued',mode=?,updated_at=? WHERE id=?",
                        (action, now(), key))

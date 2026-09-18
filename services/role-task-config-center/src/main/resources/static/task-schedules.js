@@ -3,7 +3,7 @@ let scheduleRenderVersion=0;
 async function renderSchedules(){
   const version=++scheduleRenderVersion;
   $("#search").closest(".toolbar").classList.remove("hidden");
-  $("#content").className="content";
+  $("#content").className="content schedule-content";
   $("#content").innerHTML='<div class="empty">正在加载定时任务…</div>';
   try {
     const rows=await api("/api/task-schedules?q="+encodeURIComponent($("#search").value.trim())+"&groupId="+encodeURIComponent(groupState.selected));

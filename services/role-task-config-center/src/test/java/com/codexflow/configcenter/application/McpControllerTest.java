@@ -17,6 +17,25 @@ import tools.jackson.databind.ObjectMapper;
 
 class McpControllerTest {
   @Test
+  void cliInstallationTypeAndDiagnosticsArePreserved() throws Exception {
+    var gateway = mock(GatewayClient.class);
+    var mapper = new ObjectMapper();
+    var mvc =
+        MockMvcBuilders.standaloneSetup(new McpController(new McpService(gateway), mapper)).build();
+    var body = mapper.createObjectNode();
+    var item = body.putArray("items").addObject();
+    item.putObject("installation").put("kind", "cli").put("programVerified", true);
+    item.putObject("diagnostics").put("kind", "cli").put("stage", "验证 CLI 帮助命令");
+    when(gateway.skillExchange("GET", "/mcp-packages/inventory", null, "application/json"))
+        .thenReturn(ResponseEntity.ok(body));
+    mvc.perform(get("/api/mcp-packages/inventory"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.items[0].installation.kind").value("cli"))
+        .andExpect(jsonPath("$.items[0].installation.programVerified").value(true))
+        .andExpect(jsonPath("$.items[0].diagnostics.kind").value("cli"));
+  }
+
+  @Test
   void groupFiltersAssignmentAndRequiredUploadGroup() throws Exception {
     var gateway = mock(GatewayClient.class);
     var mapper = new ObjectMapper();

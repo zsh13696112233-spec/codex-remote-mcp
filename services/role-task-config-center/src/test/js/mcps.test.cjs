@@ -4,20 +4,20 @@ const vm=require('node:vm');
 const fs=require('node:fs');
 const source=fs.readFileSync('src/main/resources/static/mcps.js','utf8');
 function setup(){
-  const listeners={},content={innerHTML:''},inventory={innerHTML:''},storage=new Map();
+  const listeners={},content={innerHTML:''},inventory={innerHTML:''},nav={innerHTML:''},storage=new Map();
   let sequence=0;
   const context=vm.createContext({state:{page:'mcps'},document:{hidden:false,addEventListener:(k,v)=>listeners[k]=v},
-    $:selector=>selector==='#content'?content:selector==='#mcpInventory'?inventory:null,
+    $:selector=>selector==='#content'?content:selector==='#mcpInventory'?inventory:selector==='#mcpMachineNav'?nav:null,
     concreteGroup:()=> 'group-a',esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),
     setInterval:()=>{},sessionStorage:{removeItem:k=>storage.delete(k)},
     skillPending:(key,payload)=>{if(!storage.has(key))storage.set(key,{payload,requestId:'request-'+(++sequence)});return storage.get(key).requestId},
     api:async path=>path.includes('/machines')?{agents:[]}:path.includes('/inventory')?{items:[]}:path.includes('/mcp-deployments')?{deployments:[]}:{packages:[],enabled:true},toast:()=>{}});
   vm.runInContext(source,context);
-  return {context,content,inventory,listeners,storage,run:code=>vm.runInContext(code,context)};
+  return {context,content,inventory,nav,listeners,storage,run:code=>vm.runInContext(code,context)};
 }
 test('loads grouped library and an explicit empty state',async()=>{
   const h=setup();await h.run('renderMcps()');
-  assert.match(h.content.innerHTML,/MCP 包库/);assert.match(h.content.innerHTML,/暂无 MCP 包/);
+  assert.match(h.content.innerHTML,/MCP \/ CLI 包库/);assert.match(h.content.innerHTML,/暂无安装包/);
   assert.equal(h.run('mcpScope("/api/mcp-packages")'),'/api/mcp-packages?groupId=group-a');
 });
 test('disabled machines explain authorization and connection requirements',()=>{
@@ -70,6 +70,19 @@ test('detection details distinguish unknown from zero and escape text',()=>{
   assert.match(h.run('mcpDiagnosticRows(detail)'),/工具数量：未知/);
   assert.match(h.run('mcpDiagnosticRows(detail)'),/尚未确认/);
 });
+
+test('CLI installations show their type and do not claim MCP discovery',()=>{
+  const h=setup();
+  h.context.rows=[{package_id:'p',agent_id:'a',state:'completed',installation:{kind:'cli',programPath:'C:/apps/gm_cli.exe',skillPath:'C:/skills/SKILL.md'},diagnostics:{kind:'cli',stage:'验证 CLI 帮助命令',reason:'<secret>',checkedAt:'today'}}];
+  const html=h.run('mcpTaskRows(rows)');
+  assert.match(html,/CLI \+ Skill/);
+  assert.match(html,/验证 CLI 帮助命令/);
+  assert.doesNotMatch(html,/工具数量|服务：|<secret>/);
+  h.context.rows[0].installation.kind='mcp';
+  assert.match(h.run('mcpTaskRows(rows)'),/MCP \+ Skill/);
+  h.context.rows[0].installation.skillPath=null;
+  assert.equal(h.run('mcpKindBadge(rows[0].installation)'),'<span class="badge">MCP</span>');
+});
 test('busy state blocks duplicate task actions',async()=>{
   const h=setup();let calls=0,finish;
   h.context.api=()=>{calls++;return new Promise(resolve=>finish=resolve)};
@@ -78,4 +91,51 @@ test('busy state blocks duplicate task actions',async()=>{
   const first=h.listeners.click(event);await h.listeners.click(event);assert.equal(calls,1);
   h.context.api=async path=>path.includes('inventory')?{items:[]}:path.includes('machines')?{agents:[]}:path.includes('deployments')?{deployments:[]}:{packages:[]};
   finish({accepted:true});await first;assert.equal(button.disabled,false);
+});
+
+test('machine navigation includes empty executors and lists the latest package attempt',()=>{
+  const h=setup();
+  h.run(`mcpView.machines=[{agentId:'a',name:'执行机 A',capabilities:['executor'],enabled:true},{agentId:'b',name:'空机器',capabilities:['executor']},{agentId:'s',name:'仅监督',capabilities:['supervisor']}];
+    mcpView.items=[{id:'old',agent_id:'a',package_id:'p',state:'completed',created_at:'2026-09-16'}, {id:'new',agent_id:'a',package_id:'p',state:'installing',created_at:'2026-09-17'}, {id:'other',agent_id:'a',package_id:'q',state:'failed',created_at:'2026-09-17'}];drawMcpInventory();`);
+  assert.match(h.nav.innerHTML,/2 个安装包/);
+  assert.match(h.nav.innerHTML,/空机器/);
+  assert.match(h.nav.innerHTML,/0 个安装包/);
+  assert.doesNotMatch(h.nav.innerHTML,/仅监督/);
+  assert.equal(h.run('mcpCurrentItems("a").length'),2);
+  assert.equal(h.run('mcpCurrentItems("a")[0].id'),'new');
+  assert.doesNotMatch(h.inventory.innerHTML,/安装成功/);
+  assert.match(h.inventory.innerHTML,/正在安装/);
+});
+
+test('installation details show escaped package identity with a missing package fallback',()=>{
+  const h=setup();h.run(`mcpView.packages=[{id:'p',name:'<包名>'}];`);
+  h.context.rows=[{package_id:'p',agent_id:'a',state:'completed'}];
+  assert.match(h.run('mcpTaskRows(rows)'),/&lt;包名>/);
+  h.context.rows[0].package_id='older-package';
+  assert.match(h.run('mcpTaskRows(rows)'),/older-packag/);
+});
+
+test('machine selection survives refresh and falls back when group changes',async()=>{
+  const h=setup();h.run(`mcpView.machines=[{agentId:'a',name:'A',capabilities:['executor']},{agentId:'b',name:'B',capabilities:['executor']}];drawMcpInventory()`);
+  await h.listeners.click({target:{closest:()=>({dataset:{mcp:'machine',id:'b'}})}});
+  assert.equal(h.run('mcpView.machineId'),'b');
+  assert.match(h.inventory.innerHTML,/暂无平台安装记录/);
+  h.run('drawMcpInventory()');assert.equal(h.run('mcpView.machineId'),'b');
+  h.run(`mcpView.machines=[{agentId:'c',name:'C',capabilities:['executor']}];drawMcpInventory()`);
+  assert.equal(h.run('mcpView.machineId'),'c');
+  h.run('mcpView.machines=[];drawMcpInventory()');assert.equal(h.run('mcpView.machineId'),'');
+  assert.match(h.inventory.innerHTML,/登记执行机/);
+});
+
+test('polling preserves selection and expanded diagnostics while updating status',()=>{
+  const h=setup();let writes=0,html='';
+  Object.defineProperty(h.inventory,'innerHTML',{get:()=>html,set:v=>{writes++;html=v;}});
+  h.run(`mcpView.machines=[{agentId:'a',name:'A',capabilities:['executor']}];mcpView.items=[{id:'t',agent_id:'a',package_id:'p',state:'installing'}];drawMcpInventory();drawMcpInventory()`);
+  assert.equal(writes,1);assert.doesNotMatch(html,/ open>/);
+  h.listeners.toggle({target:{dataset:{mcpDetails:'t'},open:true}});
+  h.run(`mcpView.items[0].state='completed';drawMcpInventory()`);
+  assert.match(html,/安装成功/);assert.match(html,/ open>/);
+  assert.equal(h.run('mcpView.machineId'),'a');
+  h.listeners.toggle({target:{dataset:{mcpDetails:'t'},open:false}});
+  h.run('drawMcpInventory()');assert.doesNotMatch(html,/ open>/);
 });

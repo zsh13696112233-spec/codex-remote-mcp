@@ -8,11 +8,16 @@
 .panel-title small,.canvas-toolbar small,.palette-label small,.inspector-heading small{color:#969eae;font-size:11px}
 .icon-primary{display:grid;place-items:center;width:34px;height:34px;padding:0!important;border:0!important;border-radius:9px!important;background:var(--p)!important;color:#fff;font-size:21px}
 .sop-search{width:100%;margin:16px 0 12px;padding:9px 11px}
-.sop-list{display:grid;gap:7px;max-height:calc(100vh - 270px);overflow:auto}
-.sop-list-item{position:relative;padding:13px 34px 13px 12px;border:1px solid transparent;border-radius:11px;background:#f7f8fb;cursor:pointer}
+.sop-list{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;max-height:calc(100vh - 270px);overflow:auto}
+.sop-list-item{position:relative;min-width:0;padding:13px 30px 13px 12px;border:1px solid transparent;border-radius:11px;background:#f7f8fb;cursor:pointer}
 .sop-list-item:hover{border-color:#d9dcef}.sop-list-item.active{background:#f0efff;border-color:#c9c5fb}
-.sop-list-item>div{display:flex;align-items:center;gap:7px;min-width:0}.sop-list-item strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sop-list-item .badge{padding:2px 6px;font-size:10px;flex:none}.sop-list-item>small{display:block;margin-top:6px;color:#929aaa;font-size:10px}
+.sop-list-item>div{display:flex;align-items:center;gap:7px;min-width:0}
+.sop-list-item>div:first-child{display:grid;grid-template-columns:16px minmax(0,1fr);align-items:start;gap:8px}
+.sop-list-item input[data-group-item]{margin:3px 0 0;width:16px;height:16px}
+.sop-list-item strong{min-width:0;white-space:normal;overflow-wrap:anywhere;font-size:13px;line-height:1.6}
+.sop-list-item .badge{grid-column:2;justify-self:start;padding:2px 6px;font-size:10px}
+.sop-list-item .group-tag{min-width:0;max-width:100%;margin:8px 0 0;white-space:normal;overflow-wrap:anywhere;font-size:11px}
+.sop-list-item>small{display:block;margin-top:8px;color:#929aaa;font-size:10px;line-height:1.6;overflow-wrap:anywhere}
 .sop-list-item>button{position:absolute;right:7px;top:8px;border:0;background:transparent;color:#9aa2b1;padding:4px 7px;font-size:17px}
 .sop-list-item>button:hover{color:#c44747;background:#fff}
 .sop-list-empty{display:grid;place-items:center;gap:6px;text-align:center;color:#858d9c;padding:50px 12px}.sop-list-empty span{font-size:12px;color:#a0a7b4}

@@ -42,6 +42,23 @@ class McpStoreTests(unittest.TestCase):
         self.body = {"requestId": str(uuid.uuid4()), "packageId": self.package['id'],
                      "groupId": self.group, "agentIds": [self.agent]}
 
+    def test_group_mcp_counts_include_shared_packages_once(self):
+        other = self.registry.save_group({"name": "另一个组"})["id"]
+        counts = {g["id"]: g["mcpCount"] for g in self.registry.groups()}
+        self.assertEqual(counts[self.group], 1)
+        self.assertEqual(counts[other], 0)
+        self.manager.upload(bundle([('demo.exe', b'binary')]), other)
+        self.manager.upload(bundle([('demo.exe', b'binary')]), other)
+        counts = {g["id"]: g["mcpCount"] for g in self.registry.groups()}
+        self.assertEqual(counts[self.group], 1)
+        self.assertEqual(counts[other], 1)
+
+    def test_group_mcp_counts_before_mcp_schema_exists(self):
+        legacy = WorkflowStore(Path(self.temp.name) / 'legacy.db')
+        registry = AgentRegistry(legacy)
+        registry.save_group({"name": "旧分组"})
+        self.assertEqual(registry.groups()[0]["mcpCount"], 0)
+
     def test_upload_and_request_idempotency(self):
         first = self.manager.create(self.body)
         self.assertEqual(first, self.manager.create(self.body))
@@ -139,6 +156,31 @@ class McpStoreTests(unittest.TestCase):
         public = self.manager.store.public(task)
         for key in ('snapshot', 'thread_id', 'turn_id', 'registration', 'result'):
             self.assertNotIn(key, public)
+
+    def test_unsupported_retry_discards_old_result_and_session(self):
+        self.manager.create(self.body)
+        task = self.manager.store.claim()
+        self.manager.store.update(task['id'], state='unsupported', occupied=0, execution_started=1,
+                                  execution_stopped=1, thread_id='old', result=json.dumps({'status': 'unsupported'}))
+        self.manager.store.action(task['id'], str(uuid.uuid4()), 'retry')
+        retried = self.manager.store.claim()
+        self.assertIsNone(retried['result'])
+        self.assertIsNone(retried['thread_id'])
+        self.assertEqual(retried['execution_started'], 0)
+
+    def test_cli_kind_survives_store_reopen_and_retry(self):
+        from mcp_store import McpStore
+        self.manager.create(self.body)
+        task = self.manager.store.claim()
+        value = {'status': 'installed', 'kind': 'cli', 'command': r'C:\apps\demo.exe', 'skillPath': r'C:\skills\SKILL.md'}
+        self.manager.store.update(task['id'], state='failed', occupied=0, result=json.dumps(value))
+        reopened = McpStore(self.store)
+        self.assertEqual(reopened.batch(task['batch_id'])['tasks'][0]['installation']['kind'], 'cli')
+        reopened.action(task['id'], str(uuid.uuid4()), 'retry')
+        self.assertEqual(json.loads(reopened.claim()['result']), value)
+        value.pop('kind')
+        reopened.update(task['id'], result=json.dumps(value))
+        self.assertEqual(reopened.batch(task['batch_id'])['tasks'][0]['installation']['kind'], 'mcp')
 
     def test_diagnostics_persist_and_restart_does_not_leave_pending(self):
         from mcp_diagnostics import diagnostic

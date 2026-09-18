@@ -16,7 +16,7 @@ async function loadGroups(){
 function renderGroupSidebar(){
   const panel=$('#groupSidebar'),active=groupedPages.includes(state.page);
   panel.hidden=!active;$('.group-layout').classList.toggle('has-groups',active);
-  const countKey={roles:'roleCount',sops:'sopCount',tasks:'taskCount',schedules:'scheduleCount',machines:'machineCount',skills:'skillCount'}[state.page];
+  const countKey={roles:'roleCount',sops:'sopCount',tasks:'taskCount',schedules:'scheduleCount',machines:'machineCount',skills:'skillCount',mcps:'mcpCount'}[state.page];
   const rows=[{id:'',name:'全部分组'},...groupState.items];
   panel.innerHTML=`<div class="group-sidebar-title"><strong>分组</strong><button data-open-groups title="管理分组">管理</button></div><select class="group-mobile" aria-label="筛选分组">${rows.map(g=>`<option value="${esc(g.id)}" ${g.id===groupState.selected?'selected':''}>${esc(g.name)}</option>`).join('')}</select><div class="group-sidebar-list">${rows.map(g=>`<button data-select-group="${esc(g.id)}" class="${g.id===groupState.selected?'active':''}" aria-pressed="${g.id===groupState.selected}"><span>${esc(g.name)}</span>${countKey&&g[countKey]!=null?`<small>${g[countKey]}</small>`:''}</button>`).join('')}</div>${groupState.error?`<p role="alert">${esc(groupState.error)}</p>`:''}`;
   panel.querySelector('select').onchange=e=>selectGroup(e.target.value).catch(error=>toast(error.message));
@@ -35,8 +35,8 @@ async function selectGroup(id){
 async function renderGroups(){
   $('#search').closest('.toolbar').classList.add('hidden');$('#content').className='content group-catalog';
   if(groupState.error){$('#content').innerHTML=`<div class="empty">${esc(groupState.error)}<button data-group-retry>重新加载</button></div>`;return}
-  const cols=[['roleCount','角色','roles'],['sopCount','SOP','sops'],['taskCount','任务定义','tasks'],['scheduleCount','定时规则','schedules'],['machineCount','机器','machines'],['skillCount','Skill','skills']];
-  $('#content').innerHTML=`<div class="group-intro"><h2>按分组组织整套业务</h2><p>角色、工作流、任务与机器共用分组，Skill 可加入多个组。点击数量，查看该组的数据。</p></div><div class="group-table-wrap"><table class="group-table"><thead><tr><th>分组名称</th>${cols.map(c=>`<th>${c[1]}</th>`).join('')}<th>操作</th></tr></thead><tbody>${groupState.items.map(g=>`<tr><td><strong>${esc(g.name)}</strong></td>${cols.map(c=>`<td><button class="group-count" data-group-jump="${c[2]}" data-id="${esc(g.id)}">${Number(g[c[0]])||0}</button></td>`).join('')}<td><div class="actions"><button data-group-edit="${esc(g.id)}">重命名</button><button data-group-delete="${esc(g.id)}">删除</button></div></td></tr>`).join('')||'<tr><td colspan="8">暂无分组，请点击“新建分组”。</td></tr>'}</tbody></table></div>`;
+  const cols=[['roleCount','角色','roles'],['sopCount','SOP','sops'],['taskCount','任务定义','tasks'],['scheduleCount','定时规则','schedules'],['machineCount','机器','machines'],['skillCount','Skill','skills'],['mcpCount','MCP','mcps']];
+  $('#content').innerHTML=`<div class="group-table-wrap"><table class="group-table"><thead><tr><th>分组名称</th>${cols.map(c=>`<th>${c[1]}</th>`).join('')}<th><span class="group-operation-label">操作</span></th></tr></thead><tbody>${groupState.items.map(g=>`<tr><td><strong>${esc(g.name)}</strong></td>${cols.map(c=>`<td><button class="group-count" data-group-jump="${c[2]}" data-id="${esc(g.id)}">${Number(g[c[0]])||0}</button></td>`).join('')}<td><div class="actions"><button data-group-edit="${esc(g.id)}">重命名</button><button data-group-delete="${esc(g.id)}">删除</button></div></td></tr>`).join('')||'<tr><td colspan="9">暂无分组，请点击“新建分组”。</td></tr>'}</tbody></table></div>`;
 }
 function groupDialog(title,html,onSave){
   let d=$('#sharedGroupDialog');if(!d){d=document.createElement('dialog');d.id='sharedGroupDialog';document.body.append(d)}
@@ -59,7 +59,7 @@ document.addEventListener('click',async e=>{
     if(b.hasAttribute('data-open-groups'))return document.querySelector('nav [data-page=groups]').click();
     if(b.dataset.groupJump){if(!await selectGroup(b.dataset.id))return;return document.querySelector(`nav [data-page="${b.dataset.groupJump}"]`).click()}
     if(b.dataset.groupEdit)return editGroup(b.dataset.groupEdit);
-    if(b.dataset.groupDelete){if(!confirm('仅无配置、机器、Skill 和历史引用的空分组可删除，确定删除？'))return;b.disabled=true;await api(`/api/groups/${encodeURIComponent(b.dataset.groupDelete)}`,{method:'DELETE'});await render();return}
+    if(b.dataset.groupDelete){if(!confirm('仅无配置、机器、Skill、MCP 和历史引用的空分组可删除，确定删除？'))return;b.disabled=true;await api(`/api/groups/${encodeURIComponent(b.dataset.groupDelete)}`,{method:'DELETE'});await render();return}
     if(b.hasAttribute('data-assign-group')){const ids=[...document.querySelectorAll('[data-group-item]:checked')].map(x=>x.dataset.groupItem);if(!ids.length){toast('请先勾选需要归组的数据。');return}if(state.page==='sops'&&!confirmDiscard())return;const kind=state.page;groupDialog(`为 ${ids.length} 条数据指定分组`,`<label>目标分组<select name="groupId" required>${groupOptions(concreteGroup())}</select></label><p>整批校验通过后保存，关联不符时整批保持原样。</p>`,async f=>{await api('/api/groups/assign',{method:'POST',body:JSON.stringify({kind,ids,groupId:f.elements.groupId.value})});state.sop.draft=null;state.sop.baseline='';await render();toast('归组已完成')})}
   }catch(error){toast(error.message)}finally{b.disabled=false}
 });

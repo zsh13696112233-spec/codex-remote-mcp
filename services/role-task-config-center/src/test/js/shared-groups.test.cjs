@@ -97,7 +97,7 @@ test('switching to group management ignores an unfinished business page render',
   const expected=nodes.get('#content').innerHTML;
   release();
   await previous;
-  assert.match(expected,/按分组组织整套业务/);
+  assert.match(expected,/分组名称/);
   assert.equal(nodes.get('#content').innerHTML,expected);
 });
 
@@ -169,4 +169,15 @@ test('shared group navigation clears Skill selections while preserving current t
   run("state.page='skills';skillView.tab='machines';skillView.selected.add('old');skillView.checked.add('p');render=async()=>{}");
   await run("selectGroup('b')");
   assert.equal(run('groupState.selected'),'b');assert.equal(run('skillView.tab'),'machines');assert.equal(run('skillView.selected.size'),0);assert.equal(run('skillView.checked.size'),0);
+});
+
+test('group catalog and MCP sidebar expose package counts and scoped links',async()=>{
+  const {run,nodes}=fixture();
+  run("groupState.items[0].mcpCount=3;state.page='groups'");await run('renderGroups()');
+  assert.match(nodes.get('#content').innerHTML,/<th>MCP<\/th>/);
+  assert.match(nodes.get('#content').innerHTML,/data-group-jump="mcps" data-id="a">3<\/button>/);
+  run("state.page='mcps';renderGroupSidebar()");
+  assert.match(nodes.get('#groupSidebar').innerHTML,/<small>3<\/small>/);
+  run('groupState.items=[]');await run('renderGroups()');
+  assert.match(nodes.get('#content').innerHTML,/colspan="9"/);
 });

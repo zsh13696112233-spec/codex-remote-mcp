@@ -60,12 +60,14 @@ class AgentRegistry:
                 (SELECT 1 FROM registered_agents WHERE id=? AND config=?)""",
                 (datetime.now(timezone.utc).isoformat(), message, agent_id, expected_root, agent_id, expected_config))
 
-    def groups(self) -> list[dict[str, str]]:
+    def groups(self) -> list[dict[str, Any]]:
         with self.store._connect() as db:
             rows = [dict(row) for row in db.execute("SELECT id, name FROM agent_groups ORDER BY name")]
             available = db.execute("SELECT 1 FROM sqlite_master WHERE name='skill_group_packages'").fetchone()
+            mcp_available = db.execute("SELECT 1 FROM sqlite_master WHERE name='mcp_package_groups'").fetchone()
             for row in rows:
                 row["skillCount"] = db.execute("SELECT COUNT(*) FROM skill_group_packages WHERE group_id=?", (row["id"],)).fetchone()[0] if available else 0
+                row["mcpCount"] = db.execute("SELECT COUNT(*) FROM mcp_package_groups WHERE group_id=?", (row["id"],)).fetchone()[0] if mcp_available else 0
             return rows
 
     def save_group(self, body: dict[str, Any], group_id: str | None = None) -> dict[str, str]:

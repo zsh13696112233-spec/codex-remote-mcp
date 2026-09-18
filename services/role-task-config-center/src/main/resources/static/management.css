@@ -1,0 +1,91 @@
+/* Shared management surfaces; business-specific content stays inside the panel. */
+.group-layout:has(.machine-content, .skill-content, .schedule-content, .run-catalog) .group-main { display:block; }
+.group-layout :is(.machine-content, .skill-content, .schedule-content, .run-catalog) { margin:0; min-width:0; }
+.group-layout .machine-board { border:0; border-radius:0; min-height:420px; overflow:visible; }
+.group-layout .machine-group-heading { padding:0 0 20px; }
+.group-layout .machine-role-columns { gap:20px; padding-top:20px; align-items:start; }
+.group-layout .machine-role-column + .machine-role-column { border:0; }
+.group-layout .machine-column-heading { background:transparent; border:0; padding:0 0 12px; }
+.group-layout .machine-column-heading h2 { color:#596177; }
+.group-layout .machine-card-list { gap:12px; }
+.group-layout .machine-card { border:1px solid #e8e9f0; border-radius:12px; padding:16px; background:#fff; }
+.group-layout .machine-card h3 { font-size:15px; }
+.group-layout .machine-card-actions { grid-column:1/-1; padding-top:10px; border-top:1px solid #eeeff5; }
+.group-layout .machine-card-actions button { font-size:12px; padding:6px 8px; }
+.group-layout .machine-last-tested { font-size:12px; }
+.group-layout .skill-content > .settings-panel { border:0; box-shadow:none; border-radius:0; padding:0; background:transparent; }
+.skill-tabs { align-items:center; }
+.skill-content .skill-tabs button[data-mcp="reload"] { margin-left:auto; border:1px solid #e3e5ee; border-radius:7px; padding:7px 12px; font-size:12px; }
+.mcp-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:20px; color:#7a8293; font-size:13px; }
+.mcp-card-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,270px),1fr)); gap:16px; align-items:stretch; }
+.mcp-card { display:flex; flex-direction:column; min-width:0; padding:20px; border:1px solid #e8e9f0; border-radius:12px; background:#fff; gap:12px; }
+.mcp-card:hover { border-color:#c7c2ed; }
+.mcp-card-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+.mcp-card-heading h3 { margin:0; font-size:16px; line-height:1.5; overflow-wrap:anywhere; }
+.mcp-card-heading .badge { flex-shrink:0; font-size:11px; }
+.mcp-card .group-tag { margin:0; align-self:flex-start; max-width:100%; overflow-wrap:anywhere; background:#f3f2f9; color:#7b7593; }
+.mcp-card p { margin:0; font-size:12px; color:#737c8e; line-height:1.7; }
+.mcp-package-groups { display:flex; flex-wrap:wrap; gap:6px; }
+.mcp-card footer { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; border-top:1px solid #eeeff5; padding-top:12px; margin-top:auto; }
+.mcp-card footer small { color:#8791a3; font-size:11px; }
+.mcp-card footer button { color:#625bd8; }
+#mcpPollStatus:empty { display:none; }
+#mcpPollStatus { color:#a54618; font-size:12px; }
+#mcpDialog { width:min(760px,94vw); }
+#mcpDialog .skill-installed { align-items:flex-start; flex-wrap:wrap; }
+#mcpDialog .skill-installed > div { flex:1 1 100%; min-width:0; }
+#mcpDialog .skill-installed strong { display:block; margin-bottom:6px; }
+#mcpDialog .skill-installed p { font-size:12px; color:#737c8e; line-height:1.7; overflow-wrap:anywhere; }
+#mcpDialog .skill-installed .badge { margin-left:10px; }
+.mcp-diagnostics { background:#f8f9fc; border-radius:8px; padding:8px 12px; margin-top:12px; }
+.mcp-inventory-layout { display:grid; grid-template-columns:180px minmax(0,1fr); gap:18px; align-items:start; }
+#mcpMachineNav { display:flex; flex-direction:column; gap:5px; max-height:500px; overflow:auto; border-right:1px solid #e8e9f0; padding-right:12px; }
+#mcpInventory { min-width:0; }
+.mcp-install-row { padding:16px 0; border-top:1px solid #eeeff5; overflow-wrap:anywhere; }
+.mcp-install-summary { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.mcp-install-summary > div { min-width:0; }
+.mcp-install-summary .actions { display:flex; flex-shrink:0; gap:6px; margin:0; }
+.mcp-install-row small,.mcp-install-row p { color:#8791a3; font-size:12px; line-height:1.7; }
+.mcp-install-row details { margin-top:12px; }
+.mcp-install-row summary { cursor:pointer; color:#7b7593; font-size:12px; }
+@media(max-width:1150px) {
+  .mcp-inventory-layout { grid-template-columns:1fr; }
+  #mcpMachineNav { flex-direction:row; border-right:0; border-bottom:1px solid #e8e9f0; padding:0 0 10px; }
+  #mcpMachineNav .skill-machine-tab { min-width:150px; width:auto; flex-shrink:0; }
+  .mcp-install-summary { align-items:flex-start; flex-direction:column; }
+}
+@media(max-width:1100px) { .group-layout .machine-role-columns { grid-template-columns:1fr; } }
+@media(max-width:600px) { .mcp-card-grid { grid-template-columns:1fr; } .mcp-card { padding:16px; } .skill-tabs { gap:12px; } }
+
+/* Scheduled definitions and run history share the management panel shell. */
+.group-layout .schedule-content { padding-top:20px; border-top:1px solid #eeeff5; gap:14px; }
+.schedule-content .card { min-width:0; border-color:#e8e9f0; border-radius:12px; padding:20px; box-shadow:none; align-items:center; }
+.schedule-content .card:hover { border-color:#c7c2ed; }
+.schedule-content .card > div:first-child { min-width:0; flex:1; }
+.schedule-content .card h3 { display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-size:16px; line-height:1.5; overflow-wrap:anywhere; }
+.schedule-content .card h3 .group-tag { margin:0; }
+.schedule-content .card p { font-size:13px; color:#737c8e; line-height:1.7; overflow-wrap:anywhere; }
+.schedule-content .card .meta { display:block; font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
+.schedule-content .actions { flex-shrink:0; margin:0; gap:6px; }
+.schedule-content .actions button { font-size:12px; padding:6px 10px; }
+.schedule-content .actions button:disabled { opacity:.45; cursor:not-allowed; }
+.group-layout .run-catalog-panel { padding:0; border:0; border-radius:0; box-shadow:none; }
+.run-catalog .run-filters { padding-bottom:20px; border-bottom:1px solid #eeeff5; }
+.run-catalog .run-filters label { font-size:12px; color:#737c8e; font-weight:500; }
+.run-catalog .run-filters input,.run-catalog .run-filters select { font-size:13px; background:#f8f9fc; }
+.run-catalog .run-table-wrap { border:1px solid #e8e9f0; border-radius:12px; }
+.run-catalog .run-table { font-size:13px; }
+.run-catalog .run-table th { background:#fafafe; color:#737c8e; }
+.run-catalog .run-table tbody tr:last-child td { border-bottom:0; }
+.run-catalog .run-table a { color:#625bd8; text-decoration:none; }
+.run-catalog .run-table a:hover { text-decoration:underline; }
+.run-catalog #runNotice { font-size:12px; color:#8791a3; margin:14px 0; }
+.run-catalog .run-pagination { font-size:12px; color:#8791a3; }
+.run-catalog .run-pagination .actions { margin:0; }
+.run-catalog .run-pagination button:disabled { opacity:.45; cursor:not-allowed; }
+:is(.schedule-content,.run-catalog) .empty { background:transparent; border:0; padding:70px 20px; font-size:13px; }
+@media(max-width:1100px) {
+  .schedule-content .card { flex-direction:column; align-items:stretch; gap:14px; }
+  .schedule-content .actions { justify-content:flex-start; padding-top:12px; border-top:1px solid #eeeff5; }
+}
+@media(max-width:600px) { .schedule-content .card { padding:16px; } }

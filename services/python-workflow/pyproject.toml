@@ -22,6 +22,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 package-dir = {"" = "src"}
 py-modules = [
+  "mcp_file_transfer",
   "skill_packages",
   "skill_store",
   "skill_deployment",

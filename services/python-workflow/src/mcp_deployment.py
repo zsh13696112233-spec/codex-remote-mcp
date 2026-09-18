@@ -8,11 +8,12 @@ import os
 import uuid
 from pathlib import Path
 
-from codex_orchestrator_mcp import AppServerClient, Orchestrator
+from codex_orchestrator_mcp import AppServerClient, AppServerDisconnected, Orchestrator
 from mcp_installation import RESULT_SCHEMA, installation_prompt, is_runtime, sandbox_policy, sandbox_rejection, validate_result
 from mcp_packages import FILE_LIMIT, parse_package, windows_path
 from mcp_store import McpStore
 from mcp_diagnostics import diagnostic, tools_discovered
+from mcp_file_transfer import DIRECT_LIMIT, McpFileTransfer
 from skill_deployment import RemoteFiles, storage_call
 from skill_packages import SkillError
 from workflow_service_config import setting
@@ -132,6 +133,12 @@ class McpDeployment:
                 raise
             except Exception as error:
                 LOGGER.warning("MCP 安装未完成，类型=%s", type(error).__name__)
+                if isinstance(error, AppServerDisconnected):
+                    LOGGER.warning(
+                        "MCP 安装连接断开，task_id=%s，execution_started=%s，execution_stopped=%s，close_code=%s",
+                        task["id"], bool(task.get("execution_started")),
+                        bool(task.get("execution_stopped")), error.code,
+                    )
                 if task.get('_check_stage'):
                     await self.record_diagnostic(task, task['_check_stage'], error=error)
                 message = str(error) if isinstance(error, SkillError) else "安装未完成，请检测远程状态后重试。"
@@ -153,6 +160,8 @@ class McpDeployment:
                 await asyncio.sleep(attempt + 1)
 
     async def run(self, task):
+        if task.get('result'):
+            task['_installation_kind'] = json.loads(task['result']).get('kind', 'mcp')
         if task['mode'] == 'check':
             await self.record_diagnostic(task, '连接执行服务', pending=True)
         snapshot = json.loads(task["snapshot"])
@@ -212,6 +221,10 @@ class McpDeployment:
         metadata, files = await asyncio.to_thread(parse_package, content)
         if metadata["id"] != package_id:
             raise SkillError("中央安装包发生变化，停止下发。", 409)
+        transfer_files = {".mcp-package.zip": content, **files}
+        merge_allowed = getattr(agent, "allow_write", False) and getattr(agent, "allow_full_access", False)
+        if any(len(data) > DIRECT_LIMIT for data in transfer_files.values()) and not merge_allowed:
+            raise SkillError("大文件合并需要执行机已授权完全访问；请更新机器权限后重新下发。", 409)
         rule = snapshot["settings"]
         temporary = windows_path(rule["temporaryRoot"]) / ((".mcp-tmp-" if rule.get("installRoot") else "") + task["id"])
         program = windows_path(rule["programRoot"]) / ("mcp-" + package_id[:16])
@@ -230,10 +243,14 @@ class McpDeployment:
             else:
                 await client.request("fs/createDirectory", {"path": str(path), "recursive": False})
                 await fs.write(path / ".mcp-install-owner.json", marker)
-        for name, data in {".mcp-package.zip": content, **files}.items():
+        transfer = McpFileTransfer(client, fs, temporary, marker, allow_full_access=merge_allowed)
+        for name, data in transfer_files.items():
             path = temporary.joinpath(*name.split("/"))
             await client.request("fs/createDirectory", {"path": str(path.parent), "recursive": True})
             await fs.ancestors(path.parent)
+            if len(data) > DIRECT_LIMIT:
+                await transfer.write_large(path, data)
+                continue
             siblings = await fs.names(path.parent)
             if path.name.casefold() in siblings:
                 await fs.metadata(path, False)
@@ -294,17 +311,19 @@ class McpDeployment:
         if result.get("status") != "installed":
             state = "unsupported" if result.get("status") == "unsupported" else "failed"
             await storage_call(self.store.update, task["id"], state=state, occupied=0,
-                               message="安装包不支持 MCP。" if state == "unsupported" else "安装未完成。")
+                               message="安装包既无可用 MCP 入口，也不满足 CLI + Skill 安装要求。" if state == "unsupported" else "安装未完成。")
             return
         snapshot = json.loads(task["snapshot"])
         package = self.store.batch(task["batch_id"])["package_id"]
         program = str(windows_path(snapshot["settings"]["programRoot"]) / ("mcp-" + package[:16]))
         skill = str(windows_path(snapshot["skill"]["root"]) / ("mcp-" + package[:16])) if snapshot["skill"]["enabled"] else None
         result = validate_result(result, program, snapshot["settings"]["runtimes"], skill)
+        task['_installation_kind'] = result.get('kind', 'mcp')
         manifest = (await storage_call(self.store.package, package))["manifest"]
         if not result["skillPath"] and any(entry["path"].split("/")[-1] == "SKILL.md" for entry in manifest):
             raise SkillError("附带 Skill 尚未安装或未报告入口。", 409)
-        await storage_call(self.store.update, task["id"], result=json.dumps(result))
+        await storage_call(self.store.update, task["id"], result=json.dumps(result), program_verified=0, skill_verified=0)
+        await self.record_diagnostic(task, '核对安装文件', pending=True)
         fs = RemoteFiles(client, file_limit=FILE_LIMIT)
         await fs.ancestors(windows_path(result["command"]).parent)
         await fs.metadata(result["command"], False)
@@ -312,6 +331,9 @@ class McpDeployment:
         if is_runtime(result["command"], snapshot["settings"]["runtimes"]):
             await fs.ancestors(windows_path(result["args"][0]).parent)
             await fs.metadata(result["args"][0], False)
+        if result.get('kind') == 'cli':
+            await self.check_cli(client, fs, task, result, snapshot)
+            return
         desired = {"command": result["command"], "args": result["args"], "cwd": result["cwd"], "enabled": True}
         await self.record_diagnostic(task, '核对 MCP 注册配置', pending=True)
         await storage_call(self.store.update, task["id"], state="registering")
@@ -349,15 +371,7 @@ class McpDeployment:
                 LOGGER.warning("MCP 验证会话释放失败，类型=%s", type(error).__name__)
         program_verified = tools_discovered(found)
         await storage_call(self.store.update, task["id"], program_verified=int(program_verified))
-        if result["skillPath"]:
-            await fs.ancestors(windows_path(result["skillPath"]).parent)
-            await fs.metadata(result["skillPath"], False)
-            skills = await fs.skills(result["cwd"])
-            matches = [entry for entry in skills["skills"] if entry.get("path") == result["skillPath"] and entry.get("enabled") is True]
-            if (len(matches) != 1 or not matches[0].get("name") or skills["errors"]
-                    or sum(entry.get("name") == matches[0]["name"] for entry in skills["skills"]) != 1):
-                raise SkillError("附带 Skill 尚未唯一识别或存在解析错误。", 409)
-            await storage_call(self.store.update, task["id"], skill_verified=1)
+        await self.check_skill(fs, task, result)
         if not program_verified:
             await storage_call(self.store.update, task["id"], state="needs_configuration", occupied=0,
                                message="程序已注册，尚未发现工具；请检查服务地址、账号或启动环境后重新检测。")
@@ -367,7 +381,47 @@ class McpDeployment:
 
     async def record_diagnostic(self, task, stage, **kwargs):
         task['_check_stage'] = stage if kwargs.get('pending') else None
-        await storage_call(self.store.update, task['id'], diagnostics=json.dumps(diagnostic(stage, **kwargs)))
+        value = diagnostic(stage, **kwargs)
+        if task.get('_installation_kind') == 'cli':
+            value.update(kind='cli', found=None, connection=None, toolCount=None)
+            if not kwargs.get('error'):
+                value['reason'] = '' if kwargs.get('pending') else 'CLI 帮助命令与 Skill 识别检查通过，未执行业务命令。'
+        await storage_call(self.store.update, task['id'], diagnostics=json.dumps(value))
+
+    async def check_skill(self, fs, task, result):
+        if not result['skillPath']:
+            return
+        await fs.ancestors(windows_path(result['skillPath']).parent)
+        await fs.metadata(result['skillPath'], False)
+        skills = await fs.skills(result['cwd'])
+        matches = [entry for entry in skills['skills']
+                   if entry.get('path') and windows_path(entry['path']) == windows_path(result['skillPath'])
+                   and entry.get('enabled') is True]
+        if (len(matches) != 1 or not matches[0].get('name') or skills['errors']
+                or sum(entry.get('name') == matches[0]['name'] for entry in skills['skills']) != 1):
+            raise SkillError('附带 Skill 尚未唯一识别或存在解析错误。', 409)
+        await storage_call(self.store.update, task['id'], skill_verified=1)
+
+    async def check_cli(self, client, fs, task, result, snapshot):
+        await storage_call(self.store.update, task['id'], state='verifying')
+        await self.record_diagnostic(task, '验证 CLI 帮助命令', pending=True)
+        config = json.loads(snapshot['config'])
+        if config.get('allow_write') is not True or config.get('allow_full_access') is not True:
+            raise SkillError('CLI 帮助验证需要执行机已授权完全访问；请更新机器权限后重新下发。', 409)
+        response = await client.request('command/exec', {
+            'command': [result['command'], *result['args'], '--help'], 'cwd': result['cwd'],
+            'sandboxPolicy': {'type': 'dangerFullAccess'}, 'timeoutMs': 20000,
+            'outputBytesCap': 4096,
+        })
+        if (type(response.get('exitCode')) is not int or response['exitCode'] != 0
+                or not any(isinstance(response.get(key), str) and response[key].strip() for key in ('stdout', 'stderr'))):
+            raise SkillError('CLI 帮助命令验证失败，请检查入口及运行环境后重新检测。', 409)
+        await storage_call(self.store.update, task['id'], program_verified=1)
+        await self.record_diagnostic(task, '验证 CLI 配套 Skill', pending=True)
+        await self.check_skill(fs, task, result)
+        await self.record_diagnostic(task, 'CLI 与 Skill 验证完成')
+        await storage_call(self.store.update, task['id'], state='completed', occupied=0,
+                           message='CLI 帮助命令可运行，配套 Skill 已识别。')
 
     @staticmethod
     async def discover(client, verification_id, name):

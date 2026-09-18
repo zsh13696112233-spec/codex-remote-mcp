@@ -40,6 +40,8 @@ def parse_package(content):
                 name = safe_relative(entry.orig_filename.rstrip("/"))
                 if name.split("/")[-1].casefold() in {".mcp-install-owner.json", ".mcp-package.zip"}:
                     raise SkillError("压缩包包含平台保留文件名。")
+                if any(part.casefold() == ".mcp-transfer" for part in name.split("/")):
+                    raise SkillError("压缩包包含平台保留的分块缓存目录名。")
                 if name.casefold() in seen:
                     raise SkillError("压缩包存在重复路径。")
                 seen.add(name.casefold())

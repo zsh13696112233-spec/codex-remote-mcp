@@ -69,9 +69,8 @@ function renderDingTalkConfig(){
       <label class="check"><input name="enabled" type="checkbox" ${x.enabled?"checked":""}> 启用钉钉机器人 Stream 长连接</label>
       <div class="grid"><label>Client ID<input name="clientId" maxlength="128" required value="${esc(x.clientId)}" placeholder="dingxxxxxxxxxxxxxxxx"></label>
       <label>Client Secret<input name="clientSecret" type="password" maxlength="512" placeholder="${x.secretConfigured?"已保存；留空表示不修改":"请输入 Client Secret"}"></label></div>
-      <input type="hidden" name="cardTemplateId" value="${esc(x.cardTemplateId)}"><p>步骤间等待通知与正式回答使用已发布的等待卡片，需开通卡片权限；其余进度按顺序发送普通消息。</p>
+      <input type="hidden" name="cardTemplateId" value="${esc(x.cardTemplateId)}">
       <label>事件轮询间隔（毫秒）<input name="eventPollIntervalMs" type="number" min="250" max="60000" required value="${Number(x.eventPollIntervalMs)||1000}"></label>
-      <p class="hint">Client Secret 只保存在服务端且不会回显。通过完整任务定义名称启动，后续携带工作流编号提问。仅网页和定时运行向配置对象主动通知。模板 ID 留空时使用钉钉内置 Markdown 进度消息，填写后使用互动进度卡。</p>
       <div class="target-list">${bindings.length?bindings.map(t=>`<article class="target-card"><div class="target-main"><strong>${esc(t.name)}</strong><p>${targetTypeLabel(t.dingtalkTarget.targetType)}：${esc(t.dingtalkTarget.displayName)}</p></div><span class="badge ${t.dingtalkActiveWorkflowId?"":"off"}">${t.dingtalkActiveWorkflowId?"运行中":"已配置通知"}</span></article>`).join(""):'<div class="empty">尚未配置主动通知。仍可通过机器人发送任务定义名称启动。</div>'}</div>
       <div id="dingtalkTestResult" class="test-result"></div>
       <footer><button type="button" data-dingtalk-test>测试连接</button><button class="primary" type="submit">保存配置</button></footer>
@@ -607,8 +606,8 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
   if(state.page==="schedules"){const url=new URL(location.href);url.searchParams.set("page","schedules");history.replaceState(null,"",url)}
   {const url=new URL(location.href);url.searchParams.set("page",state.page);history.replaceState(null,"",url)}
-  const map={mcps:["MCP 管理","上传程序包，由安装助手安装并验证。",""],skills:["Skill 管理","选择 Skill 下发，按执行机查看安装情况。",""],groups:["分组管理","统一组织角色、SOP、任务与机器。","＋ 新建分组"],schedules:["定时任务管理","每天定时或按分钟间隔执行，通知沿用任务定义配置。","＋ 新建定时任务"],runs:["任务运行","查看钉钉触发与定时任务的运行记录。",""],machines:["机器管理","",""],roles:["角色管理","定义协作角色及其职责边界。","＋ 新建角色"],sops:["SOP 工作流","拖动角色配置可复用的严格串行流程。","＋ 新建 SOP"],tasks:["任务定义","保存任务配置、钉钉通知、运行并追溯不可变快照。","＋ 新建任务"],runtime:["运行状态","查看 Python 网关和全部主监督执行机的实时状态。",""],dingtalk:["钉钉机器人","配置 Stream 长连接并查看主动通知配置。",""],"dingtalk-targets":["钉钉通知对象","维护任务定义可选择的人员或群聊。",""]};
-  [$("#title").textContent,$("#subtitle").textContent,$("#create").textContent]=map[state.page];
+  const map={mcps:["MCP 管理",""],skills:["Skill 管理",""],groups:["分组管理","＋ 新建分组"],schedules:["定时任务管理","＋ 新建定时任务"],runs:["任务运行",""],machines:["机器管理",""],roles:["角色管理","＋ 新建角色"],sops:["SOP 工作流","＋ 新建 SOP"],tasks:["任务定义","＋ 新建任务"],runtime:["运行状态",""],dingtalk:["钉钉机器人",""],"dingtalk-targets":["钉钉通知对象",""]};
+  [$("#title").textContent,$("#create").textContent]=map[state.page];
   $("#create").classList.toggle("hidden",["runs","machines","skills","mcps","runtime","dingtalk","dingtalk-targets"].includes(state.page));
   try{await render()}catch(e){toast(e.message)}
 });

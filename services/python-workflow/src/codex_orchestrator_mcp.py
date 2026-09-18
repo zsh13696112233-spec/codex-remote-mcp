@@ -602,6 +602,27 @@ class AppServerClient:
         except TimeoutError:
             self._discard_pending(request_id, future)
             raise AppServerRpcTimeout(method, effective_timeout) from None
+        except AppServerDisconnected as error:
+            self._discard_pending(request_id, future)
+            # 只记录协议元数据；关闭原因、参数和地址可能包含凭据或业务内容。
+            known_methods = {
+                "initialize", "fs/getMetadata", "fs/readDirectory", "fs/readFile",
+                "fs/writeFile", "fs/createDirectory", "config/read",
+                "config/batchWrite", "config/value/write", "config/mcpServer/reload",
+                "thread/start", "thread/read", "thread/unsubscribe", "turn/start",
+                "skills/list", "mcpServerStatus/list",
+                "command/exec",
+            }
+            request_bytes = len(json.dumps(
+                {"method": method, "id": request_id, "params": params or {}},
+                ensure_ascii=False,
+            ).encode("utf-8"))
+            LOGGER.warning(
+                "执行服务请求断连，method=%s，request_bytes=%s，close_code=%s",
+                method if method in known_methods else "other",
+                request_bytes, error.code,
+            )
+            raise
         except BaseException:
             self._discard_pending(request_id, future)
             raise
