@@ -192,6 +192,15 @@ function placeRow(parent, row, index) {
 
 function consume(event) {
   const payload = event.payload || {};
+  if (event.type === "chat.assistant.progress") {
+    const user = findMessage(payload.messageId);
+    if (user && (user.status === "completed" || user.status === "failed")) return;
+    if (user && user.status !== "completed" && user.status !== "failed") user.status = "processing";
+    upsertMessage({id: "consult-progress-" + payload.messageId, replyTo: payload.messageId,
+      role: "assistant", time: event.createdAt, text: text(payload.text),
+      status: "processing", streaming: false});
+    return;
+  }
   if (event.type === "chat.user.accepted") {
     upsertMessage({id: payload.messageId, role: "user", time: event.createdAt,
       text: text(payload.text), imageIds: payload.imageIds || [], status: "accepted", streaming: false});
@@ -214,6 +223,7 @@ function consume(event) {
     return;
   }
   if (event.type === "chat.assistant.completed") {
+    state.messages = state.messages.filter(item => item.id !== "consult-progress-" + payload.messageId);
     let value = findMessage(payload.assistantMessageId);
     if (!value) {
       value = {id: payload.assistantMessageId, replyTo: payload.messageId,
@@ -228,6 +238,7 @@ function consume(event) {
     return;
   }
   if (event.type === "chat.message.failed") {
+    state.messages = state.messages.filter(item => item.id !== "consult-progress-" + payload.messageId);
     const value = findMessage(payload.messageId);
     if (value) {
       value.status = "failed";

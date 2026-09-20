@@ -50,7 +50,7 @@ MONITOR_EVENTS_SQL = """(source = 'chat' OR (source = 'supervisor' AND
      OR event_type NOT LIKE 'appserver.%')))"""
 BOT_EVENTS_SQL = """event_type IN (
     'appserver.item/started', 'appserver.item/completed',
-    'chat.assistant.completed', 'chat.message.failed',
+    'chat.assistant.completed', 'chat.assistant.progress', 'chat.message.failed',
     'node.started', 'node.completed', 'node.failed', 'node.cancelled', 'node.timed_out',
     'step.advance.waiting', 'step.advance.held', 'step.advance.confirmed',
     'step.advance.resumed', 'step.advance.timed_out',
@@ -311,6 +311,14 @@ class WorkflowStore(InputImageStore):
                     archived_at TEXT NOT NULL,
                     PRIMARY KEY (workflow_id, node_id, attempt_number),
                     FOREIGN KEY (workflow_id, node_id)
+                        REFERENCES workflow_nodes(workflow_id, node_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS workflow_node_runtime (
+                    workflow_id TEXT NOT NULL, node_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL, cwd TEXT, model TEXT,
+                    PRIMARY KEY(workflow_id, node_id, attempt_number),
+                    FOREIGN KEY(workflow_id, node_id)
                         REFERENCES workflow_nodes(workflow_id, node_id) ON DELETE CASCADE
                 );
 
@@ -3497,6 +3505,14 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
             if old is None:
                 return
+            if snapshot.get("cwd") or snapshot.get("model"):
+                connection.execute(
+                    "INSERT INTO workflow_node_runtime(workflow_id,node_id,attempt_number,cwd,model) "
+                    "SELECT workflow_id,node_id,attempt_count,?,? FROM workflow_nodes "
+                    "WHERE workflow_id=? AND node_id=? ON CONFLICT(workflow_id,node_id,attempt_number) "
+                    "DO UPDATE SET cwd=COALESCE(excluded.cwd,cwd),model=COALESCE(excluded.model,model)",
+                    (snapshot.get("cwd"), snapshot.get("model"), workflow_id, node_id),
+                )
             values = {
                 "status": status,
                 "job_id": snapshot.get("job_id") or old["job_id"],
@@ -3784,6 +3800,16 @@ class WorkflowStore(InputImageStore):
                 connection, workflow_id, node_id, source, event_type, payload, utc_now()
             )
 
+    def event_attempt(self, workflow_id: str, node_id: str, turn_id: str) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT attempt_count AS number FROM workflow_nodes WHERE workflow_id=? AND node_id=? AND turn_id=? "
+                "UNION ALL SELECT attempt_number AS number FROM workflow_node_attempts "
+                "WHERE workflow_id=? AND node_id=? AND turn_id=? LIMIT 1",
+                (workflow_id, node_id, turn_id, workflow_id, node_id, turn_id),
+            ).fetchone()
+            return int(row["number"]) if row else None
+
     def add_events(
         self,
         events: list[dict[str, Any]],
@@ -3846,9 +3872,29 @@ class WorkflowStore(InputImageStore):
         created_at: str,
         external_event_id: str | None = None,
     ) -> int:
+        if node_id and event_type.startswith("appserver."):
+            # 轮次匹配后才附加版本，避免迟到事件被归到返工的新尝试。
+            message = payload.get("message")
+            params = message.get("params") if isinstance(message, dict) else None
+            turn_id = params.get("turnId") if isinstance(params, dict) else None
+            row = connection.execute(
+                "SELECT attempt_count,turn_id FROM workflow_nodes WHERE workflow_id=? AND node_id=?",
+                (workflow_id, node_id),
+            ).fetchone()
+            if row and turn_id and row["turn_id"] == turn_id:
+                payload = {**payload, "attemptNumber": int(row["attempt_count"] or 0)}
+            elif turn_id:
+                historic = connection.execute(
+                    "SELECT attempt_number FROM workflow_node_attempts WHERE workflow_id=? AND node_id=? AND turn_id=?",
+                    (workflow_id, node_id, turn_id),
+                ).fetchone()
+                if historic:
+                    payload = {**payload, "attemptNumber": int(historic["attempt_number"])}
         encoded = json.dumps(payload, ensure_ascii=False, default=str)
         if len(encoded) > EVENT_PAYLOAD_LIMIT:
             compact: dict[str, Any] = {"truncated": True}
+            if type(payload.get("attemptNumber")) is int:
+                compact["attemptNumber"] = payload["attemptNumber"]
             message = payload.get("message")
             params = message.get("params") if isinstance(message, dict) else None
             item = params.get("item") if isinstance(params, dict) else None

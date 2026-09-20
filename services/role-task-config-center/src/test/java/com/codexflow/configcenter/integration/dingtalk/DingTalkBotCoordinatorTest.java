@@ -861,6 +861,22 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void consultationProgressRepliesToQuestionWithoutRawToolDetails() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var event = json.createObjectNode().put("type", "chat.assistant.progress");
+    event
+        .putObject("payload")
+        .put("messageId", "question-consult")
+        .put("text", "正在核查第二步实现")
+        .put("threadId", "must-not-be-forwarded");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 3L);
+    verify(store)
+        .recordProcess(
+            eq(ID), eq("question-consult"), eq(3L), eq("正在核查第二步实现"), eq(false), eq(false));
+    verify(store, never()).enqueueCard(any(), any(), any());
+  }
+
+  @Test
   void assistantEventUsesPerMessageReply() {
     var binding =
         new DingTalkModels.Binding(ID, "original-group", "root", "active", 0, null, false);

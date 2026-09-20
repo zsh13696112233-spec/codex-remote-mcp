@@ -690,6 +690,16 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     String workflowMessageId = null;
     boolean assistantFailed = false;
 
+    if ("chat.assistant.progress".equals(type)) {
+      String questionId = payload.path("messageId").asText(null);
+      String progress = payload.path("text").asText("");
+      if (hasText(questionId) && !progress.isBlank()) {
+        recordProcessWithRetry(
+            binding.workflowId(), questionId, sequence, progress, false, false, null);
+      }
+      return true;
+    }
+
     if (type.startsWith("appserver.")) {
       String notice = DingTalkExecutionNotice.execution(event);
       if (!notice.isBlank()) {

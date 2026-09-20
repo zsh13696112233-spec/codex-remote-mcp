@@ -238,6 +238,29 @@ class SidecarStoreTests(unittest.TestCase):
 
 
 class SidecarInternalApiTests(unittest.TestCase):
+    def test_consultation_runtime_and_attempt_survive_sanitization(self):
+        lease = self._claim("consult-remote", "supervisor-a", "token-a")
+        headers = self._auth("token-a", lease)
+        self.client.post("/internal/v1/workflows/consult-remote/nodes/a/prepare", headers=headers,
+                         json={"dispatchId": "consult-prepare"})
+        synced = self.client.post("/internal/v1/workflows/consult-remote/nodes/a/state", headers=headers,
+            json={"operation": "sync", "snapshot": {"status": "running", "thread_id": "private-thread",
+                  "turn_id": "private-turn", "cwd": "/srv/work", "model": "test-model"}})
+        self.assertEqual(synced.status_code, 200)
+        response = self.client.post("/internal/v1/workflows/consult-remote/events:batch", headers=headers,
+            json={"events": [{"eventId": "consult-event", "nodeId": "a", "type": "appserver.item/completed",
+                "payload": {"attemptNumber": 999, "message": {"params": {"threadId": "private-thread",
+                            "turnId": "private-turn", "item": {"type": "agentMessage", "text": "步骤进度"}}}}}]})
+        self.assertEqual(response.status_code, 200)
+        payload = self.store.list_events("consult-remote")[-1]["payload"]
+        self.assertEqual(payload["attemptNumber"], 0)
+        self.assertNotIn("private-turn", json.dumps(payload))
+        self.assertNotIn("private-thread", json.dumps(payload))
+        from workflow_consultation import ConsultationStore
+        runtime = ConsultationStore(self.store).attempt("consult-remote", "a")
+        self.assertEqual(runtime["cwd"], "/srv/work")
+        self.assertEqual(runtime["model"], "test-model")
+
     def test_input_images_require_matching_supervisor_and_current_lease(self):
         lease = self._claim("images-a", "supervisor-a", "token-a")
         other_lease = self._claim("images-b", "supervisor-b", "token-b")
