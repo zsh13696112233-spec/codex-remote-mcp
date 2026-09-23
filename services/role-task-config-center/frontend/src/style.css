@@ -1,0 +1,320 @@
+.fg-editor {
+  --fg-accent: #6558e8;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 640px;
+  background: #fff;
+  color: #252936;
+  border: 1px solid #e7e8ee;
+  border-radius: 14px;
+  overflow: hidden;
+  font:
+    13px/1.5 system-ui,
+    sans-serif;
+}
+.fg-editor * {
+  box-sizing: border-box;
+}
+.fg-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #e7e8ee;
+  gap: 12px;
+}
+.fg-toolbar strong {
+  font-size: 15px;
+}
+.fg-toolbar small {
+  display: block;
+  color: #8a90a0;
+}
+.fg-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.fg-editor button {
+  font: inherit;
+  border: 1px solid #e4e6ee;
+  border-radius: 7px;
+  padding: 7px 11px;
+  background: white;
+  color: #41475a;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fg-editor button:hover {
+  border-color: #8d84ef;
+  background: #f7f6ff;
+}
+.fg-editor button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.fg-editor button.primary {
+  background: var(--fg-accent);
+  color: white;
+  border-color: var(--fg-accent);
+}
+.fg-workspace {
+  display: grid;
+  grid-template-columns: 154px minmax(240px, 1fr) 280px;
+  flex: 1;
+  min-height: 560px;
+}
+.fg-workspace > aside {
+  position: static;
+  width: auto;
+  background: white;
+  padding: 16px 12px;
+  border: 0;
+  color: inherit;
+  overflow: auto;
+  max-height: 720px;
+}
+.fg-workspace > .fg-palette {
+  border-right: 1px solid #e7e8ee;
+}
+.fg-workspace > .fg-inspector {
+  border-left: 1px solid #e7e8ee;
+}
+.fg-editor h3 {
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+.fg-editor h4 {
+  font-size: 12px;
+  margin: 18px 0 8px;
+}
+.fg-palette p,
+.fg-inspector > p {
+  font-size: 12px;
+  color: #8a90a0;
+  margin: 0 0 16px;
+}
+.fg-palette > button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 7px;
+  margin: 8px 0;
+  white-space: normal;
+  text-align: left;
+}
+.fg-palette > button span {
+  color: var(--fg-accent);
+}
+.fg-palette > button b {
+  margin-left: auto;
+  color: #9ba1b0;
+}
+.fg-palette-note {
+  font-size: 11px;
+  color: #969dad;
+  margin-top: 24px;
+  line-height: 1.9;
+}
+.fg-canvas {
+  position: relative;
+  min-width: 0;
+  min-height: 560px;
+  background: #f7f8fc;
+}
+.fg-renderer {
+  position: absolute !important;
+  inset: 0;
+  z-index: 0;
+}
+.fg-canvas-tools {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  display: flex;
+  gap: 4px;
+  z-index: 5;
+  box-shadow: 0 3px 18px #29305412;
+  border-radius: 8px;
+  background: white;
+  padding: 4px;
+}
+.fg-canvas-tools button {
+  font-size: 12px;
+  border: 0;
+}
+.fg-card {
+  width: 240px;
+  background: #fff;
+  border: 1px solid #dce0ed;
+  border-radius: 11px;
+  box-shadow: 0 3px 12px #2227400a;
+  overflow: hidden;
+}
+.fg-card.selected {
+  outline: 2px solid #8b80f5;
+  border-color: transparent;
+}
+.fg-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  background: linear-gradient(110deg, #f1efff, #fff);
+}
+.fg-card-heading strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fg-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: #7668ef;
+  color: #fff;
+}
+.fg-start .fg-icon {
+  background: #39a88b;
+}
+.fg-end .fg-icon {
+  background: #59677e;
+}
+.fg-card p {
+  margin: 12px 14px;
+  color: #7c8396;
+  font-size: 12px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 36px;
+}
+.fg-card small {
+  display: block;
+  border-top: 1px solid #f0f1f6;
+  padding: 8px 14px;
+  font-size: 10px;
+  color: #969cad;
+}
+.fg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0 0 13px;
+  font-size: 12px;
+  color: #5a6274;
+}
+.fg-field input,
+.fg-field select,
+.fg-field textarea {
+  width: 100%;
+  font: inherit;
+  color: #353d50;
+  border: 1px solid #dfe3ee;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+  min-width: 0;
+}
+.fg-field textarea {
+  min-height: 86px;
+  resize: vertical;
+}
+.fg-field input:focus,
+.fg-field textarea:focus,
+.fg-field select:focus {
+  outline: 2px solid #dcd7ff;
+  border-color: #9c90f0;
+}
+.fg-check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.fg-check input {
+  width: auto;
+}
+.fg-inspector details {
+  margin-top: 12px;
+}
+.fg-inspector summary {
+  cursor: pointer;
+  color: #788094;
+  margin-bottom: 10px;
+}
+.fg-step-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 20px;
+}
+.fg-danger {
+  color: #c95b64 !important;
+}
+.fg-edge-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.fg-notice,
+.fg-error {
+  padding: 9px 16px;
+  font-size: 12px;
+  background: #fff8e9;
+  color: #8c681b;
+}
+.fg-error {
+  background: #fff1f2;
+  color: #b94250;
+}
+.fg-inspector .fg-notice {
+  margin-bottom: 12px;
+  border-radius: 6px;
+}
+@container (max-width:1000px) {
+  .fg-workspace {
+    grid-template-columns: 130px minmax(240px, 1fr);
+  }
+  .fg-workspace > .fg-inspector {
+    grid-column: 1/-1;
+    border-left: 0;
+    border-top: 1px solid #e7e8ee;
+    max-height: 380px;
+  }
+  .fg-toolbar {
+    flex-wrap: wrap;
+  }
+}
+@media (max-width: 750px) {
+  .fg-workspace {
+    display: flex;
+    flex-direction: column;
+  }
+  .fg-workspace > .fg-palette {
+    max-height: 160px;
+    border-right: 0;
+    border-bottom: 1px solid #e7e8ee;
+  }
+  .fg-palette > button {
+    display: inline-flex;
+    width: auto;
+    margin: 4px;
+  }
+  .fg-palette p,
+  .fg-palette-note {
+    display: none;
+  }
+  .fg-canvas {
+    min-height: 450px;
+  }
+  .fg-toolbar {
+    flex-wrap: wrap;
+  }
+  .fg-workspace > .fg-inspector {
+    max-height: 380px;
+  }
+}

@@ -1,7 +1,6 @@
-const state={page:"roles",roles:[],sops:[],tasks:[],agents:[],dingtalk:null,dingtalkTargets:[],dingtalkDirectory:{departments:[],people:[]},dingtalkTargetType:"GROUP",dingtalkDepartmentId:"__all__",dingtalkCollapsedDepartments:new Set(),dingtalkPersonSearch:"",gatewayOnline:false,agentsAvailable:false,agentRefreshInFlight:false,lastRuntimeRefreshAt:null,sop:{draft:null,baseline:"",selectedNodeId:null,tab:"workflow",drag:null}};
+const state={page:"roles",roles:[],sops:[],tasks:[],agents:[],dingtalk:null,dingtalkTargets:[],dingtalkDirectory:{departments:[],people:[]},dingtalkTargetType:"GROUP",dingtalkDepartmentId:"__all__",dingtalkCollapsedDepartments:new Set(),dingtalkPersonSearch:"",gatewayOnline:false,agentsAvailable:false,agentRefreshInFlight:false,lastRuntimeRefreshAt:null,sop:{draft:null,baseline:"",saving:false}};
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const uid=()=>`node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
 const DEFAULT_EXPECTED_OUTPUT="完成本步骤，并返回清晰、完整且可验证的结果。";
 const MODELS=["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"];
 const PERMISSION_LABELS={read_only:"只读",workspace_write:"工作区写入",auto_review:"自动审核",full_access:"完全访问"};
@@ -153,6 +152,7 @@ function renderRuntimeStatus(){
 let pageRenderVersion=0;
 async function render({reload=true}={}){
   const version=++pageRenderVersion,page=state.page;
+  if(page!=="sops")disposeSopEditor();
   $("#search").placeholder=page==="roles"?"搜索角色名称…":page==="tasks"?"搜索任务名称…":"搜索";
   const current=()=>version===pageRenderVersion&&state.page===page;
   if(reload)await loadGroups();
@@ -221,123 +221,42 @@ function syncTaskDingTalkTargetFields(f=$("#taskForm"),selectedId=""){const type
 function openTask(x={enabled:true}){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=taskRequirements(x);f.additionalNotes.value="";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");const selectedTarget=x.dingtalkTarget||state.dingtalkTargets.find(t=>t.id===x.dingtalkTargetId),selectedType=selectedTarget?.targetType||"NONE",typeInput=f.querySelector(`[name="dingtalkTargetType"][value="${selectedType}"]`);if(typeInput)typeInput.checked=true;syncTaskDingTalkTargetFields(f,x.dingtalkTargetId||"");f.notifyDingTalk.checked=x.notifyDingTalk===true;f.enabled.checked=x.enabled!==false;bindGroupForm(f,x,id=>{const old=f.sopId.value;f.sopId.innerHTML='<option value="">请选择同组 SOP</option>'+state.sops.filter(s=>s.groupId===id&&(s.enabled||s.id===x.sopId)).map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");f.sopId.value=[...f.sopId.options].some(o=>o.value===old)?old:""});$("#taskDialog").showModal()}
 
 function blankSop(){return{groupId:concreteGroup(),id:"",name:"",description:"",supervisorAgentId:(suggestedAgents("supervisor")[0]?.agentId||""),supervisorTimeoutSec:7200,maxRetryCount:10,advanceMode:"automatic",handoffMode:"legacy_text",defaultStepModel:"gpt-5.6-sol",enabled:true,steps:[]}}
-function normalizeStep(s){const permissionProfile=s.permissionProfile||(s.writeEnabled===true?"workspace_write":"read_only");return{...s,_clientId:s._clientId||uid(),displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",permissionProfile,writeEnabled:permissionProfile!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
+function normalizeStep(s){const permissionProfile=s.permissionProfile||(s.writeEnabled===true?"workspace_write":"read_only");return{...s,displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",permissionProfile,writeEnabled:permissionProfile!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
 function setDraft(sop){
-  const copy={...blankSop(),...sop,steps:(sop.steps||[]).map(normalizeStep)};
-  state.sop.draft=copy;state.sop.selectedNodeId=copy.steps[0]?._clientId||null;state.sop.tab="workflow";state.sop.baseline=draftFingerprint(copy);
+  const copy=window.SopEditor.normalize({...blankSop(),...sop,steps:(sop.steps||[]).map(normalizeStep)});
+  state.sop.draft=copy;state.sop.baseline=draftFingerprint(copy);
 }
-function sopPayload(d=state.sop.draft){return{groupId:d.groupId,name:d.name.trim(),description:(d.description||"").trim(),supervisorAgentId:(d.supervisorAgentId||"").trim(),supervisorTimeoutSec:Number(d.supervisorTimeoutSec),maxRetryCount:Number(d.maxRetryCount),advanceMode:d.advanceMode||"automatic",handoffMode:d.handoffMode||"legacy_text",defaultStepModel:d.defaultStepModel,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),executorType:s.executorType||"local",agentId:(s.agentId||"").trim(),workingDirectory:(s.workingDirectory||"").trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
+function sopPayload(d=state.sop.draft){return{groupId:d.groupId,name:d.name.trim(),description:(d.description||"").trim(),supervisorAgentId:(d.supervisorAgentId||"").trim(),supervisorTimeoutSec:Number(d.supervisorTimeoutSec),maxRetryCount:Number(d.maxRetryCount),advanceMode:d.advanceMode||"automatic",handoffMode:d.handoffMode||"legacy_text",defaultStepModel:d.defaultStepModel,enabled:d.enabled!==false,editorGraph:d.editorGraph,steps:d.steps.map(s=>({nodeKey:s.nodeKey,id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),executorType:s.executorType||"local",agentId:(s.agentId||"").trim(),workingDirectory:(s.workingDirectory||"").trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
 function draftFingerprint(d=state.sop.draft){return d?JSON.stringify(sopPayload(d)):""}
 function isSopDirty(){return !!state.sop.draft&&draftFingerprint()!==state.sop.baseline}
 function confirmDiscard(){return !isSopDirty()||confirm("当前工作流有未保存的修改，确定放弃吗？")}
 function discardSopChanges(){
   const saved=state.sops.find(s=>s.id===state.sop.draft?.id);
-  if(saved)setDraft(saved);else{state.sop.draft=null;state.sop.baseline="";state.sop.selectedNodeId=null;state.sop.tab="workflow"}
+  if(saved)setDraft(saved);else{state.sop.draft=null;state.sop.baseline=""}
 }
-function selectedStep(){return state.sop.draft?.steps.find(s=>s._clientId===state.sop.selectedNodeId)||null}
+let unmountSopEditor=null;
+let sopSelection=0;
+function disposeSopEditor(){sopSelection++;if(unmountSopEditor){unmountSopEditor();unmountSopEditor=null}}
 function roleById(id){return state.roles.find(r=>r.id===id)}
-function syncDirtyUi(){
-  const dirty=isSopDirty(),label=document.querySelector(".canvas-toolbar small"),reset=document.querySelector("[data-sop-reset]");
-  if(label)label.textContent=dirty?"有未保存修改":"所有修改已保存";
-  if(reset)reset.disabled=!dirty;
-}
-
 function renderSopWorkspace(){
+  disposeSopEditor();
   $("#content").className="content sop-content";
   renderCatalogActions(visibleSops().length);
   if(!state.sop.draft&&!visibleSops().length){$("#content").innerHTML=roleEmptyState('');return}
-  $("#content").innerHTML=`<div class="sop-workspace">
-    <aside class="sop-list-panel">
-      <div class="panel-title"><div><strong>工作流列表</strong><small>${visibleSops().length} 条工作流</small></div><button class="icon-primary" data-sop-new title="新建 SOP">＋</button></div>
-      <input id="sopSearch" class="sop-search" type="search" placeholder="搜索工作流">
-      <div class="sop-list">${sopListHtml()}</div>
-    </aside>
-    <section class="sop-canvas-panel">
-      <div class="canvas-toolbar"><div><strong>${esc(state.sop.draft?.name||"未命名工作流")}</strong><small>${isSopDirty()?"有未保存修改":"所有修改已保存"}</small></div><div class="canvas-actions"><button data-sop-reset ${!isSopDirty()?"disabled":""}>撤销修改</button><button class="primary" data-sop-save>保存工作流</button></div></div>
-      <div class="role-palette"><div class="palette-label"><strong>角色库</strong><small>拖入下方画布添加步骤</small></div><div class="role-palette-list">${rolePaletteHtml()}</div></div>
-      <div class="flow-canvas" data-flow-canvas>${flowHtml()}</div>
-    </section>
-    <aside class="sop-inspector-panel">${inspectorHtml()}</aside>
-  </div>`;
+  $("#content").innerHTML=`<div class="sop-workspace"><aside class="sop-list-panel"><div class="panel-title"><div><strong>工作流列表</strong><small>${visibleSops().length} 条工作流</small></div><button class="icon-primary" data-sop-new title="新建 SOP">＋</button></div><input id="sopSearch" class="sop-search" type="search" placeholder="搜索工作流"><div class="sop-list">${sopListHtml()}</div></aside><div id="sopEditorRoot"></div></div>`;
+  if(!state.sop.draft)return;
+  unmountSopEditor=window.SopEditor.mount($("#sopEditorRoot"),{draft:state.sop.draft,roles:state.roles,agents:state.agents,groups:groupState.items,models:MODELS,online:state.gatewayOnline&&state.agentsAvailable,
+    onChange(draft){state.sop.draft=draft},onSave:saveSop,onError:toast});
 }
 function sopListHtml(){
   if(!visibleSops().length)return `<div class="sop-list-empty"><b>还没有工作流</b><span>点击上方“＋”开始创建</span></div>`;
   return visibleSops().map(s=>`<article class="sop-list-item ${state.sop.draft?.id===s.id?"active":""}" data-sop-select="${s.id}" data-name="${esc((s.name||"").toLowerCase())}"><div>${groupCheckbox(s)}<strong>${esc(s.name)}</strong>${status(s)}</div><div>${groupMark(s)}</div><small>${s.steps.length} 个步骤 · ${time(s.updatedAt)}</small><button data-sop-delete="${s.id}" title="删除工作流">×</button></article>`).join("");
 }
-function rolePaletteHtml(){
-  const enabled=state.roles.filter(r=>r.enabled&&r.groupId&&r.groupId===state.sop.draft?.groupId);
-  if(!enabled.length)return `<span class="palette-empty">没有可用角色，请先在角色管理中启用角色</span>`;
-  return enabled.map(r=>`<div class="role-chip" draggable="true" data-drag-role="${r.id}" title="${esc(r.duty)}"><i>${esc(r.name.slice(0,1))}</i><span>${esc(r.name)}</span><b>＋</b></div>`).join("");
-}
-function dropZone(index){return `<div class="flow-drop-zone" data-drop-index="${index}"><span>放到这里</span></div>`}
-function flowHtml(){
-  const d=state.sop.draft;
-  if(!d)return `<div class="canvas-empty"><b>选择或新建一个工作流</b><span>工作流节点会显示在这里</span></div>`;
-  if(!d.steps.length)return `<div class="canvas-empty canvas-drop-empty" data-drop-index="0"><div class="drop-icon">↳</div><b>拖动角色到这里</b><span>角色将按照从上到下的顺序严格串行执行</span></div>`;
-  return `<div class="flow-list">${d.steps.map((s,i)=>`${dropZone(i)}${nodeHtml(s,i)}`).join("")}${dropZone(d.steps.length)}</div>`;
-}
-function nodeHtml(s,index){
-  const role=roleById(s.roleId)||{name:s.roleName||"未知角色",duty:s.roleDuty||"角色已不存在",enabled:false};
-  return `<article class="flow-node ${state.sop.selectedNodeId===s._clientId?"selected":""}" draggable="true" data-node-id="${s._clientId}">
-    <div class="node-order"><span>${index+1}</span><i></i></div>
-    <div class="node-body"><div class="node-top"><div class="node-role"><i>${esc(role.name.slice(0,1))}</i><div><strong>${esc(s.displayName||role.name)}</strong><small>${esc(role.name)}${role.enabled===false?" · 已停用":""}</small></div></div><div class="node-buttons"><button data-node-shift="-1" data-node-shift-id="${s._clientId}" title="上移节点" ${index===0?"disabled":""}>↑</button><button data-node-shift="1" data-node-shift-id="${s._clientId}" title="下移节点" ${index===state.sop.draft.steps.length-1?"disabled":""}>↓</button><button data-node-remove="${s._clientId}" title="移除节点">×</button><span class="node-drag" title="按住拖动排序">⠿</span></div></div>
-    <p>${esc(s.instruction||"尚未填写执行说明")}</p><div class="node-meta"><span>${esc(s.modelOverride||`继承 ${state.sop.draft.defaultStepModel}`)}</span><span>${esc(s.agentId||"未选择执行机")}</span><span>${s.timeoutSec||1800} 秒</span></div></div>
-  </article>`;
-}
-function inspectorHtml(){
-  const hasNode=!!selectedStep();
-  return `<div class="inspector-tabs"><button class="${state.sop.tab==="workflow"?"active":""}" data-inspector-tab="workflow">流程设置</button><button class="${state.sop.tab==="node"?"active":""}" data-inspector-tab="node" ${hasNode?"":"disabled"}>节点设置</button></div><div class="inspector-body">${state.sop.tab==="node"&&hasNode?nodeInspectorHtml(selectedStep()):workflowInspectorHtml()}</div>`;
-}
-function workflowInspectorHtml(){
-  const d=state.sop.draft;if(!d)return `<div class="inspector-empty">请先选择工作流</div>`;
-  return `<div class="inspector-heading"><strong>工作流配置</strong><small>设置工作流的基础运行参数</small></div>
-    <label>所属分组 *<select data-sop-field="groupId" required>${groupOptions(d.groupId)}</select></label>
-    <label>工作流名称 *<input data-sop-field="name" maxlength="100" value="${esc(d.name)}" placeholder="例如：需求开发与质量验收"></label>
-    <label>步骤默认模型<select data-sop-field="defaultStepModel">${MODELS.map(m=>`<option ${d.defaultStepModel===m?"selected":""}>${m}</option>`).join("")}</select></label>
-    <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，两分钟后自动继续）</option></select></label>
-    <label>主监督执行机 *<div class="agent-picker"><input data-sop-field="supervisorAgentId" maxlength="128" value="${esc(d.supervisorAgentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
-    <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="7200" value="${d.supervisorTimeoutSec}"></label>
-    <label>单次任务最多重跑次数<input data-sop-field="maxRetryCount" type="number" min="0" max="100" value="${d.maxRetryCount}"></label>
-    <label class="check"><input data-sop-field="enabled" type="checkbox" ${d.enabled?"checked":""}> 启用该工作流</label>`;
-}
 function suggestedAgents(capability){
   const supervisor=state.agents.find(a=>a.agentId===state.sop.draft?.supervisorAgentId);
   return state.agents.filter(a=>a.groupId===(state.sop.draft?.groupId||concreteGroup())&&a.enabled!==false&&a.capabilities?.includes(capability)&&(capability!=="executor"||a.groupId===supervisor?.groupId));
 }
-function supervisorRuntimeView(agentId){
-  if(!state.gatewayOnline)return{state:"unknown",label:"状态未知",detail:"Python 网关不可用"};
-  if(!state.agentsAvailable)return{state:"unknown",label:"状态未知",detail:"主监督状态暂时无法读取"};
-  const agent=state.agents.find(a=>a.agentId===agentId);
-  if(!agent)return{state:"unregistered",label:"未登记",detail:"该 ID 不在当前执行机列表中"};
-  if(agent.enabled===false)return{state:"disabled",label:"已停用",detail:"该主监督已在网关配置中停用"};
-  const checked=agent.checkedAt?`最近检查 ${new Date(agent.checkedAt).toLocaleTimeString("zh-CN",{hour12:false})}`:"正在等待首次检查";
-  if(agent.connectionStatus==="online"&&agent.availability==="busy")return{state:"busy",label:"在线忙碌",detail:checked};
-  if(agent.connectionStatus==="online")return{state:"online",label:"在线空闲",detail:checked};
-  if(agent.connectionStatus==="offline")return{state:"offline",label:"离线",detail:checked};
-  return{state:"unknown",label:"状态未知",detail:checked};
-}
-function supervisorSelectionStatusHtml(agentId){
-  const view=supervisorRuntimeView(agentId||"");
-  return `<small class="agent-selection-status ${view.state}" data-supervisor-selection-status><i></i><span>${esc(view.label)}</span><b>${esc(view.detail)}</b></small>`;
-}
-function agentChoiceButtons(capability,scope){
-  const agents=suggestedAgents(capability);
-  return agents.length?agents.map(a=>{
-    if(capability!=="supervisor")return `<button type="button" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}"><span>${esc(a.name||a.agentId)}${a.port?` : ${a.port}`:""}</span>${a.defaultModel?`<small>${esc(a.defaultModel)}</small>`:""}</button>`;
-    const view=supervisorRuntimeView(a.agentId);
-    return `<button type="button" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}" title="${esc(view.detail)}"><span class="agent-choice-main"><i class="agent-status-dot ${view.state}"></i><span>${esc(a.name||a.agentId)}${a.port?` : ${a.port}`:""}</span></span><small class="agent-runtime-status ${view.state}">${esc(view.label)}</small></button>`;
-  }).join(""):'<span class="agent-picker-empty">暂无可用建议</span>';
-}
-function updateAgentRuntimeUi(){
-  document.querySelectorAll('[data-agent-choice="supervisor"]').forEach(button=>{
-    const view=supervisorRuntimeView(button.dataset.agentId),dot=button.querySelector(".agent-status-dot"),label=button.querySelector(".agent-runtime-status");
-    if(dot)dot.className=`agent-status-dot ${view.state}`;
-    if(label){label.className=`agent-runtime-status ${view.state}`;label.textContent=view.label}
-    button.title=view.detail;
-  });
-  const selected=document.querySelector("[data-supervisor-selection-status]"),input=document.querySelector('[data-sop-field="supervisorAgentId"]');
-  if(selected&&input){const view=supervisorRuntimeView(input.value.trim());selected.className=`agent-selection-status ${view.state}`;selected.innerHTML=`<i></i><span>${esc(view.label)}</span><b>${esc(view.detail)}</b>`}
-}
+function updateAgentRuntimeUi(){window.dispatchEvent(new CustomEvent('sop-runtime',{detail:{agents:state.agents,online:state.gatewayOnline&&state.agentsAvailable}}))}
 async function refreshAgentRuntimeStatuses(){
   if(document.hidden||!["sops","runtime"].includes(state.page)||state.agentRefreshInFlight)return;
   state.agentRefreshInFlight=true;
@@ -348,47 +267,6 @@ function agentPermissionProfiles(agentId){
   const agent=state.agents.find(a=>a.agentId===agentId);if(!agent)return["read_only"];
   if(Array.isArray(agent.permissionProfiles)&&agent.permissionProfiles.length)return agent.permissionProfiles;
   return agent.allowWrite?["read_only","workspace_write"]:["read_only"];
-}
-function permissionOptions(step){
-  const allowed=agentPermissionProfiles(step.agentId);
-  return allowed.map(value=>`<option value="${value}" ${step.permissionProfile===value?"selected":""}>${PERMISSION_LABELS[value]||value}</option>`).join("");
-}
-function nodeInspectorHtml(s){
-  const role=roleById(s.roleId)||{name:s.roleName||"未知角色",duty:s.roleDuty||"",enabled:false};
-  return `<div class="inspector-heading"><strong>节点配置</strong><small>步骤由上到下严格串行执行</small></div>
-    <div class="selected-role"><i>${esc(role.name.slice(0,1))}</i><div><strong>${esc(role.name)}</strong><small>${esc(role.duty||"暂无职责说明")}</small></div>${role.enabled===false?'<b>已停用</b>':""}</div>
-    <label>显示名称 *<input data-node-field="displayName" value="${esc(s.displayName)}"></label>
-    <label><span class="field-title">本步骤要做什么 * <em class="field-scope current-step">仅当前步骤</em></span><textarea data-node-field="instruction" placeholder="说明具体动作、使用哪些输入以及处理范围">${esc(s.instruction)}</textarea><small class="field-help">这是当前步骤的核心执行要求，不会发送给其他步骤。</small></label>
-    <label>执行机 *<div class="agent-picker"><input data-node-field="agentId" maxlength="128" value="${esc(s.agentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部步骤执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("executor","executor")}</div></div></label>
-    <label>模型<select data-node-field="modelOverride"><option value="">继承工作流默认模型</option>${MODELS.map(m=>`<option value="${m}" ${s.modelOverride===m?"selected":""}>${m}</option>`).join("")}</select></label>
-    <div class="inspector-grid"><label>超时（秒）<input data-node-field="timeoutSec" type="number" min="10" max="7200" value="${s.timeoutSec}"></label><label>工作目录<input data-node-field="workingDirectory" value="${esc(s.workingDirectory)}" placeholder="可选"></label></div>
-    <label>权限档位<select data-node-field="permissionProfile">${permissionOptions(s)}</select></label>
-    <details class="inspector-advanced"><summary>高级设置</summary>
-      <label>Skill 标签<input data-node-field="skills" value="${esc(s.skills.join(", "))}" placeholder="多个标签用逗号分隔"></label>
-      <label>MCP 标签<input data-node-field="mcps" value="${esc(s.mcps.join(", "))}" placeholder="多个标签用逗号分隔"></label>
-    </details>`;
-}
-
-function addRoleNode(roleId,index){
-  const role=roleById(roleId);if(!role||!role.enabled)return;
-  const suggested=suggestedAgents("executor")[0];const node=normalizeStep({roleId:role.id,roleName:role.name,roleDuty:role.duty,displayName:role.name,instruction:role.duty,agentId:suggested?.agentId||""});
-  state.sop.draft.steps.splice(index,0,node);state.sop.selectedNodeId=node._clientId;state.sop.tab="node";renderSopWorkspace();
-}
-function moveNode(nodeId,index){
-  const steps=state.sop.draft.steps,from=steps.findIndex(s=>s._clientId===nodeId);if(from<0)return;
-  const [node]=steps.splice(from,1);if(from<index)index--;steps.splice(Math.max(0,Math.min(index,steps.length)),0,node);state.sop.selectedNodeId=nodeId;renderSopWorkspace();
-}
-function shiftNode(nodeId,delta){
-  const steps=state.sop.draft.steps,from=steps.findIndex(s=>s._clientId===nodeId),to=from+delta;
-  if(from<0||to<0||to>=steps.length)return;
-  [steps[from],steps[to]]=[steps[to],steps[from]];state.sop.selectedNodeId=nodeId;state.sop.tab="node";renderSopWorkspace();
-}
-function updateField(target,obj,field){
-  if(target.type==="checkbox")obj[field]=target.checked;
-  else if(target.type==="number")obj[field]=Number(target.value);
-  else if(field==="skills"||field==="mcps")obj[field]=target.value.split(",").map(v=>v.trim()).filter(Boolean);
-  else if(field==="modelOverride")obj[field]=target.value||null;
-  else obj[field]=target.value;
 }
 function validateSop(){
   const d=state.sop.draft;if(!d)return"请先选择或新建工作流。";if(!d.groupId||!groupState.items.some(g=>g.id===d.groupId))return"请先选择有效分组。";if(!d.name.trim())return"请输入工作流名称。";
@@ -402,28 +280,38 @@ function validateSop(){
   if(d.supervisorTimeoutSec<10||d.supervisorTimeoutSec>7200)return"主监督最长时间必须在 10 到 7200 秒之间。";
   if(d.maxRetryCount<0||d.maxRetryCount>100)return"单次任务最多重跑次数必须在 0 到 100 之间。";
   for(let i=0;i<d.steps.length;i++){
-    const s=d.steps[i];if(!s.displayName.trim())return`请填写第 ${i+1} 个节点的显示名称。`;
+    const s=d.steps[i];if(!agentPermissionProfiles(s.agentId).includes(s.permissionProfile))return`第 ${i+1} 个步骤的执行机不支持所选权限档位。`;if(!s.displayName.trim())return`请填写第 ${i+1} 个节点的显示名称。`;
     if(!s.instruction.trim())return`请填写第 ${i+1} 个节点的执行说明。`;
     if(!(s.agentId||"").trim())return`请输入第 ${i+1} 个节点的执行机 ID。`;
     if(s.timeoutSec<10||s.timeoutSec>7200)return`第 ${i+1} 个节点的超时必须在 10 到 7200 秒之间。`;
   }
   return"";
 }
-async function saveSop(){
-  const message=validateSop();if(message){toast(message);return}
-  if(state.sop.saving)return;state.sop.saving=true;
-  const saveButton=document.querySelector("[data-sop-save]");if(saveButton)saveButton.textContent="正在保存…";
+async function saveSop(draft){
+  if(state.sop.saving)throw new Error("正在保存，请稍候。");
+  state.sop.draft=draft;
+  window.SopEditor.orderedKeys(draft.editorGraph,draft.steps);
+  const message=validateSop();if(message)throw new Error(message);
+  state.sop.saving=true;
   document.querySelectorAll("body>aside,main").forEach(el=>el.inert=true);
   try{
-  const d=state.sop.draft,saved=await api(d.id?`/api/sops/${d.id}`:"/api/sops",{method:d.id?"PUT":"POST",body:JSON.stringify(sopPayload())});
-  await loadGroups();renderGroupSidebar();await loadBase();setDraft(saved);renderSopWorkspace();toast("SOP 工作流已保存");
-  }finally{state.sop.saving=false;document.querySelectorAll("body>aside,main").forEach(el=>el.inert=false);if(saveButton)saveButton.textContent="保存工作流";}
+    const saved=await api(draft.id?`/api/sops/${draft.id}`:"/api/sops",{method:draft.id?"PUT":"POST",body:JSON.stringify(sopPayload())});
+    setDraft(saved);
+    const index=state.sops.findIndex(s=>s.id===saved.id);if(index<0)state.sops.push(saved);else state.sops[index]=saved;
+    const list=document.querySelector('.sop-list');if(list)list.innerHTML=sopListHtml();
+    try{await loadGroups();renderGroupSidebar()}catch{toast("工作流已保存，分组统计暂未更新。")}
+    toast("SOP 工作流已保存");return state.sop.draft;
+  }finally{state.sop.saving=false;document.querySelectorAll("body>aside,main").forEach(el=>el.inert=false)}
 }
 async function selectSop(id){
   if(state.sop.draft?.id===id)return;if(!confirmDiscard())return;
-  setDraft(await api(`/api/sops/${id}`));renderSopWorkspace();
+  const request=++sopSelection,fingerprint=draftFingerprint();
+  const saved=await api(`/api/sops/${id}`);
+  if(request!==sopSelection||state.page!=="sops")return;
+  if(draftFingerprint()!==fingerprint){toast("草稿已变化，请重新选择工作流。");return}
+  setDraft(saved);renderSopWorkspace();
 }
-function startNewSop(){if(!concreteGroup())return chooseGroup(()=>startNewSop());if(!confirmDiscard())return;setDraft(blankSop());renderSopWorkspace();setTimeout(()=>document.querySelector('[data-sop-field="name"]')?.focus(),0)}
+function startNewSop(){if(!concreteGroup())return chooseGroup(()=>startNewSop());if(!confirmDiscard())return;setDraft(blankSop());renderSopWorkspace();setTimeout(()=>document.querySelector('.fg-inspector input[aria-label="工作流名称 *"]')?.focus(),0)}
 
 $("#roleForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.currentTarget;if(f.dataset.saving)return;f.dataset.saving="true";const submit=f.querySelector("button.primary");submit.disabled=true;const b={groupId:f.elements.groupId.value,name:f.name.value,duty:f.duty.value,enabled:f.enabled.checked};try{if(f.id.value){b.version=Number(f.version.value);await api(`/api/roles/${f.id.value}`,{method:"PUT",body:JSON.stringify(b)})}else await api("/api/roles",{method:"POST",body:JSON.stringify(b)});$("#roleDialog").close();toast("角色已保存");render()}catch(x){toast(x.message)}finally{delete f.dataset.saving;submit.disabled=false}});
 $("#taskForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.currentTarget;if(f.dataset.saving)return;f.dataset.saving="true";const submit=f.querySelector("button.primary");submit.disabled=true;const b={groupId:f.elements.groupId.value,name:f.name.value,objective:f.objective.value,sopId:f.sopId.value,additionalNotes:f.additionalNotes.value,enabled:f.enabled.checked,dingtalkTargetId:f.dingtalkTargetId.value||null,notifyDingTalk:f.notifyDingTalk.checked};try{await api(f.id.value?`/api/task-definitions/${f.id.value}`:"/api/task-definitions",{method:f.id.value?"PUT":"POST",body:JSON.stringify(b)});$("#taskDialog").close();toast("任务定义已保存");render()}catch(x){toast(x.message)}finally{delete f.dataset.saving;submit.disabled=false}});
@@ -437,19 +325,6 @@ $("#content").addEventListener("click",async e=>{
     if(e.target.closest('[data-role-clear-search]')){$('#search').value='';await render({reload:false});$('#search').focus();return}
     const runtimeRefresh=e.target.closest("[data-runtime-refresh]");
     if(runtimeRefresh){runtimeRefresh.disabled=true;await refreshAgentRuntimeStatuses();return}
-    const pickerToggle=e.target.closest("[data-agent-menu-toggle]");
-    if(pickerToggle){
-      const menu=pickerToggle.closest(".agent-picker").querySelector(".agent-picker-menu"),opening=menu.hidden;
-      document.querySelectorAll(".agent-picker-menu").forEach(item=>item.hidden=true);
-      document.querySelectorAll("[data-agent-menu-toggle]").forEach(item=>item.setAttribute("aria-expanded","false"));
-      menu.hidden=!opening;pickerToggle.setAttribute("aria-expanded",String(opening));return;
-    }
-    const agentChoice=e.target.closest("[data-agent-choice]");
-    if(agentChoice){
-      if(agentChoice.dataset.agentChoice==="supervisor"&&state.sop.draft){state.sop.draft.supervisorAgentId=agentChoice.dataset.agentId;renderSopWorkspace();return}
-      const step=selectedStep();if(agentChoice.dataset.agentChoice==="executor"&&step){step.agentId=agentChoice.dataset.agentId;if(!agentPermissionProfiles(step.agentId).includes(step.permissionProfile)){step.permissionProfile="read_only";step.writeEnabled=false}renderSopWorkspace();return}
-    }
-    if(!e.target.closest(".agent-picker")){document.querySelectorAll(".agent-picker-menu").forEach(item=>item.hidden=true);document.querySelectorAll("[data-agent-menu-toggle]").forEach(item=>item.setAttribute("aria-expanded","false"))}
     const dingtalkTest=e.target.closest("[data-dingtalk-test]");
     if(dingtalkTest){botTestButton=dingtalkTest;dingtalkTest.disabled=true;const result=await api("/api/dingtalk/config/test",{method:"POST",body:JSON.stringify(dingtalkPayload())});const output=$("#dingtalkTestResult");output.className=`test-result ${result.success?"success":"error"}`;output.textContent=result.message;dingtalkTest.disabled=false;return}
     const targetType=e.target.closest("[data-target-type]");if(targetType){state.dingtalkTargetType=targetType.dataset.targetType;renderDingTalkTargets();return}
@@ -474,14 +349,6 @@ $("#content").addEventListener("click",async e=>{
     if(e.target.matches("[data-group-item]"))return;
     const list=e.target.closest("[data-sop-select]");if(list){await selectSop(list.dataset.sopSelect);return}
     if(e.target.closest("[data-sop-new]")){startNewSop();return}
-    if(e.target.closest("[data-sop-save]")){await saveSop();return}
-    if(e.target.closest("[data-sop-reset]")){if(!confirm("确定撤销当前所有未保存修改？"))return;const id=state.sop.draft.id;if(id)setDraft(await api(`/api/sops/${id}`));else setDraft(blankSop());renderSopWorkspace();return}
-    const tab=e.target.closest("[data-inspector-tab]");if(tab&&!tab.disabled){state.sop.tab=tab.dataset.inspectorTab;renderSopWorkspace();return}
-    const shift=e.target.closest("[data-node-shift]");
-    if(shift){shiftNode(shift.dataset.nodeShiftId,Number(shift.dataset.nodeShift));return}
-    const remove=e.target.closest("[data-node-remove]");
-    if(remove){const id=remove.dataset.nodeRemove;state.sop.draft.steps=state.sop.draft.steps.filter(s=>s._clientId!==id);if(state.sop.selectedNodeId===id){state.sop.selectedNodeId=state.sop.draft.steps[0]?._clientId||null;state.sop.tab=state.sop.selectedNodeId?"node":"workflow"}renderSopWorkspace();return}
-    const node=e.target.closest("[data-node-id]");if(node){state.sop.selectedNodeId=node.dataset.nodeId;state.sop.tab="node";renderSopWorkspace()}
   }catch(x){if(botTestButton)botTestButton.disabled=false;toast(x.message)}
 });
 $("#content").addEventListener("submit",async e=>{
@@ -494,71 +361,10 @@ $("#content").addEventListener("submit",async e=>{
 $("#content").addEventListener("input",e=>{
   if(e.target.matches("[data-person-search]")){state.dingtalkPersonSearch=e.target.value;refreshDirectoryPeople();return}
   if(e.target.id==="sopSearch"){const q=e.target.value.trim().toLowerCase();document.querySelectorAll(".sop-list-item").forEach(item=>item.hidden=!item.dataset.name.includes(q));return}
-  const sopField=e.target.dataset.sopField;
-  if(sopField&&state.sop.draft){updateField(e.target,state.sop.draft,sopField);const title=document.querySelector(".canvas-toolbar strong");if(sopField==="name"&&title)title.textContent=e.target.value||"未命名工作流";if(sopField==="supervisorAgentId")updateAgentRuntimeUi();syncDirtyUi();return}
-  const nodeField=e.target.dataset.nodeField,step=selectedStep();
-  if(nodeField&&step){updateField(e.target,step,nodeField);const card=document.querySelector(`[data-node-id="${step._clientId}"]`);if(card&&nodeField==="displayName")card.querySelector(".node-role strong").textContent=e.target.value||roleById(step.roleId)?.name||"未命名节点";if(card&&nodeField==="instruction")card.querySelector(".node-body>p").textContent=e.target.value||"尚未填写执行说明";syncDirtyUi()}
 });
 $("#content").addEventListener("change",async e=>{
   if(e.target.matches("[data-target-enabled]")){const card=e.target.closest("[data-target-id]"),target=state.dingtalkTargets.find(x=>x.id===card?.dataset.targetId);if(target?.targetType==="PERSON"){const previous=target.enabled;e.target.disabled=true;try{const saved=await api(`/api/dingtalk/targets/${target.id}`,{method:"PUT",body:JSON.stringify({displayName:target.displayName,enabled:e.target.checked})});Object.assign(target,saved);toast("人员启用状态已自动保存")}catch(x){e.target.checked=previous;toast(x.message)}finally{e.target.disabled=!target.available}return}}
-  const sf=e.target.dataset.sopField;if(sf&&state.sop.draft){updateField(e.target,state.sop.draft,sf);if(sf==="groupId"){renderSopWorkspace();return}syncDirtyUi();return}
-  const nf=e.target.dataset.nodeField,step=selectedStep();if(nf&&step){updateField(e.target,step,nf);if(nf==="permissionProfile")step.writeEnabled=step.permissionProfile!=="read_only";if(nf==="agentId"&&!agentPermissionProfiles(step.agentId).includes(step.permissionProfile)){step.permissionProfile="read_only";step.writeEnabled=false;renderSopWorkspace();return}syncDirtyUi()}
 });
-$("#content").addEventListener("dragstart",e=>{
-  const role=e.target.closest("[data-drag-role]"),node=e.target.closest("[data-node-id]");
-  if(role)state.sop.drag={type:"role",id:role.dataset.dragRole};else if(node){state.sop.drag={type:"node",id:node.dataset.nodeId};node.classList.add("dragging")}else return;
-  e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",state.sop.drag.id);
-});
-function dropTargetAt(element,clientY){
-  const zone=element?.closest?.("[data-drop-index]");
-  if(zone)return{element:zone,index:Number(zone.dataset.dropIndex),side:"zone"};
-  const node=element?.closest?.("[data-node-id]");if(!node)return null;
-  const index=state.sop.draft.steps.findIndex(s=>s._clientId===node.dataset.nodeId);
-  if(index<0)return null;
-  const rect=node.getBoundingClientRect(),after=clientY>=rect.top+rect.height/2;
-  return{element:node,index:index+(after?1:0),side:after?"after":"before"};
-}
-function dropTarget(e){return dropTargetAt(e.target,e.clientY)}
-function showDropTarget(target){
-  document.querySelectorAll(".drag-over,.drop-before,.drop-after").forEach(x=>x.classList.remove("drag-over","drop-before","drop-after"));
-  if(target)target.element.classList.add(target.side==="zone"?"drag-over":target.side==="after"?"drop-after":"drop-before");
-}
-$("#content").addEventListener("dragover",e=>{
-  const target=dropTarget(e);if(!target||!state.sop.drag)return;e.preventDefault();
-  showDropTarget(target);
-  e.dataTransfer.dropEffect="move";
-});
-$("#content").addEventListener("drop",e=>{
-  const target=dropTarget(e);if(!target||!state.sop.drag)return;e.preventDefault();
-  const drag=state.sop.drag;state.sop.drag=null;
-  drag.type==="role"?addRoleNode(drag.id,target.index):moveNode(drag.id,target.index);
-});
-$("#content").addEventListener("dragend",()=>{state.sop.drag=null;document.querySelectorAll(".dragging,.drag-over,.drop-before,.drop-after").forEach(x=>x.classList.remove("dragging","drag-over","drop-before","drop-after"))});
-
-let pointerDrag=null;
-$("#content").addEventListener("pointerdown",e=>{
-  if(e.button!==0)return;
-  const handle=e.target.closest(".node-drag"),role=e.target.closest("[data-drag-role]");
-  if(!handle&&!role)return;
-  e.preventDefault();
-  const node=handle?.closest("[data-node-id]");
-  pointerDrag={type:role?"role":"node",id:role?role.dataset.dragRole:node.dataset.nodeId,pointerId:e.pointerId,source:handle||role};
-  pointerDrag.source.setPointerCapture?.(e.pointerId);node?.classList.add("dragging");
-});
-$("#content").addEventListener("pointermove",e=>{
-  if(!pointerDrag||pointerDrag.pointerId!==e.pointerId)return;
-  const element=document.elementFromPoint(e.clientX,e.clientY);
-  showDropTarget(dropTargetAt(element,e.clientY));
-});
-$("#content").addEventListener("pointerup",e=>{
-  if(!pointerDrag||pointerDrag.pointerId!==e.pointerId)return;
-  const drag=pointerDrag,target=dropTargetAt(document.elementFromPoint(e.clientX,e.clientY),e.clientY);pointerDrag=null;
-  document.querySelectorAll(".dragging,.drag-over,.drop-before,.drop-after").forEach(x=>x.classList.remove("dragging","drag-over","drop-before","drop-after"));
-  if(!target)return;
-  drag.type==="role"?addRoleNode(drag.id,target.index):moveNode(drag.id,target.index);
-});
-$("#content").addEventListener("pointercancel",()=>{pointerDrag=null;document.querySelectorAll(".dragging,.drag-over,.drop-before,.drop-after").forEach(x=>x.classList.remove("dragging","drag-over","drop-before","drop-after"))});
-
 const runHistory = {id: null, name: "", page: 0, request: 0};
 async function showRuns(id, name, page = 0) {
   const request = ++runHistory.request;

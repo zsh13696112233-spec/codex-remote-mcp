@@ -11,7 +11,7 @@ function fixture(search='') {
   function element(){return {innerHTML:'',value:'',textContent:'',dataset:{},close(){},style:{},classList:{add(){},remove(){},toggle(){}},addEventListener(){},querySelector(){return element()},querySelectorAll(){return []},closest(){return element()}}}
   const navButtons=['roles','groups','skills'].map(page=>({...element(),dataset:{page}}));
   const document={querySelector(selector){if(!nodes.has(selector))nodes.set(selector,element());return nodes.get(selector)},querySelectorAll(selector){return selector==='nav button'?navButtons:[]},addEventListener(){},createElement:element};
-  const context=vm.createContext({document,window:{addEventListener(){}},location:{search,href:'http://localhost/'+search},history:{replaceState(){}},URL,URLSearchParams,console,setInterval(){},setTimeout(){},confirm(){return false},fetch(){throw Error('Unexpected network request')}});
+  const context=vm.createContext({document,window:{addEventListener(){},SopEditor:{normalize:d=>d,mount(el,options){this.lastOptions=options;return()=>{this.unmountCount=(this.unmountCount||0)+1}}}},location:{search,href:'http://localhost/'+search},history:{replaceState(){}},URL,URLSearchParams,console,setInterval(){},setTimeout(){},confirm(){return false},fetch(){throw Error('Unexpected network request')}});
   for(const name of ['groups.js','machines.js','run-catalog.js','task-schedules.js','skills.js','app.js']) {
     let script=fs.readFileSync(path.join(__dirname,'../../main/resources/static',name),'utf8');
     if(name==='app.js')script=script.slice(0,script.indexOf('const initialPage='));
@@ -36,8 +36,8 @@ test('SOP palette, machines and payload stay within the selected group',()=>{
   const {run}=fixture('?groupId=a');
   run(`setDraft({...blankSop(),name:'流程',supervisorAgentId:'ma',steps:[{roleId:'ra',displayName:'步骤',instruction:'执行',agentId:'ma',timeoutSec:60}]})`);
   assert.equal(run('sopPayload().groupId'),'a');
-  assert.match(run('rolePaletteHtml()'),/甲角色/);
-  assert.doesNotMatch(run('rolePaletteHtml()'),/乙角色|旧角色/);
+  run('renderSopWorkspace()');assert.equal(run("window.SopEditor.lastOptions.roles.filter(r=>r.enabled&&r.groupId===state.sop.draft.groupId).map(r=>r.name).join()"),'甲角色');
+
   assert.equal(run(`suggestedAgents('supervisor').map(x=>x.agentId).join()`),'ma');
   assert.equal(run('validateSop()'),'');
   run(`state.sop.draft.steps[0].roleId='rb'`);
@@ -151,8 +151,8 @@ test('empty SOP panel shows creation guidance but keeps an unsaved draft editabl
   assert.match(nodes.get('#content').innerHTML,/这个分组还没有工作流/);
   assert.doesNotMatch(nodes.get('#content').innerHTML,/data-sop-save/);
   run("setDraft(blankSop());renderSopWorkspace()");
-  assert.match(nodes.get('#content').innerHTML,/data-sop-save/);
-  assert.match(nodes.get('#content').innerHTML,/data-flow-canvas/);
+  assert.match(nodes.get('#content').innerHTML,/sopEditorRoot/);assert.ok(run('window.SopEditor.lastOptions.onSave'));
+  assert.match(nodes.get('#content').innerHTML,/sopEditorRoot/);
   assert.match(nodes.get('#groupActions').innerHTML,/共 0 个工作流/);
 });
 

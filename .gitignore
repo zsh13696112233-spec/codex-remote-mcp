@@ -14,6 +14,7 @@ dist/
 
 # Java/Maven output
 target/
+node_modules/
 *.class
 
 # IDE and operating-system files

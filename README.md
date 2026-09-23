@@ -200,6 +200,10 @@ uv run --project services/python-workflow python scripts/verify_long_job.py --de
 
 Java 命令按当前操作系统选择：macOS 使用 `mvnd`，Windows 使用 `mvn`；不要把另一台电脑的命令直接照搬到当前环境。
 
+配置中心构建还需要 Node.js 22.12+ 和 npm（在 PATH 中）。Maven 自动执行锁文件安装及 FlowGram 编辑器构建，将 `target/generated-resources/static/sop-editor/` 打入 JAR；缺少 Node/npm 或版本不满足要求时构建失败。部署 JAR 仍只需 Java。监控中心没有 Node 构建步骤。
+
+编辑器开发、前端单测及本机 Chrome 验收命令见[配置中心 SOP 编辑器](services/role-task-config-center/README.md#flowgram-sop-编辑器)。从配置中心目录运行 `mvn package`（macOS 使用 `mvnd package`）会同时构建前后端；不要提交 `node_modules/` 或 `target/`。
+
 macOS（从仓库根目录）：
 
 ```sh

@@ -65,10 +65,13 @@ class DomainJsonMapper {
     result.put("handoffMode", sop.handoffMode);
     result.put("defaultStepModel", sop.defaultStepModel);
     result.put("enabled", sop.enabled);
+    if (sop.editorGraphJson != null)
+      result.set("editorGraph", objectMapper.readTree(sop.editorGraphJson));
     var steps = result.putArray("steps");
     for (SopStepEntity step : sop.steps) {
       ObjectNode item = steps.addObject();
       item.put("id", step.id);
+      item.put("nodeKey", step.nodeKey == null ? step.id : step.nodeKey);
       item.put("order", step.positionNo + 1);
       item.put("displayName", step.displayName);
       item.put("roleId", step.role.id);
@@ -190,7 +193,7 @@ class DomainJsonMapper {
   }
 
   /** 将 JSON 节点序列化为数据库可保存的字符串。 */
-  String write(JsonNode node) {
+  String write(Object node) {
     try {
       return objectMapper.writeValueAsString(node);
     } catch (Exception error) {

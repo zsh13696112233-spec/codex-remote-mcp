@@ -291,6 +291,7 @@ public class ConfigService {
 
   /** 将 SOP 请求字段和完整步骤列表应用到聚合根。 */
   private void applySop(SopEntity sop, SopSaveRequest body) {
+    var orderedSteps = SopGraphValidator.ordered(body.editorGraph(), body.steps());
     assignSop(sop, body.groupId(), false);
     groups.validateMachines(
         body.groupId(),
@@ -319,7 +320,8 @@ public class ConfigService {
     if (body.enabled() != null) sop.enabled = body.enabled();
     sop.steps.clear();
     int position = 0;
-    for (SopStepRequest rawStep : body.steps()) {
+    sop.editorGraphJson = body.editorGraph() == null ? null : json.write(body.editorGraph());
+    for (SopStepRequest rawStep : orderedSteps) {
       sop.steps.add(createStep(sop, rawStep, position++));
     }
   }
@@ -328,6 +330,7 @@ public class ConfigService {
   private SopStepEntity createStep(SopEntity sop, SopStepRequest body, int position) {
     SopStepEntity step = new SopStepEntity();
     step.id = newId();
+    step.nodeKey = body.nodeKey() == null ? step.id : body.nodeKey();
     step.sop = sop;
     step.positionNo = position;
     step.displayName = body.displayName().trim();

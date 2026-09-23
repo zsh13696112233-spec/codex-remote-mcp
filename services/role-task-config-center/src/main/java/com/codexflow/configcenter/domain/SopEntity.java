@@ -20,6 +20,9 @@ class SopEntity extends Timestamped {
   /** SOP 主键，使用应用生成的 UUID。 */
   @Id String id;
 
+  @Column(name = "editor_graph_json", columnDefinition = "LONGTEXT")
+  String editorGraphJson;
+
   /** SOP 名称，数据库中不允许为空。 */
   @Column(nullable = false)
   String name;

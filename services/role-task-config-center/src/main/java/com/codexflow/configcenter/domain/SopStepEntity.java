@@ -20,6 +20,9 @@ class SopStepEntity {
   /** 步骤主键，使用应用生成的 UUID。 */
   @Id String id;
 
+  @Column(name = "node_key", length = 128)
+  String nodeKey;
+
   /** 所属 SOP；步骤写入时必须存在，使用延迟加载避免无条件加载整个聚合。 */
   @ManyToOne(fetch = FetchType.LAZY, optional = false)
   @JoinColumn(name = "sop_id")

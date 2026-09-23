@@ -34,4 +34,36 @@ public record SopStepRequest(
     @Size(max = 64) String modelOverride,
     Integer timeoutSec,
     Set<@Size(max = 160) String> skills,
-    Set<@Size(max = 160) String> mcps) {}
+    Set<@Size(max = 160) String> mcps,
+    @Size(max = 128) String nodeKey) {
+  public SopStepRequest(
+      String displayName,
+      String roleId,
+      String instruction,
+      String expectedOutput,
+      String executorType,
+      String agentId,
+      String workingDirectory,
+      Boolean writeEnabled,
+      String permissionProfile,
+      String modelOverride,
+      Integer timeoutSec,
+      Set<String> skills,
+      Set<String> mcps) {
+    this(
+        displayName,
+        roleId,
+        instruction,
+        expectedOutput,
+        executorType,
+        agentId,
+        workingDirectory,
+        writeEnabled,
+        permissionProfile,
+        modelOverride,
+        timeoutSec,
+        skills,
+        mcps,
+        null);
+  }
+}
