@@ -46,3 +46,24 @@ test('machine card escapes persisted directory and diagnostic text',()=>{
   const h=setup();h.context.machine.skillInstallation={enabled:false,root:'<img>',checkMessage:'<script>'};
   const html=h.run('machineCard(machine,"executor")');assert.match(html,/未授权/);assert.match(html,/&lt;img>/);assert.doesNotMatch(html,/<script>/);
 });
+
+test('executor online status follows the saved connection test across page loads',()=>{
+  for(const [testStatus,label] of [['passed','在线'],['failed','离线'],['untested','在线状态未知']]){
+    const h=setup();Object.assign(h.context.machine,{testStatus,testedAt:'2026-09-22T08:00:00Z'});
+    const html=h.run('machineCard(machine,"executor")');
+    assert.ok(html.includes(`>● ${label}</span>`));
+    assert.match(html,/2026-09-22T08:00:00Z/);
+  }
+});
+
+test('supervisor and dual-role cards retain runtime status independently of connection tests',()=>{
+  for(const capabilities of [['supervisor'],['supervisor','executor']]){
+    for(const role of capabilities){
+      for(const [connectionStatus,testStatus,label] of [['offline','passed','离线'],['online','failed','在线'],['unknown','passed','在线状态未知']]){
+        const h=setup();Object.assign(h.context.machine,{capabilities,connectionStatus,testStatus});
+        h.context.role=role;
+        assert.ok(h.run('machineCard(machine,role)').includes(`>● ${label}</span>`));
+      }
+    }
+  }
+});

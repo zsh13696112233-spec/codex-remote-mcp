@@ -38,8 +38,10 @@ function machineRoleColumn(members,role,hasGroup){
   return `<section class="machine-role-column ${role}" aria-label="${title}"><div class="machine-column-heading"><div><h2>${title} <span>${items.length}</span></h2></div><button data-machine-action="add" data-role="${role}" ${hasGroup?'':'disabled'}>＋ 添加</button></div><div class="machine-card-list">${items.map(a=>machineCard(a,role)).join('')||`<div class="machine-role-empty"><strong>暂无${title}</strong><p>${hasGroup?`添加一台${title}，完善分组配置。`:'请先在左侧新建分组。'}</p></div>`}</div></section>`;
 }
 function machineCard(a,role){
-  const online=a.connectionStatus==='online',offline=a.connectionStatus==='offline';
   const tested=a.testStatus==='passed',failed=a.testStatus==='failed';
+  const supervisor=(a.capabilities||[]).includes('supervisor');
+  const online=supervisor?a.connectionStatus==='online':tested;
+  const offline=supervisor?a.connectionStatus==='offline':failed;
   return `<article class="machine-card"><div class="machine-card-heading"><div><h3>${esc(a.name||a.ip)} ${groupMark(a)}<small> : ${esc(a.port)}</small></h3></div>${status(a)}</div><div class="machine-state-row"><span class="machine-state ${online?'online':offline?'offline':''}">● ${online?'在线':offline?'离线':'在线状态未知'}</span><span class="machine-state ${tested?'online':failed?'offline':''}">${tested?'检测通过':failed?'检测失败':'未检测'}</span>${(a.capabilities||[]).length>1?'<span class="machine-dual-role">兼任监督 / 执行</span>':''}</div><p class="machine-last-tested">最近检测 <span>${time(a.testedAt)}</span></p>${role==='executor'?`<p class="machine-last-tested machine-skill-settings">Skill 下发：${a.skillInstallation?.enabled?'已授权':'未授权'}<br>${esc(a.skillInstallation?.root||'尚未配置安装目录')}<br>${esc(a.skillInstallation?.checkMessage||'尚未检测目录')}${a.skillInstallation?.checkedAt?` · ${time(a.skillInstallation.checkedAt)}`:''}</p>`:''}<div class="machine-card-actions">${(role==='executor'?['test','edit','skill-check','toggle']:['test','edit','toggle']).map(action=>`<button data-machine-action="${action}" data-id="${esc(a.agentId)}" ${pendingMachineActions.has(a.agentId)?'disabled':''}>${action==='test'?'检测连接':action==='edit'?'编辑':action==='skill-check'?'检测 Skill 目录':a.enabled?'停用':'启用'}</button>`).join('')}</div></article>`;
 }
 
