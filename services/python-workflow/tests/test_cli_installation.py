@@ -29,7 +29,7 @@ class CliInstallationTests(unittest.IsolatedAsyncioTestCase):
         self.fs = SimpleNamespace(ancestors=AsyncMock(), metadata=AsyncMock(),
             skills=AsyncMock(return_value={'skills': [{'path': self.result['skillPath'].upper(),
                 'name': 'gm-cli', 'enabled': True}], 'errors': []}))
-        self.client = SimpleNamespace(request=AsyncMock(return_value={'exitCode': 0, 'stdout': 'Usage: gm_cli', 'stderr': ''}))
+        self.client = SimpleNamespace(request=AsyncMock(return_value={'exitCode': 0, 'stdout': 'CODEX_TERMINAL_PATH_OK', 'stderr': ''}))
 
     async def verify(self):
         with patch('mcp_deployment.RemoteFiles', return_value=self.fs):
@@ -39,6 +39,7 @@ class CliInstallationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(validate_result(self.result, self.program, skill=self.skill), self.result)
         self.assertIn('kind', RESULT_SCHEMA['required'])
         for change in ({'skillPath': None}, {'kind': 'other'}, {'args': ['login']},
+                       {'terminal': None}, {'terminal': {'command': self.program + r'\other.exe', 'args': []}},
                        {'command': self.program + r'\install.bat'}, {'skillPath': r'C:\other\SKILL.md'}):
             with self.subTest(change=change), self.assertRaises(SkillError):
                 validate_result({**self.result, **change}, self.program, skill=self.skill)
@@ -56,8 +57,8 @@ class CliInstallationTests(unittest.IsolatedAsyncioTestCase):
         await self.verify()
         self.assertEqual((self.saved['state'], self.saved['program_verified'], self.saved['skill_verified']), ('completed', 1, 1))
         self.assertEqual(json.loads(self.saved['result'])['kind'], 'cli')
-        self.client.request.assert_awaited_once()
-        method, params = self.client.request.await_args.args
+        self.assertEqual(self.client.request.await_count, 2)
+        method, params = self.client.request.await_args_list[0].args
         self.assertEqual(method, 'command/exec')
         self.assertEqual(params['command'], [self.result['command'], '--help'])
         self.assertEqual(params['timeoutMs'], 20000)
@@ -66,6 +67,7 @@ class CliInstallationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail['kind'], 'cli')
         self.assertFalse(detail['pending'])
         self.assertIsNone(detail['toolCount'])
+        self.assertIn('用户 PATH', self.saved['message'])
 
     async def test_authorized_skill_root_is_normalized_and_verified(self):
         self.result['skillPath'] = self.skill

@@ -14,6 +14,7 @@ from mcp_packages import FILE_LIMIT, parse_package, windows_path
 from mcp_store import McpStore
 from mcp_diagnostics import diagnostic, tools_discovered
 from mcp_file_transfer import DIRECT_LIMIT, McpFileTransfer
+from mcp_terminal import install_terminal
 from skill_deployment import RemoteFiles, storage_call
 from skill_packages import SkillError
 from workflow_service_config import setting
@@ -334,6 +335,7 @@ class McpDeployment:
         if result.get('kind') == 'cli':
             await self.check_cli(client, fs, task, result, snapshot)
             return
+        terminal_installed = await self.configure_terminal(client, fs, task, result, snapshot)
         desired = {"command": result["command"], "args": result["args"], "cwd": result["cwd"], "enabled": True}
         await self.record_diagnostic(task, '核对 MCP 注册配置', pending=True)
         await storage_call(self.store.update, task["id"], state="registering")
@@ -374,10 +376,23 @@ class McpDeployment:
         await self.check_skill(fs, task, result)
         if not program_verified:
             await storage_call(self.store.update, task["id"], state="needs_configuration", occupied=0,
-                               message="程序已注册，尚未发现工具；请检查服务地址、账号或启动环境后重新检测。")
+                               message="程序已注册，尚未发现工具；请检查服务地址、账号或启动环境后重新检测。" + self.terminal_notice(terminal_installed))
             return
         await storage_call(self.store.update, task["id"], state="completed", occupied=0,
-                           message="MCP 工具已识别，附带 Skill 检查通过。" if result["skillPath"] else "MCP 工具已识别。")
+                           message=("MCP 工具已识别，附带 Skill 检查通过。" if result["skillPath"] else "MCP 工具已识别。") + self.terminal_notice(terminal_installed))
+
+    @staticmethod
+    def terminal_notice(installed):
+        return '终端入口已加入执行账号的用户 PATH；已有终端或执行服务需重启后生效。' if installed else ''
+
+    async def configure_terminal(self, client, fs, task, result, snapshot):
+        if result.get('kind') != 'cli' and result.get('terminal') is None:
+            return False
+        await self.record_diagnostic(task, '验证终端入口并写入用户 PATH', pending=True)
+        package = self.store.batch(task['batch_id'])['package_id']
+        program = str(windows_path(snapshot['settings']['programRoot']) / ('mcp-' + package[:16]))
+        return await install_terminal(client, fs, result, program, package, task['id'],
+                                      json.loads(snapshot['config']), snapshot['settings']['runtimes'])
 
     async def record_diagnostic(self, task, stage, **kwargs):
         task['_check_stage'] = stage if kwargs.get('pending') else None
@@ -405,23 +420,13 @@ class McpDeployment:
     async def check_cli(self, client, fs, task, result, snapshot):
         await storage_call(self.store.update, task['id'], state='verifying')
         await self.record_diagnostic(task, '验证 CLI 帮助命令', pending=True)
-        config = json.loads(snapshot['config'])
-        if config.get('allow_write') is not True or config.get('allow_full_access') is not True:
-            raise SkillError('CLI 帮助验证需要执行机已授权完全访问；请更新机器权限后重新下发。', 409)
-        response = await client.request('command/exec', {
-            'command': [result['command'], *result['args'], '--help'], 'cwd': result['cwd'],
-            'sandboxPolicy': {'type': 'dangerFullAccess'}, 'timeoutMs': 20000,
-            'outputBytesCap': 4096,
-        })
-        if (type(response.get('exitCode')) is not int or response['exitCode'] != 0
-                or not any(isinstance(response.get(key), str) and response[key].strip() for key in ('stdout', 'stderr'))):
-            raise SkillError('CLI 帮助命令验证失败，请检查入口及运行环境后重新检测。', 409)
+        await self.configure_terminal(client, fs, task, result, snapshot)
         await storage_call(self.store.update, task['id'], program_verified=1)
         await self.record_diagnostic(task, '验证 CLI 配套 Skill', pending=True)
         await self.check_skill(fs, task, result)
         await self.record_diagnostic(task, 'CLI 与 Skill 验证完成')
         await storage_call(self.store.update, task['id'], state='completed', occupied=0,
-                           message='CLI 帮助命令可运行，配套 Skill 已识别。')
+                           message='CLI 帮助命令可运行，配套 Skill 已识别。' + self.terminal_notice(True))
 
     @staticmethod
     async def discover(client, verification_id, name):

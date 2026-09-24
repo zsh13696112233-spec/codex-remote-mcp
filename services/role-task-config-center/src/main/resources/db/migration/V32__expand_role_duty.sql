@@ -1,0 +1,2 @@
+ALTER TABLE codex_sop_roles
+  MODIFY COLUMN duty LONGTEXT NOT NULL COMMENT '角色职责说明';

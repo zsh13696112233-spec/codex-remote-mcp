@@ -49,7 +49,7 @@ def is_runtime(command, runtimes=()):
 def validate_result(value, program, runtimes=(), skill=None):
     """接受显式 MCP/CLI 入口；旧结果默认 MCP，不接受环境变量或任意配置。"""
     fields = {"status", "name", "command", "args", "cwd", "skillPath"}
-    if not isinstance(value, dict) or set(value) not in (fields, fields | {"kind"}):
+    if not isinstance(value, dict) or not fields <= set(value) or set(value) - fields - {"kind", "terminal"}:
         raise SkillError("安装结果格式不正确。", 409)
     kind = value.get("kind", "mcp")  # 已持久化的旧安装结果按 MCP 恢复。
     if not isinstance(kind, str) or kind not in {"mcp", "cli"}:
@@ -101,7 +101,33 @@ def validate_result(value, program, runtimes=(), skill=None):
               "args": args, "cwd": cwd, "skillPath": skill_path}
     if "kind" in value:
         result["kind"] = kind
+    if "terminal" in value:
+        terminal = value["terminal"]
+        if terminal is not None:
+            terminal = validate_terminal(terminal, program, runtimes)
+        if kind == "cli" and terminal != {"command": command, "args": args}:
+            raise SkillError("CLI 终端入口必须与程序入口一致。", 409)
+        result["terminal"] = terminal
     return result
+
+
+def validate_terminal(value, program, runtimes=()):
+    if not isinstance(value, dict) or set(value) != {"command", "args"}:
+        raise SkillError("终端入口格式不正确。", 409)
+    command = str(windows_path(value["command"]))
+    args = value["args"]
+    runtime = is_runtime(command, runtimes)
+    if (not isinstance(args, list) or (runtime and (len(args) != 1 or not isinstance(args[0], str)
+            or not within(args[0], program))) or (not runtime and (args or not within(command, program)
+            or windows_path(command).suffix.lower() != ".exe"))):
+        raise SkillError("终端入口仅支持安装目录内 EXE，或已有运行时加单个已安装脚本。", 409)
+    entry = windows_path(args[0] if runtime else command)
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", entry.stem):
+        raise SkillError("终端命令名只能包含英文、数字、下划线和连字符。", 409)
+    # PATH 分隔符和 CMD 展开字符不得进入固定启动器。
+    if any(re.search(r'[;\r\n%!^&|<>\"]', path) for path in [command, *args]):
+        raise SkillError("终端入口路径含不支持的特殊字符。", 409)
+    return {"command": command, "args": args}
 
 
 RESULT_SCHEMA = {
@@ -112,8 +138,13 @@ RESULT_SCHEMA = {
         "name": {"type": "string"}, "command": {"type": "string"},
         "args": {"type": "array", "items": {"type": "string"}},
         "cwd": {"type": "string"}, "skillPath": {"type": ["string", "null"]},
+        "terminal": {"anyOf": [{"type": "null"}, {
+            "type": "object", "additionalProperties": False,
+            "properties": {"command": {"type": "string"},
+                           "args": {"type": "array", "items": {"type": "string"}}},
+            "required": ["command", "args"]}]},
     },
-    "required": ["status", "kind", "name", "command", "args", "cwd", "skillPath"],
+    "required": ["status", "kind", "name", "command", "args", "cwd", "skillPath", "terminal"],
 }
 
 
@@ -132,6 +163,10 @@ def installation_prompt(source, program, skill, runtimes):
         "Skill 中的命令示例必须使用程序目录内入口的绝对路径（PowerShell 使用 & 调用），"
         "不能依赖 PATH 或临时包目录；保留 Skill 的名称和用途。"
         "CLI 的 command 是 exe 绝对路径且 args=[]，或现有 Python/Node 绝对路径且 args 只有已安装脚本绝对路径。"
+        "terminal 报告需要终端调用的入口，格式为 {command,args}，限制与 CLI 入口相同。"
+        "CLI 必须报告与主入口相同的 terminal；兼具 CLI 的 MCP 报告独立终端入口，不含 MCP 启动参数。"
+        "纯 MCP、失败或不支持时 terminal=null。不要把只有 STDIO 的 MCP 当作 CLI。"
+        "平台负责终端入口的用户 PATH 写入和验收，安装助手仍不得修改 PATH 或创建命令启动器。"
         "CLI 没有 Skill 或两种类型均不支持时才返回 unsupported；复制或校验失败返回 failed。"
         "仅验证帮助与安装文件，不启动业务调用。注册和最终验收由平台执行。"
         "只返回指定结构，禁止包含密码、令牌或原始工具日志。"

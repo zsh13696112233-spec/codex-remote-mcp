@@ -20,8 +20,8 @@ class RoleEntity extends Timestamped {
   @Column(nullable = false)
   String name;
 
-  /** 角色职责说明，对应最长 2000 字符的 {@code duty} 字段。 */
-  @Column(nullable = false, length = 2000)
+  /** 角色职责说明，使用长文本保存；请求边界限制为 50,000 字符。 */
+  @Column(nullable = false, columnDefinition = "LONGTEXT")
   String duty;
 
   /** 是否允许新建 SOP 步骤继续引用该角色。 */

@@ -215,7 +215,7 @@ class McpStoreTests(unittest.TestCase):
 
 
 class McpVerificationTests(unittest.IsolatedAsyncioTestCase):
-    async def verification_fixture(self, connected=True, skill_enabled=True, conflict=False, legacy=False):
+    async def verification_fixture(self, connected=True, skill_enabled=True, conflict=False, legacy=False, hybrid=False):
         manager = object.__new__(McpDeployment)
         captured, calls = {}, []
         package = 'a' * 64
@@ -223,15 +223,20 @@ class McpVerificationTests(unittest.IsolatedAsyncioTestCase):
         skill_root = r'C:\deploy\skills\mcp-' + package[:16]
         result = {'status': 'installed', 'name': 'demo', 'command': root + r'\demo.exe',
                   'args': ['mcp'], 'cwd': root, 'skillPath': skill_root + r'\SKILL.md'}
+        if hybrid:
+            result['terminal'] = {'command': root + r'\cli.exe', 'args': []}
         desired = {key: result[key] for key in ('command', 'args', 'cwd')}
         desired['enabled'] = True
         task = {'id': 'x', 'batch_id': 'b', 'registration': json.dumps(desired), 'snapshot': json.dumps({
+            'config': json.dumps({'allow_write': True, 'allow_full_access': True}),
             'settings': {'programRoot': r'C:\deploy\program', 'runtimes': []},
             'skill': {'enabled': True, 'root': r'C:\deploy\skills'}})}
         manager.store = SimpleNamespace(update=lambda *a, **kw: captured.update(kw),
             batch=lambda _: {'package_id': package}, package=lambda _: {'manifest': [{'path': 'SKILL.md'}]})
         async def request(method, params):
             calls.append((method, params))
+            if method == 'command/exec':
+                return {'exitCode': 0, 'stdout': 'CODEX_TERMINAL_PATH_OK'}
             if method == 'config/read':
                 return {'config': {'mcp_servers': {} if conflict else {'demo': desired}},
                         'layers': [{'name': {'type': 'user', 'file': r'C:\test\config.toml'}, 'version': 'v1'}]}
@@ -257,6 +262,24 @@ class McpVerificationTests(unittest.IsolatedAsyncioTestCase):
             else:
                 await manager.register_and_check(SimpleNamespace(request=request), task, result)
         return captured, calls, fs
+
+    async def test_hybrid_registers_terminal_but_keeps_absolute_mcp_entry(self):
+        saved, calls, _ = await self.verification_fixture(hybrid=True)
+        self.assertEqual(saved['state'], 'completed')
+        self.assertIn('用户 PATH', saved['message'])
+        commands = [params['command'] for method, params in calls if method == 'command/exec']
+        self.assertEqual(len(commands), 2)
+        self.assertTrue(commands[0][0].endswith('cli.exe'))
+        self.assertEqual(commands[0][1:], ['--help'])
+        methods = [method for method, _ in calls]
+        self.assertIn('config/mcpServer/reload', methods)
+        self.assertIn('mcpServerStatus/list', methods)
+
+    async def test_pure_mcp_does_not_register_terminal(self):
+        saved, calls, _ = await self.verification_fixture()
+        self.assertEqual(saved['state'], 'completed')
+        self.assertNotIn('command/exec', [method for method, _ in calls])
+        self.assertNotIn('用户 PATH', saved['message'])
 
     async def test_tool_initialization_and_bundled_skill_are_verified_independently(self):
         saved, _, fs = await self.verification_fixture(connected=False)
