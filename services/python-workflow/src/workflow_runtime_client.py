@@ -148,6 +148,11 @@ class InternalApiClient:
         return [{"imageId": value["imageId"], "mediaType": value["mediaType"],
                  "content": base64.b64decode(value["dataBase64"], validate=True)} for value in result["images"]]
 
+    def acceptance_operation(self, workflow_id, node_id, operation, payload):
+        result = self._lease_request("POST", workflow_id,
+            self._node_path(workflow_id, node_id) + "/acceptance", {**payload, "operation": operation})
+        return result.get("result")
+
     def prepare_node_dispatch(
         self, workflow_id: str, node_id: str
     ) -> dict[str, Any]:

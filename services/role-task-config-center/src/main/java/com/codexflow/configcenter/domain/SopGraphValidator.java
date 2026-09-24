@@ -25,11 +25,16 @@ final class SopGraphValidator {
       }
       return steps;
     }
-    if (!Integer.valueOf(1).equals(graph.version())
+    if ((!Integer.valueOf(1).equals(graph.version()) && !Integer.valueOf(2).equals(graph.version()))
         || graph.nodes() == null
         || graph.edges() == null
         || steps.isEmpty()
-        || graph.nodes().size() != steps.size() + 2
+        || graph.nodes().size()
+            != steps.size()
+                + 2
+                + graph.nodes().stream()
+                    .filter(n -> n != null && "acceptance".equals(n.type()))
+                    .count()
         || graph.edges().size() != graph.nodes().size() - 1) fail();
     Map<String, SopEditorGraph.Node> nodes = new HashMap<>();
     String start = null;
@@ -50,7 +55,11 @@ final class SopGraphValidator {
       } else if ("end".equals(node.type())) {
         if (end != null) fail();
         end = node.id();
+      } else if ("acceptance".equals(node.type())) {
+        if (!Integer.valueOf(2).equals(graph.version()) || node.acceptance() == null) fail();
+        node.acceptance().validate();
       } else if (!"step".equals(node.type())) fail();
+      if (!"acceptance".equals(node.type()) && node.acceptance() != null) fail();
     }
     if (start == null || end == null) fail();
     Map<String, SopStepRequest> byKey = new HashMap<>();
@@ -75,9 +84,12 @@ final class SopGraphValidator {
     List<SopStepRequest> ordered = new ArrayList<>();
     Set<String> visited = new HashSet<>();
     String current = start;
+    String previous = null;
     while (current != null && visited.add(current)) {
+      if ("acceptance".equals(nodes.get(current).type()) && !byKey.containsKey(previous)) fail();
       if (byKey.containsKey(current)) ordered.add(byKey.get(current));
       if (current.equals(end)) break;
+      previous = current;
       current = next.get(current);
     }
     if (!end.equals(current) || visited.size() != nodes.size() || ordered.size() != steps.size())

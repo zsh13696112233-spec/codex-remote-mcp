@@ -153,6 +153,7 @@ test("真实画布：新建、拖入三个角色、保存刷新、属性撤销�
     mcps: ["tools"],
   });
   await expect(page.getByText("所有修改已保存", { exact: true })).toBeVisible();
+  await backToList(page);
   await page.getByRole("button", { name: "角色管理", exact: true }).click();
   await page.getByRole("button", { name: "SOP 工作流", exact: true }).click();
   await expect(page.locator(".fg-renderer")).toHaveCount(1);
@@ -263,19 +264,22 @@ test("保存防重、失败保留草稿、运行状态刷新不覆盖输入、�
     "需要保留的草稿",
   );
   page.once("dialog", (dialog) => dialog.dismiss());
+  await backToList(page);
   await page.locator('[data-sop-select="second"]').click();
   await expect(page.getByLabel("工作流名称 *", { exact: true })).toHaveValue(
     "需要保留的草稿",
   );
   page.once("dialog", (dialog) => dialog.dismiss());
+  await backToList(page);
   await page.getByRole("button", { name: "角色管理", exact: true }).click();
   await expect(page.locator(".fg-renderer")).toHaveCount(1);
   page.once("dialog", (dialog) => dialog.dismiss());
-  await page.reload({waitUntil: "commit", timeout: 3000}).catch(() => {});
+  await page.reload({ waitUntil: "commit", timeout: 3000 }).catch(() => {});
   await expect(page.getByLabel("工作流名称 *", { exact: true })).toHaveValue(
     "需要保留的草稿",
   );
   page.once("dialog", (dialog) => dialog.accept());
+  await backToList(page);
   await page.locator('[data-sop-select="second"]').click();
   await expect(page.getByLabel("工作流名称 *", { exact: true })).toHaveValue(
     "另一个流程",
@@ -294,6 +298,7 @@ test("选择请求晚到时不会覆盖新建草稿", async ({ page }) => {
     });
   });
   const requested = page.waitForRequest("**/api/sops/second");
+  await backToList(page);
   await page.locator('[data-sop-select="second"]').click();
   await requested;
   await page.locator("#create").click();
@@ -321,5 +326,91 @@ test("停用角色保留在已有步骤，角色库不提供停用角色", async
   await openExisting(page);
   await page.locator('[data-sop-node="n0"]').click();
   await expect(page.getByText("当前角色已停用。")).toBeVisible();
-  await expect(page.locator(".fg-palette button")).toHaveCount(2);
+  await expect(page.locator(".fg-palette button")).toHaveCount(3);
+});
+
+async function backToList(page: Page) {
+  const button = page.getByRole("button", { name: "返回列表", exact: true });
+  if (await button.isVisible()) await button.click();
+}
+
+test("空白拖动只平移视口，节点拖动改变布局，列表往返保留草稿", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openExisting(page);
+  const canvas = page.locator(".fg-canvas");
+  const box = (await canvas.boundingBox())!;
+  expect(box.width).toBeGreaterThan(850);
+  expect(box.height).toBeGreaterThan(700);
+  const node = page.locator('[data-sop-node="n0"]');
+  const before = (await node.boundingBox())!;
+  await page.mouse.move(box.x + 100, box.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 220, box.y + 160, { steps: 15 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => Math.round((await node.boundingBox())!.x - before.x))
+    .toBeGreaterThan(100);
+  await expect(page.getByText("所有修改已保存", { exact: true })).toBeVisible();
+  const moved = (await node.boundingBox())!;
+  await page.mouse.move(moved.x + 20, moved.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(moved.x + 60, moved.y + 50, { steps: 10 });
+  await page.mouse.up();
+  await expect(page.getByText("有未保存修改", { exact: true })).toBeVisible();
+  await backToList(page);
+  await expect(page.locator(".sop-list")).toBeVisible();
+  await page
+    .getByRole("button", { name: "继续编辑当前草稿", exact: true })
+    .click();
+  await expect(page.getByText("有未保存修改", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await expect(page.getByText("所有修改已保存", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "收起属性面板", exact: true }).click();
+  expect((await canvas.boundingBox())!.width).toBeGreaterThan(box.width + 250);
+  await page.getByRole("button", { name: "流程设置", exact: true }).click();
+  await page.setViewportSize({ width: 700, height: 850 });
+  await page.getByRole("button", { name: "收起属性面板", exact: true }).click();
+  expect((await canvas.boundingBox())!.height).toBeGreaterThan(650);
+  await page.screenshot({
+    path: "../target/sop-browser-results/interaction-narrow.png",
+  });
+});
+
+
+test("三个阶段分别插入 IF，配置保存后刷新恢复", async ({page}) => {
+  let saved: any = existing();
+  await page.route("**/api/sops", r => r.fulfill({json: [saved]}));
+  await page.route("**/api/sops/existing", async r => {
+    if (r.request().method() === "PUT") saved = {...saved, ...r.request().postDataJSON()};
+    await r.fulfill({json: saved});
+  });
+  await page.goto("/?page=sops&groupId=g");
+  await expect(page.locator(".fg-editor")).toHaveAttribute("data-ready", "true");
+  for (let i = 0; i < 3; i++) {
+    await page.getByRole("button", {name:"自动整理", exact:true}).click();
+    await expect(page.locator(".fg-editor")).toHaveAttribute("data-ready", "true");
+    const from = (await page.locator(`[data-sop-node="n${i}"]`).boundingBox())!;
+    const to = (await (i === 2 ? page.locator(".fg-end") : page.locator(`[data-sop-node="n${i+1}"]`)).boundingBox())!;
+    const palette = (await page.getByRole("button", {name:"IF 判断 ＋", exact:true}).boundingBox())!;
+    await page.mouse.move(palette.x + 20, palette.y + 15);
+    await page.mouse.down();
+    await page.mouse.move((from.x + from.width + to.x)/2, (from.y + from.height/2 + to.y + to.height/2)/2, {steps:20});
+    await page.mouse.up();
+    await expect(page.locator(".fg-acceptance")).toHaveCount(i+1);
+    await page.getByLabel("判断名称", {exact:true}).fill(`第${i+1}阶段判断`);
+    await page.getByLabel("验收条件", {exact:true}).fill(`第${i+1}阶段符合预期输出`);
+  }
+  await page.getByRole("button", {name:"保存工作流", exact:true}).click();
+  await expect(page.getByText("所有修改已保存", {exact:true})).toBeVisible();
+  expect(saved.editorGraph.version).toBe(2);
+  expect(saved.editorGraph.nodes.filter((n: any) => n.type === "acceptance")).toHaveLength(3);
+  await page.reload();
+  await expect(page.locator(".fg-acceptance")).toHaveCount(3);
+  await page.locator(".fg-acceptance").first().click();
+  await page.screenshot({path:"../target/sop-browser-results/acceptance-desktop.png"});
+  await page.setViewportSize({width:700,height:850});
+  await page.getByRole("button",{name:"收起属性面板",exact:true}).click();
+  await page.screenshot({path:"../target/sop-browser-results/acceptance-narrow.png"});
 });

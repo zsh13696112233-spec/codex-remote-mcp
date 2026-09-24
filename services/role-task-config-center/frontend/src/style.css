@@ -275,46 +275,146 @@
   margin-bottom: 12px;
   border-radius: 6px;
 }
-@container (max-width:1000px) {
-  .fg-workspace {
-    grid-template-columns: 130px minmax(240px, 1fr);
+/* 编辑区使用视口高度，面板独立滚动，画布不随页面滚动。 */
+.fg-editor {
+  min-height: 0;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+.fg-toolbar {
+  flex: none;
+}
+.fg-toolbar > div:first-of-type {
+  flex: 1;
+  min-width: 0;
+}
+.fg-toolbar strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fg-workspace {
+  position: relative;
+  min-height: 0;
+  grid-template-columns: 170px minmax(0, 1fr) 300px;
+  overflow: hidden;
+}
+.fg-workspace > aside {
+  max-height: none;
+  min-height: 0;
+}
+.fg-canvas {
+  min-height: 0;
+  overflow: hidden;
+}
+.fg-inspector {
+  position: relative !important;
+}
+.fg-close-inspector {
+  float: right;
+  padding: 0 7px !important;
+  font-size: 20px !important;
+}
+.fg-editor[data-palette="false"] .fg-palette,
+.fg-editor[data-inspector="false"] .fg-inspector {
+  display: none;
+}
+.fg-editor[data-palette="false"] .fg-workspace {
+  grid-template-columns: 0 minmax(0, 1fr) 300px;
+}
+.fg-editor[data-inspector="false"] .fg-workspace {
+  grid-template-columns: 170px minmax(0, 1fr) 0;
+}
+.fg-editor[data-palette="false"][data-inspector="false"] .fg-workspace {
+  grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+.fg-palette {
+  grid-column: 1;
+}
+.fg-canvas {
+  grid-column: 2;
+  grid-row: 1;
+}
+.fg-inspector {
+  grid-column: 3;
+  grid-row: 1;
+}
+.fg-canvas-tools button[aria-pressed="true"] {
+  background: #eeebff;
+  color: #6558e8;
+}
+@media (max-width: 1000px) {
+  .fg-editor .fg-workspace {
+    grid-template-columns: 150px minmax(0, 1fr) 0;
+  }
+  .fg-editor[data-palette="false"] .fg-workspace {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
   }
   .fg-workspace > .fg-inspector {
-    grid-column: 1/-1;
-    border-left: 0;
-    border-top: 1px solid #e7e8ee;
-    max-height: 380px;
+    position: absolute !important;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: min(320px, 85vw);
+    z-index: 8;
+    box-shadow: -8px 0 24px #29305418;
+    background: white;
   }
   .fg-toolbar {
     flex-wrap: wrap;
+    padding: 10px;
+    gap: 8px;
+  }
+  .fg-actions {
+    gap: 4px;
+  }
+  .fg-actions button {
+    padding: 6px 8px;
   }
 }
-@media (max-width: 750px) {
-  .fg-workspace {
-    display: flex;
-    flex-direction: column;
+@media (max-width: 600px) {
+  .fg-editor .fg-workspace {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
   }
   .fg-workspace > .fg-palette {
-    max-height: 160px;
-    border-right: 0;
-    border-bottom: 1px solid #e7e8ee;
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 170px;
+    z-index: 7;
+    box-shadow: 8px 0 24px #29305418;
   }
-  .fg-palette > button {
-    display: inline-flex;
-    width: auto;
-    margin: 4px;
+  .fg-actions {
+    width: 100%;
+    justify-content: flex-end;
   }
-  .fg-palette p,
-  .fg-palette-note {
-    display: none;
+  .fg-canvas-tools {
+    left: 8px;
+    bottom: 10px;
+    gap: 0;
   }
-  .fg-canvas {
-    min-height: 450px;
+  .fg-canvas-tools button {
+    padding: 7px;
   }
-  .fg-toolbar {
-    flex-wrap: wrap;
+}
+.fg-editor .fg-close-inspector {
+  width: 28px;
+  min-width: 28px;
+  display: inline-block;
+}
+@media (max-width: 1000px) {
+  .fg-editor[data-inspector] .fg-workspace {
+    grid-template-columns: 150px minmax(0, 1fr) 0;
   }
-  .fg-workspace > .fg-inspector {
-    max-height: 380px;
+  .fg-editor[data-palette="false"][data-inspector] .fg-workspace {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
+  }
+}
+@media (max-width: 600px) {
+  .fg-editor[data-palette][data-inspector] .fg-workspace {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
   }
 }

@@ -322,7 +322,18 @@ public class ConfigService {
     int position = 0;
     sop.editorGraphJson = body.editorGraph() == null ? null : json.write(body.editorGraph());
     for (SopStepRequest rawStep : orderedSteps) {
-      sop.steps.add(createStep(sop, rawStep, position++));
+      var step = createStep(sop, rawStep, position++);
+      if (body.editorGraph() != null) {
+        for (var edge : body.editorGraph().edges()) {
+          if (edge.source().equals(step.nodeKey)) {
+            body.editorGraph().nodes().stream()
+                .filter(n -> n.id().equals(edge.target()) && "acceptance".equals(n.type()))
+                .findFirst()
+                .ifPresent(n -> step.acceptanceJson = json.write(n.acceptance()));
+          }
+        }
+      }
+      sop.steps.add(step);
     }
   }
 

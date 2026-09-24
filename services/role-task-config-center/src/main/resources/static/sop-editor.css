@@ -24,3 +24,7 @@
 
 
 .sop-content{margin:0;min-height:640px}.sop-workspace{grid-template-columns:180px minmax(0,1fr);min-height:700px;border-radius:12px}.sop-list-panel{position:static;width:auto;color:inherit}.sop-list-panel .panel-title{flex-wrap:wrap}#sopEditorRoot{min-width:0;container-type:inline-size} @media(max-width:1000px){.sop-workspace{grid-template-columns:minmax(0,1fr)}.sop-list-panel{border-right:0;border-bottom:1px solid var(--line)}.sop-list{max-height:180px;grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}}
+/* 列表保留分组管理，编辑时画布独占视口。 */
+.sop-workspace{display:block;min-height:0;border-radius:12px}.sop-list-panel{border:0}.sop-list{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));max-height:none}.sop-workspace>[data-sop-open]{margin:16px 16px 0}#sopEditorRoot{display:none}
+body.sop-editing{overflow:hidden}body.sop-editing #sopEditorRoot{display:block;position:fixed;inset:0;z-index:100;background:white;height:100dvh}body.sop-editing>#toast{z-index:200}
+body.sop-editing>aside,body.sop-editing main>header,body.sop-editing .group-sidebar,body.sop-editing .group-actions,body.sop-editing .toolbar,body.sop-editing .sop-list-panel,body.sop-editing [data-sop-open]{visibility:hidden}

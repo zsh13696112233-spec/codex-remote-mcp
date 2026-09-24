@@ -725,6 +725,7 @@ class WorkflowGateway:
             "你是这个工作流的主监督会话，不要亲自执行任何节点的业务任务。\n"
             "仅使用 Codex Orchestrator MCP 提供的 dispatch_node、wait_node、"
             "node_status、cancel_node 工具调度节点。\n"
+            "验收 checking/repairing 阶段继续等待；验收 held 时说明暂停原因并结束监督本轮，绝不派发后续步骤。\n"
             "每次只能派发依赖已经 completed 的节点；数据库也会强制检查依赖。\n"
             "节点派发后必须调用 wait_node，直到得到 completed、failed、cancelled "
             "或 interrupted。每次调用 wait_node 时 timeout_sec 使用 10 秒，"
@@ -1025,7 +1026,7 @@ class WorkflowGateway:
                 "text": {"type": "string", "maxLength": 20_000},
                 "actionType": {
                     "type": ["string", "null"],
-                    "enum": ["stop", "skip", "restart_from", None],
+                    "enum": ["stop", "skip", "restart_from", "repair_acceptance", None],
                 },
                 "nodeId": {"type": ["string", "null"], "maxLength": 128},
                 "revisionInstruction": {
@@ -1099,7 +1100,7 @@ class WorkflowGateway:
                 "nodeId": None,
                 "revisionInstruction": None,
             }
-        if action_type not in {"stop", "skip", "restart_from"}:
+        if action_type not in {"stop", "skip", "restart_from", "repair_acceptance"}:
             raise RuntimeError("任务助手提出了不支持的操作。")
         if action_type != "stop":
             valid_ids = {node["id"] for node in snapshot.get("nodes", [])}
@@ -1107,7 +1108,7 @@ class WorkflowGateway:
                 raise RuntimeError("任务助手没有识别出有效的目标步骤，请重新说明。")
         else:
             node_id = None
-        if action_type != "restart_from" and revision_instruction is not None:
+        if action_type not in {"restart_from", "repair_acceptance"} and revision_instruction is not None:
             raise RuntimeError("任务助手返回格式无效。")
         return {
             "kind": kind,
@@ -1135,6 +1136,10 @@ class WorkflowGateway:
                 return "本任务的重跑额度已经用完，仍可以继续咨询任务状态和结果。"
             raise
         action_type = proposal["actionType"]
+        if action_type == "repair_acceptance":
+            return ("准备在原步骤会话中追加一次修复和复检，消耗一次重跑额度；未通过将再次暂停。"
+                    + "\n修复要求：" + str(proposal.get("revisionInstruction") or "")
+                    + "\n请另发“确认执行”，10分钟内有效。")
         if action_type == "restart_from":
             names = "、".join(
                 item["displayName"] for item in proposal.get("affectedNodes", [])
@@ -1176,6 +1181,11 @@ class WorkflowGateway:
                 await self._pause_supervisor(workflow_id)
                 action_type = action["actionType"]
                 node_id = action.get("nodeId")
+                if action_type == "repair_acceptance":
+                    await _database_call(self.store.resume_acceptance, workflow_id, node_id, action["actionId"])
+                    await _database_call(self.store.finish_control_execution, action["actionId"], result={"acceptance": "repair_pending"})
+                    await self._resume_supervisor_if_needed(workflow_id)
+                    return "已确认追加一次原会话修复和复检；通过后继续，未通过再次暂停。"
                 if action_type == "restart_from":
                     assert node_id is not None
                     await self._interrupt_nodes(
@@ -1330,7 +1340,8 @@ class WorkflowGateway:
             "返回 propose_control/skip；要求重试、重新执行、从某一步重新开始时统一返回"
             "propose_control/restart_from，并把步骤序号或名称映射为快照里的真实 id。"
             "restart_from 表示该步到最后全部重跑，已完成任务也允许提出。"
-            "输出中的 revisionInstruction 字段始终必须存在。只有 restart_from 可以填写"
+            "验收等待处理时，补充要求后使用 repair_acceptance，针对该步骤追加一次修复复检，禁止跳过或强制放行。"
+            "输出中的 revisionInstruction 字段始终必须存在。restart_from 和 repair_acceptance 可以填写"
             "该字段：如果用户说明了上一版的问题或修改要求，请将其总结为独立、完整、"
             "可直接执行的中文返工要求，保留所有关键约束，去掉重跑步骤等控制措辞，"
             "不得虚构品牌、颜色或其他细节；如果用户只是要求重新尝试而没有新增修改要求，"
@@ -2038,6 +2049,20 @@ async def internal_prepare_node(request: Request) -> Response:
         return _internal_error_response(error)
 
 
+async def internal_acceptance(request: Request) -> Response:
+    try:
+        gateway, supervisor_id, workflow_id, lease_token = await _validate_internal_write(request)
+        payload = await request.json()
+        if not isinstance(payload, dict) or payload.get("operation") not in {"claim", "attach", "finish", "hold"}:
+            raise ValueError("无效验收操作。")
+        result = await _database_call(gateway.store.acceptance_operation, workflow_id,
+            request.path_params["node_id"], payload["operation"], payload,
+            sidecar_supervisor_id=supervisor_id, lease_token=lease_token)
+        return JSONResponse({"result": result})
+    except (PermissionError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        return _internal_error_response(error)
+
+
 async def internal_update_node(request: Request) -> Response:
     try:
         gateway, supervisor_id, workflow_id, lease_token = (
@@ -2240,6 +2265,7 @@ def create_app(
                 internal_add_events,
                 methods=["POST"],
             ),
+            Route("/internal/v1/workflows/{workflow_id}/nodes/{node_id}/acceptance", internal_acceptance, methods=["POST"]),
             Route("/workflows", create_workflow, methods=["POST"]),
             Route("/workflow-task-bindings", register_workflow_task_bindings, methods=["POST"]),
             Route("/workflow-statuses", get_workflow_statuses, methods=["POST"]),

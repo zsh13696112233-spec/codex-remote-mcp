@@ -1,5 +1,5 @@
 const STATUS = {
-  pending: "未开始", queued: "进行中", running: "进行中", cancelling: "进行中",
+  acceptance_held: "等待处理", pending: "未开始", queued: "进行中", running: "进行中", cancelling: "进行中",
   completed: "已完成", skipped: "已跳过", failed: "未完成", cancelled: "未完成", interrupted: "未完成"
 };
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
@@ -423,7 +423,7 @@ function formatBytes(value) {
 function renderSteps(nodes, initializing = false) {
   const list = $("#steps");
   nodes.forEach((node, index) => {
-    const signature = JSON.stringify([node.resultRevision == null ? node : [node.id, node.resultRevision],
+    const signature = JSON.stringify([node.resultRevision == null ? node : [node.id, node.resultRevision, node.acceptance],
       initializing ? initializationMessage(state.snapshot) : null,
       state.snapshot?.pendingAdvance?.completedNodeId === node.id ? state.snapshot.pendingAdvance : null]);
     const cached = state.stepRows.get(node.id);
@@ -443,7 +443,7 @@ function renderSteps(nodes, initializing = false) {
     const head = make("div", "step-head");
     const title = make("div", "step-title");
     title.append(make("span", "step-number", `第 ${index + 1} 步`), make("h3", "", node.displayName || "任务步骤"));
-    head.append(title, make("span", `step-state ${stateName}`, zh(node.status)));
+    head.append(title, make("span", `step-state ${stateName}`, node.acceptance && node.acceptance.state !== "initial" ? ({checking:"检查中",check_pending:"等待检查",repairing:"修复中",repair_pending:"等待修复",held:"等待处理",passed:"验收通过"}[node.acceptance.state] || zh(node.status)) : zh(node.status)));
 
     const details = make("div", "step-details");
     addDetail(details, "执行机", node.agentId || "未指定");
@@ -456,6 +456,16 @@ function renderSteps(nodes, initializing = false) {
       if (node.finishedAt) duration.dataset.elapsedEnd = node.finishedAt;
     }
     card.append(head, details);
+    if (node.acceptance && node.acceptance.state !== "initial") {
+      const gate = make("div", "step-result");
+      gate.append(make("strong", "", `${node.acceptance.config.name} · 已修复 ${node.acceptance.repairs} 次`));
+      if (node.acceptance.reason) gate.append(make("p", "", node.acceptance.reason));
+      if (node.acceptance.state === "held") gate.append(make("p", "", "请在任务助手中补充修复要求并确认，追加一次修复和复检；不能直接放行。"));
+      const history = make("details", "");
+      history.append(make("summary", "", "历次验收记录"));
+      (node.acceptance.history || []).forEach(h => history.append(make("p", "", `${fmt(h.at)}：${h.reason || "修复完成，等待复检"}`)));
+      gate.append(history); card.append(gate);
+    }
 
     const hasArtifacts = Array.isArray(node.artifacts) && node.artifacts.length > 0;
     if (node.response || node.error || hasArtifacts) {
@@ -533,11 +543,14 @@ function render(snapshot) {
   const initializing = isInitializing(snapshot);
   const active = nodes.find(node => ACTIVE.has(node.status));
   const failed = nodes.find(node => FAILED.has(node.status));
+  const acceptanceHeld = nodes.find(node => node.acceptance?.state === "held");
   const allStepsFinished = nodes.length > 0
     && nodes.every(node => node.status === "completed" || node.status === "skipped");
   const allStepsPending = nodes.length === 0 || nodes.every(node => node.status === "pending");
   $("#current").textContent = initializing
     ? initializationMessage(snapshot)
+    : acceptanceHeld
+    ? `第 ${nodes.indexOf(acceptanceHeld) + 1} 步验收暂停，请在任务助手中补充修复要求`
     : snapshot.pendingAdvance?.state === "held"
     ? `任务已暂停，暂不进入第 ${nodes.findIndex(node => node.id === snapshot.pendingAdvance.nextNodeId) + 1} 步`
     : snapshot.pendingAdvance

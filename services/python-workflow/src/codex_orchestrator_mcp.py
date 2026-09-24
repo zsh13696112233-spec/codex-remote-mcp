@@ -1818,6 +1818,8 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
     store = get_workflow_store()
     snapshot = job.snapshot()
     current_node = store.get_node(workflow_id, node_id)
+    if current_node.get("acceptance") and current_node["acceptance"]["state"] != "initial":
+        return current_node
     if current_node.get("jobId") not in {None, job.job_id}:
         return snapshot
     if job.status == "completed" and job.artifact_contract:
@@ -1835,6 +1837,8 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
             snapshot["error"] = str(error)
             snapshot["finished_at"] = snapshot.get("finished_at") or utc_now()
     store.sync_node_job(workflow_id, node_id, snapshot)
+    if current_node.get("acceptance"):
+        return store.get_node(workflow_id, node_id)
     return snapshot
 
 
@@ -1842,7 +1846,17 @@ async def _monitor_workflow_node(workflow_id: str, node_id: str, job: Job) -> No
     await job.completed.wait()
     await flush_workflow_events()
     _sync_workflow_job(workflow_id, node_id, job)
+    await _run_acceptance(workflow_id, node_id)
     if job.artifact_contract and job.managed_attempt_dir:
+        # A concurrent poll can have claimed acceptance before this monitor.
+        # Keep the original output readable until that check has actually ended.
+        while True:
+            current = get_workflow_store().get_node(workflow_id, node_id)
+            gate = current.get("acceptance")
+            if (not gate or gate["state"] in {"passed", "held"}
+                    or current["status"] in {"failed", "cancelled", "interrupted"}):
+                break
+            await asyncio.sleep(0.25)
         try:
             await orchestrator.cleanup_managed_artifacts(job)
         except Exception as error:
@@ -1859,6 +1873,87 @@ async def _monitor_workflow_node(workflow_id: str, node_id: str, job: Job) -> No
                 event_type="artifact.cleanup_failed",
                 payload={"message": "执行机托管目录清理失败。"},
             )
+
+
+async def _run_acceptance(workflow_id: str, node_id: str) -> None:
+    from workflow_acceptance import RESULT_SCHEMA
+    store = get_workflow_store()
+    managed_jobs = []
+    while True:
+        node = store.get_node(workflow_id, node_id)
+        if not node.get("acceptance") or node["acceptance"]["state"] not in {"check_pending", "repair_pending"}:
+            if (managed_jobs and node.get("acceptance")
+                    and node["acceptance"]["state"] in {"checking", "repairing"}
+                    and node["status"] not in {"failed", "cancelled", "interrupted"}):
+                await asyncio.sleep(0.25)
+                continue
+            for completed_job in managed_jobs:
+                try:
+                    await orchestrator.cleanup_managed_artifacts(completed_job)
+                except Exception:
+                    LOGGER.exception("清理验收修复临时目录失败：workflow=%s node=%s", workflow_id, node_id)
+            return
+        try:
+            spec = store.acceptance_operation(workflow_id, node_id, "claim", {})
+        except (ValueError, RuntimeError, PermissionError):
+            LOGGER.exception("验收执行资格校验失败：workflow=%s node=%s", workflow_id, node_id)
+            try:
+                store.acceptance_operation(workflow_id, node_id, "hold", {})
+            except Exception:
+                LOGGER.exception("无法写入验收暂停状态，等待中央租约恢复处理。")
+            return
+        if spec is None:
+            if managed_jobs:
+                continue
+            return
+        payload = {"token": spec["token"], "status": "failed"}
+        try:
+            if not spec["threadId"]:
+                raise ValueError("原会话不可用。")
+            agent = orchestrator.load_agents()[spec["agentId"]]
+            client = orchestrator._client_factory(agent.url, token=orchestrator._resolve_agent_token(agent))
+            try:
+                await asyncio.wait_for(client.open(), timeout=30)
+                read = await asyncio.wait_for(client.request("thread/read", {"threadId": spec["threadId"], "includeTurns": True}), timeout=30)
+                turns = read.get("thread", {}).get("turns")
+                if not isinstance(turns, list) or not turns or any(t.get("status") not in {"completed", "failed", "interrupted"} for t in turns):
+                    raise ValueError("原会话尚未确认结束，不能启动新的修复或检查。")
+            finally:
+                await client.close()
+            handoff = None
+            if spec["stage"] == "repairing" and spec.get("handoffMode") == "cumulative_files":
+                handoff = {"workflowId": workflow_id, "nodeId": node_id, "stepNumber": spec["stepNumber"],
+                           "steps": store.get_cumulative_artifact_inputs(workflow_id, node_id, include_current=True)}
+                spec["prompt"] += "\n请使用本步骤上一版交付文件作为修复输入。"
+            job = await orchestrator.dispatch(
+                agent_id=spec["agentId"], prompt=spec["prompt"], thread_id=spec["threadId"],
+                cwd=spec["cwd"], write=spec["write"], permission_profile=spec["permissionProfile"],
+                model=spec["model"], timeout_sec=spec["timeoutSec"],
+                output_schema=RESULT_SCHEMA if spec["stage"] == "checking" else None,
+                artifact_handoff=handoff,
+            )
+            store.acceptance_operation(workflow_id, node_id, "attach", {"token": spec["token"], "jobId": job.job_id})
+            if getattr(job, "managed_attempt_dir", None):
+                managed_jobs.append(job)
+            attached_turn = None
+            while not job.completed.is_set():
+                if job.turn_id and job.turn_id != attached_turn:
+                    store.acceptance_operation(workflow_id, node_id, "attach", {"token": spec["token"], "jobId": job.job_id, "turnId": job.turn_id})
+                    attached_turn = job.turn_id
+                try:
+                    await asyncio.wait_for(job.completed.wait(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    pass
+            payload.update(status=job.status, response=job.response, turnId=job.turn_id)
+            if handoff is not None and job.status == "completed":
+                payload["artifacts"] = job.captured_files
+        except Exception:
+            LOGGER.exception("验收执行失败，保持暂停：workflow=%s node=%s", workflow_id, node_id)
+        try:
+            store.acceptance_operation(workflow_id, node_id, "finish", payload)
+        except (ValueError, TypeError):
+            LOGGER.exception("验收结果保存失败，保持暂停：workflow=%s node=%s", workflow_id, node_id)
+            store.acceptance_operation(workflow_id, node_id, "finish", {"token": spec["token"], "status": "failed"})
 
 
 def _track_workflow_node(workflow_id: str, node_id: str, job: Job) -> None:
@@ -1945,6 +2040,12 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         await asyncio.sleep(min(0.25, remaining))
     node = store.prepare_node_dispatch(workflow_id, node_id)
     if node["alreadyDispatched"]:
+        current = store.get_node(workflow_id, node_id)
+        if current.get("acceptance") and current["acceptance"]["state"] != "initial":
+            task = asyncio.create_task(_run_acceptance(workflow_id, node_id))
+            _workflow_monitors.add(task)
+            task.add_done_callback(_workflow_monitors.discard)
+            return current
         job_id = node.get("jobId")
         if job_id and job_id in orchestrator.jobs:
             return orchestrator.get_job(job_id).snapshot()
@@ -2050,6 +2151,15 @@ async def wait_node(
 ) -> dict[str, Any]:
     """等待节点；超时仅返回当前状态，主监督会话可以继续调用本工具。"""
     node = _workflow_node_snapshot(workflow_id, node_id)
+    if node.get("acceptance") and node["acceptance"]["state"] != "initial":
+        if node["acceptance"]["state"] in {"check_pending", "repair_pending"}:
+            task = asyncio.create_task(_run_acceptance(workflow_id, node_id))
+            _workflow_monitors.add(task)
+            task.add_done_callback(_workflow_monitors.discard)
+        if node["acceptance"]["state"] not in {"passed", "held"}:
+            await asyncio.sleep(min(max(timeout_sec, 0), 10))
+        return _workflow_node_snapshot(workflow_id, node_id)
+
     job_id = node.get("jobId")
     if not job_id:
         raise ValueError(f"节点尚未派发：{node_id}")

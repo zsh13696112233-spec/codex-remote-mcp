@@ -11,6 +11,8 @@ import {
   EditorRenderer,
   WorkflowNodeRenderer,
   useNodeRender,
+  EditorState,
+  WorkflowDragService,
   type FreeLayoutPluginContext,
   type WorkflowJSON,
   type WorkflowNodeRegistry,
@@ -23,6 +25,7 @@ import {
   orderedKeys,
   canConnect,
   insertStep,
+  insertAcceptance,
   removeStep,
   key,
   permissions,
@@ -45,6 +48,7 @@ export interface EditorOptions {
   onChange(d: Draft): void;
   onSave(d: Draft): Promise<Draft>;
   onError(message: string): void;
+  onBack(): void;
 }
 const Actions = createContext({ select: (_id: string) => {} });
 function NodeCard() {
@@ -61,7 +65,7 @@ function NodeCard() {
     </WorkflowNodeRenderer>
   );
 }
-const registries: WorkflowNodeRegistry[] = ["start", "step", "end"].map(
+const registries: WorkflowNodeRegistry[] = ["start", "step", "end", "acceptance"].map(
   (type) => ({
     type,
     meta: {
@@ -86,7 +90,7 @@ const registries: WorkflowNodeRegistry[] = ["start", "step", "end"].map(
               {type === "start" ? "▶" : type === "end" ? "■" : "◇"}
             </span>
             <strong>
-              {type === "step"
+              {type === "acceptance" ? form.values.name : type === "step"
                 ? form.values.displayName
                 : type === "start"
                   ? "开始"
@@ -94,7 +98,7 @@ const registries: WorkflowNodeRegistry[] = ["start", "step", "end"].map(
             </strong>
           </div>
           <p>
-            {type === "step"
+            {type === "acceptance" ? "通过继续；不通过修复，超限暂停" : type === "step"
               ? form.values.instruction || "配置本步骤执行要求"
               : type === "start"
                 ? "从任务定义接收目标与输入"
@@ -118,7 +122,7 @@ function toFlow(d: Draft): WorkflowJSON {
       type: n.type,
       meta: { position: { x: n.x, y: n.y } },
       data:
-        n.type === "step" ? clone(d.steps.find((s) => s.nodeKey === n.id)) : {},
+        n.type === "step" ? clone(d.steps.find((s) => s.nodeKey === n.id)) : n.type === "acceptance" ? clone(n.acceptance) : {},
     })),
     edges: d.editorGraph.edges.map((e) => ({
       sourceNodeID: e.source,
@@ -133,10 +137,11 @@ function fromFlow(d: Draft, json: WorkflowJSON): Draft {
       .filter((n) => n.type === "step")
       .map((n) => ({ ...n.data, nodeKey: n.id })),
     editorGraph: {
-      version: 1,
+      version: d.editorGraph.version,
       nodes: json.nodes.map((n) => ({
         id: n.id,
-        type: n.type as "start" | "step" | "end",
+        type: n.type as "start" | "step" | "end" | "acceptance",
+        ...(n.type === "acceptance" ? {acceptance: n.data} : {}),
         x: n.meta?.position?.x || 0,
         y: n.meta?.position?.y || 0,
       })),
@@ -214,11 +219,19 @@ export function Editor({ options }: { options: EditorOptions }) {
   const initial = useRef(toFlow(draft));
   const baseline = useRef(JSON.stringify(draft));
   const ctx = useRef<FreeLayoutPluginContext>();
+  const dragSubscription = useRef<{ dispose(): void }>();
   const loading = useRef(false);
   const savingRef = useRef(false);
   const [ready, setReady] = useState(false);
   const [arranging, setArranging] = useState(false);
   const [selected, setSelected] = useState("");
+  const [paletteOpen, setPaletteOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [mouseMode, setMouseMode] = useState(true);
+  const selectNode = (id: string) => {
+    setSelected(id);
+    setInspectorOpen(true);
+  };
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [runtime, setRuntime] = useState({
@@ -228,6 +241,13 @@ export function Editor({ options }: { options: EditorOptions }) {
   const [, refreshHistory] = useState(0);
   const commit = (next: Draft, load = false, record = true) => {
     if (savingRef.current) return;
+    if (!load) {
+      for (const n of next.editorGraph.nodes.filter(n => n.type === "acceptance")) {
+        const before = current.current.editorGraph.edges.find(e => e.target === n.id)?.source;
+        const after = next.editorGraph.edges.find(e => e.target === n.id)?.source;
+        if (after && before !== after) options.onError("IF 判断对象已按连线更新，请确认验收条件适用。");
+      }
+    }
     if (record) history.current.record(next);
     current.current = next;
     setDraft(next);
@@ -264,10 +284,24 @@ export function Editor({ options }: { options: EditorOptions }) {
         if (!loading.current && !savingRef.current)
           actions.current.commit(
             fromFlow(current.current, c.document.toJSON()),
+            false,
+            !c.get(WorkflowDragService).isDragging,
           );
       },
       onAllLayersRendered: (c: FreeLayoutPluginContext) => {
         ctx.current = c;
+        c.playground.editorState.changeState(
+          EditorState.STATE_MOUSE_FRIENDLY_SELECT.id,
+        );
+        dragSubscription.current?.dispose();
+        dragSubscription.current = c
+          .get(WorkflowDragService)
+          .onNodesDrag((event) => {
+            if (event.type === "onDragEnd" && !savingRef.current)
+              actions.current.commit(
+                fromFlow(current.current, c.document.toJSON()),
+              );
+          });
         requestAnimationFrame(() =>
           requestAnimationFrame(() => {
             if (ctx.current === c)
@@ -286,13 +320,30 @@ export function Editor({ options }: { options: EditorOptions }) {
       setRuntime((e as CustomEvent).detail);
     };
     window.addEventListener("sop-runtime", listener);
+    const opened = () =>
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => ctx.current?.tools.fitView(false)),
+      );
+    window.addEventListener("sop-editor-open", opened);
     return () => {
       window.removeEventListener("sop-runtime", listener);
+      window.removeEventListener("sop-editor-open", opened);
+      dragSubscription.current?.dispose();
       ctx.current = undefined;
     };
   }, []);
   const roles = options.roles.filter((r) => r.groupId === draft.groupId);
   const agents = runtime.agents.filter((a) => a.groupId === draft.groupId);
+  const gate = draft.editorGraph.nodes.find(n => n.id === selected && n.type === "acceptance");
+  const updateGate = (field: string, value: string | number) => {
+    const d = clone(current.current), n = d.editorGraph.nodes.find(n => n.id === selected)!;
+    n.acceptance = {...n.acceptance!, [field]: value};
+    commit(d, true);
+  };
+  const addGate = (point = {x: 350, y: 250}, edge?: Edge) => {
+    const d = insertAcceptance(current.current, point, edge);
+    commit(d, true); selectNode(d.editorGraph.nodes[d.editorGraph.nodes.length - 1].id);
+  };
   const step = draft.steps.find((s) => s.nodeKey === selected);
   const selectedType = draft.editorGraph.nodes.find(
     (n) => n.id === selected,
@@ -356,7 +407,7 @@ export function Editor({ options }: { options: EditorOptions }) {
       mcps: [],
     };
     commit(insertStep(current.current, s, point, edge), true);
-    setSelected(s.nodeKey);
+    selectNode(s.nodeKey);
   };
   const undo = (redo = false) => {
     if (savingRef.current) return;
@@ -431,13 +482,18 @@ export function Editor({ options }: { options: EditorOptions }) {
     ];
   };
   return (
-    <Actions.Provider value={{ select: setSelected }}>
+    <Actions.Provider value={{ select: selectNode }}>
       <div
         className="fg-editor"
         data-ready={ready && !arranging}
+        data-palette={paletteOpen}
+        data-inspector={inspectorOpen}
         onKeyDownCapture={controlKeys}
       >
         <div className="fg-toolbar">
+          <button disabled={saving || arranging} onClick={options.onBack}>
+            返回列表
+          </button>
           <div>
             <strong>{draft.name || "未命名工作流"}</strong>
             <small>
@@ -461,7 +517,19 @@ export function Editor({ options }: { options: EditorOptions }) {
             >
               重做
             </button>
-            <button disabled={saving} onClick={() => setSelected("")}>
+            <button
+              aria-expanded={paletteOpen}
+              onClick={() => setPaletteOpen((v) => !v)}
+            >
+              角色库
+            </button>
+            <button
+              disabled={saving}
+              onClick={() => {
+                setSelected("");
+                setInspectorOpen(true);
+              }}
+            >
               流程设置
             </button>
             <button
@@ -511,6 +579,7 @@ export function Editor({ options }: { options: EditorOptions }) {
                 </button>
               ))}
             {!roles.some((r) => r.enabled) && <p>本组暂无启用的角色。</p>}
+            <button draggable onDragStart={e => e.dataTransfer.setData("application/x-sop-role", "__acceptance__")} onClick={() => addGate()}>IF 判断 ＋</button>
             <div className="fg-palette-note">
               开始 → 角色步骤 → 结束
               <br />
@@ -530,7 +599,8 @@ export function Editor({ options }: { options: EditorOptions }) {
                 (r) =>
                   r.id === e.dataTransfer.getData("application/x-sop-role"),
               );
-              if (!role || !ctx.current) return;
+              const isGate = e.dataTransfer.getData("application/x-sop-role") === "__acceptance__";
+              if ((!role && !isGate) || !ctx.current) return;
               e.preventDefault();
               const point =
                 ctx.current.playground.config.getPosFromMouseEvent(e);
@@ -539,8 +609,9 @@ export function Editor({ options }: { options: EditorOptions }) {
                   point,
                   18,
                 );
+              if (isGate) { addGate(point, line?.from && line?.to ? {source: line.from.id, target: line.to.id} : undefined); return; }
               addRole(
-                role,
+                role!,
                 point,
                 line?.from && line?.to
                   ? { source: line.from.id, target: line.to.id }
@@ -552,6 +623,20 @@ export function Editor({ options }: { options: EditorOptions }) {
               <EditorRenderer className="fg-renderer" />
             </FreeLayoutEditorProvider>
             <div className="fg-canvas-tools">
+              <button
+                aria-pressed={mouseMode}
+                onClick={() => {
+                  const next = !mouseMode;
+                  setMouseMode(next);
+                  ctx.current?.playground.editorState.changeState(
+                    next
+                      ? EditorState.STATE_MOUSE_FRIENDLY_SELECT.id
+                      : EditorState.STATE_SELECT.id,
+                  );
+                }}
+              >
+                {mouseMode ? "小手模式" : "选择模式"}
+              </button>
               <button onClick={() => ctx.current?.playground.config.zoomout()}>
                 −
               </button>
@@ -590,10 +675,17 @@ export function Editor({ options }: { options: EditorOptions }) {
             </div>
           </section>
           <aside className="fg-inspector">
+            <button
+              className="fg-close-inspector"
+              aria-label="收起属性面板"
+              onClick={() => setInspectorOpen(false)}
+            >
+              ×
+            </button>
             <h3>
               {step
                 ? "步骤设置"
-                : selectedType === "start"
+                : selectedType === "acceptance" ? "IF 判断设置" : selectedType === "start"
                   ? "开始"
                   : selectedType === "end"
                     ? "结束"
@@ -607,6 +699,15 @@ export function Editor({ options }: { options: EditorOptions }) {
                     : "所有步骤完成后结束工作流，交付现有步骤结果。"}
                 </p>
                 <button onClick={() => setSelected("")}>编辑流程设置</button>
+              </>
+            ) : gate ? (
+              <>
+                <Field label="判断名称" value={gate.acceptance!.name} onChange={v => updateGate("name", v)} />
+                <Field label="验收条件" multiline maxLength={10000} value={gate.acceptance!.criteria} onChange={v => updateGate("criteria", v)} />
+                <Field label="最大自动修复次数" type="number" value={String(gate.acceptance!.maxRepairs)} onChange={v => updateGate("maxRepairs", Number(v))} />
+                <p>当前判断对象：{draft.steps.find(s => s.nodeKey === draft.editorGraph.edges.find(e => e.target === gate.id)?.source)?.displayName || "尚未连接角色步骤"}</p>
+                <p>使用紧邻前一步的原会话。通过继续，不通过修复；超限或需要决策时暂停。</p>
+                <button onClick={() => {commit(removeStep(current.current, gate.id), true); setSelected("");}}>删除判断</button>
               </>
             ) : step ? (
               <>
@@ -725,6 +826,8 @@ export function Editor({ options }: { options: EditorOptions }) {
                   <button
                     className="fg-danger"
                     onClick={() => {
+                      const target = current.current.editorGraph.edges.find(e => e.source === step.nodeKey)?.target;
+                      if (current.current.editorGraph.nodes.find(n => n.id === target)?.type === "acceptance" && !window.confirm("删除此步骤也会删除其后的 IF 判断，是否继续？")) return;
                       commit(removeStep(current.current, step.nodeKey), true);
                       setSelected("");
                     }}

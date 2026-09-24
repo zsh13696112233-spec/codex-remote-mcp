@@ -337,6 +337,16 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void acceptancePauseUsesPersistentNoticeWithoutAdvanceCard() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var event = json.createObjectNode().put("type", "acceptance.held");
+    event.putObject("payload").put("reason", "测试尚未通过").put("repairs", 2).put("pauseId", "pause-1");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 1L);
+    verify(store).recordProcess(eq(ID), isNull(), eq(1L), contains("测试尚未通过"), eq(false), eq(true));
+    verify(store, never()).recordWaitingCard(anyString(), anyLong(), any(), anyBoolean());
+  }
+
+  @Test
   void heldEventUsesOneCombinedNotice() {
     var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
     var snapshot = waiting();

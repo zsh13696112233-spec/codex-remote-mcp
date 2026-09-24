@@ -267,6 +267,7 @@ public class WorkflowRunStore {
       node.put(
           "model", step.modelOverride == null ? task.sop.defaultStepModel : step.modelOverride);
       node.put("timeoutSec", step.timeoutSec);
+      if (step.acceptanceJson != null) node.set("acceptance", json.read(step.acceptanceJson));
       stepNumber++;
     }
     return root;

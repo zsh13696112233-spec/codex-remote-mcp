@@ -16,9 +16,11 @@ export interface Step {
   skills: string[];
   mcps: string[];
 }
+export interface Acceptance { name: string; criteria: string; maxRepairs: number; }
 export interface GraphNode {
   id: string;
-  type: "start" | "step" | "end";
+  type: "start" | "step" | "end" | "acceptance";
+  acceptance?: Acceptance;
   x: number;
   y: number;
 }
@@ -106,12 +108,12 @@ export function orderedKeys(g: Graph, steps: Step[]): string[] {
   const start = g.nodes.filter((n) => n.type === "start"),
     end = g.nodes.filter((n) => n.type === "end");
   if (
-    g.version !== 1 ||
+    ![1, 2].includes(g.version) ||
     !steps.length ||
     nodes.size !== g.nodes.length ||
     start.length !== 1 ||
     end.length !== 1 ||
-    g.nodes.length !== steps.length + 2 ||
+    g.nodes.length !== steps.length + 2 + g.nodes.filter(n => n.type === "acceptance").length ||
     g.edges.length !== g.nodes.length - 1
   )
     fail();
@@ -119,7 +121,8 @@ export function orderedKeys(g: Graph, steps: Step[]): string[] {
     g.nodes.some(
       (n) =>
         !/^[A-Za-z0-9_-]{1,128}$/.test(n.id) ||
-        !["start", "step", "end"].includes(n.type) ||
+        !["start", "step", "end", "acceptance"].includes(n.type) ||
+        (n.type !== "acceptance" && !!n.acceptance) ||
         !Number.isFinite(n.x) ||
         !Number.isFinite(n.y) ||
         Math.abs(n.x) > 1000000 ||
@@ -150,9 +153,16 @@ export function orderedKeys(g: Graph, steps: Step[]): string[] {
   }
   const seen = new Set<string>(),
     order: string[] = [];
+  let previous: string | undefined;
   let id: string | undefined = start[0].id;
   while (id && !seen.has(id)) {
     seen.add(id);
+    const n = nodes.get(id)!;
+    if (n.type === "acceptance") {
+      const a = n.acceptance;
+      if (g.version !== 2 || !previous || nodes.get(previous)?.type !== "step" || !a?.name.trim() || a.name.length > 200 || !a.criteria.trim() || a.criteria.length > 10000 || !Number.isInteger(a.maxRepairs) || a.maxRepairs < 0 || a.maxRepairs > 10) fail();
+    }
+    previous = id;
     if (nodes.get(id)?.type === "step") order.push(id);
     if (id === end[0].id) break;
     id = next.get(id);
@@ -186,8 +196,11 @@ export function canConnect(g: Graph, source: string, target: string): boolean {
 }
 export function removeStep(d: Draft, id: string): Draft {
   const out = clone(d);
-  if (out.editorGraph.nodes.find((n) => n.id === id)?.type !== "step")
-    return out;
+  const type = out.editorGraph.nodes.find((n) => n.id === id)?.type;
+  if (type !== "step" && type !== "acceptance") return out;
+  const child = out.editorGraph.edges.find(e => e.source === id)?.target;
+  if (type === "step" && out.editorGraph.nodes.find(n => n.id === child)?.type === "acceptance")
+    return removeStep(removeStep(out, child!), id);
   const incoming = out.editorGraph.edges.find((e) => e.target === id),
     outgoing = out.editorGraph.edges.find((e) => e.source === id);
   out.steps = out.steps.filter((s) => s.nodeKey !== id);
@@ -257,4 +270,15 @@ export class DraftHistory {
     this.current = next;
     return clone(next);
   }
+}
+
+export function insertAcceptance(d: Draft, point: {x: number; y: number}, edge?: Edge): Draft {
+  const out = clone(d), id = key();
+  out.editorGraph.version = 2;
+  out.editorGraph.nodes.push({id, type: "acceptance", ...point, acceptance: {name: "IF 判断", criteria: "", maxRepairs: 2}});
+  if (edge) {
+    out.editorGraph.edges = out.editorGraph.edges.filter(e => e.source !== edge.source || e.target !== edge.target);
+    out.editorGraph.edges.push({source: edge.source, target: id}, {source: id, target: edge.target});
+  }
+  return out;
 }

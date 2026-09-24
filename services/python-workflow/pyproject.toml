@@ -33,5 +33,6 @@ py-modules = [
   "workflow_runtime_client",
   "workflow_sidecar",
   "workflow_store",
+  "workflow_acceptance",
   "workflow_input_images",
 ]

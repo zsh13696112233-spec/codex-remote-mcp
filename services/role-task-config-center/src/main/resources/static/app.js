@@ -236,17 +236,19 @@ function discardSopChanges(){
 }
 let unmountSopEditor=null;
 let sopSelection=0;
-function disposeSopEditor(){sopSelection++;if(unmountSopEditor){unmountSopEditor();unmountSopEditor=null}}
+function disposeSopEditor(){sopSelection++;document.body?.classList.remove('sop-editing');if(unmountSopEditor){unmountSopEditor();unmountSopEditor=null}}
+function openSopEditor(){document.body?.classList.add('sop-editing');window.dispatchEvent(new Event('sop-editor-open'))}
 function roleById(id){return state.roles.find(r=>r.id===id)}
 function renderSopWorkspace(){
   disposeSopEditor();
   $("#content").className="content sop-content";
   renderCatalogActions(visibleSops().length);
   if(!state.sop.draft&&!visibleSops().length){$("#content").innerHTML=roleEmptyState('');return}
-  $("#content").innerHTML=`<div class="sop-workspace"><aside class="sop-list-panel"><div class="panel-title"><div><strong>工作流列表</strong><small>${visibleSops().length} 条工作流</small></div><button class="icon-primary" data-sop-new title="新建 SOP">＋</button></div><input id="sopSearch" class="sop-search" type="search" placeholder="搜索工作流"><div class="sop-list">${sopListHtml()}</div></aside><div id="sopEditorRoot"></div></div>`;
+  $("#content").innerHTML=`<div class="sop-workspace"><button data-sop-open class="primary">继续编辑当前草稿</button><aside class="sop-list-panel"><div class="panel-title"><div><strong>工作流列表</strong><small>${visibleSops().length} 条工作流</small></div><button class="icon-primary" data-sop-new title="新建 SOP">＋</button></div><input id="sopSearch" class="sop-search" type="search" placeholder="搜索工作流"><div class="sop-list">${sopListHtml()}</div></aside><div id="sopEditorRoot"></div></div>`;
   if(!state.sop.draft)return;
   unmountSopEditor=window.SopEditor.mount($("#sopEditorRoot"),{draft:state.sop.draft,roles:state.roles,agents:state.agents,groups:groupState.items,models:MODELS,online:state.gatewayOnline&&state.agentsAvailable,
-    onChange(draft){state.sop.draft=draft},onSave:saveSop,onError:toast});
+    onChange(draft){state.sop.draft=draft},onSave:saveSop,onError:toast,onBack(){document.body?.classList.remove('sop-editing')}});
+  openSopEditor();
 }
 function sopListHtml(){
   if(!visibleSops().length)return `<div class="sop-list-empty"><b>还没有工作流</b><span>点击上方“＋”开始创建</span></div>`;
@@ -304,7 +306,7 @@ async function saveSop(draft){
   }finally{state.sop.saving=false;document.querySelectorAll("body>aside,main").forEach(el=>el.inert=false)}
 }
 async function selectSop(id){
-  if(state.sop.draft?.id===id)return;if(!confirmDiscard())return;
+  if(state.sop.draft?.id===id){openSopEditor();return}if(!confirmDiscard())return;
   const request=++sopSelection,fingerprint=draftFingerprint();
   const saved=await api(`/api/sops/${id}`);
   if(request!==sopSelection||state.page!=="sops")return;
@@ -344,6 +346,7 @@ $("#content").addEventListener("click",async e=>{
       if(a==="run-task"){action.disabled=true;const r=await api(`/api/task-definitions/${id}/runs`,{method:"POST"});toast("任务已提交");window.open(r.monitorUrl,"_blank","noopener");action.disabled=false}
       if(a==="runs")showRuns(id,action.dataset.name);return;
     }
+    if(e.target.closest("[data-sop-open]")){openSopEditor();return}
     const del=e.target.closest("[data-sop-delete]");
     if(del){e.stopPropagation();const id=del.dataset.sopDelete;if(!confirm("确定删除这个 SOP 工作流？"))return;await api(`/api/sops/${id}`,{method:"DELETE"});if(state.sop.draft?.id===id){state.sop.draft=null;state.sop.baseline=""}await loadGroups();renderGroupSidebar();await loadBase();if(!state.sop.draft&&visibleSops().length)setDraft(visibleSops()[0]);renderSopWorkspace();toast("SOP 已删除");return}
     if(e.target.matches("[data-group-item]"))return;

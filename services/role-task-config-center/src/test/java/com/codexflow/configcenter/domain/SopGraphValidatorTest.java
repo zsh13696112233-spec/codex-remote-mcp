@@ -85,7 +85,7 @@ class SopGraphValidatorTest {
     assertThatThrownBy(
             () ->
                 SopGraphValidator.ordered(
-                    new SopEditorGraph(2, valid.nodes(), valid.edges()),
+                    new SopEditorGraph(3, valid.nodes(), valid.edges()),
                     List.of(step("a"), step("b"))))
         .isInstanceOf(IllegalArgumentException.class);
   }
@@ -95,6 +95,30 @@ class SopGraphValidatorTest {
     var steps = List.of(step("b"), step("a"));
     assertThat(SopGraphValidator.ordered(null, steps)).isEqualTo(steps);
     assertThatThrownBy(() -> SopGraphValidator.ordered(null, List.of(step("a"), step("a"))))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void acceptanceGateFollowsItsRoleAndDoesNotBecomeAnExecutionStep() {
+    var nodes =
+        List.of(
+            new SopEditorGraph.Node("start", "start", 0d, 0d),
+            new SopEditorGraph.Node("a", "step", 10d, 0d),
+            new SopEditorGraph.Node(
+                "check",
+                "acceptance",
+                20d,
+                0d,
+                new com.codexflow.configcenter.dto.SopAcceptance("检查", "满足预期", 2)),
+            new SopEditorGraph.Node("end", "end", 30d, 0d));
+    var graph =
+        new SopEditorGraph(
+            2, nodes, List.of(edge("start", "a"), edge("a", "check"), edge("check", "end")));
+    assertThat(SopGraphValidator.ordered(graph, List.of(step("a")))).hasSize(1);
+    var invalid =
+        new SopEditorGraph(
+            2, nodes, List.of(edge("start", "check"), edge("check", "a"), edge("a", "end")));
+    assertThatThrownBy(() -> SopGraphValidator.ordered(invalid, List.of(step("a"))))
         .isInstanceOf(IllegalArgumentException.class);
   }
 }

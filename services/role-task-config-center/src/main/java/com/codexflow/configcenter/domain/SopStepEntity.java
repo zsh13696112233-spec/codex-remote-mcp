@@ -23,6 +23,9 @@ class SopStepEntity {
   @Column(name = "node_key", length = 128)
   String nodeKey;
 
+  @Column(name = "acceptance_json", columnDefinition = "LONGTEXT")
+  String acceptanceJson;
+
   /** 所属 SOP；步骤写入时必须存在，使用延迟加载避免无条件加载整个聚合。 */
   @ManyToOne(fetch = FetchType.LAZY, optional = false)
   @JoinColumn(name = "sop_id")

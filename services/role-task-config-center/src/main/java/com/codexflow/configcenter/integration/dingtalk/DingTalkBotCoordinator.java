@@ -32,6 +32,8 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   private static final Logger LOGGER = LoggerFactory.getLogger(DingTalkBotCoordinator.class);
   private static final Set<String> PROGRESS_EVENTS =
       Set.of(
+          "acceptance.held",
+          "acceptance.passed",
           "node.started",
           "node.completed",
           "node.failed",
@@ -837,6 +839,13 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         }
         String notice =
             DingTalkExecutionNotice.stepLabel(event, snapshot) + "：" + eventNotice(type);
+        if ("acceptance.held".equals(type)) {
+          notice +=
+              "\n已修复 "
+                  + event.path("payload").path("repairs").asInt()
+                  + " 次。\n"
+                  + event.path("payload").path("reason").asText("");
+        }
         store.refreshWaitingCards(binding.workflowId(), snapshot);
         if (TERMINAL_EVENTS.contains(type) && !snapshot.path("response").asText().isBlank())
           notice += "\n执行结果：\n" + DingTalkExecutionNotice.safe(snapshot.path("response").asText());
@@ -849,6 +858,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
             TERMINAL_EVENTS.contains(type)
                 || "step.advance.waiting".equals(type)
                 || "step.advance.held".equals(type)
+                || "acceptance.held".equals(type)
                 || "node.failed".equals(type)
                 || "node.timed_out".equals(type),
             null);
@@ -1163,6 +1173,8 @@ class DingTalkBotCoordinator implements SmartLifecycle {
 
   private static String eventNotice(String type) {
     return switch (type) {
+      case "acceptance.held" -> "验收未通过，已暂停。请补充修复要求，再确认追加一次修复和复检。";
+      case "acceptance.passed" -> "验收通过。";
       case "node.started" -> "已开始执行。";
       case "node.completed" -> "已完成。";
       case "node.failed" -> "执行失败，请查看监控页。";

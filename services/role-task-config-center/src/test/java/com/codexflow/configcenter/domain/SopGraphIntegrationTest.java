@@ -149,6 +149,56 @@ class SopGraphIntegrationTest extends GroupedFixtureSupport {
         .isEqualTo(count);
   }
 
+  @Test
+  void acceptancePersistsSeparatelyAndEntersOnlyItsBusinessStepProtocol() {
+    String role =
+        jdbc.queryForObject("select id from codex_sop_roles order by name limit 1", String.class);
+    var acceptance = new SopAcceptance("验收", "需求完整", null);
+    assertThat(acceptance.maxRepairs()).isEqualTo(2);
+    var graph =
+        new SopEditorGraph(
+            2,
+            List.of(
+                new SopEditorGraph.Node("start", "start", 0d, 0d),
+                    new SopEditorGraph.Node("a", "step", 100d, 0d),
+                new SopEditorGraph.Node("check", "acceptance", 200d, 0d, acceptance),
+                    new SopEditorGraph.Node("end", "end", 300d, 0d)),
+            List.of(
+                new SopEditorGraph.Edge("start", "a"),
+                new SopEditorGraph.Edge("a", "check"),
+                new SopEditorGraph.Edge("check", "end")));
+    var body =
+        new SopSaveRequest(
+            "验收流程",
+            null,
+            "local",
+            7200,
+            "gpt-5.6-sol",
+            true,
+            10,
+            "automatic",
+            "legacy_text",
+            null,
+            List.of(step("a", role)),
+            GROUP,
+            graph);
+    var saved = service.createSop(body);
+    em.flush();
+    em.clear();
+    assertThat(service.getSop(saved.path("id").asText()).path("editorGraph"))
+        .isEqualTo(mapper.valueToTree(graph));
+    var task =
+        service.createTask(
+            grouped(
+                new TaskDefinitionSaveRequest(
+                    "验收任务", "运行", saved.path("id").asText(), null, true)));
+    var payload = runs.prepareLatest(task.path("id").asText()).payload();
+    assertThat(payload.path("nodes").size()).isEqualTo(1);
+    assertThat(payload.path("nodes").get(0).path("acceptance"))
+        .isEqualTo(mapper.valueToTree(acceptance));
+    assertThat(payload.has("editorGraph")).isFalse();
+  }
+
   private SopStepRequest step(String key, String role) {
     return new SopStepRequest(
         key == null ? "旧步骤" : key,

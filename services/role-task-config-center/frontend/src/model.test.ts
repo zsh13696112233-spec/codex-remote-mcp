@@ -5,6 +5,7 @@ import {
   canConnect,
   removeStep,
   insertStep,
+  insertAcceptance,
   DraftHistory,
   clone,
   type Step,
@@ -92,7 +93,7 @@ describe("串行图契约", () => {
     if (kind === "重复节点") d.editorGraph.nodes[2].id = "a";
     if (kind === "节点不匹配") d.steps[0].nodeKey = "missing";
     if (kind === "非法坐标") d.editorGraph.nodes[0].x = Infinity;
-    if (kind === "版本") d.editorGraph.version = 2;
+    if (kind === "版本") d.editorGraph.version = 3;
     expect(() => orderedKeys(d.editorGraph, d.steps)).toThrow();
   });
   it("插入连线和删除中间步骤保持链路", () => {
@@ -134,5 +135,25 @@ describe("串行图契约", () => {
     history.undo();
     history.record({ ...d, name: "另一修改" });
     expect(history.redo()).toBeUndefined();
+  });
+});
+
+
+describe("串行验收", () => {
+  it("判断不改变角色执行顺序，删除角色联动删除判断", () => {
+    const base = fixture();
+    const edge = base.editorGraph.edges.find(e => e.source === base.steps[0].nodeKey)!;
+    const d = insertAcceptance(base, {x: 123, y: 45}, edge);
+    const gate = d.editorGraph.nodes.at(-1)!;
+    gate.acceptance!.criteria = "满足预期输出";
+    expect(orderedKeys(d.editorGraph, d.steps)).toEqual(orderedKeys(base.editorGraph, base.steps));
+    const removed = removeStep(d, base.steps[0].nodeKey);
+    expect(removed.editorGraph.nodes.some(n => n.id === gate.id)).toBe(false);
+  });
+  it("拒绝未填条件和开始后的判断", () => {
+    const d = insertAcceptance(fixture(), {x: 1,y: 2}, fixture().editorGraph.edges[0]);
+    expect(() => orderedKeys(d.editorGraph, d.steps)).toThrow();
+    d.editorGraph.nodes.at(-1)!.acceptance!.criteria = "检查";
+    expect(() => orderedKeys(d.editorGraph, d.steps)).toThrow();
   });
 });

@@ -51,7 +51,7 @@ MONITOR_EVENTS_SQL = """(source = 'chat' OR (source = 'supervisor' AND
 BOT_EVENTS_SQL = """event_type IN (
     'appserver.item/started', 'appserver.item/completed',
     'chat.assistant.completed', 'chat.assistant.progress', 'chat.message.failed',
-    'node.started', 'node.completed', 'node.failed', 'node.cancelled', 'node.timed_out',
+    'acceptance.held', 'acceptance.passed', 'node.started', 'node.completed', 'node.failed', 'node.cancelled', 'node.timed_out',
     'step.advance.waiting', 'step.advance.held', 'step.advance.confirmed',
     'step.advance.resumed', 'step.advance.timed_out',
     'workflow.completed', 'workflow.failed', 'workflow.cancelled')"""
@@ -62,15 +62,18 @@ def utc_now() -> str:
 
 
 from workflow_input_images import InputImageStore
+from workflow_acceptance import AcceptanceStore, normalize_acceptance
 
 
-class WorkflowStore(InputImageStore):
+class WorkflowStore(InputImageStore, AcceptanceStore):
     """跨 HTTP 网关和 MCP 子进程共享的 SQLite 工作流状态库。"""
 
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+        with self._connect() as connection:
+            self.initialize_acceptance(connection)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -561,6 +564,7 @@ class WorkflowStore(InputImageStore):
             if node_id in node_ids:
                 raise ValueError(f"节点 id 重复：{node_id}")
             node_ids.add(node_id)
+            acceptance = normalize_acceptance(raw_node.get("acceptance"))
 
             executor = raw_node.get("executor") or {}
             if not isinstance(executor, dict):
@@ -636,6 +640,7 @@ class WorkflowStore(InputImageStore):
                     "permissionProfile": permission_profile,
                     "model": raw_node.get("model"),
                     "timeoutSec": timeout_sec,
+                    **({"acceptance": acceptance} if acceptance else {}),
                 }
             )
 
@@ -659,7 +664,7 @@ class WorkflowStore(InputImageStore):
         advance_mode = str(value.get("advanceMode") or "automatic").strip().lower()
         if advance_mode not in {"automatic", "semi_automatic"}:
             raise ValueError("advanceMode 只能是 automatic 或 semi_automatic。")
-        if advance_mode == "semi_automatic":
+        if advance_mode == "semi_automatic" or any(n.get("acceptance") for n in nodes):
             for position, node in enumerate(nodes):
                 expected = [] if position == 0 else [nodes[position - 1]["id"]]
                 if node["dependsOn"] != expected:
@@ -782,6 +787,11 @@ class WorkflowStore(InputImageStore):
                         timestamp,
                     ),
                 )
+                if node.get("acceptance"):
+                    connection.execute(
+                        "INSERT INTO workflow_acceptance(workflow_id,node_id,config_json) VALUES (?,?,?)",
+                        (spec["workflowId"], node["id"], json.dumps(node["acceptance"], ensure_ascii=False)),
+                    )
             self._add_event_with_connection(
                 connection,
                 spec["workflowId"],
@@ -829,7 +839,7 @@ class WorkflowStore(InputImageStore):
                 )
 
     def recover_active_workflows_after_restart(self) -> list[str]:
-        """阶段 A 不重新附着旧会话，网关重启后直接终止遗留运行。"""
+        """重启不盲目重新执行：验收阶段保持暂停，其他遗留运行沿用中断策略。"""
         timestamp = utc_now()
         error = "工作流网关已重启，任务已中断。"
         with self._connect() as connection:
@@ -841,6 +851,8 @@ class WorkflowStore(InputImageStore):
             ).fetchall()
             workflow_ids = [str(row["workflow_id"]) for row in rows]
             for workflow_id in workflow_ids:
+                if self.hold_acceptance_after_disconnect(connection, workflow_id):
+                    continue
                 self._supersede_pending_advances(
                     connection, workflow_id, "gateway_restarted", timestamp
                 )
@@ -1244,6 +1256,8 @@ class WorkflowStore(InputImageStore):
         reason: str,
         timestamp: str,
     ) -> None:
+        if self.hold_acceptance_after_disconnect(connection, workflow_id):
+            return
         self._supersede_pending_advances(connection, workflow_id, reason, timestamp)
         connection.execute(
             "UPDATE workflow_nodes SET status = 'interrupted', error = COALESCE(error, ?), "
@@ -1461,6 +1475,7 @@ class WorkflowStore(InputImageStore):
             )
         nodes = [self._node_snapshot(row) for row in node_rows]
         for node in nodes:
+            node["acceptance"] = self.acceptance_snapshot(workflow_id, node["id"])
             node["resultRevision"] = revisions.get(node["id"], 0)
             if node["id"] in unchanged:
                 node.pop("response", None)
@@ -1725,7 +1740,7 @@ class WorkflowStore(InputImageStore):
         return result
 
     def get_cumulative_artifact_inputs(
-        self, workflow_id: str, node_id: str
+        self, workflow_id: str, node_id: str, *, include_current: bool = False
     ) -> list[dict[str, Any]]:
         """返回当前步骤之前所有步骤的当前有效文件，包含无文件步骤。"""
         with self._connect() as connection:
@@ -1746,7 +1761,7 @@ class WorkflowStore(InputImageStore):
                 WHERE n.workflow_id = ? AND n.position < ?
                 ORDER BY n.position, a.created_at, a.artifact_id
                 """,
-                (workflow_id, target["position"]),
+                (workflow_id, target["position"] + int(include_current)),
             ).fetchall()
         steps: list[dict[str, Any]] = []
         by_node: dict[str, dict[str, Any]] = {}
@@ -2175,10 +2190,10 @@ class WorkflowStore(InputImageStore):
     ) -> dict[str, Any]:
         if action_type == "retry":
             action_type = "restart_from"
-        if action_type not in {"stop", "restart_from", "skip"}:
+        if action_type not in {"stop", "restart_from", "skip", "repair_acceptance"}:
             raise ValueError("控制类型只能是 stop、restart_from 或 skip。")
         revision_instruction = self._normalize_revision_instruction(revision_instruction)
-        if action_type != "restart_from" and revision_instruction is not None:
+        if action_type not in {"restart_from", "repair_acceptance"} and revision_instruction is not None:
             raise ValueError("只有返工操作可以包含返工要求。")
         now_dt = datetime.now(UTC)
         now = now_dt.isoformat()
@@ -2199,6 +2214,12 @@ class WorkflowStore(InputImageStore):
                 ).fetchone()["status"]
                 if status in {"completed", "cancelled"}:
                     raise ValueError("当前任务已经结束，不能停止。")
+            if action_type == "repair_acceptance":
+                gate = connection.execute("SELECT state FROM workflow_acceptance WHERE workflow_id=? AND node_id=?", (workflow_id,node_id)).fetchone()
+                if gate is None or gate["state"] != "held" or not revision_instruction:
+                    raise ValueError("请为等待处理的验收补充修复要求。")
+                if workflow["used_retry_count"] >= workflow["max_retry_count"]:
+                    raise ValueError("本任务的重跑次数已经用完。")
             affected_nodes: list[dict[str, Any]] = []
             if action_type in {"restart_from", "skip"}:
                 node = connection.execute(
@@ -2209,6 +2230,8 @@ class WorkflowStore(InputImageStore):
                 if node is None:
                     raise ValueError(f"找不到步骤：{node_id}")
                 if action_type == "skip":
+                    if connection.execute("SELECT 1 FROM workflow_acceptance WHERE workflow_id=? AND node_id=?", (workflow_id,node_id)).fetchone():
+                        raise ValueError("含验收关卡的步骤不能跳过。")
                     node_status = connection.execute(
                         "SELECT status FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
                         (workflow_id, node_id),
@@ -2485,6 +2508,7 @@ class WorkflowStore(InputImageStore):
                     ),
                 )
             for item in tail:
+                connection.execute("UPDATE workflow_acceptance SET state='initial',repairs=0,manual=0,token=NULL,job_id=NULL,thread_id=NULL,turn_id=NULL,reason=NULL,instruction=NULL WHERE workflow_id=? AND node_id=?", (workflow_id,item["node_id"]))
                 attempt_number = int(item["attempt_count"] or 0)
                 connection.execute(
                     """
@@ -2573,6 +2597,8 @@ class WorkflowStore(InputImageStore):
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM workflow_acceptance WHERE workflow_id=? AND node_id=?", (workflow_id,node_id)).fetchone():
+                raise ValueError("含验收关卡的步骤不能跳过。")
             self._require_control_idle(connection, workflow_id)
             row = connection.execute(
                 "SELECT status FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
@@ -3107,7 +3133,9 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
         if row is None:
             raise ValueError(f"找不到节点：{node_id}")
-        return self._node_snapshot(row)
+        result = self._node_snapshot(row)
+        result["acceptance"] = self.acceptance_snapshot(workflow_id, node_id)
+        return result
 
     def get_nodes_from(self, workflow_id: str, node_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
@@ -3256,6 +3284,8 @@ class WorkflowStore(InputImageStore):
                 revision_rows,
                 str(workflow["handoff_mode"]),
             )
+            if node.get("acceptance"):
+                actual_prompt = actual_prompt.replace("首次产物无论质量如何，都必须交由人工审核。只有用户确认返工并开始新一轮步骤执行后，才允许重新生成一次。", "首次产物完成后由平台发起验收。只有平台明确发起修复轮次时，才允许修复一次；不得自行循环。")
             if row["thread_id"]:
                 resume_notice = "\n\n用户已确认新一轮返工。请基于本会话上一版产物完成本次修改，未要求改变的内容保留。本轮允许重新修改并交付一个版本。"
                 prompt_body = actual_prompt[:-len(SINGLE_OUTPUT_CONSTRAINT)]
@@ -3495,6 +3525,11 @@ class WorkflowStore(InputImageStore):
                     lease_token=lease_token,
                     require_lease=True,
                 )
+            snapshot = self._acceptance_intercept(connection, workflow_id, node_id, snapshot)
+            if snapshot is None:
+                return
+            status = str(snapshot.get("status") or "running")
+            finished_at = snapshot.get("finished_at") if status in TERMINAL_NODE_STATUSES else None
             old = connection.execute(
                 """
                 SELECT status, job_id, thread_id, turn_id, response, error, finished_at
@@ -3711,6 +3746,8 @@ class WorkflowStore(InputImageStore):
         if snapshot["status"] == "cancelled":
             return
         nodes = snapshot["nodes"]
+        if any(n.get("acceptance") and n["acceptance"]["state"] not in {"initial", "passed"} for n in nodes):
+            return
         all_completed = bool(nodes) and all(
             node["status"] in {"completed", "skipped"} for node in nodes
         )
