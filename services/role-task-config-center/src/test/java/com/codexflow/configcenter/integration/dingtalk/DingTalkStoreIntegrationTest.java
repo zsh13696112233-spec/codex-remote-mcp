@@ -1256,6 +1256,44 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
     assertThat(store.quotedAction(unrelated)).isNull();
   }
 
+  @Test
+  void hiddenExecutionEventsPersistCursorWithoutOutboxAndRemainIdempotentAfterReload() {
+    String client = "hidden-details-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("hidden-start")).workflowId();
+    for (long sequence = 1; sequence <= 3; sequence++) {
+      assertThat(
+              store.recordEvent(
+                  client,
+                  workflow,
+                  sequence,
+                  "hidden-execution:" + sequence,
+                  null,
+                  null,
+                  null,
+                  false))
+          .isTrue();
+    }
+    // Each store call commits independently; subsequent reads use the persisted binding.
+    assertThat(store.binding(workflow).orElseThrow().eventCursor()).isEqualTo(3);
+    assertThat(
+            store.recordEvent(client, workflow, 3, "hidden-execution:3", null, null, null, false))
+        .isFalse();
+    store.recordProcess(workflow, null, 2, "迟到的工具消息", false, false);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id=?",
+                Integer.class,
+                workflow))
+        .isZero();
+    store.recordProcess(workflow, null, 4, "正式步骤结果", false, false);
+    store.recordProcess(workflow, null, 4, "重复结果", false, false);
+    assertThat(store.binding(workflow).orElseThrow().eventCursor()).isEqualTo(4);
+    var sent = drainOutbox().stream().filter(item -> workflow.equals(item.workflowId())).toList();
+    assertThat(sent).hasSize(1);
+    assertThat(sent.get(0).payload().path("text").asText()).contains("正式步骤结果");
+  }
+
   private String createTask(String clientId) {
     String targetId = clientId == null ? null : createGroupTarget(clientId, "chat-1", "测试群");
     return createBoundTask(createSop(), targetId);

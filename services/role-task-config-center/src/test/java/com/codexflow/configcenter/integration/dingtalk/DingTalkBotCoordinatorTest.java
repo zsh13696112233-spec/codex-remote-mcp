@@ -844,6 +844,104 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void hiddenDetailsAdvanceCursorAndKeepProgressAndAnswersAcrossPolls() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var page = json.createObjectNode().put("nextCursor", 9);
+    var events = page.putArray("events");
+    long sequence = 0;
+    for (String source : List.of("supervisor", "worker", "assistant")) {
+      for (String type : List.of("reasoning", "commandExecution")) {
+        var event =
+            events
+                .addObject()
+                .put("sequence", ++sequence)
+                .put("type", "appserver.item/completed")
+                .put("source", source);
+        event
+            .putObject("payload")
+            .put("messageId", "question-id")
+            .putObject("message")
+            .putObject("params")
+            .putObject("item")
+            .put("type", type);
+      }
+    }
+    var progress =
+        events
+            .addObject()
+            .put("sequence", 7)
+            .put("type", "appserver.item/completed")
+            .put("source", "worker");
+    progress
+        .putObject("payload")
+        .putObject("message")
+        .putObject("params")
+        .putObject("item")
+        .put("type", "agentMessage")
+        .put("phase", "commentary")
+        .put("text", "正在检查");
+    events.addObject().put("sequence", 8).put("type", "node.started");
+    events
+        .addObject()
+        .put("sequence", 9)
+        .put("type", "chat.assistant.completed")
+        .putObject("payload")
+        .put("messageId", "question-id")
+        .put("text", "正式回答");
+    when(runStore.dingtalkShowExecutionDetails(ID)).thenReturn(false);
+    when(gateway.get("/workflows/" + ID + "/events/history?after=0&limit=200&view=bot"))
+        .thenReturn(page);
+    ReflectionTestUtils.invokeMethod(bot, "pollBinding", binding);
+    for (long hidden = 1; hidden <= 6; hidden++) {
+      verify(store)
+          .recordEvent("app", ID, hidden, "hidden-execution:" + hidden, null, null, null, false);
+    }
+    verify(store).recordProcess(eq(ID), isNull(), eq(7L), contains("正在检查"), eq(false), eq(false));
+    verify(store).recordProcess(eq(ID), isNull(), eq(8L), contains("已开始执行"), eq(false), eq(false));
+    verify(store).completeReply(ID, "question-id", 9L, "正式回答", null);
+    verify(store, times(2))
+        .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean());
+    verify(store, never())
+        .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean(), any());
+    verify(runStore, times(1)).dingtalkShowExecutionDetails(ID);
+    verifyNoInteractions(transport);
+    var resumed = new DingTalkModels.Binding(ID, "group", "root", "active", 9, null, false);
+    var empty = json.createObjectNode().put("nextCursor", 12);
+    empty.putArray("events");
+    when(gateway.get("/workflows/" + ID + "/events/history?after=9&limit=200&view=bot"))
+        .thenReturn(empty);
+    ReflectionTestUtils.invokeMethod(bot, "pollBinding", resumed);
+    verify(store).recordEvent("app", ID, 12, "cursor:" + ID + ":12", null, null, null, false);
+    verify(runStore, times(1)).dingtalkShowExecutionDetails(ID);
+  }
+
+  @Test
+  void enabledDetailsUseExistingDeliveryAndHiddenDetailsDoNotSuppressWaitingCards() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var page = json.createObjectNode();
+    var event =
+        page.putArray("events")
+            .addObject()
+            .put("sequence", 1)
+            .put("type", "appserver.item/completed")
+            .put("source", "worker");
+    var item =
+        event.putObject("payload").putObject("message").putObject("params").putObject("item");
+    item.put("type", "reasoning").putArray("summary").add("先核对输入");
+    when(runStore.dingtalkShowExecutionDetails(ID)).thenReturn(true);
+    when(gateway.get("/workflows/" + ID + "/events/history?after=0&limit=200&view=bot"))
+        .thenReturn(page);
+    ReflectionTestUtils.invokeMethod(bot, "pollBinding", binding);
+    verify(store).recordProcess(eq(ID), isNull(), eq(1L), contains("思考摘要"), eq(false), eq(false));
+    when(runStore.dingtalkShowExecutionDetails(ID)).thenReturn(false);
+    when(gateway.get("/workflows/" + ID)).thenReturn(waiting());
+    event.put("type", "step.advance.waiting").put("sequence", 2);
+    event.putObject("payload").put("gateId", "11111111111111111111111111111111");
+    ReflectionTestUtils.invokeMethod(bot, "pollBinding", binding);
+    verify(store).recordWaitingCard(eq(ID), eq(2L), any(), eq(true));
+  }
+
+  @Test
   void assistantToolProgressKeepsQuestionId() {
     var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
     var event =

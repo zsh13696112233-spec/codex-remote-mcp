@@ -187,6 +187,31 @@ class DingTalkExecutionNoticeTest {
   }
 
   @Test
+  void detailsAreClassifiedByEventStructureInsteadOfMessageText() {
+    for (String type :
+        java.util.List.of(
+            "reasoning",
+            "commandExecution",
+            "fileChange",
+            "webSearch",
+            "imageView",
+            "imageGeneration",
+            "mcpToolCall",
+            "dynamicToolCall",
+            "collabToolCall",
+            "collabAgentToolCall")) {
+      for (String method : java.util.List.of("item/started", "item/completed")) {
+        assertThat(DingTalkExecutionNotice.isExecutionDetail(event(method, type))).isTrue();
+      }
+    }
+    var progress = event("item/completed", "agentMessage");
+    item(progress).put("text", "思考摘要：工具调用：这是正式进度");
+    assertThat(DingTalkExecutionNotice.isExecutionDetail(progress)).isFalse();
+    assertThat(DingTalkExecutionNotice.isExecutionDetail(event("node.completed", "reasoning")))
+        .isFalse();
+  }
+
+  @Test
   void onlyPublishesCompletedReadableSummary() {
     var event = event("item/started", "reasoning");
     item(event).putArray("summary").add("先检查输入").addObject().put("text", "再核对结果");

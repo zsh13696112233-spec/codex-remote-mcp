@@ -52,6 +52,10 @@ class SopEntity extends Timestamped {
   @Column(name = "handoff_mode", nullable = false)
   String handoffMode = "legacy_text";
 
+  /** 是否向钉钉展示思考摘要和工具调用；新建 SOP 默认关闭。 */
+  @Column(name = "dingtalk_show_execution_details", nullable = false)
+  boolean dingtalkShowExecutionDetails = false;
+
   /** 步骤未单独指定模型时使用的默认模型。 */
   @Column(name = "default_step_model", nullable = false)
   String defaultStepModel = "gpt-5.6-sol";

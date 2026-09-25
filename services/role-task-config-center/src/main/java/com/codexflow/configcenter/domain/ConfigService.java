@@ -313,6 +313,9 @@ public class ConfigService {
     if (!HANDOFF_MODES.contains(sop.handoffMode)) {
       throw new IllegalArgumentException("handoffMode 只能是 legacy_text 或 cumulative_files。");
     }
+    if (body.dingtalkShowExecutionDetails() != null) {
+      sop.dingtalkShowExecutionDetails = body.dingtalkShowExecutionDetails();
+    }
     sop.defaultStepModel = normalizeNullable(body.defaultStepModel());
     if (sop.defaultStepModel == null) sop.defaultStepModel = defaultModel;
     validateModel(sop.defaultStepModel);

@@ -77,6 +77,15 @@ public class WorkflowRunStore {
     return new PreparedRun(workflowId, (ObjectNode) json.read(run.submittedJson));
   }
 
+  /** 读取运行时冻结的钉钉展示偏好；旧快照保持原有输出。 */
+  @Transactional(readOnly = true)
+  public boolean dingtalkShowExecutionDetails(String workflowId) {
+    return json.read(findRun(workflowId).snapshotJson)
+        .path("sop")
+        .path("dingtalkShowExecutionDetails")
+        .asBoolean(true);
+  }
+
   /** 返回运行所属的任务定义 ID。 */
   @Transactional(readOnly = true)
   public String taskDefinitionId(String workflowId) {

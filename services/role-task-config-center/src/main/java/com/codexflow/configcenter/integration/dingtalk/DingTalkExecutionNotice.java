@@ -13,6 +13,32 @@ import tools.jackson.databind.JsonNode;
 final class DingTalkExecutionNotice {
   private DingTalkExecutionNotice() {}
 
+  static boolean isExecutionDetail(JsonNode event) {
+    String eventType = event.path("type").asText();
+    if (!"appserver.item/started".equals(eventType)
+        && !"appserver.item/completed".equals(eventType)) return false;
+    return switch (event
+        .path("payload")
+        .path("message")
+        .path("params")
+        .path("item")
+        .path("type")
+        .asText()) {
+      case "reasoning",
+              "commandExecution",
+              "fileChange",
+              "webSearch",
+              "imageView",
+              "imageGeneration",
+              "mcpToolCall",
+              "dynamicToolCall",
+              "collabToolCall",
+              "collabAgentToolCall" ->
+          true;
+      default -> false;
+    };
+  }
+
   static String execution(JsonNode event) {
     return execution(event, null);
   }

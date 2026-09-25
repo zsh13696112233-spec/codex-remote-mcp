@@ -19,6 +19,7 @@ import java.util.List;
  * @param advanceMode 步骤成功后的流转方式
  * @param handoffMode 步骤之间的结果交接方式
  * @param dingtalkTargetId V1 兼容字段，当前忽略；通知对象由任务定义维护
+ * @param dingtalkShowExecutionDetails 是否向钉钉展示思考摘要和工具调用
  * @param steps 按执行顺序排列的步骤列表
  */
 public record SopSaveRequest(
@@ -33,7 +34,37 @@ public record SopSaveRequest(
     @Size(max = 32) String handoffMode,
     @Size(max = 36) String dingtalkTargetId,
     @NotEmpty List<@Valid SopStepRequest> steps,
-    @NotBlank @Size(max = 36) String groupId) {
+    @NotBlank @Size(max = 36) String groupId,
+    Boolean dingtalkShowExecutionDetails) {
+  public SopSaveRequest(
+      String name,
+      String description,
+      String supervisorAgentId,
+      Integer supervisorTimeoutSec,
+      String defaultStepModel,
+      Boolean enabled,
+      Integer maxRetryCount,
+      String advanceMode,
+      String handoffMode,
+      String dingtalkTargetId,
+      List<SopStepRequest> steps,
+      String groupId) {
+    this(
+        name,
+        description,
+        supervisorAgentId,
+        supervisorTimeoutSec,
+        defaultStepModel,
+        enabled,
+        maxRetryCount,
+        advanceMode,
+        handoffMode,
+        dingtalkTargetId,
+        steps,
+        groupId,
+        null);
+  }
+
   public SopSaveRequest(
       String name,
       String description,

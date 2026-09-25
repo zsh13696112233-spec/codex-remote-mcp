@@ -637,9 +637,21 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       }
       JsonNode events = result.path("events");
       if (!events.isArray()) return;
+      boolean showExecutionDetails =
+          events.isEmpty() || workflowRunStore.dingtalkShowExecutionDetails(binding.workflowId());
       for (JsonNode event : events) {
         long sequence = event.path("sequence").asLong();
-        if (!consumeEvent(binding, event, sequence)) return;
+        if (!showExecutionDetails && DingTalkExecutionNotice.isExecutionDetail(event)) {
+          store.recordEvent(
+              properties.getClientId(),
+              binding.workflowId(),
+              sequence,
+              "hidden-execution:" + sequence,
+              null,
+              null,
+              null,
+              false);
+        } else if (!consumeEvent(binding, event, sequence)) return;
         cursor = Math.max(cursor, sequence);
       }
       long nextCursor = result.path("nextCursor").asLong(cursor);

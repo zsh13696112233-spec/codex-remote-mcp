@@ -16,7 +16,7 @@ class BranchMigrationCompatibilityTest {
             + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
     Flyway.configure().dataSource(url, "sa", "").target("29").load().migrate();
     var flyway = Flyway.configure().dataSource(url, "sa", "").load();
-    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(3);
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(4);
     try (var connection = DriverManager.getConnection(url, "sa", "");
         var statement = connection.createStatement()) {
       statement.executeUpdate(

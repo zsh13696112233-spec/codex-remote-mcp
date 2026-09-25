@@ -181,3 +181,21 @@ test('group catalog and MCP sidebar expose package counts and scoped links',asyn
   run('groupState.items=[]');await run('renderGroups()');
   assert.match(nodes.get('#content').innerHTML,/colspan="9"/);
 });
+
+
+test('SOP DingTalk details switch defaults off and survives save/reload and draft changes',()=>{
+  const {run}=fixture('?groupId=a');
+  run(`setDraft({...blankSop(),name:'通知流程'})`);
+  assert.equal(run('sopPayload().dingtalkShowExecutionDetails'),false);
+  assert.doesNotMatch(run('workflowInspectorHtml()'),/data-sop-field="dingtalkShowExecutionDetails"[^>]*checked/);
+  run(`updateField({type:'checkbox',checked:true},state.sop.draft,'dingtalkShowExecutionDetails')`);
+  assert.equal(run('isSopDirty()'),true);
+  assert.equal(run('sopPayload().dingtalkShowExecutionDetails'),true);
+  run(`setDraft({...sopPayload(),id:'saved'})`);
+  assert.equal(run('isSopDirty()'),false);
+  assert.match(run('workflowInspectorHtml()'),/data-sop-field="dingtalkShowExecutionDetails"[^>]*checked/);
+  run(`state.sops=[{...state.sop.draft}];state.sop.draft.dingtalkShowExecutionDetails=false;discardSopChanges()`);
+  assert.equal(run('sopPayload().dingtalkShowExecutionDetails'),true);
+  run(`setDraft({...sopPayload(),id:'',name:'副本'})`);
+  assert.equal(run('sopPayload().dingtalkShowExecutionDetails'),true);
+});
