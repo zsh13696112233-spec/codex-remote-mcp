@@ -147,7 +147,9 @@ test('empty SOP panel shows creation guidance but keeps an unsaved draft editabl
   run("setDraft(blankSop());renderSopWorkspace()");
   assert.match(nodes.get('#content').innerHTML,/data-sop-save/);
   assert.match(nodes.get('#content').innerHTML,/data-flow-canvas/);
-  assert.match(nodes.get('#groupActions').innerHTML,/共 0 个工作流/);
+  assert.equal(nodes.get('#groupActions').hidden,true);
+  assert.match(nodes.get('#sopPicker').innerHTML,/新建工作流（未保存）/);
+  assert.doesNotMatch(nodes.get('#content').innerHTML,/sop-list-panel|sopSearch/);
 });
 
 
@@ -233,4 +235,74 @@ test('choosing a group updates the URL without dropping the active page',async()
   assert.equal(saved.searchParams.get('groupId'),'b');
   assert.equal(saved.searchParams.get('page'),'tasks');
   assert.equal(saved.searchParams.has('runPage'),false);
+});
+
+test('SOP picker scopes and escapes options and keeps batch management in a dialog',()=>{
+  const {run,nodes}=fixture('?groupId=a');
+  run(`state.page='sops';state.sops=[{...blankSop(),id:'s1',name:'<流程>',groupId:'a'},{...blankSop(),id:'s2',name:'乙组流程',groupId:'b'}];setDraft(state.sops[0]);renderSopWorkspace()`);
+  assert.match(nodes.get('#sopPicker').innerHTML,/value="s1" selected/);
+  assert.match(nodes.get('#sopPicker').innerHTML,/&lt;流程&gt;/);
+  assert.doesNotMatch(nodes.get('#sopPicker').innerHTML,/乙组流程|type="search"/);
+  assert.match(nodes.get('#content').innerHTML,/<dialog id="sopManageDialog"/);
+  assert.match(nodes.get('#content').innerHTML,/data-sop-delete="s1"/);
+  assert.doesNotMatch(nodes.get('#content').innerHTML,/sop-list-panel|sopSearch/);
+});
+
+test('SOP picker cancellation and loading failure preserve the current draft',async()=>{
+  const {run,context}=fixture('?groupId=a');
+  run(`state.page='sops';setDraft({...blankSop(),id:'s1',name:'原流程'});state.sop.draft.name='未保存'`);
+  assert.equal(await run(`selectSop('s2')`),false);
+  assert.equal(run('state.sop.draft.name'),'未保存');
+  context.confirm=()=>true;
+  context.fetch=async()=>{throw Error('加载失败')};
+  await assert.rejects(run(`selectSop('s2')`),/加载失败/);
+  assert.equal(run('state.sop.draft.id'),'s1');
+  assert.equal(run('state.sop.draft.name'),'未保存');
+});
+
+test('late SOP selection cannot replace a new group or an edited draft',async()=>{
+  const {run,context}=fixture('?groupId=a');
+  run(`state.page='sops';setDraft({...blankSop(),id:'s1',name:'原流程'})`);
+  let release;
+  context.fetch=()=>new Promise(resolve=>{release=()=>resolve({ok:true,text:async()=>JSON.stringify({id:'s2',name:'新流程',groupId:'a',steps:[]})})});
+  const pending=run(`selectSop('s2')`);
+  run(`groupState.selected='b'`);release();
+  assert.equal(await pending,false);
+  assert.equal(run('state.sop.draft.id'),'s1');
+  run(`groupState.selected='a'`);
+  const pendingEdit=run(`selectSop('s2')`);
+  run(`state.sop.draft.name='加载期间修改'`);release();
+  assert.equal(await pendingEdit,false);
+  assert.equal(run('state.sop.draft.name'),'加载期间修改');
+});
+
+test('successful SOP selection replaces the editor and updates the picker',async()=>{
+  const {run,nodes,context}=fixture('?groupId=a');
+  run(`state.page='sops';state.sops=[{...blankSop(),id:'s1',name:'一号'},{...blankSop(),id:'s2',name:'二号'}];setDraft(state.sops[0])`);
+  context.fetch=async()=>({ok:true,text:async()=>JSON.stringify({id:'s2',name:'二号',groupId:'a',enabled:true,steps:[]})});
+  assert.equal(await run(`selectSop('s2')`),true);
+  assert.equal(run('state.sop.draft.id'),'s2');
+  assert.match(nodes.get('#sopPicker').innerHTML,/value="s2" selected/);
+});
+
+test('SOP batch controls use the management dialog selection',()=>{
+  const {run,nodes,context}=fixture();
+  run(`state.page='sops'`);
+  nodes.set('[data-role-count]',{dataset:{total:'2'}});
+  context.document.querySelectorAll=()=>[{}];
+  run('updateRoleSelection()');
+  assert.equal(nodes.get('#sopManageDialog [data-batch-actions]').hidden,false);
+  assert.equal(nodes.get('#sopManageDialog [data-assign-group]').disabled,false);
+  assert.equal(nodes.get('[data-role-count]').textContent,'已选择 1 个工作流');
+});
+
+test('rebuilding the SOP editor invalidates an older selection response',async()=>{
+  const {run,context}=fixture('?groupId=a');
+  run(`state.page='sops';setDraft({...blankSop(),id:'s1',name:'原流程'})`);
+  let release;
+  context.fetch=()=>new Promise(resolve=>{release=()=>resolve({ok:true,text:async()=>JSON.stringify({id:'s2',name:'旧响应',groupId:'a',steps:[]})})});
+  const pending=run(`selectSop('s2')`);
+  run('renderSopWorkspace()');release();
+  assert.equal(await pending,false);
+  assert.equal(run('state.sop.draft.id'),'s1');
 });

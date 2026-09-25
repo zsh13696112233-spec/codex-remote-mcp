@@ -157,6 +157,7 @@ async function render({reload=true}={}){
   if(reload)await loadGroups();
   if(!current())return;
   renderGroupFilter();
+  $("#sopPicker").hidden=page!=="sops";
   if(state.page==="groups"){await renderGroups();return}
   if(state.page==="schedules"){await renderSchedules();return}
   if(state.page==="runs"){await renderRunCatalog();return}
@@ -210,11 +211,12 @@ function updateRoleSelection(){
   const count=document.querySelectorAll('#content [data-group-item]:checked').length;
   const summary=$("[data-role-count]");
   if(summary)summary.textContent=count?`已选择 ${count} 个${catalogLabel()}`:`共 ${summary.dataset.total} 个${catalogLabel()}`;
-  const assign=$("#groupActions [data-assign-group]");
+  const scope=state.page==='sops'?'#sopManageDialog':'#groupActions';
+  const assign=$(`${scope} [data-assign-group]`);
   if(assign)assign.disabled=count===0;
-  const batch=$("#groupActions [data-batch-actions]");if(batch)batch.hidden=count===0;
+  const batch=$(`${scope} [data-batch-actions]`);if(batch)batch.hidden=count===0;
 }
-$("#groupActions").addEventListener("click",e=>{
+document.addEventListener("click",e=>{
   if(!e.target.closest('[data-clear-group-selection]'))return;
   document.querySelectorAll('#content [data-group-item]:checked').forEach(input=>{input.checked=false});
   updateRoleSelection();
@@ -248,26 +250,38 @@ function syncDirtyUi(){
 }
 
 function renderSopWorkspace(){
+  sopSelectionVersion++;
   $("#content").className="content sop-content";
-  renderCatalogActions(visibleSops().length);
+  renderSopPicker();
+  $("#groupActions").hidden=true;
+  $("#groupActions").innerHTML='';
   if(!state.sop.draft&&!visibleSops().length){$("#content").innerHTML=roleEmptyState();return}
   $("#content").innerHTML=`<div class="sop-workspace">
-    <aside class="sop-list-panel">
-      <div class="panel-title"><div><strong>工作流列表</strong><small>${visibleSops().length} 条工作流</small></div><button class="icon-primary" data-sop-new title="新建 SOP">＋</button></div>
-      <input id="sopSearch" class="sop-search" type="search" placeholder="搜索工作流">
-      <div class="sop-list">${sopListHtml()}</div>
-    </aside>
     <section class="sop-canvas-panel">
       <div class="canvas-toolbar"><div><strong>${esc(state.sop.draft?.name||"未命名工作流")}</strong><small>${isSopDirty()?"有未保存修改":"所有修改已保存"}</small></div><div class="canvas-actions"><button data-sop-reset ${!isSopDirty()?"disabled":""}>撤销修改</button><button class="primary" data-sop-save>保存工作流</button></div></div>
       <div class="role-palette"><div class="palette-label"><strong>角色库</strong><small>拖入下方画布添加步骤</small></div><div class="role-palette-list">${rolePaletteHtml()}</div></div>
       <div class="flow-canvas" data-flow-canvas>${flowHtml()}</div>
     </section>
     <aside class="sop-inspector-panel">${inspectorHtml()}</aside>
-  </div>`;
+  </div><dialog id="sopManageDialog" class="wide" aria-labelledby="sopManageTitle"><div class="sop-manage-body"><h2 id="sopManageTitle">管理工作流</h2><div class="group-actions"><span data-role-count data-total="${visibleSops().length}" role="status">共 ${visibleSops().length} 个工作流</span><span data-batch-actions hidden><button data-assign-group>归组 / 改组</button><button data-clear-group-selection>取消选择</button></span></div><div class="sop-manage-list">${sopListHtml()}</div><footer><button data-dialog-close>关闭</button></footer></div></dialog>`;
 }
+function renderSopPicker(){
+  const draft=state.sop.draft,items=visibleSops();
+  $('#sopPicker').hidden=false;
+  $('#sopPicker').innerHTML=`<label class="sop-picker-label"><span>工作流</span><select aria-label="选择工作流" data-sop-picker ${!items.length?'disabled':''}>${!draft?.id?`<option value="">${draft?'新建工作流（未保存）':'暂无工作流'}</option>`:''}${items.map(s=>`<option value="${esc(s.id)}" ${s.id===draft?.id?'selected':''}>${esc(s.name)}${s.enabled?'':'（已停用）'}</option>`).join('')}</select></label><button data-sop-manage ${!items.length?'disabled':''}>管理工作流</button>`;
+}
+$('#sopPicker').addEventListener('change',async e=>{
+  if(!e.target.matches('[data-sop-picker]')||!e.target.value)return;
+  const picker=e.target;picker.disabled=true;
+  try{await selectSop(picker.value)}catch(error){toast(error.message)}
+  finally{picker.value=state.sop.draft?.id||'';picker.disabled=false}
+});
+$('#sopPicker').addEventListener('click',e=>{
+  if(e.target.closest('[data-sop-manage]'))$('#sopManageDialog')?.showModal();
+});
 function sopListHtml(){
   if(!visibleSops().length)return `<div class="sop-list-empty"><b>还没有工作流</b><span>点击上方“＋”开始创建</span></div>`;
-  return visibleSops().map(s=>`<article class="sop-list-item ${state.sop.draft?.id===s.id?"active":""}" data-sop-select="${s.id}" data-name="${esc((s.name||"").toLowerCase())}"><div>${groupCheckbox(s)}<strong>${esc(s.name)}</strong>${status(s)}</div><div>${groupMark(s)}</div><small>${s.steps.length} 个步骤 · ${time(s.updatedAt)}</small><button data-sop-delete="${s.id}" title="删除工作流">×</button></article>`).join("");
+  return visibleSops().map(s=>`<article class="sop-list-item ${state.sop.draft?.id===s.id?"active":""}"><div>${groupCheckbox(s)}<strong>${esc(s.name)}</strong>${status(s)}</div><div>${groupMark(s)}</div><small>${s.steps.length} 个步骤 · ${time(s.updatedAt)}</small><button data-sop-delete="${esc(s.id)}" title="删除工作流">删除</button></article>`).join("");
 }
 function rolePaletteHtml(){
   const enabled=state.roles.filter(r=>r.enabled&&r.groupId&&r.groupId===state.sop.draft?.groupId);
@@ -426,9 +440,14 @@ async function saveSop(){
   await loadGroups();renderGroupFilter();await loadBase();setDraft(saved);renderSopWorkspace();toast("SOP 工作流已保存");
   }finally{state.sop.saving=false;document.querySelectorAll("body>aside,main").forEach(el=>el.inert=false);if(saveButton)saveButton.textContent="保存工作流";}
 }
+let sopSelectionVersion=0;
 async function selectSop(id){
-  if(state.sop.draft?.id===id)return;if(!confirmDiscard())return;
-  setDraft(await api(`/api/sops/${id}`));renderSopWorkspace();
+  if(state.sop.draft?.id===id)return false;if(!confirmDiscard())return false;
+  const version=++sopSelectionVersion,pageVersion=pageRenderVersion,group=groupState.selected,before=draftFingerprint();
+  const saved=await api(`/api/sops/${encodeURIComponent(id)}`);
+  if(version!==sopSelectionVersion||state.page!=='sops'||pageVersion!==pageRenderVersion||group!==groupState.selected)return false;
+  if(before!==draftFingerprint()){toast('工作流已有新修改，请重新选择。');return false}
+  setDraft(saved);renderSopWorkspace();return true;
 }
 function startNewSop(){if(!concreteGroup())return chooseGroup(()=>startNewSop());if(!confirmDiscard())return;setDraft(blankSop());renderSopWorkspace();setTimeout(()=>document.querySelector('[data-sop-field="name"]')?.focus(),0)}
 
@@ -476,9 +495,8 @@ $("#content").addEventListener("click",async e=>{
       if(a==="runs")showRuns(id,action.dataset.name);return;
     }
     const del=e.target.closest("[data-sop-delete]");
-    if(del){e.stopPropagation();const id=del.dataset.sopDelete;if(!confirm("确定删除这个 SOP 工作流？"))return;await api(`/api/sops/${id}`,{method:"DELETE"});if(state.sop.draft?.id===id){state.sop.draft=null;state.sop.baseline=""}await loadGroups();renderGroupFilter();await loadBase();if(!state.sop.draft&&visibleSops().length)setDraft(visibleSops()[0]);renderSopWorkspace();toast("SOP 已删除");return}
+    if(del){e.stopPropagation();const id=del.dataset.sopDelete;if(del.disabled||!confirm("确定删除这个 SOP 工作流？"))return;del.disabled=true;try{await api(`/api/sops/${id}`,{method:"DELETE"});if(state.sop.draft?.id===id){state.sop.draft=null;state.sop.baseline=""}await loadGroups();renderGroupFilter();await loadBase();if(!state.sop.draft&&visibleSops().length)setDraft(visibleSops()[0]);renderSopWorkspace();toast("SOP 已删除")}finally{del.disabled=false}return}
     if(e.target.matches("[data-group-item]"))return;
-    const list=e.target.closest("[data-sop-select]");if(list){await selectSop(list.dataset.sopSelect);return}
     if(e.target.closest("[data-sop-new]")){startNewSop();return}
     if(e.target.closest("[data-sop-save]")){await saveSop();return}
     if(e.target.closest("[data-sop-reset]")){if(!confirm("确定撤销当前所有未保存修改？"))return;const id=state.sop.draft.id;if(id)setDraft(await api(`/api/sops/${id}`));else setDraft(blankSop());renderSopWorkspace();return}
@@ -499,7 +517,6 @@ $("#content").addEventListener("submit",async e=>{
 });
 $("#content").addEventListener("input",e=>{
   if(e.target.matches("[data-person-search]")){state.dingtalkPersonSearch=e.target.value;refreshDirectoryPeople();return}
-  if(e.target.id==="sopSearch"){const q=e.target.value.trim().toLowerCase();document.querySelectorAll(".sop-list-item").forEach(item=>item.hidden=!item.dataset.name.includes(q));return}
   const sopField=e.target.dataset.sopField;
   if(sopField&&state.sop.draft){updateField(e.target,state.sop.draft,sopField);const title=document.querySelector(".canvas-toolbar strong");if(sopField==="name"&&title)title.textContent=e.target.value||"未命名工作流";if(sopField==="supervisorAgentId")updateAgentRuntimeUi();syncDirtyUi();return}
   const nodeField=e.target.dataset.nodeField,step=selectedStep();

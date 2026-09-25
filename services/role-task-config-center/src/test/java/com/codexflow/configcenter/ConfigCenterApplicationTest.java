@@ -176,7 +176,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
         .contains("styles.css?v=20260904-dialog-cancel")
         .contains("sync-wait.css?v=20260905")
         .contains("id=\"syncWait\"")
-        .contains("app.js?v=20260925-no-search")
+        .contains("app.js?v=20260925-sop-picker")
         .contains("任务目标")
         .contains("发送给所有步骤")
         .contains("type=\"hidden\" name=\"additionalNotes\"");
