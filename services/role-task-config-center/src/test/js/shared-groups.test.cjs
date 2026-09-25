@@ -47,9 +47,13 @@ test('SOP palette, machines and payload stay within the selected group',()=>{
 });
 
 test('dirty SOP cancellation retains the draft and previous filter',async()=>{
-  const {run}=fixture('?groupId=a');
+  const {run,nodes}=fixture('?groupId=a');
   run(`state.page='sops';setDraft({...blankSop(),name:'原流程'});state.sop.draft.name='未保存';`);
+  run('renderCatalogActions(1)');
+  const actions=nodes.get('#groupActions').innerHTML;
   assert.equal(await run(`selectGroup('b')`),false);
+  assert.equal(nodes.get('#groupActions').hidden,false);
+  assert.equal(nodes.get('#groupActions').innerHTML,actions);
   assert.equal(run('groupState.selected'),'a');
   assert.equal(run('state.sop.draft.name'),'未保存');
 });
@@ -79,8 +83,8 @@ test('retired unassigned links return to all and no migration entry is rendered'
   assert.equal(run('groupState.selected'),'');
   assert.equal(run('groupUrl.searchParams.has("groupId")'),false);
   assert.equal(run('groupUrl.searchParams.get("page")'),'roles');
-  run('renderGroupSidebar()');
-  assert.doesNotMatch(nodes.get('#groupSidebar').innerHTML,/待归组|unassigned/);
+  run('renderGroupFilter()');
+  assert.doesNotMatch(nodes.get('#groupFilter').innerHTML,/待归组|unassigned/);
   await run('renderGroups()');
   assert.doesNotMatch(nodes.get('#content').innerHTML,/待归组|group-unassigned/);
 });
@@ -101,20 +105,13 @@ test('switching to group management ignores an unfinished business page render',
   assert.equal(nodes.get('#content').innerHTML,expected);
 });
 
-test('role search distinguishes no matches from an empty group and preserves filtering',async()=>{
+test('role catalog preserves group filtering and empty creation guidance',async()=>{
   const {run,nodes}=fixture('?groupId=a');
-  nodes.set('#search',{value:'不存在',closest(){return{classList:{remove(){}}}}});
-  await run('render({reload:false})');
-  assert.match(nodes.get('#content').innerHTML,/没有找到匹配的角色/);
-  assert.match(nodes.get('#content').innerHTML,/data-role-clear-search/);
-  assert.doesNotMatch(nodes.get('#content').innerHTML,/data-role-create/);
-  nodes.get('#search').value='';
   await run('render({reload:false})');
   assert.match(nodes.get('#content').innerHTML,/甲角色/);
   assert.doesNotMatch(nodes.get('#content').innerHTML,/乙角色|旧角色/);
   assert.match(nodes.get('#groupActions').innerHTML,/共 1 个角色/);
-  run('state.roles=[]');
-  await run('render({reload:false})');
+  run('state.roles=[]');await run('render({reload:false})');
   assert.match(nodes.get('#content').innerHTML,/这个分组还没有角色/);
   assert.match(nodes.get('#content').innerHTML,/data-role-create/);
 });
@@ -133,16 +130,13 @@ test('role batch assignment requires selection and clears its count on deselecti
   assert.equal(nodes.get('#groupActions [data-assign-group]').disabled,true);
 });
 
-test('task panel uses task empty and search states with the selected group',async()=>{
+test('task panel uses the selected group in its empty state',async()=>{
   const {run,nodes}=fixture('?groupId=a');
   run("state.page='tasks';state.tasks=[]");
   await run('render({reload:false})');
   assert.match(nodes.get('#content').innerHTML,/这个分组还没有任务/);
   assert.match(nodes.get('#groupActions').innerHTML,/共 0 个任务/);
-  nodes.get('#search').value='未匹配';
-  await run('render({reload:false})');
-  assert.match(nodes.get('#content').innerHTML,/没有找到匹配的任务/);
-  assert.match(nodes.get('#content').innerHTML,/data-role-clear-search/);
+
 });
 
 test('empty SOP panel shows creation guidance but keeps an unsaved draft editable',()=>{
@@ -171,13 +165,13 @@ test('shared group navigation clears Skill selections while preserving current t
   assert.equal(run('groupState.selected'),'b');assert.equal(run('skillView.tab'),'machines');assert.equal(run('skillView.selected.size'),0);assert.equal(run('skillView.checked.size'),0);
 });
 
-test('group catalog and MCP sidebar expose package counts and scoped links',async()=>{
+test('group catalog and MCP picker expose package counts and scoped links',async()=>{
   const {run,nodes}=fixture();
   run("groupState.items[0].mcpCount=3;state.page='groups'");await run('renderGroups()');
   assert.match(nodes.get('#content').innerHTML,/<th>MCP<\/th>/);
   assert.match(nodes.get('#content').innerHTML,/data-group-jump="mcps" data-id="a">3<\/button>/);
-  run("state.page='mcps';renderGroupSidebar()");
-  assert.match(nodes.get('#groupSidebar').innerHTML,/<small>3<\/small>/);
+  run("state.page='mcps';renderGroupFilter()");
+  assert.match(nodes.get('#groupFilter').innerHTML,/<small>3<\/small>/);
   run('groupState.items=[]');await run('renderGroups()');
   assert.match(nodes.get('#content').innerHTML,/colspan="9"/);
 });
@@ -198,4 +192,45 @@ test('SOP DingTalk details switch defaults off and survives save/reload and draf
   assert.equal(run('sopPayload().dingtalkShowExecutionDetails'),true);
   run(`setDraft({...sopPayload(),id:'',name:'副本'})`);
   assert.equal(run('sopPayload().dingtalkShowExecutionDetails'),true);
+});
+
+test('top group picker restores current label, escapes names and exposes load errors',()=>{
+  const {run,nodes}=fixture('?groupId=b');
+  run('renderGroupFilter()');
+  assert.match(nodes.get('#groupFilter').innerHTML,/<strong>乙组<\/strong>/);
+  assert.doesNotMatch(nodes.get('#groupFilter').innerHTML,/<input|搜索分组/);
+  assert.doesNotMatch(nodes.get('#groupFilter').innerHTML,/group-sidebar|data-open-groups/);
+  run(`groupState.items[1].name='<img onerror="x">';renderGroupFilter()`);
+  assert.doesNotMatch(nodes.get('#groupFilter').innerHTML,/<img/);
+  run(`groupState.items=[];groupState.error='分组暂时无法加载';renderGroupFilter()`);
+  assert.match(nodes.get('#groupFilter').innerHTML,/分组暂不可用/);
+  assert.match(nodes.get('#groupFilter').innerHTML,/data-group-retry/);
+  run(`state.page='groups';renderGroupFilter()`);
+  assert.equal(nodes.get('#groupFilter').hidden,true);
+});
+
+
+
+test('bulk controls appear only when catalog items are selected',()=>{
+  const {run,nodes,context}=fixture();
+  run('renderCatalogActions(3)');
+  assert.match(nodes.get('#groupActions').innerHTML,/data-batch-actions hidden/);
+  assert.match(nodes.get('#groupActions').innerHTML,/data-clear-group-selection/);
+  context.document.querySelectorAll=()=>[{}];
+  run('updateRoleSelection()');
+  assert.equal(nodes.get('#groupActions [data-batch-actions]').hidden,false);
+  context.document.querySelectorAll=()=>[];
+  run('updateRoleSelection()');
+  assert.equal(nodes.get('#groupActions [data-batch-actions]').hidden,true);
+});
+
+test('choosing a group updates the URL without dropping the active page',async()=>{
+  const {run,context}=fixture('?page=tasks&groupId=a&runPage=2');
+  let saved;
+  context.history.replaceState=(state,title,url)=>{saved=url};
+  run(`state.page='tasks';render=async()=>{}`);
+  await run(`selectGroup('b')`);
+  assert.equal(saved.searchParams.get('groupId'),'b');
+  assert.equal(saved.searchParams.get('page'),'tasks');
+  assert.equal(saved.searchParams.has('runPage'),false);
 });

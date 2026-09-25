@@ -16,7 +16,7 @@ function saveRunCatalogFilters(){
 async function renderRunCatalog(){
   saveRunCatalogFilters();
   loadGatewayReady();
-  $("#search").closest(".toolbar").classList.add("hidden");
+  $(".toolbar").classList.add("hidden");
   $("#content").className="content run-catalog";
   const f=runCatalogFilters;
   $("#content").innerHTML=`<section class="run-catalog-panel">

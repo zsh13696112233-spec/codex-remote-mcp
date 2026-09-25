@@ -7,7 +7,7 @@ function setup(){
   const listeners={},content={innerHTML:''},inventory={innerHTML:''},nav={innerHTML:''},storage=new Map();
   let sequence=0;
   const context=vm.createContext({state:{page:'mcps'},document:{hidden:false,addEventListener:(k,v)=>listeners[k]=v},
-    $:selector=>selector==='#content'?content:selector==='#mcpInventory'?inventory:selector==='#mcpMachineNav'?nav:null,
+    $:selector=>selector==='.toolbar'?{classList:{add(){}}}:selector==='#content'?content:selector==='#mcpInventory'?inventory:selector==='#mcpMachineNav'?nav:null,
     concreteGroup:()=> 'group-a',esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),
     setInterval:()=>{},sessionStorage:{removeItem:k=>storage.delete(k)},
     skillPending:(key,payload)=>{if(!storage.has(key))storage.set(key,{payload,requestId:'request-'+(++sequence)});return storage.get(key).requestId},

@@ -46,7 +46,7 @@ async function renderSkills(){
   const version=pageRenderVersion;
   if(skillView.groupId!==groupState.selected)resetSkillSelection();
   skillView.groupId=groupState.selected;
-  $("#search").closest(".toolbar").classList.add("hidden");
+  $(".toolbar").classList.add("hidden");
   $("#content").className="content skill-content";
   $("#content").innerHTML='<section class="settings-panel" role="status">正在加载 Skill…</section>';
   try{
@@ -160,11 +160,11 @@ document.addEventListener("click",async event=>{
       if(file.size>20*1024*1024)throw new Error("ZIP 不能超过 20 MiB。");
       skillMessage("正在上传并校验…");$("#skillUploadError").textContent="正在上传并校验…";
       const p=await api(skillScope("/api/skills",skillView.uploadGroup),{method:"POST",headers:{"Content-Type":"application/zip"},body:file});
-      if(current()){skillView.packageId=p.id;$('#skillUploadDialog').close();await renderSkills();if(current()){skillMessage('上传校验通过，已加入当前组。');await loadGroups();if(current())renderGroupSidebar()}}
+      if(current()){skillView.packageId=p.id;$('#skillUploadDialog').close();await renderSkills();if(current()){skillMessage('上传校验通过，已加入当前组。');await loadGroups();if(current())renderGroupFilter()}}
     }else if(action==='assign'){
       const groupId=$('#skillAssignGroup').value;if(!groupId)throw new Error('请选择目标分组。');
       await api('/api/skills/groups/assign',{method:'POST',body:JSON.stringify({groupId,packageIds:[...skillView.checked]})});
-      if(current()){$('#skillAssignDialog').close();skillView.checked.clear();await renderSkills();if(current()){skillMessage('已加入所选分组，原有归属保持不变。');await loadGroups();if(current())renderGroupSidebar()}}
+      if(current()){$('#skillAssignDialog').close();skillView.checked.clear();await renderSkills();if(current()){skillMessage('已加入所选分组，原有归属保持不变。');await loadGroups();if(current())renderGroupFilter()}}
     }else if(action==="deploy"){
       const agentIds=[...skillView.selected].filter(id=>skillView.machines.some(m=>m.agentId===id&&m.eligible&&m.groupId===skillView.deployGroup)).sort();
       if(!skillView.packageId||!agentIds.length)throw new Error("请选择 Skill 和至少一台允许安装的执行机。");

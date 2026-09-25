@@ -13,27 +13,34 @@ async function loadGroups(){
   try{const result=await api('/api/groups');groupState.items=result.groups||[];groupState.error=''}
   catch(error){groupState.error='分组暂时无法加载，请刷新重试。'}
 }
-function renderGroupSidebar(){
-  const panel=$('#groupSidebar'),active=groupedPages.includes(state.page);
+function renderGroupFilter(){
+  const panel=$('#groupFilter'),active=groupedPages.includes(state.page);
   panel.hidden=!active;$('.group-layout').classList.toggle('has-groups',active);
   const countKey={roles:'roleCount',sops:'sopCount',tasks:'taskCount',schedules:'scheduleCount',machines:'machineCount',skills:'skillCount',mcps:'mcpCount'}[state.page];
   const rows=[{id:'',name:'全部分组'},...groupState.items];
-  panel.innerHTML=`<div class="group-sidebar-title"><strong>分组</strong><button data-open-groups title="管理分组">管理</button></div><select class="group-mobile" aria-label="筛选分组">${rows.map(g=>`<option value="${esc(g.id)}" ${g.id===groupState.selected?'selected':''}>${esc(g.name)}</option>`).join('')}</select><div class="group-sidebar-list">${rows.map(g=>`<button data-select-group="${esc(g.id)}" class="${g.id===groupState.selected?'active':''}" aria-pressed="${g.id===groupState.selected}"><span>${esc(g.name)}</span>${countKey&&g[countKey]!=null?`<small>${g[countKey]}</small>`:''}</button>`).join('')}</div>${groupState.error?`<p role="alert">${esc(groupState.error)}</p>`:''}`;
-  panel.querySelector('select').onchange=e=>selectGroup(e.target.value).catch(error=>toast(error.message));
-  const actions=$('#groupActions');actions.hidden=!['roles','sops','tasks'].includes(state.page);
-  actions.innerHTML='<span>选中条目后可统一归组；已有引用时须先处理关联。</span><button data-assign-group>归组 / 改组</button>';
+  const selected=rows.find(g=>g.id===groupState.selected);
+  panel.innerHTML=`<details class="group-picker"><summary><span>分组</span><strong>${esc(selected?.name||(groupState.error?'分组暂不可用':'分组已不可用'))}</strong><span aria-hidden="true">⌄</span></summary><div class="group-picker-menu"><div class="group-picker-list">${rows.map(g=>`<button type="button" data-select-group="${esc(g.id)}" class="${g.id===groupState.selected?'active':''}" aria-pressed="${g.id===groupState.selected}"><span>${esc(g.name)}</span>${countKey&&g[countKey]!=null?`<small>${Number(g[countKey])||0}</small>`:''}</button>`).join('')}</div></div></details>${groupState.error?`<p class="group-filter-error" role="alert">${esc(groupState.error)} <button data-group-retry>重试</button></p>`:''}`;
+  const actions=$('#groupActions');actions.hidden=true;actions.innerHTML='';
 }
+function closeGroupPicker(restoreFocus=false){
+  const picker=$('#groupFilter details');
+  if(picker?.open){picker.open=false;if(restoreFocus)picker.querySelector('summary').focus()}
+}
+document.addEventListener('click',e=>{if(!e.target.closest('#groupFilter'))closeGroupPicker()});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#groupFilter details')?.open){e.preventDefault();closeGroupPicker(true)}});
+
 async function selectGroup(id){
   if(state.page==='mcps'){if(mcpView.busy)return false;document.querySelector('#mcpDialog')?.close();mcpView.version++}
   if(state.page==='skills')resetSkillSelection();
-  if(state.page==='sops'&&!confirmDiscard()){renderGroupSidebar();return false}
+  if(state.page==='sops'&&!confirmDiscard()){closeGroupPicker(true);return false}
+  closeGroupPicker(true);
   groupState.selected=id;state.sop.draft=null;state.sop.baseline='';state.sop.selectedNodeId=null;
   runCatalogFilters.page=0;runCatalogRequest++;scheduleRenderVersion++;
-  $('#search').value='';const url=new URL(location.href);if(id)url.searchParams.set('groupId',id);else url.searchParams.delete('groupId');url.searchParams.delete('runPage');history.replaceState(null,'',url);
+  const url=new URL(location.href);if(id)url.searchParams.set('groupId',id);else url.searchParams.delete('groupId');url.searchParams.delete('runPage');history.replaceState(null,'',url);
   await render();return true;
 }
 async function renderGroups(){
-  $('#search').closest('.toolbar').classList.add('hidden');$('#content').className='content group-catalog';
+  $(".toolbar").classList.add('hidden');$('#content').className='content group-catalog';
   if(groupState.error){$('#content').innerHTML=`<div class="empty">${esc(groupState.error)}<button data-group-retry>重新加载</button></div>`;return}
   const cols=[['roleCount','角色','roles'],['sopCount','SOP','sops'],['taskCount','任务定义','tasks'],['scheduleCount','定时规则','schedules'],['machineCount','机器','machines'],['skillCount','Skill','skills'],['mcpCount','MCP','mcps']];
   $('#content').innerHTML=`<div class="group-table-wrap"><table class="group-table"><thead><tr><th>分组名称</th>${cols.map(c=>`<th>${c[1]}</th>`).join('')}<th><span class="group-operation-label">操作</span></th></tr></thead><tbody>${groupState.items.map(g=>`<tr><td><strong>${esc(g.name)}</strong></td>${cols.map(c=>`<td><button class="group-count" data-group-jump="${c[2]}" data-id="${esc(g.id)}">${Number(g[c[0]])||0}</button></td>`).join('')}<td><div class="actions"><button data-group-edit="${esc(g.id)}">重命名</button><button data-group-delete="${esc(g.id)}">删除</button></div></td></tr>`).join('')||'<tr><td colspan="9">暂无分组，请点击“新建分组”。</td></tr>'}</tbody></table></div>`;

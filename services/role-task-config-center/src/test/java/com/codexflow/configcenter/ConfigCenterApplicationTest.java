@@ -148,7 +148,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
 
     assertThat(index)
         .contains("data-page=\"groups\">分组管理")
-        .contains("id=\"groupSidebar\"")
+        .contains("id=\"groupFilter\"")
         .doesNotContain("data-page=\"runtime\"");
     assertThat(script)
         .contains("/api/gateway/ready")
@@ -176,7 +176,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
         .contains("styles.css?v=20260904-dialog-cancel")
         .contains("sync-wait.css?v=20260905")
         .contains("id=\"syncWait\"")
-        .contains("app.js?v=20260924-dingtalk-details")
+        .contains("app.js?v=20260925-no-search")
         .contains("任务目标")
         .contains("发送给所有步骤")
         .contains("type=\"hidden\" name=\"additionalNotes\"");

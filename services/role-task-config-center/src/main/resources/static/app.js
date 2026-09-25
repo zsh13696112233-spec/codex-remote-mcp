@@ -153,11 +153,10 @@ function renderRuntimeStatus(){
 let pageRenderVersion=0;
 async function render({reload=true}={}){
   const version=++pageRenderVersion,page=state.page;
-  $("#search").placeholder=page==="roles"?"搜索角色名称…":page==="tasks"?"搜索任务名称…":"搜索";
   const current=()=>version===pageRenderVersion&&state.page===page;
   if(reload)await loadGroups();
   if(!current())return;
-  renderGroupSidebar();
+  renderGroupFilter();
   if(state.page==="groups"){await renderGroups();return}
   if(state.page==="schedules"){await renderSchedules();return}
   if(state.page==="runs"){await renderRunCatalog();return}
@@ -167,44 +166,44 @@ async function render({reload=true}={}){
   if(reload){if(state.page==="runtime")await loadRuntime();else await loadBase()}
   if(!current())return;
   if(state.page==="dingtalk"){
-    $("#search").closest(".toolbar").classList.add("hidden");
+    $(".toolbar").classList.add("hidden");
     state.dingtalk=await api("/api/dingtalk/config");
     if(!current())return;
     renderDingTalkConfig();return;
   }
   if(state.page==="dingtalk-targets"){
-    $("#search").closest(".toolbar").classList.add("hidden");
+    $(".toolbar").classList.add("hidden");
     [state.dingtalk,state.dingtalkTargets,state.dingtalkDirectory]=await Promise.all([api("/api/dingtalk/config"),api("/api/dingtalk/targets"),api("/api/dingtalk/targets/directory")]);
     if(!current())return;
     state.dingtalkCollapsedDepartments=new Set((state.dingtalkDirectory.departments||[]).map(x=>x.externalId));
     renderDingTalkTargets();return;
   }
   if(state.page==="runtime"){
-    $("#search").closest(".toolbar").classList.add("hidden");
+    $(".toolbar").classList.add("hidden");
     renderRuntimeStatus();return;
   }
   if(state.page==="sops"){
-    $("#search").closest(".toolbar").classList.add("hidden");
+    $(".toolbar").classList.add("hidden");
     if(!state.sop.draft&&visibleSops().length)setDraft(visibleSops()[0]);
     renderSopWorkspace();return;
   }
-  $("#search").closest(".toolbar").classList.remove("hidden");
-  const q=$("#search").value.trim().toLowerCase();
-  const data=state[state.page].filter(groupMatches).filter(x=>(x.name||"").toLowerCase().includes(q));
+  $(".toolbar").classList.remove("hidden");
+  const data=state[state.page].filter(groupMatches);
   $("#content").className="content";
   $("#content").classList.toggle("role-grid",["roles","tasks"].includes(state.page));
   $("#content").classList.toggle("task-grid",state.page==="tasks");
-  $("#content").innerHTML=data.length?data.map(state.page==="roles"?roleCard:taskCard).join(""):roleEmptyState(q);
-  renderCatalogActions(data.length,q);
+  $("#content").innerHTML=data.length?data.map(state.page==="roles"?roleCard:taskCard).join(""):roleEmptyState();
+  renderCatalogActions(data.length);
 }
 function catalogLabel(){return state.page==='roles'?'角色':state.page==='tasks'?'任务':'工作流'}
-function renderCatalogActions(total,query=''){
-  $("#groupActions").innerHTML=`<span data-role-count data-total="${total}" role="status">${query?'找到':'共'} ${total} 个${catalogLabel()}</span><button data-assign-group disabled>归组 / 改组</button>`;
+function renderCatalogActions(total){
+  $("#groupActions").hidden=false;
+  $("#groupActions").innerHTML=`<span data-role-count data-total="${total}" role="status">共 ${total} 个${catalogLabel()}</span><span data-batch-actions hidden><button data-assign-group disabled>归组 / 改组</button><button data-clear-group-selection>取消选择</button></span>`;
 }
-function roleEmptyState(query){
-  const label=catalogLabel(),title=query?`没有找到匹配的${label}`:concreteGroup()?`这个分组还没有${label}`:`创建你的第一个${label}`;
-  const detail=query?"试试其他关键词，或清空搜索查看当前分组。":state.page==='roles'?"定义角色的职责，让每个工作步骤都有明确的分工。":state.page==='tasks'?"选择工作流并填写任务目标，保存后即可重复运行。":"将角色组织为串行步骤，建立可复用的工作流程。";
-  return `<div class="empty role-empty"><div class="role-empty-icon" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="9" y="5" width="30" height="38" rx="5"/><circle cx="24" cy="18" r="5"/><path d="M16 32c0-7 16-7 16 0M18 37h12"/></svg></div><h2>${title}</h2><p>${detail}</p><button ${query?'data-role-clear-search':'data-role-create class="primary"'}>${query?'清空搜索':`＋ 新建${state.page==='sops'?' SOP':label}`}</button></div>`;
+function roleEmptyState(){
+  const label=catalogLabel(),title=concreteGroup()?`这个分组还没有${label}`:`创建你的第一个${label}`;
+  const detail=state.page==='roles'?"定义角色的职责，让每个工作步骤都有明确的分工。":state.page==='tasks'?"选择工作流并填写任务目标，保存后即可重复运行。":"将角色组织为串行步骤，建立可复用的工作流程。";
+  return `<div class="empty role-empty"><div class="role-empty-icon" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="9" y="5" width="30" height="38" rx="5"/><circle cx="24" cy="18" r="5"/><path d="M16 32c0-7 16-7 16 0M18 37h12"/></svg></div><h2>${title}</h2><p>${detail}</p><button data-role-create class="primary">＋ 新建${state.page==='sops'?' SOP':label}</button></div>`;
 }
 function updateRoleSelection(){
   if(!['roles','tasks','sops'].includes(state.page))return;
@@ -213,7 +212,13 @@ function updateRoleSelection(){
   if(summary)summary.textContent=count?`已选择 ${count} 个${catalogLabel()}`:`共 ${summary.dataset.total} 个${catalogLabel()}`;
   const assign=$("#groupActions [data-assign-group]");
   if(assign)assign.disabled=count===0;
+  const batch=$("#groupActions [data-batch-actions]");if(batch)batch.hidden=count===0;
 }
+$("#groupActions").addEventListener("click",e=>{
+  if(!e.target.closest('[data-clear-group-selection]'))return;
+  document.querySelectorAll('#content [data-group-item]:checked').forEach(input=>{input.checked=false});
+  updateRoleSelection();
+});
 $("#content").addEventListener("change",e=>{if(e.target.matches('[data-group-item]'))updateRoleSelection()});
 function openRole(x={enabled:true}){const f=$("#roleForm");f.reset();f.id.value=x.id||"";f.version.value=x.version??0;f.name.value=x.name||"";f.duty.value=x.duty||"";f.enabled.checked=x.enabled!==false;bindGroupForm(f,x);$("#roleDialog").showModal()}
 function taskRequirements(x={}){return[x.objective||"",x.additionalNotes?`补充要求：\n${x.additionalNotes}`:""].filter(Boolean).join("\n\n")}
@@ -245,7 +250,7 @@ function syncDirtyUi(){
 function renderSopWorkspace(){
   $("#content").className="content sop-content";
   renderCatalogActions(visibleSops().length);
-  if(!state.sop.draft&&!visibleSops().length){$("#content").innerHTML=roleEmptyState('');return}
+  if(!state.sop.draft&&!visibleSops().length){$("#content").innerHTML=roleEmptyState();return}
   $("#content").innerHTML=`<div class="sop-workspace">
     <aside class="sop-list-panel">
       <div class="panel-title"><div><strong>工作流列表</strong><small>${visibleSops().length} 条工作流</small></div><button class="icon-primary" data-sop-new title="新建 SOP">＋</button></div>
@@ -418,7 +423,7 @@ async function saveSop(){
   document.querySelectorAll("body>aside,main").forEach(el=>el.inert=true);
   try{
   const d=state.sop.draft,saved=await api(d.id?`/api/sops/${d.id}`:"/api/sops",{method:d.id?"PUT":"POST",body:JSON.stringify(sopPayload())});
-  await loadGroups();renderGroupSidebar();await loadBase();setDraft(saved);renderSopWorkspace();toast("SOP 工作流已保存");
+  await loadGroups();renderGroupFilter();await loadBase();setDraft(saved);renderSopWorkspace();toast("SOP 工作流已保存");
   }finally{state.sop.saving=false;document.querySelectorAll("body>aside,main").forEach(el=>el.inert=false);if(saveButton)saveButton.textContent="保存工作流";}
 }
 async function selectSop(id){
@@ -436,7 +441,6 @@ $("#content").addEventListener("click",async e=>{
   let botTestButton=null;
   try{
     if(e.target.closest('[data-role-create]')){if(state.page==='sops')startNewSop();else if(state.page==='tasks')openTask();else openRole();return}
-    if(e.target.closest('[data-role-clear-search]')){$('#search').value='';await render({reload:false});$('#search').focus();return}
     const runtimeRefresh=e.target.closest("[data-runtime-refresh]");
     if(runtimeRefresh){runtimeRefresh.disabled=true;await refreshAgentRuntimeStatuses();return}
     const pickerToggle=e.target.closest("[data-agent-menu-toggle]");
@@ -472,7 +476,7 @@ $("#content").addEventListener("click",async e=>{
       if(a==="runs")showRuns(id,action.dataset.name);return;
     }
     const del=e.target.closest("[data-sop-delete]");
-    if(del){e.stopPropagation();const id=del.dataset.sopDelete;if(!confirm("确定删除这个 SOP 工作流？"))return;await api(`/api/sops/${id}`,{method:"DELETE"});if(state.sop.draft?.id===id){state.sop.draft=null;state.sop.baseline=""}await loadGroups();renderGroupSidebar();await loadBase();if(!state.sop.draft&&visibleSops().length)setDraft(visibleSops()[0]);renderSopWorkspace();toast("SOP 已删除");return}
+    if(del){e.stopPropagation();const id=del.dataset.sopDelete;if(!confirm("确定删除这个 SOP 工作流？"))return;await api(`/api/sops/${id}`,{method:"DELETE"});if(state.sop.draft?.id===id){state.sop.draft=null;state.sop.baseline=""}await loadGroups();renderGroupFilter();await loadBase();if(!state.sop.draft&&visibleSops().length)setDraft(visibleSops()[0]);renderSopWorkspace();toast("SOP 已删除");return}
     if(e.target.matches("[data-group-item]"))return;
     const list=e.target.closest("[data-sop-select]");if(list){await selectSop(list.dataset.sopSelect);return}
     if(e.target.closest("[data-sop-new]")){startNewSop();return}
@@ -614,8 +618,7 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   try{await render()}catch(e){toast(e.message)}
 });
 $("#create").onclick=()=>state.page==="groups"?editGroup():state.page==="roles"?openRole():state.page==="sops"?startNewSop():state.page==="tasks"?openTask():state.page==="schedules"?openSchedule().catch(e=>toast(e.message)):null;
-$("#refresh").onclick=async()=>{if(state.page==="sops"&&!confirmDiscard())return;try{if(state.page==="sops"){const id=state.sop.draft?.id;await loadGroups();renderGroupSidebar();await loadBase();if(id&&state.sops.some(s=>s.id===id))setDraft(await api(`/api/sops/${id}`));else if(visibleSops().length)setDraft(visibleSops()[0]);else state.sop.draft=null;renderSopWorkspace()}else await render()}catch(e){toast(e.message)}};
-$("#search").oninput=()=>render({reload:false});
+$("#refresh").onclick=async()=>{if(state.page==="sops"&&!confirmDiscard())return;try{if(state.page==="sops"){const id=state.sop.draft?.id;await loadGroups();renderGroupFilter();await loadBase();if(id&&state.sops.some(s=>s.id===id))setDraft(await api(`/api/sops/${id}`));else if(visibleSops().length)setDraft(visibleSops()[0]);else state.sop.draft=null;renderSopWorkspace()}else await render()}catch(e){toast(e.message)}};
 window.addEventListener("beforeunload",e=>{if(isSopDirty()){e.preventDefault();e.returnValue=""}});
 setInterval(refreshAgentRuntimeStatuses,10000);
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)refreshAgentRuntimeStatuses()});

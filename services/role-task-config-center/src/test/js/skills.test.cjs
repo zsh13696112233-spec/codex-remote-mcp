@@ -10,7 +10,7 @@ function setup(){
   const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{innerHTML:'',textContent:'',showModal(){this.open=true},close(){this.open=false},classList:{add(){}},closest(){return this}});return nodes.get(selector)};
   const context=vm.createContext({crypto:webcrypto,Uint8Array,console,state:{page:'skills'},pageRenderVersion:1,
     document:{hidden:false,addEventListener:(event,handler)=>listeners[event]=handler,querySelector:node,querySelectorAll:()=>[]},
-    groupState:{selected:''},concreteGroup:()=> 'g',groupName:id=>id,groupOptions:()=>'',chooseGroup:fn=>fn('g'),loadGroups:async()=>{},renderGroupSidebar(){},navigator:{},setInterval(){},$:node,esc:v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),
+    groupState:{selected:''},concreteGroup:()=> 'g',groupName:id=>id,groupOptions:()=>'',chooseGroup:fn=>fn('g'),loadGroups:async()=>{},renderGroupFilter(){},navigator:{},setInterval(){},$:node,esc:v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),
     time:v=>v,sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
     loadGatewayReady:async()=>{},api:async()=>({deployments:[]})});
   vm.runInContext(source,context);return {context,nodes,node,listeners,storage,run:code=>vm.runInContext(code,context)};

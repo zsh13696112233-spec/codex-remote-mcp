@@ -16,7 +16,7 @@ function mcpMachineOption(machine){
 async function renderMcps(){
   if(state.page!=='mcps')return;
   const version=++mcpView.version;
-  $('#search')?.closest('.toolbar').classList.add('hidden');
+  $(".toolbar").classList.add('hidden');
   $('#content').className='content skill-content mcp-content';
   $('#content').innerHTML='<section class="settings-panel">正在加载 MCP…</section>';
   try{

@@ -2,11 +2,11 @@ let scheduleRows=[];
 let scheduleRenderVersion=0;
 async function renderSchedules(){
   const version=++scheduleRenderVersion;
-  $("#search").closest(".toolbar").classList.remove("hidden");
+  $(".toolbar").classList.remove("hidden");
   $("#content").className="content schedule-content";
   $("#content").innerHTML='<div class="empty">正在加载定时任务…</div>';
   try {
-    const rows=await api("/api/task-schedules?q="+encodeURIComponent($("#search").value.trim())+"&groupId="+encodeURIComponent(groupState.selected));
+    const rows=await api("/api/task-schedules?groupId="+encodeURIComponent(groupState.selected));
     if(state.page!=="schedules"||version!==scheduleRenderVersion)return;
     scheduleRows=rows;
     const beijing=v=>v?new Date(v).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai",hour12:false}):"—";
