@@ -2,22 +2,13 @@
 import asyncio
 import json
 import logging
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from workflow_gateway import WorkflowGateway
 
 from workflow_store import PROMPT_LIMIT, RESULT_LIMIT
-
-
-async def db(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    # 取消调用者不能让尚未结束的数据库写入在后台越过取消事务。
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task
-        raise
+from workflow_database import database_call as db
 
 
 SCHEMA = {
@@ -163,12 +154,12 @@ class DiscussionService:
                 if job.status != "completed":
                     if job.error_stage not in {"turn/start", "turn/completed"} and not job.turn_id:
                         await db(self.store.update_discussion, workflow_id, message["messageId"], state="failed")
-                    else:
-                        record = await db(self.store.get_discussion, workflow_id, message["messageId"])
-                        await self.reconcile(record)
-                    raise RuntimeError("执行者未完成讨论，已保持等待；请重试核对结果。")
-                raw = job.response
-                await db(self.store.update_discussion, workflow_id, message["messageId"], state="finished", response=raw)
+                        raise RuntimeError("执行者未完成讨论，已保持等待；请重试核对结果。")
+                    record = await db(self.store.get_discussion, workflow_id, message["messageId"])
+                    raw = await self.reconcile(record)
+                else:
+                    raw = job.response
+                    await db(self.store.update_discussion, workflow_id, message["messageId"], state="finished", response=raw)
             except asyncio.CancelledError:
                 if not job.completed.is_set():
                     try:

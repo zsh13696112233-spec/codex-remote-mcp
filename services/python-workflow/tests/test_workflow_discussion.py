@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from codex_orchestrator_mcp import Orchestrator
@@ -234,6 +235,70 @@ class DiscussionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(gateway.assistant_orchestrator.jobs)
         finally:
             await gateway.event_batcher.close()
+
+    def failed_job_gateway(self, turn_status, response=None):
+        gateway = fixture_gateway(self.store, Orchestrator())
+        self.addAsyncCleanup(gateway.event_batcher.close)
+        completed = asyncio.Event()
+        completed.set()
+        job = SimpleNamespace(job_id="failed-job", turn_id="known-turn", completed=completed,
+                              status="failed", error_stage="turn/completed", response=None)
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.request.return_value = {"thread": {"turns": [{
+            "id": "known-turn", "status": turn_status,
+            "items": [{"type": "agentMessage", "phase": "final_answer", "text": response}],
+        }]}}
+        dispatch_patch = patch.object(gateway.assistant_orchestrator, "dispatch", AsyncMock(return_value=job))
+        dispatch = dispatch_patch.start()
+        self.addCleanup(dispatch_patch.stop)
+        client_patch = patch.object(gateway.assistant_orchestrator, "_client_factory", return_value=client)
+        client_patch.start()
+        self.addCleanup(client_patch.stop)
+        return gateway, dispatch, client
+
+    async def test_failed_job_with_completed_remote_turn_commits_without_retry(self):
+        gateway, dispatch, client = self.failed_job_gateway("completed",
+            json.dumps({"text": "已修改", "summary": "新计划：只保留登录"}))
+        message = self.accept()
+        await gateway._process_chat_message("serial-demo", message)
+        await gateway._process_chat_message("serial-demo", message)
+        dispatch.assert_awaited_once()
+        client.request.assert_awaited_once_with("thread/read", {
+            "threadId": "original-thread", "includeTurns": True})
+        self.assertEqual(self.store.get_discussion("serial-demo", message["messageId"])["state"], "completed")
+        self.assertEqual(self.store.pending_chat_count("serial-demo"), 0)
+        snapshot = self.store.get_workflow("serial-demo")
+        self.assertFalse(snapshot["discussionBusy"])
+        self.assertEqual(snapshot["pendingAdvance"]["state"], "held")
+        self.assertEqual(snapshot["nodes"][0]["response"], "新计划：只保留登录")
+        answers = [event for event in self.store.list_events("serial-demo")
+                   if event["type"] == "chat.assistant.completed"]
+        self.assertEqual(len(answers), 1)
+        self.assertIn("已修改", answers[0]["payload"]["text"])
+        self.store.confirm_advance("serial-demo", self.gate)
+        self.assertIn("新计划：只保留登录", self.store.prepare_node_dispatch("serial-demo", "b")["prompt"])
+
+    async def test_reconciled_invalid_answer_does_not_replace_summary(self):
+        gateway, dispatch, _ = self.failed_job_gateway("completed", '{"text":"已修改","summary":""}')
+        message = self.accept()
+        with self.assertRaisesRegex(RuntimeError, "回答为空或超过容量限制"):
+            await gateway._process_chat_message("serial-demo", message)
+        dispatch.assert_awaited_once()
+        self.assertEqual(self.store.get_node("serial-demo", "a")["response"], "原计划：登录、支付")
+        self.assertEqual(self.store.get_discussion("serial-demo", message["messageId"])["state"], "failed")
+
+    async def test_reconciled_running_turn_still_blocks_advance_without_redispatch(self):
+        gateway, dispatch, _ = self.failed_job_gateway("inProgress")
+        message = self.accept()
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, "此前修改尚未结束"):
+                await gateway._process_chat_message("serial-demo", message)
+        dispatch.assert_awaited_once()
+        self.store.fail_chat_message("serial-demo", message["messageId"], "尚未结束")
+        with self.assertRaises(RuntimeError):
+            self.store.confirm_advance("serial-demo", self.gate)
+        self.assertEqual(self.store.get_node("serial-demo", "a")["response"], "原计划：登录、支付")
 
     async def test_cancel_reconciliation_reads_already_finished_turn_without_interrupt(self):
         message = self.accept()

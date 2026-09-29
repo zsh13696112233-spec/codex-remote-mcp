@@ -24,6 +24,7 @@ from codex_orchestrator_mcp import (
     utc_now,
 )
 from workflow_event_batcher import AsyncEventBatcher
+from workflow_database import database_call as _database_call
 from workflow_store import (
     REVISION_INSTRUCTION_LIMIT,
     WorkflowStore,
@@ -39,25 +40,6 @@ SIDECAR_HEARTBEAT_INTERVAL_SEC = 5
 SIDECAR_LEASE_TIMEOUT_SEC = 20
 SIDECAR_WATCHDOG_INTERVAL_SEC = 1.0
 LOGGER = logging.getLogger(__name__)
-
-
-async def _database_call(function, *args, **kwargs):
-    """取消协程时先等待已经开始的数据库操作结束，避免旧写入污染下一次尝试。"""
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-        except Exception:
-            # 下方统一取出异常；取消优先，但必须消费线程任务的异常。
-            break
-    if cancelled:
-        if not task.cancelled():
-            task.exception()
-        raise asyncio.CancelledError()
-    return task.result()
 
 
 class WorkflowGateway:
