@@ -119,8 +119,6 @@ class McpStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.create_workflow({**spec, 'workflowId': 'another'})
         with self.assertRaises(ValueError):
-            self.store.restart_from_node('mcp-interlock', 'a', revision_instruction='重试')
-        with self.assertRaises(ValueError):
             self.store.prepare_node_dispatch('mcp-interlock', 'a')
 
     def test_settings_do_not_elevate_machine_permissions(self):

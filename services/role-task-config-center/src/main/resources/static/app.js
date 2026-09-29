@@ -316,7 +316,6 @@ function workflowInspectorHtml(){
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，两分钟后自动继续）</option></select></label>
     <label>主监督执行机 *<div class="agent-picker"><input data-sop-field="supervisorAgentId" maxlength="128" value="${esc(d.supervisorAgentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
     <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="7200" value="${d.supervisorTimeoutSec}"></label>
-    <label>单次任务最多重跑次数<input data-sop-field="maxRetryCount" type="number" min="0" max="100" value="${d.maxRetryCount}"></label>
     <label class="check"><input data-sop-field="dingtalkShowExecutionDetails" type="checkbox" ${d.dingtalkShowExecutionDetails?"checked":""}> 钉钉显示思考过程和工具调用</label>
     <p class="meta">关闭后仍发送进度说明、步骤结果和确认通知。修改仅对新运行生效。</p>
     <label class="check"><input data-sop-field="enabled" type="checkbox" ${d.enabled?"checked":""}> 启用该工作流</label>`;

@@ -40,3 +40,23 @@ test('failed consultation clears in-progress row', () => {
   assert.equal(vm.runInContext('state.messages.some(m => m.id === "consult-progress-q")', context), false);
   assert.equal(vm.runInContext('state.messages[0].status', context), 'failed');
 });
+
+test('waiting replies preserve executor identity after replay', () => {
+  const context = app();
+  vm.runInContext(`
+    consume({type:'chat.user.accepted',payload:{messageId:'q',text:'采用这个方案'}});
+    consume({type:'chat.assistant.completed',payload:{messageId:'q',assistantMessageId:'a',
+      stepNumber:2,summaryUpdated:true,text:'已更新交接总结'}});
+  `, context);
+  assert.equal(vm.runInContext('state.messages[1].stepNumber', context), 2);
+});
+
+test('discussion disables continue even when gate is held', () => {
+  const context = app();
+  const button = {dataset:{advanceGate:'gate',advanceState:'held',advanceAction:'confirm'},disabled:false};
+  context.document.querySelectorAll = () => [button];
+  vm.runInContext('state.snapshot={discussionBusy:true};renderAdvanceCountdown()', context);
+  assert.equal(button.disabled, true);
+  vm.runInContext('state.snapshot.discussionBusy=false;renderAdvanceCountdown()', context);
+  assert.equal(button.disabled, false);
+});

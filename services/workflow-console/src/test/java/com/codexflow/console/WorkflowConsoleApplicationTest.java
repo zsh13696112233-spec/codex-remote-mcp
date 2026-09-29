@@ -62,9 +62,9 @@ class WorkflowConsoleApplicationTest {
                                 || path.contains("edit")));
   }
 
-  /** 确认页面区分进度和助手消息、展示额度，并允许终态继续发送消息。 */
+  /** 确认页面区分进度和讨论消息，并允许终态继续只读咨询。 */
   @Test
-  void staticUiKeepsCompletedChatAndRetryPolicyVisible() throws IOException {
+  void staticUiKeepsCompletedChatAndDiscussionVisible() throws IOException {
     String app = new ClassPathResource("static/app.js").getContentAsString(StandardCharsets.UTF_8);
     String page =
         new ClassPathResource("static/index.html").getContentAsString(StandardCharsets.UTF_8);
@@ -73,14 +73,14 @@ class WorkflowConsoleApplicationTest {
         .contains(
             "任务进度",
             "任务助手",
-            "snapshot.retryPolicy",
-            "remainingRetries",
+            "discussionBusy",
+            "步执行者",
             "pendingAdvance",
             "确认继续",
             "保持等待",
             "两分钟内未回复将自动继续",
-            "暂停不会返工",
-            "请在任务助手中说明修改点",
+            "明确提出修改或采纳后更新交接总结",
+            "讨论处理中",
             "confirmAdvance",
             "holdAdvance",
             "allStepsFinished",
@@ -92,6 +92,6 @@ class WorkflowConsoleApplicationTest {
             "artifact.mediaType",
             "file.download");
     assertThat(app).doesNotContain("state.snapshot?.status === \"completed\") return");
-    assertThat(page).contains("id=\"retries\"", "剩余重跑次数");
+    assertThat(page).doesNotContain("id=\"retries\"", "剩余重跑次数");
   }
 }

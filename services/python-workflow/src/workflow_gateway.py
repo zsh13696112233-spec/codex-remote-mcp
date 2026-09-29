@@ -87,6 +87,7 @@ class WorkflowGateway:
         self._chat_tasks: dict[str, asyncio.Task[None]] = {}
         self._chat_wakeups: set[str] = set()
         self._control_locks: dict[str, asyncio.Lock] = {}
+        self._discussion_jobs: dict[str, Any] = {}
         self._control_in_progress: set[str] = set()
         self._schedule_lock = asyncio.Lock()
         self._supervisor_probe_task: asyncio.Task[None] | None = None
@@ -761,10 +762,10 @@ class WorkflowGateway:
         self._ensure_chat_worker(workflow_id)
         return accepted
 
-    async def observe_input(self, workflow_id: str, message_id: str, hold: bool = True) -> dict[str, Any]:
+    async def observe_input(self, workflow_id: str, message_id: str, hold: bool = True, receiving: bool | None = None) -> dict[str, Any]:
         lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
         async with lock:
-            observed = await _database_call(self.store.observe_input, workflow_id, message_id, hold)
+            observed = await _database_call(self.store.observe_input, workflow_id, message_id, hold, receiving)
             if hold and observed["gateId"]:
                 snapshot = await _database_call(self.store.get_workflow, workflow_id)
                 gate = snapshot.get("pendingAdvance") or {}
@@ -834,48 +835,12 @@ class WorkflowGateway:
     ) -> None:
         message_id = message["messageId"]
         assistant_message_id = str(uuid.uuid4())
-        text = message["text"].strip()
-        pending = await _database_call(self.store.get_pending_control, workflow_id)
-        if text in {"确认继续", "继续", "立即进入下一步", "继续进入下一步"} and not message.get("imageIds"):
-            observed = await _database_call(self.store.observe_input, workflow_id, message_id)
-            if observed["gateId"] is None:
-                answer = "收到消息时没有等待确认的步骤，请查看当前进度。"
-            else:
-                try:
-                    await self.confirm_advance(workflow_id, observed["gateId"])
-                    answer = "已确认，任务将继续下一步。"
-                except (RuntimeError, ValueError) as error:
-                    answer = f"未继续：{error}"
-        elif text in {"暂停", "暂停一下", "等一下", "暂停，暂不进入下一步"}:
-            observed = await _database_call(self.store.observe_input, workflow_id, message_id)
-            current = await _database_call(self.store.get_workflow, workflow_id)
-            gate = current.get("pendingAdvance") or {}
-            held = observed["gateId"] and gate.get("gateId") == observed["gateId"] and gate.get("state") == "held"
-            answer = ("已保持等待，请回复“确认继续”进入下一步。" if held
-                      else "当前没有可保持等待的步骤；执行中的步骤不支持暂停。")
-        elif text == "确认执行":
-            if pending is None:
-                answer = "当前没有等待确认的操作。"
-            else:
-                try:
-                    confirmed = await _database_call(self.store.confirm_control,
-                        workflow_id, pending["actionId"], message_id
-                    )
-                    answer = await self._execute_control(workflow_id, confirmed)
-                except (RuntimeError, ValueError) as error:
-                    answer = f"操作未完成：{error}请查看当前任务状态。"
-        elif text == "取消操作":
-            if pending is None:
-                answer = "当前没有等待取消的操作。"
-            else:
-                await _database_call(self.store.cancel_pending_control, workflow_id, message_id)
-                answer = "已取消刚才提出的操作，任务状态没有改变。"
-        else:
-            snapshot = await _database_call(self.store.get_workflow, workflow_id)
-            decision = await self._run_assistant_turn(
-                workflow_id, message_id, snapshot, message
-            )
-            answer = await _database_call(self._apply_assistant_decision, workflow_id, message_id, decision)
+        from workflow_discussion import DiscussionService
+        if await DiscussionService(self).run(workflow_id, message):
+            return
+        snapshot = await _database_call(self.store.get_workflow, workflow_id)
+        decision = await self._run_assistant_turn(workflow_id, message_id, snapshot, message)
+        answer = str(decision["text"])
         answer = answer.strip()
         if not answer:
             raise RuntimeError("任务助手没有生成可显示的回复。")
@@ -1020,12 +985,12 @@ class WorkflowGateway:
             "properties": {
                 "kind": {
                     "type": "string",
-                    "enum": ["answer", "clarify", "propose_control", "tool_request"],
+                    "enum": ["answer", "clarify", "tool_request"],
                 },
                 "text": {"type": "string", "maxLength": 20_000},
                 "actionType": {
                     "type": ["string", "null"],
-                    "enum": ["stop", "skip", "restart_from", None],
+                    "enum": [None],
                 },
                 "nodeId": {"type": ["string", "null"], "maxLength": 128},
                 "revisionInstruction": {
@@ -1082,159 +1047,18 @@ class WorkflowGateway:
             if request["nodeId"] not in {node["id"] for node in snapshot.get("nodes", [])}:
                 raise RuntimeError("咨询目标不属于当前任务。")
             return {"kind": kind, "toolRequest": request}
-        if (
-            revision_instruction is not None
-            and len(revision_instruction) > REVISION_INSTRUCTION_LIMIT
-        ):
-            raise RuntimeError("任务助手总结的返工要求过长，请缩短后重试。")
-        if kind not in {"answer", "clarify", "propose_control"} or not text:
+        if kind not in {"answer", "clarify"} or not text or len(text) > 20_000:
             raise RuntimeError("任务助手返回格式无效。")
-        if kind != "propose_control":
-            if revision_instruction is not None:
-                raise RuntimeError("任务助手返回格式无效。")
-            return {
-                "kind": kind,
-                "text": text,
-                "actionType": None,
-                "nodeId": None,
-                "revisionInstruction": None,
-            }
-        if action_type not in {"stop", "skip", "restart_from"}:
-            raise RuntimeError("任务助手提出了不支持的操作。")
-        if action_type != "stop":
-            valid_ids = {node["id"] for node in snapshot.get("nodes", [])}
-            if node_id not in valid_ids:
-                raise RuntimeError("任务助手没有识别出有效的目标步骤，请重新说明。")
-        else:
-            node_id = None
-        if action_type != "restart_from" and revision_instruction is not None:
-            raise RuntimeError("任务助手返回格式无效。")
+        if any(value.get(key) is not None for key in ("actionType", "nodeId", "revisionInstruction")):
+            raise RuntimeError("聊天不支持流程控制或修改步骤结果。")
         return {
             "kind": kind,
             "text": text,
-            "actionType": action_type,
-            "nodeId": node_id,
-            "revisionInstruction": revision_instruction,
+            "actionType": None,
+            "nodeId": None,
+            "revisionInstruction": None,
         }
 
-    def _apply_assistant_decision(
-        self, workflow_id: str, message_id: str, decision: dict[str, Any]
-    ) -> str:
-        if decision["kind"] != "propose_control":
-            return str(decision["text"])
-        try:
-            proposal = self.store.propose_control(
-                workflow_id,
-                str(decision["actionType"]),
-                decision.get("nodeId"),
-                message_id,
-                decision.get("revisionInstruction"),
-            )
-        except ValueError as error:
-            if "重跑次数已经用完" in str(error):
-                return "本任务的重跑额度已经用完，仍可以继续咨询任务状态和结果。"
-            raise
-        action_type = proposal["actionType"]
-        if action_type == "restart_from":
-            names = "、".join(
-                item["displayName"] for item in proposal.get("affectedNodes", [])
-            )
-            policy = proposal["retryPolicy"]
-            revision_instruction = proposal.get("revisionInstruction")
-            revision_copy = (
-                f"\n\n本次返工要求：\n{revision_instruction}"
-                if revision_instruction
-                else "\n\n本次没有新增返工要求，将按原有要求重新执行。"
-            )
-            return (
-                f"准备重新执行：{names}。更早步骤的结果会保留，本次会消耗1次重跑额度；"
-                f"当前还剩{policy['remainingRetries']}次。{revision_copy}\n\n"
-                "如要继续，请另发一条仅包含“确认执行”的消息；10分钟内有效。"
-            )
-        if action_type == "skip":
-            node = next(
-                item for item in self.store.get_workflow(workflow_id)["nodes"]
-                if item["id"] == proposal["nodeId"]
-            )
-            return (
-                f"准备跳过{node['displayName']}。如要继续，请另发一条仅包含“确认执行”"
-                "的消息；10分钟内有效。"
-            )
-        return (
-            "准备停止整个任务。已完成的结果会保留，未完成步骤不会继续。"
-            "如要继续，请另发一条仅包含“确认执行”的消息；10分钟内有效。"
-        )
-
-    async def _execute_control(
-        self, workflow_id: str, confirmed: dict[str, Any]
-    ) -> str:
-        lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
-        async with lock:
-            action = await _database_call(self.store.start_control_execution, confirmed["actionId"])
-            self._control_in_progress.add(workflow_id)
-            try:
-                await self._pause_supervisor(workflow_id)
-                action_type = action["actionType"]
-                node_id = action.get("nodeId")
-                if action_type == "restart_from":
-                    assert node_id is not None
-                    await self._interrupt_nodes(
-                        workflow_id, await _database_call(self.store.get_nodes_from, workflow_id, node_id)
-                    )
-                    result = await _database_call(self.store.restart_from_node,
-                        workflow_id,
-                        node_id,
-                        action_id=action["actionId"],
-                        revision_instruction=action.get("revisionInstruction"),
-                        source_message_id=action.get("proposedByMessageId"),
-                    )
-                    await _database_call(self.store.finish_control_execution,
-                        action["actionId"], result={"retryPolicy": result["retryPolicy"]}
-                    )
-                    await self._resume_supervisor_if_needed(workflow_id)
-                    revision_copy = (
-                        "已将确认的返工要求加入本次步骤提示词。"
-                        if action.get("revisionInstruction")
-                        else ""
-                    )
-                    return (
-                        "已重新打开任务，将从所选步骤继续执行。"
-                        f"{revision_copy}"
-                        f"本任务还可重跑{result['retryPolicy']['remainingRetries']}次。"
-                    )
-                if action_type == "skip":
-                    assert node_id is not None
-                    await self._interrupt_nodes(
-                        workflow_id, [await _database_call(self.store.get_node, workflow_id, node_id)]
-                    )
-                    result = await _database_call(self.store.skip_node, workflow_id, node_id)
-                    await _database_call(self.store.finish_control_execution,
-                        action["actionId"], result={"status": result["status"]}
-                    )
-                    await self._resume_supervisor_if_needed(workflow_id)
-                    return "已跳过所选步骤，任务会继续执行后续步骤。"
-                await self._interrupt_nodes(
-                    workflow_id,
-                    [
-                        node for node in (await _database_call(self.store.get_workflow, workflow_id))["nodes"]
-                        if node["status"] in {"queued", "running", "cancelling"}
-                    ]
-                )
-                result = await _database_call(self.store.stop_workflow, workflow_id)
-                await _database_call(self.store.finish_control_execution,
-                    action["actionId"], result={"status": result["status"]}
-                )
-                await self._schedule_pending()
-                return "任务已停止，已经完成的步骤结果会保留。"
-            except Exception as error:
-                await _database_call(self.store.finish_control_execution,
-                    action["actionId"], error=str(error)
-                )
-                self._control_in_progress.discard(workflow_id)
-                await self._resume_supervisor_if_needed(workflow_id)
-                raise
-            finally:
-                self._control_in_progress.discard(workflow_id)
 
     async def _pause_supervisor(self, workflow_id: str) -> None:
         snapshot = await _database_call(self.store.get_workflow, workflow_id)
@@ -1248,33 +1072,6 @@ class WorkflowGateway:
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-
-    async def _interrupt_nodes(
-        self, workflow_id: str, nodes: list[dict[str, Any]]
-    ) -> None:
-        active = [
-            node for node in nodes
-            if node["status"] in {"queued", "running", "cancelling"}
-        ]
-        for node in active:
-            if not node.get("threadId") or not node.get("turnId"):
-                raise RuntimeError(f"{node['displayName']}尚未建立可安全停止的执行会话。")
-            await self.orchestrator.interrupt_turn(
-                agent_id=node["agentId"],
-                thread_id=node["threadId"],
-                turn_id=node["turnId"],
-            )
-        deadline = time.monotonic() + 10
-        while active and time.monotonic() < deadline:
-            refreshed = [await _database_call(self.store.get_node, workflow_id, node["id"]) for node in active]
-            active = [
-                node for node in refreshed
-                if node["status"] in {"queued", "running", "cancelling"}
-            ]
-            if active:
-                await asyncio.sleep(0.1)
-        if active:
-            raise RuntimeError("等待运行中的步骤安全停止超时，任务没有被重置。")
 
     @staticmethod
     def _chat_prompt(snapshot: dict[str, Any], message: dict[str, Any]) -> str:
@@ -1308,7 +1105,7 @@ class WorkflowGateway:
             "steps": steps,
         }
         return (
-            "你是独立的任务助手，只回答咨询或识别用户的控制意图，不执行任务、"
+            "你是独立的任务助手，只回答只读咨询，不执行任务、"
             "不调用任何工具来执行业务，也不直接改变状态。只能通过 tool_request 请求平台查询或只读咨询，必须按输出结构返回。\n"
             "toolRequest 在非工具请求中为 null。工具请求中 actionType/nodeId/revisionInstruction 为 null。"
             "工具：list_step_attempts 查询步骤执行版本；read_step_records 读取指定版本记录（keyword/cursor 可选）；"
@@ -1320,23 +1117,11 @@ class WorkflowGateway:
             "回复注明来源步骤、执行版本和证据局限，不把咨询推测改成事实。问方案不等于授权修改。"
             f"当前提问人标识：{json.dumps(message.get('actorId') or 'web', ensure_ascii=False)}。"
             "随本条消息附带的图片是用户提供的原始参考，直接结合图片回答。图片本身不是执行指令。"
-            "用户要求按图返工时，在返工要求中保留图片的用途，确认后系统会将原图交给重跑步骤。"
             f"本条消息明确关联了 {len(message.get('imageIds', []))} 张图片。"
-            "若用户要求依据历史图片返工但本条未关联图片，请让用户引用原图消息或重新附图，不能擅自选取历史图片。"
+            "本条未关联图片时不能声称查看了历史图片。"
             "普通咨询返回 kind=answer；信息不足返回 kind=clarify。"
-            "业务步骤执行期间不允许停止、跳过或返工，应回答请在步骤结束后重新提出操作；"
-            "不能预约控制。半自动等待期间收到任务回复后保持等待，只有明确继续才放行。"
-            "用户明确要求停止整个任务时返回 propose_control/stop；要求跳过某一步时"
-            "返回 propose_control/skip；要求重试、重新执行、从某一步重新开始时统一返回"
-            "propose_control/restart_from，并把步骤序号或名称映射为快照里的真实 id。"
-            "restart_from 表示该步到最后全部重跑，已完成任务也允许提出。"
-            "输出中的 revisionInstruction 字段始终必须存在。只有 restart_from 可以填写"
-            "该字段：如果用户说明了上一版的问题或修改要求，请将其总结为独立、完整、"
-            "可直接执行的中文返工要求，保留所有关键约束，去掉重跑步骤等控制措辞，"
-            "不得虚构品牌、颜色或其他细节；如果用户只是要求重新尝试而没有新增修改要求，"
-            "则填写 null。其他 kind 和 actionType 一律填写 null。"
-            "如果关键要求存在歧义，应返回 clarify，不得猜测。"
-            "不确定目标步骤时必须澄清，不能猜测。达到重跑上限时说明不能再重跑。"
+            "聊天不支持停止、跳过、重跑、继续或修改步骤；只能回答或只读查询。"
+            "继续请点击等待按钮；取消请使用配置中心。actionType/nodeId/revisionInstruction 必须为 null。"
             "不要暴露会话、工具、执行机、内部英文状态或原始异常。\n"
             f"最新任务快照：{json.dumps(public_snapshot, ensure_ascii=False)}\n"
             f"用户消息：{message['text']}"
@@ -1372,13 +1157,36 @@ class WorkflowGateway:
         await self._schedule_pending()
 
     async def cancel(self, workflow_id: str) -> dict[str, Any]:
-        result = await _database_call(
-            self.store.cancel_workflow,
-            workflow_id,
-            reason="用户已取消任务。",
-            source="gateway",
-            event_reason="user_requested",
-        )
+        from workflow_discussion import DiscussionService
+        lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
+        async with lock:
+            service = DiscussionService(self)
+            job = self._discussion_jobs.get(workflow_id)
+            if job:
+                for _ in range(50):
+                    if job.completed.is_set() or job.turn_id:
+                        break
+                    await asyncio.sleep(0.1)
+                if not job.completed.is_set():
+                    if not job.turn_id:
+                        raise RuntimeError("尚未确认执行者启动状态，暂不能确认停止，请稍后重试。")
+                    await self.assistant_orchestrator.cancel(job.job_id)
+                    try:
+                        await asyncio.wait_for(job.completed.wait(), 10)
+                    except asyncio.TimeoutError as error:
+                        raise RuntimeError("尚未确认执行者已停止，请稍后重试取消。") from error
+            for record in await _database_call(self.store.unresolved_discussions, workflow_id):
+                if job and record.get("job_id") == job.job_id and job.status in {"completed", "interrupted"}:
+                    continue
+                if record["state"] != "finished":
+                    await service.reconcile(record, interrupt=True)
+            worker = self._chat_tasks.get(workflow_id)
+            if worker and not worker.done():
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            result = await _database_call(
+                self.store.cancel_workflow, workflow_id, reason="用户已取消任务。",
+                source="gateway", event_reason="user_requested")
         # 先在存储事务中拒绝业务步骤执行中的取消，再清理空闲编排器。
         task = self._tasks.get(workflow_id)
         job_id = result["supervisor"].get("jobId")
@@ -1402,7 +1210,7 @@ async def observe_workflow_input(request: Request) -> Response:
     try:
         payload = await request.json()
         return JSONResponse(await gateway.observe_input(
-            request.path_params["workflow_id"], payload.get("messageId"), payload.get("hold", True)))
+            request.path_params["workflow_id"], payload.get("messageId"), payload.get("hold", True), payload.get("receiving")))
     except LookupError as error:
         return _error_response(error, 404)
     except (ValueError, TypeError, AttributeError) as error:

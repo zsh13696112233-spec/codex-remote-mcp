@@ -19,6 +19,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -33,6 +34,13 @@ import tools.jackson.databind.node.ObjectNode;
 class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFixtureSupport {
 
   private String lastTaskName;
+
+  @BeforeEach
+  void isolateOutboxBatch() {
+    // 测试使用共享 H2 上下文，前例遗留发送队列不能占用本例的领取批次。
+    jdbc.update(
+        "UPDATE codex_sop_dingtalk_outbox SET status='sent' WHERE status IN ('pending','failed','sending')");
+  }
 
   @Test
   void quotedProgressSurvivesHistoryLimitAndDuplicateDeliveryWithoutMergingDifferentGates() {
@@ -95,75 +103,6 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
         "update codex_sop_dingtalk_outbox set advance_gate_id = 'new-gate', delivered_at = CURRENT_TIMESTAMP where dedup_key = 'quote-history-two'");
     assertThat(store.conversation(client, reply)).isEmpty();
     assertThat(store.quotedAdvance(reply)).isNull();
-  }
-
-  @Test
-  void restartCardWorksWithoutWaitingAndRejectsWrongActorOrAction() {
-    String client = "restart-card-" + UUID.randomUUID();
-    createTask(client);
-    String workflow = store.reserveStart(client, message("start-restart-card")).workflowId();
-    var binding = store.binding(workflow).orElseThrow();
-    var source =
-        new DingTalkModels.Message(
-            "propose-" + client, "restart-group", "2", "owner", "返工", true, false, null);
-    var inbound = store.registerInbound(client, binding, source);
-    var snapshot = objectMapper.createObjectNode();
-    snapshot
-        .putObject("pendingControl")
-        .put("actionId", "action-one")
-        .put("type", "restart_from")
-        .put("status", "pending")
-        .put("actorId", client + ":owner")
-        .put("expiresAt", java.time.Instant.now().plusSeconds(600).toString());
-    store.completeReply(workflow, inbound.workflowMessageId(), 1, "返工内容", "action-one", snapshot);
-    String id =
-        jdbc.queryForObject(
-            "select id from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card'",
-            String.class,
-            workflow);
-    var click =
-        new DingTalkModels.CardAction(
-            "wait-" + id, null, "owner", "restart_confirm", java.util.Map.of());
-    assertThat(store.controlCardMessage(click, client, workflow, "action-one", true)).isEmpty();
-    store.markAdvanceDelivered(id, "carrier", java.time.Instant.now());
-    store.markOutboxSent(id, "carrier");
-    var accepted =
-        store.controlCardMessage(click, client, workflow, "action-one", true).orElseThrow();
-    assertThat(accepted.content()).isEqualTo("确认执行");
-    assertThat(accepted.messageId())
-        .isEqualTo(
-            store
-                .controlCardMessage(click, client, workflow, "action-one", true)
-                .orElseThrow()
-                .messageId());
-    assertThat(store.controlCardMessage(click, client, workflow, "action-two", true)).isEmpty();
-    var outsider =
-        new DingTalkModels.CardAction(
-            "wait-" + id, null, "other", "restart_confirm", java.util.Map.of());
-    assertThat(store.controlCardMessage(outsider, client, workflow, "action-one", true)).isEmpty();
-    assertThat(
-            store
-                .controlCardMessage(click, client, workflow, "action-one", false)
-                .orElseThrow()
-                .content())
-        .isEqualTo("取消操作");
-    jdbc.update(
-        "update codex_sop_dingtalk_workflow_bindings set status = 'terminal', waiting_assistant = false where workflow_id = ?",
-        workflow);
-    assertThat(store.pollable(client))
-        .extracting(DingTalkModels.Binding::workflowId)
-        .contains(workflow);
-    store.refreshWaitingCards(workflow, objectMapper.createObjectNode());
-    assertThat(
-            jdbc.queryForObject(
-                "select count(*) from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card_update'",
-                Integer.class,
-                workflow))
-        .isEqualTo(1);
-    store.markWaitingCardRefreshed("wait-" + id, "closed");
-    assertThat(store.pollable(client))
-        .extracting(DingTalkModels.Binding::workflowId)
-        .doesNotContain(workflow);
   }
 
   @Test
@@ -466,26 +405,6 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
   @Autowired jakarta.persistence.EntityManager entityManager;
 
   @Test
-  void staleDingTalkPointerCannotOverwriteANewerWebRunOnRestart() {
-    String clientId = "app-" + UUID.randomUUID();
-    String taskId = createTask(clientId);
-    String oldId = store.reserveStart(clientId, message("old-start")).workflowId();
-    store.reconcileRuntimeStatus(clientId, oldId, "completed");
-    String currentId = taskLaunches.reserveLatest(taskId).prepared().workflowId();
-    jdbc.update(
-        "update codex_sop_task_definitions set dingtalk_active_workflow_id = ? where id = ?",
-        oldId,
-        taskId);
-
-    assertThat(store.acquireForRestart(clientId, oldId)).contains(currentId);
-    assertThat(taskLaunches.activeWorkflowId(taskId)).contains(currentId);
-    assertThat(store.binding(oldId).orElseThrow().status()).isEqualTo("terminal");
-    store.reconcileRuntimeStatus(clientId, oldId, "completed");
-    assertThat(taskLaunches.activeWorkflowId(taskId)).contains(currentId);
-    assertThat(store.active(clientId, message("check"))).isEmpty();
-  }
-
-  @Test
   void advanceQuoteAndDeliveryTimeSurviveRetry() {
     String client = "advance-" + UUID.randomUUID();
     createTask(client);
@@ -509,7 +428,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
             .workflowId();
     store.recordAdvance(workflow, 1, "11111111111111111111111111111111", "第1步完成，请确认继续");
     var item =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(row -> workflow.equals(row.workflowId()))
             .findFirst()
             .orElseThrow();
@@ -541,10 +460,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
         java.time.Instant.now().minusSeconds(5),
         item.id());
     var retry =
-        store.claimDue().stream()
-            .filter(row -> row.id().equals(item.id()))
-            .findFirst()
-            .orElseThrow();
+        claimDueNow().stream().filter(row -> row.id().equals(item.id())).findFirst().orElseThrow();
     assertThat(java.time.Instant.parse(retry.payload().path("deliveredAt").asText()))
         .isEqualTo(sentAt.truncatedTo(java.time.temporal.ChronoUnit.MICROS));
     store.markOutboxSent(item.id(), "sent-advance");
@@ -563,7 +479,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
             workflow,
             "22222222222222222222222222222222");
     var next =
-        store.claimDue().stream().filter(row -> nextId.equals(row.id())).findFirst().orElseThrow();
+        claimDueNow().stream().filter(row -> nextId.equals(row.id())).findFirst().orElseThrow();
     assertThat(next.payload().path("text").asText()).contains("第2次等待确认");
     // 会话回复可能没有消息编号，两轮相同业务正文仍必须分别定位。
     store.markAdvanceDelivered(nextId, null, java.time.Instant.now());
@@ -615,7 +531,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
                 workflow))
         .isEqualTo(1);
     var notice =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(row -> workflow.equals(row.workflowId()))
             .findFirst()
             .orElseThrow();
@@ -634,7 +550,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
     String workflow = store.reserveStart(client, message("fallback-start")).workflowId();
     store.recordAdvance(workflow, 1, "11111111111111111111111111111111", "请确认继续");
     var notice =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(row -> workflow.equals(row.workflowId()))
             .findFirst()
             .orElseThrow();
@@ -647,7 +563,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
             .put("createdAt", "2026-09-09T06:33:10Z");
     store.recordProcess(workflow, null, 2, "执行进度", false, false, event);
     var process =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(row -> workflow.equals(row.workflowId()))
             .findFirst()
             .orElseThrow();
@@ -655,7 +571,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
     store.markOutboxSent(process.id(), "process-sent");
     store.recordHeld(workflow, 3, "已保持等待");
     var held =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(row -> workflow.equals(row.workflowId()))
             .findFirst()
             .orElseThrow();
@@ -756,49 +672,6 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
         .get()
         .extracting(DingTalkModels.Binding::workflowId)
         .isEqualTo(currentId);
-  }
-
-  @Test
-  void restartAndNewWebRunCannotBothAcquireTheTask() throws Exception {
-    String clientId = "app-" + UUID.randomUUID();
-    String taskId = createTask(clientId);
-    String oldId = store.reserveStart(clientId, message("restart-source")).workflowId();
-    store.reconcileRuntimeStatus(clientId, oldId, "completed");
-    CountDownLatch start = new CountDownLatch(1);
-    ExecutorService executor = Executors.newFixedThreadPool(2);
-    try {
-      Future<Boolean> restarted =
-          executor.submit(
-              () -> {
-                start.await();
-                return store.acquireForRestart(clientId, oldId).isEmpty();
-              });
-      Future<String> web =
-          executor.submit(
-              () -> {
-                start.await();
-                try {
-                  return taskLaunches.reserveLatest(taskId).prepared().workflowId();
-                } catch (ConflictFailure busy) {
-                  return null;
-                }
-              });
-      start.countDown();
-      boolean acquired = restarted.get(10, TimeUnit.SECONDS);
-      String webId = web.get(10, TimeUnit.SECONDS);
-      assertThat(acquired).isEqualTo(webId == null);
-      assertThat(taskLaunches.activeWorkflowId(taskId)).contains(acquired ? oldId : webId);
-      if (acquired) {
-        assertThat(store.acquireForRestart(clientId, oldId)).isEmpty();
-        store.releaseRestartReservation(clientId, oldId);
-        assertThat(taskLaunches.activeWorkflowId(taskId)).isEmpty();
-        assertThat(store.active(clientId, message("check"))).isEmpty();
-      } else {
-        assertThat(store.active(clientId, message("check"))).isEmpty();
-      }
-    } finally {
-      executor.shutdownNow();
-    }
   }
 
   @Test
@@ -957,8 +830,9 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
         message.messageId(),
         "当前绑定已有任务运行，任务编号：" + busy.workflowId());
 
+    makePendingMessagesDue();
     DingTalkModels.Outbox outgoing =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(item -> message.messageId().equals(item.replyToMessageId()))
             .findFirst()
             .orElseThrow();
@@ -994,7 +868,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
         "**状态：** 运行中");
 
     DingTalkModels.Outbox item =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(row -> reservation.workflowId().equals(row.workflowId()))
             .findFirst()
             .orElseThrow();
@@ -1023,7 +897,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
     store.enqueueProgressMarkdown(
         "proactive-progress-" + binding.workflowId(), binding.workflowId(), "任务进度", "**状态：** 等待开始");
     DingTalkModels.Outbox outgoing =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(item -> binding.workflowId().equals(item.workflowId()))
             .findFirst()
             .orElseThrow();
@@ -1100,7 +974,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
                 false))
         .isFalse();
     List<DingTalkModels.Outbox> claimed =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(row -> binding.workflowId().equals(row.workflowId()))
             .toList();
     assertThat(claimed).hasSize(1);
@@ -1215,8 +1089,9 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
     store.ensureConversation(clientId, workflowId, taskId, question, "running");
     var incoming = store.registerInbound(clientId, store.route(workflowId, question), question);
     store.completeReply(workflowId, incoming.workflowMessageId(), 10, "回答", "action-1");
+    makePendingMessagesDue();
     var outgoing =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(item -> workflowId.equals(item.workflowId()))
             .findFirst()
             .orElseThrow();
@@ -1231,7 +1106,6 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
             "quote", "another-group", "2", "bob", "确认执行", true, false, "real-reply-id");
     assertThat(store.conversation(clientId, quoted).orElseThrow().workflowId())
         .isEqualTo(workflowId);
-    assertThat(store.quotedAction(quoted)).isEqualTo("action-1");
     // Session replies may return no usable message ID: parsed nested text must match the sent
     // reply.
     var callback = objectMapper.createObjectNode();
@@ -1246,14 +1120,12 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
             .toMessage(callback.toString());
     assertThat(store.conversation(clientId, parsed).orElseThrow().workflowId())
         .isEqualTo(workflowId);
-    assertThat(store.quotedAction(parsed)).isEqualTo("action-1");
     assertThat(store.conversation("another-client", parsed)).isEmpty();
     callback.put("conversationId", "unrelated-group");
     var unrelated =
         new OfficialDingTalkTransport(new DingTalkProperties(), objectMapper)
             .toMessage(callback.toString());
     assertThat(store.conversation(clientId, unrelated)).isEmpty();
-    assertThat(store.quotedAction(unrelated)).isNull();
   }
 
   @Test
@@ -1386,6 +1258,7 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
   }
 
   private List<DingTalkModels.Outbox> drainOutbox() {
+    makePendingMessagesDue();
     var delivered = new java.util.ArrayList<DingTalkModels.Outbox>();
     for (int i = 0; i < 200; i++) {
       var batch = store.claimDue(1);
@@ -1394,6 +1267,23 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
       delivered.addAll(batch);
     }
     throw new AssertionError("发送队列未在测试上限内清空");
+  }
+
+  private void makePendingMessagesDue() {
+    // 队列顺序测试不依赖 Instant 纳秒与数据库微秒精度的舍入时刻。
+    new TransactionTemplate(transactions)
+        .executeWithoutResult(
+            status -> {
+              entityManager.flush();
+              jdbc.update(
+                  "UPDATE codex_sop_dingtalk_outbox SET next_attempt_at='2000-01-01 00:00:00' WHERE status='pending'");
+              entityManager.clear();
+            });
+  }
+
+  private List<DingTalkModels.Outbox> claimDueNow() {
+    makePendingMessagesDue();
+    return store.claimDue();
   }
 
   @Test
@@ -1449,28 +1339,27 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
         client + "4", firstWorkflow, group + "2", "GROUP", group + "2", null, "其他群");
     entityManager.flush();
     var batch =
-        store.claimDue().stream().filter(item -> item.conversationId().startsWith(group)).toList();
+        claimDueNow().stream().filter(item -> item.conversationId().startsWith(group)).toList();
     assertThat(batch)
         .extracting(item -> item.payload().path("text").asText())
         .containsExactly("开始", "其他任务", "其他群");
-    assertThat(store.claimDue()).noneMatch(item -> group.equals(item.conversationId()));
+    assertThat(claimDueNow()).noneMatch(item -> group.equals(item.conversationId()));
     var first = batch.get(0);
     store.markOutboxFailed(first.id(), new IllegalStateException("临时失败"));
     entityManager.flush();
     jdbc.update(
         "update codex_sop_dingtalk_outbox set next_attempt_at = '2099-01-01 00:00:00' where id = ?",
         first.id());
-    assertThat(store.claimDue()).noneMatch(item -> group.equals(item.conversationId()));
+    assertThat(claimDueNow()).noneMatch(item -> group.equals(item.conversationId()));
     jdbc.update(
         "update codex_sop_dingtalk_outbox set next_attempt_at = '2000-01-01 00:00:00' where id = ?",
         first.id());
     entityManager.clear();
     var retried =
-        store.claimDue().stream().filter(item -> group.equals(item.conversationId())).toList();
+        claimDueNow().stream().filter(item -> group.equals(item.conversationId())).toList();
     assertThat(retried).extracting(DingTalkModels.Outbox::id).containsExactly(first.id());
     store.markOutboxSent(first.id(), "sent");
-    assertThat(
-            store.claimDue().stream().filter(item -> group.equals(item.conversationId())).toList())
+    assertThat(claimDueNow().stream().filter(item -> group.equals(item.conversationId())).toList())
         .extracting(item -> item.payload().path("text").asText())
         .containsExactly("完成");
   }
@@ -1481,17 +1370,19 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
     String group = "chunks-" + UUID.randomUUID();
     String body = "甲".repeat(850) + "乙".repeat(850) + "丙".repeat(300);
     store.enqueueTargetText(group, null, group, "GROUP", group, null, body);
+    makePendingMessagesDue();
     var first =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(item -> group.equals(item.conversationId()))
             .findFirst()
             .orElseThrow();
     assertThat(first.payload().path("text").asText()).isEqualTo("甲".repeat(850));
-    assertThat(store.claimDue()).noneMatch(item -> group.equals(item.conversationId()));
+    assertThat(claimDueNow()).noneMatch(item -> group.equals(item.conversationId()));
     store.initialize("app");
     entityManager.flush();
+    makePendingMessagesDue();
     var recovered =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(item -> group.equals(item.conversationId()))
             .findFirst()
             .orElseThrow();
@@ -1509,14 +1400,13 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
         "会话回复");
     store.enqueueTargetText(group + "next", null, group, "GROUP", group, null, "后续正文");
     var reply =
-        store.claimDue().stream()
+        claimDueNow().stream()
             .filter(item -> group.equals(item.conversationId()))
             .findFirst()
             .orElseThrow();
     assertThat(reply.messageKind()).isEqualTo("reply");
     store.markOutboxFailed(reply.id(), new IllegalStateException("会话已过期"));
-    assertThat(
-            store.claimDue().stream().filter(item -> group.equals(item.conversationId())).toList())
+    assertThat(claimDueNow().stream().filter(item -> group.equals(item.conversationId())).toList())
         .extracting(item -> item.payload().path("text").asText())
         .containsExactly("后续正文");
   }

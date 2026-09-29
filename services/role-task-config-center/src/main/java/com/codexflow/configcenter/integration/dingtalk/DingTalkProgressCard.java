@@ -251,14 +251,6 @@ class DingTalkProgressCard {
       value.append(markdown ? "\n\n**当前步骤：** 等待调度" : "\n当前步骤：等待调度");
     }
 
-    JsonNode retryPolicy = snapshot.path("retryPolicy");
-    if (retryPolicy.isObject() && retryPolicy.path("maxRetries").asInt() > 0) {
-      value
-          .append(markdown ? "\n\n**剩余返工：** " : "\n剩余返工：")
-          .append(retryPolicy.path("remainingRetries").asInt())
-          .append(" 次");
-    }
-
     appendNodes(value, snapshot.path("nodes"), markdown);
     appendLatestOutput(value, snapshot.path("nodes"), markdown);
 

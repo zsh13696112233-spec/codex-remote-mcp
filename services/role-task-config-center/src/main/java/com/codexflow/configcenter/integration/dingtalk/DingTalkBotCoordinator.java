@@ -275,7 +275,6 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         snapshot.path("status").asText());
     DingTalkModels.Binding route = store.route(workflowId, message);
     message = message.withContent(explicit == null ? command : parts.length == 2 ? parts[1] : "");
-    if (message.imageCodes().isEmpty() && handleTextAdvanceControl(route, message)) return;
     forwardToAssistant(route, message);
   }
 
@@ -321,6 +320,17 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   private void forwardToAssistant(DingTalkModels.Binding binding, DingTalkModels.Message message) {
     String text = message.content();
     String workflowId = binding.workflowId();
+    String quotedGate = store.quotedAdvance(message);
+    if (quotedGate != null
+        && !quotedGate.equals(
+            gateway
+                .get("/workflows/" + workflowId)
+                .path("pendingAdvance")
+                .path("gateId")
+                .asText())) {
+      reply(message, workflowId, "引用的等待已结束，请引用当前等待消息讨论。");
+      return;
+    }
     if (text.length() > 4000 || message.imageCodes().size() > 5) {
       reply(message, workflowId, "每条消息最多 4000 个字符和 5 张图片。");
       return;
@@ -328,13 +338,15 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     DingTalkModels.Inbound inbound =
         store.registerInbound(properties.getClientId(), binding, message);
     if (!"accepted".equals(inbound.status())) return;
-    boolean restartReserved = false;
     try {
       // 首次入站即保持等待；同一编号重试不会保持后续新等待。
       JsonNode observation =
           gateway.post(
               "/workflows/" + workflowId + "/input-observations",
-              objectMapper.createObjectNode().put("messageId", inbound.workflowMessageId()));
+              objectMapper
+                  .createObjectNode()
+                  .put("messageId", inbound.workflowMessageId())
+                  .put("receiving", !text.isBlank()));
       if (observation != null)
         store.recordInputGate(message.messageId(), observation.path("gateId").asText(null));
       var imageIds =
@@ -358,36 +370,15 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         return;
       }
       String actor = properties.getClientId() + ":" + message.senderUserId();
-      String actionId = null;
-      if ("确认执行".equals(text) || "取消操作".equals(text)) {
-        JsonNode pending = gateway.get("/workflows/" + workflowId).path("pendingControl");
-        actionId =
-            (!hasText(message.replyToMessageId()) && !hasText(message.quotedText()))
-                ? pending.path("actionId").asText(null)
-                : store.quotedAction(message);
-        if (actionId == null
-            || !actor.equals(pending.path("actorId").asText())
-            || !actionId.equals(pending.path("actionId").asText())) {
-          throw new IllegalArgumentException("请由提议人携带工作流编号，或引用本人有效的确认消息操作。");
-        }
-        if ("确认执行".equals(text) && "restart_from".equals(pending.path("type").asText())) {
-          var busy = store.acquireForRestart(properties.getClientId(), workflowId);
-          if (busy.isPresent()) throw new IllegalArgumentException("该任务已有其他运行，暂不能返工。");
-          restartReserved = true;
-        }
-      }
       ObjectNode request =
           objectMapper
               .createObjectNode()
               .put("messageId", inbound.workflowMessageId())
               .put("text", text)
               .put("actorId", actor);
-      if (actionId != null) request.put("expectedActionId", actionId);
       request.set("imageIds", objectMapper.valueToTree(imageIds));
       gateway.post("/workflows/" + workflowId + "/messages", request);
     } catch (RuntimeException error) {
-      if (restartReserved && !workflowBecameActive(workflowId))
-        store.releaseRestartReservation(properties.getClientId(), workflowId);
       store.markInboundFinished(workflowId, inbound.workflowMessageId(), true);
       reply(
           message,
@@ -395,15 +386,18 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           error instanceof IllegalArgumentException
               ? error.getMessage()
               : "图片或消息未能交给任务助手，请检查格式后重新发送。");
-    }
-  }
-
-  private boolean workflowBecameActive(String workflowId) {
-    try {
-      String status = gateway.get("/workflows/" + workflowId).path("status").asText();
-      return Set.of("queued", "running", "cancelling").contains(status);
-    } catch (RuntimeException ignored) {
-      return false;
+    } finally {
+      try {
+        gateway.post(
+            "/workflows/" + workflowId + "/input-observations",
+            objectMapper
+                .createObjectNode()
+                .put("messageId", inbound.workflowMessageId())
+                .put("hold", false)
+                .put("receiving", false));
+      } catch (RuntimeException error) {
+        LOGGER.warn("消息接收状态尚未解除，保持等待并等待同一消息重试。", error);
+      }
     }
   }
 
@@ -414,70 +408,6 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     } catch (RuntimeException ignored) {
       return false;
     }
-  }
-
-  private boolean handleTextAdvanceControl(
-      DingTalkModels.Binding binding, DingTalkModels.Message message) {
-    String command = normalizedCommand(message.content());
-    String action =
-        switch (command) {
-          case "暂停", "暂停一下", "等一下", "暂停，暂不进入下一步" -> "hold";
-          case "确认继续", "继续", "立即进入下一步", "继续进入下一步" -> "confirm";
-          default -> null;
-        };
-    if (action == null) return false;
-
-    DingTalkModels.Inbound inbound = null;
-    try {
-      JsonNode snapshot = gateway.get("/workflows/" + binding.workflowId());
-      String gateId = snapshot.path("pendingAdvance").path("gateId").asText();
-      String quotedGate = store.quotedAdvance(message);
-      if ("confirm".equals(action) && message.quotedCard() && quotedGate == null) {
-        reply(message, binding.workflowId(), "已识别任务，但无法确认这张引用卡片对应的等待。请点击当前等待卡片的“继续执行”按钮。");
-        return true;
-      }
-      if (quotedGate != null && !quotedGate.equals(gateId)) {
-        reply(message, binding.workflowId(), "引用的等待已结束，请引用当前等待消息操作。");
-        return true;
-      }
-      if (!isGateId(gateId)) {
-        inbound = store.registerInbound(properties.getClientId(), binding, message);
-        gateway.post(
-            "/workflows/" + binding.workflowId() + "/input-observations",
-            objectMapper
-                .createObjectNode()
-                .put("messageId", inbound.workflowMessageId())
-                .put("hold", !"confirm".equals(action)));
-        reply(message, binding.workflowId(), "当前没有等待确认的步骤。");
-        return true;
-      }
-      inbound = store.registerInbound(properties.getClientId(), binding, message);
-      JsonNode observed =
-          gateway.post(
-              "/workflows/" + binding.workflowId() + "/input-observations",
-              objectMapper
-                  .createObjectNode()
-                  .put("messageId", inbound.workflowMessageId())
-                  .put("hold", !"confirm".equals(action)));
-      if (!gateId.equals(observed.path("gateId").asText())) {
-        reply(message, binding.workflowId(), "该消息对应的等待已结束，请重新发送。");
-        store.markInboundFinished(binding.workflowId(), inbound.workflowMessageId(), false);
-        return true;
-      }
-      gateway.post(
-          "/workflows/" + binding.workflowId() + "/advance/" + gateId + "/" + action, null);
-      store.markInboundFinished(binding.workflowId(), inbound.workflowMessageId(), false);
-      reply(
-          message,
-          binding.workflowId(),
-          "hold".equals(action) ? "已保持等待，请回复“确认继续”。" : "已确认，任务将继续下一步。");
-    } catch (RuntimeException error) {
-      reply(message, binding.workflowId(), "步骤等待可能已结束，请查询当前进度后重试。");
-    } finally {
-      if (inbound != null)
-        store.markInboundFinished(binding.workflowId(), inbound.workflowMessageId(), false);
-    }
-    return true;
   }
 
   private void enqueueBindingText(
@@ -520,57 +450,12 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         Map.of("updateCardDataByKey", true));
   }
 
-  private boolean handleRestartCard(
-      DingTalkModels.CardAction event, String workflowId, boolean confirm) {
-    String controlId = stringValue(event.value(), "controlId", null);
-    if (!isUuid(workflowId) || !hasText(controlId) || controlId.length() > 128) return false;
-    var source =
-        store.controlCardMessage(event, properties.getClientId(), workflowId, controlId, confirm);
-    var binding = store.binding(workflowId);
-    if (source.isEmpty() || binding.isEmpty()) return false;
-    JsonNode snapshot = gateway.get("/workflows/" + workflowId);
-    JsonNode pending = snapshot.path("pendingControl");
-    if (!controlId.equals(pending.path("actionId").asText())
-        || !(stringValue(event.value(), "action", event.actionId()).startsWith("stop_")
-                ? "stop"
-                : "restart_from")
-            .equals(pending.path("type").asText())
-        || !"pending".equals(pending.path("status").asText())
-        || !(properties.getClientId() + ":" + event.operatorUserId())
-            .equals(pending.path("actorId").asText())
-        || !Instant.parse(pending.path("expiresAt").asText()).isAfter(Instant.now())) {
-      store.refreshWaitingCards(workflowId, snapshot);
-      return false;
-    }
-    boolean reserved = false;
-    try {
-      if (confirm && "restart_from".equals(pending.path("type").asText())) {
-        if (store.acquireForRestart(properties.getClientId(), workflowId).isPresent()) return false;
-        reserved = true;
-      }
-      var inbound = store.registerInbound(properties.getClientId(), binding.get(), source.get());
-      var request =
-          objectMapper
-              .createObjectNode()
-              .put("messageId", inbound.workflowMessageId())
-              .put("text", source.get().content())
-              .put("actorId", properties.getClientId() + ":" + event.operatorUserId())
-              .put("expectedActionId", controlId);
-      gateway.post("/workflows/" + workflowId + "/messages", request);
-      return true; // 仅表示提交成功；执行结果由原有任务助手事件返回。
-    } catch (RuntimeException error) {
-      if (reserved && !workflowBecameActive(workflowId))
-        store.releaseRestartReservation(properties.getClientId(), workflowId);
-      throw error;
-    }
-  }
-
   private boolean handleAction(DingTalkModels.CardAction event) {
     String action = stringValue(event.value(), "action", event.actionId());
     String workflowId = stringValue(event.value(), "workflowId", null);
     String gateId = stringValue(event.value(), "gateId", null);
     if (List.of("restart_confirm", "restart_cancel", "stop_confirm", "stop_cancel")
-        .contains(action)) return handleRestartCard(event, workflowId, action.endsWith("_confirm"));
+        .contains(action)) return false; // 升级前的控制卡片已失效。
     if (!isUuid(workflowId) || !isGateId(gateId)) return false;
     Optional<DingTalkModels.Binding> binding = store.binding(workflowId);
     if (binding.isEmpty()) return false;
@@ -755,18 +640,15 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       boolean waitingReply =
           isGateId(replyGate)
               && !"closed".equals(DingTalkWaitingCard.state(replySnapshot, replyGate));
-      if (waitingReply
-          || (List.of("restart_from", "stop")
-                  .contains(replySnapshot.path("pendingControl").path("type").asText())
-              && payload
-                  .path("actionId")
-                  .asText()
-                  .equals(replySnapshot.path("pendingControl").path("actionId").asText()))) {
+      String answerText = failed ? "暂时无法完成回复，请重试核对执行结果。" : payload.path("text").asText();
+      if (payload.has("stepNumber"))
+        answerText = "第" + payload.path("stepNumber").asInt() + "步执行者：\n" + answerText;
+      if (waitingReply) {
         store.completeReply(
             binding.workflowId(),
             workflowMessageId,
             sequence,
-            failed ? "任务助手暂时无法完成回复，请稍后重试。" : payload.path("text").asText(),
+            answerText,
             payload.path("actionId").asText(null),
             replySnapshot);
       } else {
@@ -774,7 +656,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
             binding.workflowId(),
             workflowMessageId,
             sequence,
-            failed ? "任务助手暂时无法完成回复，请稍后重试。" : payload.path("text").asText(),
+            answerText,
             payload.path("actionId").asText(null));
       }
       finishAssistantEvent(binding, workflowMessageId, failed);
@@ -786,7 +668,8 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           String heldGate = heldSnapshot.path("pendingAdvance").path("gateId").asText();
           if (isGateId(heldGate)
               && heldGate.equals(payload.path("gateId").asText())
-              && "held".equals(DingTalkWaitingCard.state(heldSnapshot, heldGate))) {
+              && Set.of("held", "busy")
+                  .contains(DingTalkWaitingCard.state(heldSnapshot, heldGate))) {
             store.recordWaitingCard(binding.workflowId(), sequence, heldSnapshot, false);
           } else {
             store.recordEvent(
@@ -1106,7 +989,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         + "已完成，下一步"
         + next
         + "。\n"
-        + "请引用本消息回复“确认继续”，立即开始下一步。\n"
+        + "请点击等待卡片的“继续执行”按钮，交接最新总结。\n"
         + "两分钟内未回复将自动继续。\n"
         + "如需提问或暂缓，请回复本消息，任务将保持等待。";
   }
@@ -1181,7 +1064,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       case "node.cancelled" -> "已取消。";
       case "node.timed_out" -> "执行超时。";
       case "step.advance.waiting" -> "等待进入下一步，可通过编号暂停或继续。";
-      case "step.advance.held" -> "已保持等待，请回复“确认继续”进入下一步。";
+      case "step.advance.held" -> "已保持等待，可与本步骤执行者讨论；完成后点击继续按钮。";
       case "step.advance.confirmed", "step.advance.resumed" -> "已确认继续，等待下一步启动。";
       case "step.advance.timed_out" -> "两分钟等待已结束，任务已自动继续。";
       case "workflow.completed" -> "任务已完成。";

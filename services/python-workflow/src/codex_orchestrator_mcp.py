@@ -1258,6 +1258,8 @@ class Orchestrator:
                         )
 
                         job.thread_id = self._extract_id(thread_result, "thread")
+                        if job.requested_thread_id and job.thread_id != job.requested_thread_id:
+                            raise RuntimeError("执行会话恢复结果不匹配，未启动新的执行轮次。")
                         if job.input_images:
                             stage = "image/stage"
                             image_dir = remote_path_join(agent.artifact_root, "conversation-inputs", job.job_id)
@@ -2104,90 +2106,6 @@ def workflow_status(workflow_id: str) -> dict[str, Any]:
     }
 
 
-def propose_workflow_control(
-    workflow_id: str, action_type: str, message_id: str, node_id: str | None = None
-) -> dict[str, Any]:
-    """网关内部兼容入口；不会暴露为主监督可调用的 MCP 工具。"""
-    snapshot = get_workflow_store().get_workflow(workflow_id)
-    if action_type == "stop":
-        if snapshot["status"] in {"completed", "cancelled"}:
-            raise ValueError("当前任务已经结束，不能停止。")
-        node_id = None
-    elif action_type in {"retry", "restart_from", "skip"}:
-        node = next((item for item in snapshot["nodes"] if item["id"] == node_id), None)
-        if node is None:
-            raise ValueError("必须指定存在的步骤。")
-        if action_type == "skip" and node["status"] in {"completed", "skipped"}:
-            raise ValueError("已完成或已跳过的步骤不能跳过。")
-    else:
-        raise ValueError("只支持停止任务、重试步骤和跳过步骤。")
-    return get_workflow_store().propose_control(
-        workflow_id, action_type, node_id, message_id
-    )
-
-
-def cancel_workflow_control(workflow_id: str, message_id: str) -> dict[str, Any]:
-    """取消当前等待确认的聊天控制操作。"""
-    return get_workflow_store().cancel_pending_control(workflow_id, message_id)
-
-
-async def execute_workflow_control(
-    workflow_id: str, action_id: str, confirmation_message_id: str
-) -> dict[str, Any]:
-    """执行已经由另一条“确认执行”消息确认的控制操作。"""
-    store = get_workflow_store()
-    confirmed = store.confirm_control(workflow_id, action_id, confirmation_message_id)
-    action = store.start_control_execution(action_id)
-    try:
-        snapshot = store.get_workflow(workflow_id)
-        if action["actionType"] in {"retry", "restart_from"}:
-            targets = store.get_nodes_from(workflow_id, str(action["nodeId"]))
-        elif action["actionType"] == "stop":
-            targets = snapshot["nodes"]
-        else:
-            targets = [
-                next(item for item in snapshot["nodes"] if item["id"] == action["nodeId"])
-            ]
-        for node in targets:
-            job_id = node.get("jobId")
-            is_active = node["status"] in {"queued", "running", "cancelling"}
-            if is_active and job_id not in orchestrator.jobs:
-                if not node.get("threadId") or not node.get("turnId"):
-                    raise RuntimeError("当前无法安全中止正在执行的步骤，请稍后重试控制操作。")
-                await orchestrator.interrupt_turn(
-                    agent_id=node["agentId"],
-                    thread_id=node["threadId"],
-                    turn_id=node["turnId"],
-                )
-            if job_id and job_id in orchestrator.jobs:
-                job = await orchestrator.cancel(job_id)
-                if not job.completed.is_set():
-                    job = await orchestrator.wait(job_id, 10)
-                if not job.completed.is_set() and action["actionType"] in {
-                    "retry", "restart_from", "skip"
-                }:
-                    raise RuntimeError("步骤尚未完全停止，暂不能重试或跳过，请稍后再试。")
-                _sync_workflow_job(workflow_id, node["id"], job)
-
-        if action["actionType"] == "stop":
-            result = store.stop_workflow(workflow_id)
-        elif action["actionType"] in {"retry", "restart_from"}:
-            result = store.restart_from_node(
-                workflow_id, str(action["nodeId"]), action_id=action_id
-            )
-        else:
-            result = store.skip_node(workflow_id, str(action["nodeId"]))
-        public_result = {
-            "workflowId": workflow_id,
-            "status": result["status"],
-            "actionType": action["actionType"],
-            "nodeId": action["nodeId"],
-        }
-        store.finish_control_execution(action_id, result=public_result)
-        return public_result
-    except Exception as error:
-        store.finish_control_execution(action_id, error=str(error))
-        raise
 
 
 def main() -> None:

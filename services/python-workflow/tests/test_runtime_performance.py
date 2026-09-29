@@ -152,19 +152,19 @@ class RuntimePerformanceTests(unittest.TestCase):
         self.store.update_assistant("one", {**snapshot, "turn_id": "next"})
         self.assertNotEqual(self.store.poll_workflow("one")["revision"], changed["revision"])
 
-    def test_task_scope_blocks_create_and_restart_across_supervisors(self):
+    def test_task_scope_blocks_create_across_supervisors(self):
         self.store.create_workflow(spec("old", "task"))
-        self.store.stop_workflow("old")
+        self.store.cancel_workflow("old")
         other = spec("new", "task")
         other["supervisorAgentId"] = "another-supervisor"
         self.store.create_workflow(other)
         reopened_store = WorkflowStore(self.path)
         with self.assertRaisesRegex(ValueError, "其他运行"):
-            reopened_store.restart_from_node("old", "a")
+            reopened_store.create_workflow(spec("third", "task"))
         self.assertEqual(reopened_store.get_workflow("old")["retryPolicy"]["usedRetries"], 0)
         self.assertEqual(reopened_store.get_workflow("old")["status"], "cancelled")
-        self.store.stop_workflow("new")
-        self.store.restart_from_node("old", "a")
+        self.store.cancel_workflow("new")
+        self.store.create_workflow(spec("replacement", "task"))
         with self.assertRaisesRegex(ValueError, "其他运行"):
             self.store.create_workflow(spec("third", "task"))
 
@@ -179,18 +179,16 @@ class RuntimePerformanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "其他运行"):
             self.store.create_workflow(spec("new", "task"))
 
-    def test_legacy_restart_fails_closed_until_task_scope_is_registered(self):
+    def test_legacy_binding_preserves_cancelled_run(self):
         self.store.create_workflow(spec("legacy"))
-        self.store.stop_workflow("legacy")
+        self.store.cancel_workflow("legacy")
         original = self.store.get_spec("legacy")
         original.pop("taskDefinitionId")
         with self.store._connect() as connection:
             connection.execute("UPDATE workflows SET spec_zlib = ? WHERE workflow_id = 'legacy'",
                                (zlib.compress(json.dumps(original).encode()),))
-        with self.assertRaisesRegex(ValueError, "升级登记"):
-            self.store.restart_from_node("legacy", "a")
         self.store.register_task_bindings("task", ["legacy"])
-        self.assertEqual(self.store.restart_from_node("legacy", "a")["status"], "queued")
+        self.assertEqual(self.store.get_workflow("legacy")["status"], "cancelled")
 
     def test_concurrent_submissions_acquire_only_one_task_scope(self):
         barrier = threading.Barrier(2)
@@ -287,7 +285,7 @@ class RuntimePerformanceTests(unittest.TestCase):
             connection.execute("UPDATE workflow_events SET payload_json = ?, payload_zlib = NULL WHERE sequence = ?",
                                (json.dumps(payload), sequence))
         self.assertEqual(self.store.compact_terminal_events("2100-01-01T00:00:00+00:00")["scanned"], 0)
-        self.store.stop_workflow("one")
+        self.store.cancel_workflow("one")
         script = Path(__file__).resolve().parents[3] / "scripts/compact_workflow_events.py"
         result = subprocess.run([sys.executable, str(script), "--db", str(self.path),
                                  "--before", "2100-01-01T00:00:00+00:00"], capture_output=True, text=True, check=True)

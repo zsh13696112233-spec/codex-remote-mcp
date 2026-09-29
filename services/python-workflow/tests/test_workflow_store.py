@@ -56,35 +56,7 @@ class WorkflowStoreTests(unittest.TestCase):
         self.store.sync_node_job("serial-demo", "a", {"status": "completed", "finished_at": utc_now()})
         return self.store.get_workflow("serial-demo")["pendingAdvance"]
 
-    def test_restart_resumes_only_target_thread(self) -> None:
-        self.store.create_workflow(serial_workflow())
-        for node in ("a", "b", "c"):
-            self.store.prepare_node_dispatch("serial-demo", node)
-            self.store.sync_node_job("serial-demo", node, {
-                "status": "completed", "thread_id": "thread-" + node,
-                "response": "旧产物", "finished_at": utc_now(),
-            })
-        self.store.restart_from_node("serial-demo", "b", revision_instruction="界面炫酷一点")
-        snapshot = self.store.get_workflow("serial-demo")
-        self.assertEqual(snapshot["nodes"][1]["threadId"], "thread-b")
-        self.assertIsNone(snapshot["nodes"][2]["threadId"])
-        dispatched = self.store.prepare_node_dispatch("serial-demo", "b")
-        self.assertEqual(dispatched["threadId"], "thread-b")
-        self.assertIn("基于本会话上一版产物", dispatched["prompt"])
-        self.assertIn("界面炫酷一点", dispatched["prompt"])
 
-    def test_pending_control_blocks_advance_until_cancelled(self) -> None:
-        gate = self.waiting_gate()
-        message = str(uuid.uuid4())
-        self.store.accept_chat_message("serial-demo", message, "停止")
-        self.store.propose_control("serial-demo", "stop", None, message)
-        with self.assertRaisesRegex(RuntimeError, "请先确认或取消"):
-            self.store.confirm_advance("serial-demo", gate["gateId"])
-        cancel = str(uuid.uuid4())
-        self.store.accept_chat_message("serial-demo", cancel, "取消操作")
-        self.store.cancel_pending_control("serial-demo", cancel)
-        self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "held")
-        self.store.confirm_advance("serial-demo", gate["gateId"])
 
     def test_notification_extends_once_and_survives_reload(self) -> None:
         gate = self.waiting_gate()
@@ -117,6 +89,7 @@ class WorkflowStoreTests(unittest.TestCase):
         message = str(uuid.uuid4())
         self.store.accept_chat_message("serial-demo", message, "解释一下结果")
         self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "held")
+        self.store.complete_chat_message("serial-demo", message, str(uuid.uuid4()), "解释完毕")
         self.store.confirm_advance("serial-demo", gate["gateId"])
         self.store.prepare_node_dispatch("serial-demo", "b")
         self.store.sync_node_job("serial-demo", "b", {"status": "completed", "finished_at": utc_now()})
@@ -147,19 +120,19 @@ class WorkflowStoreTests(unittest.TestCase):
                 self.store.prepare_node_dispatch(mode, "a")
                 message = str(uuid.uuid4())
                 self.store.observe_input(mode, message)
-                for control in (lambda: self.store.cancel_workflow(mode), lambda: self.store.skip_node(mode, "b"), lambda: self.store.restart_from_node(mode, "a")):
+                for control in (lambda: self.store.cancel_workflow(mode),):
                     with self.assertRaisesRegex(RuntimeError, "执行期间"):
                         control()
                 self.store.sync_node_job(mode, "a", {"status": "completed", "finished_at": utc_now()})
                 self.store.accept_chat_message(mode, message, "退回第一步")
-                with self.assertRaisesRegex(RuntimeError, "执行期间"):
-                    self.store.propose_control(mode, "restart_from", "a", message)
+                self.assertIsNone(self.store.discussion_target(mode, message))
                 self.assertEqual(self.store.get_workflow(mode)["retryPolicy"]["usedRetries"], 0)
 
     def test_legacy_message_retry_cannot_capture_current_wait(self) -> None:
         gate = self.waiting_gate()
         message = str(uuid.uuid4())
         self.store.accept_chat_message("serial-demo", message, "原来的提问")
+        self.store.complete_chat_message("serial-demo", message, str(uuid.uuid4()), "已回答")
         self.store.confirm_advance("serial-demo", gate["gateId"])
         self.store.prepare_node_dispatch("serial-demo", "b")
         self.store.sync_node_job("serial-demo", "b", {"status": "completed", "finished_at": utc_now()})
@@ -168,18 +141,6 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertEqual(self.store.observe_input("serial-demo", message), {"gateId": None, "controlAllowed": False})
         self.assertEqual(self.store.get_workflow("serial-demo")["pendingAdvance"]["state"], "countdown")
 
-    def test_confirmed_control_blocks_dispatch_until_finished(self) -> None:
-        gate = self.waiting_gate()
-        message = str(uuid.uuid4())
-        self.store.accept_chat_message("serial-demo", message, "跳过下一步")
-        action = self.store.propose_control("serial-demo", "skip", "b", message)
-        confirmation = str(uuid.uuid4())
-        self.store.accept_chat_message("serial-demo", confirmation, "确认执行")
-        self.store.confirm_control("serial-demo", action["actionId"], confirmation)
-        with self.assertRaisesRegex(RuntimeError, "请先确认或取消"):
-            self.store.confirm_advance("serial-demo", gate["gateId"])
-        with self.assertRaisesRegex(RuntimeError, "已确认的操作"):
-            self.store.prepare_node_dispatch("serial-demo", "b")
 
     def test_input_and_timeout_have_one_atomic_winner(self) -> None:
         gate = self.waiting_gate()
@@ -420,28 +381,6 @@ class WorkflowStoreTests(unittest.TestCase):
         self.store.cancel_workflow("serial-demo")
         self.assertFalse(self.store.has_supervisor_lease("serial-demo"))
 
-    def test_restart_uses_existing_lease_or_returns_to_queue(self) -> None:
-        value = serial_workflow()
-        value["supervisorAgentId"] = "supervisor-a"
-        self.store.create_workflow(value)
-        self.store.claim_next_workflow("supervisor-a")
-        self.store.prepare_node_dispatch("serial-demo", "a")
-        self.store.sync_node_job(
-            "serial-demo",
-            "a",
-            {"status": "completed", "response": "A", "finished_at": utc_now()},
-        )
-
-        active_restart = self.store.restart_from_node("serial-demo", "b")
-        self.assertEqual(active_restart["status"], "running")
-        self.assertTrue(self.store.has_supervisor_lease("serial-demo"))
-
-        self.store.finish_workflow(
-            "serial-demo", supervisor_status="failed", response=None, error="结束本轮"
-        )
-        terminal_restart = self.store.restart_from_node("serial-demo", "b")
-        self.assertEqual(terminal_restart["status"], "queued")
-        self.assertFalse(self.store.has_supervisor_lease("serial-demo"))
 
     def test_restart_recovery_fails_active_workflows_and_preserves_queue(self) -> None:
         active = serial_workflow()
@@ -614,32 +553,6 @@ class WorkflowStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "严格串行"):
             WorkflowStore.normalize_spec(value)
 
-    def test_semi_automatic_restart_and_stop_supersede_old_waits(self) -> None:
-        value = serial_workflow()
-        value["advanceMode"] = "semi_automatic"
-        self.store.create_workflow(value)
-        self.store.prepare_node_dispatch("serial-demo", "a")
-        self.store.sync_node_job(
-            "serial-demo", "a", {"status": "completed", "finished_at": utc_now()}
-        )
-        first_gate = self.store.get_workflow("serial-demo")["pendingAdvance"]["gateId"]
-        self.store.hold_advance("serial-demo", first_gate)
-
-        restarted = self.store.restart_from_node("serial-demo", "b")
-        self.assertIsNone(restarted["pendingAdvance"])
-        with self.assertRaisesRegex(RuntimeError, "失效"):
-            self.store.confirm_advance("serial-demo", first_gate)
-
-        self.store.prepare_node_dispatch("serial-demo", "b")
-        self.store.sync_node_job(
-            "serial-demo", "b", {"status": "completed", "finished_at": utc_now()}
-        )
-        second_gate = self.store.get_workflow("serial-demo")["pendingAdvance"]["gateId"]
-        self.store.hold_advance("serial-demo", second_gate)
-        stopped = self.store.stop_workflow("serial-demo")
-        self.assertIsNone(stopped["pendingAdvance"])
-        with self.assertRaisesRegex(RuntimeError, "失效"):
-            self.store.confirm_advance("serial-demo", second_gate)
 
     def test_cancelling_held_workflow_supersedes_the_wait(self) -> None:
         value = serial_workflow()
@@ -669,7 +582,7 @@ class WorkflowStoreTests(unittest.TestCase):
         skipped = serial_workflow()
         skipped["advanceMode"] = "semi_automatic"
         self.store.create_workflow(skipped)
-        self.store.skip_node("serial-demo", "a")
+        self.store.sync_node_job("serial-demo", "a", {"status": "skipped"})
         self.assertIsNone(self.store.get_workflow("serial-demo")["pendingAdvance"])
         self.assertFalse(
             self.store.prepare_node_dispatch("serial-demo", "b")["alreadyDispatched"]
@@ -816,243 +729,25 @@ class WorkflowStoreTests(unittest.TestCase):
         )
         self.assertEqual(accepted["workflowStatusAtAcceptance"], "completed")
 
-    def test_control_requires_separate_exact_confirmation(self) -> None:
-        self.store.create_workflow(serial_workflow())
-        proposed_message = str(uuid.uuid4())
-        confirmation_message = str(uuid.uuid4())
-        self.store.accept_chat_message("serial-demo", proposed_message, "跳过第1步")
-        action = self.store.propose_control("serial-demo", "skip", "a", proposed_message)
-        with self.assertRaisesRegex(ValueError, "单独回复"):
-            self.store.confirm_control("serial-demo", action["actionId"], proposed_message)
-        self.store.accept_chat_message("serial-demo", confirmation_message, "确认执行")
-        confirmed = self.store.confirm_control(
-            "serial-demo", action["actionId"], confirmation_message
-        )
-        self.assertEqual(confirmed["actionType"], "skip")
 
     def test_skipped_dependency_allows_next_step(self) -> None:
         self.store.create_workflow(serial_workflow())
-        self.store.skip_node("serial-demo", "a")
+        self.store.sync_node_job("serial-demo", "a", {"status": "skipped"})
         next_step = self.store.prepare_node_dispatch("serial-demo", "b")
         self.assertIn("已跳过", next_step["prompt"])
         snapshot = self.store.get_workflow("serial-demo")
         self.assertEqual(snapshot["nodes"][0]["status"], "skipped")
         self.assertEqual(snapshot["retryPolicy"]["usedRetries"], 0)
         with self.assertRaisesRegex(RuntimeError, "执行期间"):
-            self.store.stop_workflow("serial-demo")
+            self.store.cancel_workflow("serial-demo")
         self.store.sync_node_job("serial-demo", "b", {"status": "completed", "finished_at": utc_now()})
-        stopped = self.store.stop_workflow("serial-demo")
+        stopped = self.store.cancel_workflow("serial-demo")
         self.assertEqual(stopped["retryPolicy"]["usedRetries"], 0)
 
-    def test_restart_from_archives_tail_and_consumes_one_shared_retry(self) -> None:
-        value = serial_workflow()
-        value["maxRetryCount"] = 2
-        self.store.create_workflow(value)
-        for node_id, response in (("a", "结果A"), ("b", "结果B"), ("c", "结果C")):
-            self.store.prepare_node_dispatch("serial-demo", node_id)
-            self.store.sync_node_job(
-                "serial-demo",
-                node_id,
-                {"status": "completed", "response": response, "finished_at": utc_now()},
-            )
-        png = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-        )
-        old_artifact = self.store.save_image_bytes(
-            "serial-demo", "b", "same-source", png
-        )
-        self.store.finish_workflow(
-            "serial-demo", supervisor_status="completed", response="完成", error=None
-        )
 
-        restarted = self.store.restart_from_node("serial-demo", "b")
 
-        self.assertEqual(restarted["status"], "queued")
-        self.assertEqual(restarted["retryPolicy"], {
-            "maxRetries": 2, "usedRetries": 1, "remainingRetries": 1,
-        })
-        self.assertEqual(restarted["nodes"][0]["response"], "结果A")
-        self.assertEqual(
-            [node["status"] for node in restarted["nodes"]],
-            ["completed", "pending", "pending"],
-        )
-        self.assertEqual(
-            [node["attemptCount"] for node in restarted["nodes"]], [0, 1, 1]
-        )
-        self.assertEqual(restarted["nodes"][1]["artifacts"], [])
-        with self.assertRaisesRegex(ValueError, "找不到工作流图片"):
-            self.store.get_artifact("serial-demo", old_artifact["id"])
-        new_artifact = self.store.save_image_bytes(
-            "serial-demo", "b", "same-source", png
-        )
-        self.assertNotEqual(new_artifact["id"], old_artifact["id"])
-        prompt = self.store.prepare_node_dispatch("serial-demo", "b")["prompt"]
-        self.assertIn("结果A", prompt)
-        with self.store._connect() as connection:
-            archived_nodes = connection.execute(
-                "SELECT node_id, attempt_number FROM workflow_node_attempts "
-                "WHERE workflow_id = ? ORDER BY node_id",
-                ("serial-demo",),
-            ).fetchall()
-            archived_images = connection.execute(
-                "SELECT node_id, attempt_number FROM workflow_attempt_artifacts "
-                "WHERE workflow_id = ?",
-                ("serial-demo",),
-            ).fetchall()
-        self.assertEqual(
-            [(row["node_id"], row["attempt_number"]) for row in archived_nodes],
-            [("b", 0), ("c", 0)],
-        )
-        self.assertEqual(
-            [(row["node_id"], row["attempt_number"]) for row in archived_images],
-            [("b", 0)],
-        )
 
-    def test_confirmed_revision_instruction_is_audited_before_hidden_constraint(self) -> None:
-        value = serial_workflow()
-        value["maxRetryCount"] = 3
-        self.store.create_workflow(value)
-        self.store.prepare_node_dispatch("serial-demo", "a")
-        self.store.sync_node_job(
-            "serial-demo",
-            "a",
-            {"status": "completed", "response": "结果A", "finished_at": utc_now()},
-        )
-        first_prompt = self.store.prepare_node_dispatch("serial-demo", "b")["prompt"]
-        self.store.sync_node_job(
-            "serial-demo",
-            "b",
-            {"status": "completed", "response": "结果B", "finished_at": utc_now()},
-        )
 
-        proposed_message = str(uuid.uuid4())
-        confirmed_message = str(uuid.uuid4())
-        instruction = "重新生成空客 A380，并增加清晰、完整的机身涂装和标识。"
-        self.store.accept_chat_message(
-            "serial-demo", proposed_message, "没有 logo、没有涂装，重新生成"
-        )
-        proposal = self.store.propose_control(
-            "serial-demo",
-            "restart_from",
-            "b",
-            proposed_message,
-            instruction,
-        )
-        self.store.accept_chat_message("serial-demo", confirmed_message, "确认执行")
-        confirmed = self.store.confirm_control(
-            "serial-demo", proposal["actionId"], confirmed_message
-        )
-        action = self.store.start_control_execution(confirmed["actionId"])
-        self.store.restart_from_node(
-            "serial-demo",
-            "b",
-            action_id=action["actionId"],
-            revision_instruction=action["revisionInstruction"],
-            source_message_id=action["proposedByMessageId"],
-        )
-        self.store.finish_control_execution(action["actionId"], result={})
-
-        prompt = self.store.prepare_node_dispatch("serial-demo", "b")["prompt"]
-        self.assertIn("结果A", prompt)
-        self.assertIn("【本次及历史返工要求】", prompt)
-        self.assertTrue(prompt.endswith(SINGLE_OUTPUT_CONSTRAINT))
-        self.assertLess(prompt.index("结果A"), prompt.index("【本次及历史返工要求】"))
-        self.assertLess(prompt.index(instruction), prompt.index("【系统单次产物约束】"))
-        with self.store._connect() as connection:
-            node = connection.execute(
-                "SELECT original_prompt FROM workflow_nodes "
-                "WHERE workflow_id = ? AND node_id = ?",
-                ("serial-demo", "b"),
-            ).fetchone()
-            archived = connection.execute(
-                "SELECT actual_prompt FROM workflow_node_attempts "
-                "WHERE workflow_id = ? AND node_id = ? AND attempt_number = 0",
-                ("serial-demo", "b"),
-            ).fetchone()
-            revision = connection.execute(
-                "SELECT action_id, source_message_id, instruction "
-                "FROM workflow_node_revision_instructions WHERE workflow_id = ?",
-                ("serial-demo",),
-            ).fetchone()
-            stored_action = connection.execute(
-                "SELECT revision_instruction FROM workflow_control_actions "
-                "WHERE action_id = ?",
-                (action["actionId"],),
-            ).fetchone()
-        self.assertEqual(node["original_prompt"], "只写一个 b")
-        self.assertEqual(archived["actual_prompt"], first_prompt)
-        self.assertEqual(revision["action_id"], action["actionId"])
-        self.assertEqual(revision["source_message_id"], proposed_message)
-        self.assertEqual(revision["instruction"], instruction)
-        self.assertEqual(stored_action["revision_instruction"], instruction)
-
-    def test_revision_history_keeps_latest_and_drops_oldest_when_too_long(self) -> None:
-        value = serial_workflow()
-        value["maxRetryCount"] = 10
-        self.store.create_workflow(value)
-        self.store.prepare_node_dispatch("serial-demo", "a")
-        self.store.sync_node_job(
-            "serial-demo",
-            "a",
-            {"status": "completed", "response": "A", "finished_at": utc_now()},
-        )
-        for index in range(1, 7):
-            self.store.restart_from_node(
-                "serial-demo",
-                "b",
-                revision_instruction=f"要求{index}-" + str(index) * 3_980,
-            )
-
-        prompt = self.store.prepare_node_dispatch("serial-demo", "b")["prompt"]
-        self.assertLessEqual(len(prompt), 100_000)
-        self.assertIn("【较早返工要求因内容过长已省略】", prompt)
-        self.assertNotIn("要求1-", prompt)
-        self.assertIn("要求6-", prompt)
-        self.assertLess(prompt.index("要求5-"), prompt.index("要求6-"))
-
-    def test_restart_without_revision_instruction_keeps_existing_prompt_behavior(self) -> None:
-        self.store.create_workflow(serial_workflow())
-        self.store.prepare_node_dispatch("serial-demo", "a")
-        self.store.sync_node_job(
-            "serial-demo",
-            "a",
-            {"status": "completed", "response": "A", "finished_at": utc_now()},
-        )
-        self.store.restart_from_node("serial-demo", "b")
-
-        prompt = self.store.prepare_node_dispatch("serial-demo", "b")["prompt"]
-        self.assertNotIn("本次及历史返工要求", prompt)
-        self.assertTrue(prompt.endswith(SINGLE_OUTPUT_CONSTRAINT))
-
-    def test_retry_budget_rejects_next_restart_and_proposals_do_not_consume(self) -> None:
-        value = serial_workflow()
-        value["maxRetryCount"] = 10
-        self.store.create_workflow(value)
-        self.store.prepare_node_dispatch("serial-demo", "a")
-        self.store.sync_node_job(
-            "serial-demo", "a",
-            {"status": "completed", "response": "A", "finished_at": utc_now()},
-        )
-        proposal_message = str(uuid.uuid4())
-        self.store.accept_chat_message("serial-demo", proposal_message, "从第2步重跑")
-        proposal = self.store.propose_control(
-            "serial-demo", "restart_from", "b", proposal_message
-        )
-        self.assertEqual(proposal["retryCost"], 1)
-        self.assertEqual(
-            self.store.get_workflow("serial-demo")["retryPolicy"]["usedRetries"], 0
-        )
-        for _ in range(10):
-            self.store.restart_from_node("serial-demo", "b")
-        self.assertEqual(
-            self.store.get_workflow("serial-demo")["retryPolicy"]["usedRetries"], 10
-        )
-        with self.assertRaisesRegex(ValueError, "次数已经用完"):
-            self.store.restart_from_node("serial-demo", "b")
-        with self.assertRaisesRegex(ValueError, "次数已经用完"):
-            self.store.propose_control(
-                "serial-demo", "restart_from", "b", str(uuid.uuid4())
-            )
 
     def test_cumulative_files_omits_predecessor_text_and_keeps_revision_local(self) -> None:
         value = serial_workflow()
@@ -1064,9 +759,10 @@ class WorkflowStoreTests(unittest.TestCase):
             "a",
             {"status": "completed", "response": "机密的第一步文字", "finished_at": utc_now()},
         )
-        self.store.restart_from_node(
-            "serial-demo", "b", revision_instruction="只属于第二步的返工要求"
-        )
+        # 历史返工要求仍可读取；升级后不再创建新的返工操作。
+        with self.store._connect() as db:
+            db.execute("INSERT INTO workflow_node_revision_instructions(workflow_id,node_id,retry_ordinal,instruction,created_at) VALUES(?,?,?,?,?)",
+                ("serial-demo", "b", 1, "只属于第二步的返工要求", utc_now()))
 
         second = self.store.prepare_node_dispatch("serial-demo", "b")
         self.assertEqual(second["handoffMode"], "cumulative_files")
@@ -1106,7 +802,9 @@ class WorkflowStoreTests(unittest.TestCase):
             "a",
             {"status": "completed", "response": "done", "finished_at": utc_now()},
         )
-        self.store.restart_from_node("serial-demo", "b")
+        # 模拟旧运行已归档文件后的当前附件集合。
+        with self.store._connect() as db:
+            db.execute("DELETE FROM workflow_artifacts WHERE workflow_id='serial-demo' AND node_id='b'")
         restarted = self.store.get_cumulative_artifact_inputs("serial-demo", "c")
         self.assertEqual(len(restarted[0]["artifacts"]), 1)
         self.assertEqual(restarted[1]["artifacts"], [])

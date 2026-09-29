@@ -26,6 +26,7 @@ class MockAppServer:
         structured_reply: str | None = None,
         config_requirements: dict[str, Any] | None = None,
         process_notifications: list[dict[str, Any]] | None = None,
+        resume_thread_id: str | None = None,
     ) -> None:
         self.delay_sec = delay_sec
         self.turn_status = turn_status
@@ -46,6 +47,7 @@ class MockAppServer:
         }, ensure_ascii=False)
         self.config_requirements = config_requirements
         self.process_notifications = process_notifications or []
+        self.resume_thread_id = resume_thread_id
         self.url = ""
         self.authorization: str | None = None
         self.requests: list[dict[str, Any]] = []
@@ -101,7 +103,8 @@ class MockAppServer:
                         {"requirements": self.config_requirements},
                     )
                 elif method in {"thread/start", "thread/resume"}:
-                    await self._result(connection, request_id, {"thread": {"id": "thread-1"}})
+                    thread_id = (self.resume_thread_id or message["params"]["threadId"]) if method == "thread/resume" else "thread-1"
+                    await self._result(connection, request_id, {"thread": {"id": thread_id}})
                 elif method == "turn/start":
                     await self._result(connection, request_id, {"turn": {"id": "turn-1"}})
                     if self.close_after_turn_start is not None:

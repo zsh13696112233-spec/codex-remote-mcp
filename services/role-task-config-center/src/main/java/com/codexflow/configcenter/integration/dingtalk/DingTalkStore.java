@@ -211,28 +211,12 @@ class DingTalkStore {
                       && inbound.observedGateId != null
                       && inbound.observedGateId.equals(
                           waitingSnapshot.path("pendingAdvance").path("gateId").asText());
-              JsonNode control =
-                  waitingSnapshot == null
-                      ? objectMapper.createObjectNode()
-                      : waitingSnapshot.path("pendingControl");
-              boolean restart =
-                  actionId != null
-                      && actionId.equals(control.path("actionId").asText())
-                      && List.of("restart_from", "stop").contains(control.path("type").asText());
               if (waiting) {
                 payload =
                     waitingPayload(workflowId, waitingSnapshot, text, false)
                         .put("answer", true)
                         .put("atUserId", inbound.senderUserId)
                         .put("actionId", actionId);
-              }
-              if (restart) {
-                payload
-                    .put("restartControl", true)
-                    .put("controlType", control.path("type").asText())
-                    .put("answer", true)
-                    .put("controlExpiresAt", control.path("expiresAt").asText())
-                    .put("controlActorId", control.path("actorId").asText());
               }
               enqueue(
                   "assistant:" + workflowMessageId,
@@ -241,7 +225,7 @@ class DingTalkStore {
                   group ? "GROUP" : "PERSON",
                   group ? conversationId : inbound.senderUserId,
                   inbound.messageId,
-                  waiting || restart ? "waiting_card" : "reply",
+                  waiting ? "waiting_card" : "reply",
                   payload);
             });
     binding.eventCursor = sequence;
@@ -337,14 +321,6 @@ class DingTalkStore {
     }
   }
 
-  @Transactional(readOnly = true)
-  public String quotedAction(DingTalkModels.Message message) {
-    return quotedOutgoing(message)
-        .map(this::toOutbox)
-        .map(item -> item.payload().path("actionId").asText(null))
-        .orElse(null);
-  }
-
   /** 保持等待只发送一条完整通知，不再追加独立的 @ 提醒。 */
   @Transactional
   public void recordHeld(String workflowId, long sequence, String text) {
@@ -388,7 +364,8 @@ class DingTalkStore {
       String gateId = snapshot.path("pendingAdvance").path("gateId").asText();
       if (!invitation
           && outbox
-              .findByWorkflowIdAndWaitingCardStateIn(workflowId, List.of("countdown", "held"))
+              .findByWorkflowIdAndWaitingCardStateIn(
+                  workflowId, List.of("countdown", "held", "busy"))
               .stream()
               .anyMatch(
                   card ->
@@ -436,7 +413,8 @@ class DingTalkStore {
   public void refreshWaitingCards(String workflowId, JsonNode snapshot) {
     requiredBindingForUpdate(workflowId);
     for (var card :
-        outbox.findByWorkflowIdAndWaitingCardStateIn(workflowId, List.of("countdown", "held"))) {
+        outbox.findByWorkflowIdAndWaitingCardStateIn(
+            workflowId, List.of("countdown", "held", "busy"))) {
       if (card.deliveredAt == null) continue;
       String state = DingTalkWaitingCard.cardState(snapshot, toOutbox(card).payload());
       if (state.equals(card.waitingCardState)) continue;
@@ -491,55 +469,6 @@ class DingTalkStore {
                         : ("PERSON".equals(card.targetType)
                             && card.targetExternalId.equals(event.operatorUserId()))))
         .isPresent();
-  }
-
-  @Transactional(readOnly = true)
-  public Optional<DingTalkModels.Message> controlCardMessage(
-      DingTalkModels.CardAction event,
-      String clientId,
-      String workflowId,
-      String controlId,
-      boolean confirm) {
-    if (event.cardInstanceId() == null
-        || !event.cardInstanceId().startsWith("wait-")
-        || !hasTextValue(event.operatorUserId())) return Optional.empty();
-    return outbox
-        .findById(event.cardInstanceId().substring(5))
-        .filter(
-            card -> {
-              JsonNode payload = toOutbox(card).payload();
-              return "waiting_card".equals(card.messageKind)
-                  && card.deliveredAt != null
-                  && workflowId.equals(card.workflowId)
-                  && payload.path("restartControl").asBoolean()
-                  && controlId.equals(payload.path("actionId").asText())
-                  && (String.valueOf(event.value().getOrDefault("action", event.actionId()))
-                              .startsWith("stop_")
-                          ? "stop"
-                          : "restart_from")
-                      .equals(payload.path("controlType").asText("restart_from"))
-                  && (clientId + ":" + event.operatorUserId())
-                      .equals(payload.path("controlActorId").asText())
-                  && (!hasTextValue(event.conversationId())
-                      || event.conversationId().equals(card.conversationId))
-                  && ("GROUP".equals(card.targetType)
-                      || ("PERSON".equals(card.targetType)
-                          && event.operatorUserId().equals(card.targetExternalId)));
-            })
-        .map(
-            card ->
-                new DingTalkModels.Message(
-                    UUID.nameUUIDFromBytes(
-                            (event.cardInstanceId() + ":" + controlId + ":" + confirm)
-                                .getBytes(StandardCharsets.UTF_8))
-                        .toString(),
-                    card.conversationId,
-                    "GROUP".equals(card.targetType) ? "2" : "1",
-                    event.operatorUserId(),
-                    confirm ? "确认执行" : "取消操作",
-                    true,
-                    false,
-                    null));
   }
 
   @Transactional
@@ -807,24 +736,6 @@ class DingTalkStore {
     DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
     binding.status = "active";
     binding.updatedAt = Instant.now();
-  }
-
-  @Transactional
-  public Optional<String> acquireForRestart(String clientId, String workflowId) {
-    DingTalkWorkflowBindingEntity binding = requiredBinding(workflowId);
-    Optional<String> busy = taskBindings.acquireForRestart(binding.taskDefinitionId, workflowId);
-    if (busy.isPresent()) return busy;
-    binding.status = "active";
-    binding.updatedAt = Instant.now();
-    return Optional.empty();
-  }
-
-  @Transactional
-  public void releaseRestartReservation(String clientId, String workflowId) {
-    DingTalkWorkflowBindingEntity binding = requiredBinding(workflowId);
-    binding.status = "terminal";
-    binding.updatedAt = Instant.now();
-    releaseSlot(binding, workflowId);
   }
 
   @Transactional

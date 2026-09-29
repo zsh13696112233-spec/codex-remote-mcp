@@ -198,6 +198,7 @@ function consume(event) {
     if (user && user.status !== "completed" && user.status !== "failed") user.status = "processing";
     upsertMessage({id: "consult-progress-" + payload.messageId, replyTo: payload.messageId,
       role: "assistant", time: event.createdAt, text: text(payload.text),
+      stepNumber: payload.stepNumber,
       status: "processing", streaming: false});
     return;
   }
@@ -231,6 +232,7 @@ function consume(event) {
       state.messages.push(value);
     }
     value.text = text(payload.text);
+    value.stepNumber = payload.stepNumber;
     value.status = "completed";
     value.streaming = false;
     const user = findMessage(payload.messageId);
@@ -317,7 +319,7 @@ function renderMessages() {
     const content = make("div", "chat-content");
     const meta = make("div", "chat-meta");
     const isFinal = message.role === "progress" && index === state.messages.length - 1 && TERMINAL.has(state.snapshot?.status);
-    const sourceLabel = message.role === "progress" ? (isFinal ? "任务结果" : "任务进度") : "任务助手";
+    const sourceLabel = message.role === "progress" ? (isFinal ? "任务结果" : "任务进度") : (message.stepNumber ? `第${message.stepNumber}步执行者` : "任务助手");
     meta.append(make("strong", "", isUser ? "我" : sourceLabel), make("time", "", fmt(message.time)));
     const bubble = make("div", "bubble");
     bubble.append(make("p", "", message.text));
@@ -484,8 +486,8 @@ function renderSteps(nodes, initializing = false) {
           ? `保持等待：暂不进入${next?.displayName || "下一步骤"}`
           : `等待进入下一步：${next?.displayName || "下一步骤"}`),
         make("span", "", held
-          ? "任务不会自动继续。请点击或回复“确认继续”进入下一步；如需返工，请说明修改点并确认执行。"
-          : "请确认继续；两分钟内未回复将自动继续。提问或选择保持等待后，将等待您明确确认。节点操作仅在步骤未执行时允许。")
+          ? "正在与本步骤执行者讨论。明确提出修改或采纳后更新交接总结，完成后请点击继续。"
+          : "两分钟内未回复将自动继续。收到讨论消息后保持等待，点击继续交接最新版总结。")
       );
       const actions = make("div", "advance-actions");
       const confirm = make(
@@ -550,9 +552,6 @@ function render(snapshot) {
       : allStepsFinished ? "所有步骤已完成，正在生成任务总结"
       : allStepsPending ? "尚未开始" : "等待任务继续";
   $("#progress").textContent = `${snapshot.progress?.completed || 0} / ${snapshot.progress?.total || nodes.length}`;
-  $("#retries").textContent = snapshot.retryPolicy
-    ? `${snapshot.retryPolicy.remainingRetries} / ${snapshot.retryPolicy.maxRetries}`
-    : "—";
   renderDuration();
   $("#updated").textContent = new Date().toLocaleString("zh-CN", {hour12: false});
   renderSteps(nodes, initializing);
@@ -590,7 +589,10 @@ function renderAdvanceCountdown() {
     const acting = action?.gateId === button.dataset.advanceGate;
     const held = button.dataset.advanceState === "held";
     const remaining = Math.max(0, Math.ceil((new Date(button.dataset.advanceExpires) - Date.now()) / 1000));
-    if (acting) {
+    if (state.snapshot?.discussionBusy && button.dataset.advanceAction === "confirm") {
+      button.textContent = "讨论处理中…";
+      button.disabled = true;
+    } else if (acting) {
       if (action.type === button.dataset.advanceAction) {
         button.textContent = action.type === "hold" ? "正在保持等待…" : "正在确认…";
       }
@@ -628,7 +630,7 @@ async function runAdvanceAction(gateId, action) {
   renderAdvanceCountdown();
   try {
     await api(`/api/workflows/${encodeURIComponent(state.workflowId)}/advance/${encodeURIComponent(gateId)}/${action}`, {method: "POST"});
-    toast(action === "hold" ? "任务已暂停；暂停不会返工，如需返工请在任务助手中说明修改点" : "已确认，正在进入下一步");
+    toast(action === "hold" ? "已保持等待，可与本步骤执行者讨论修改" : "已确认，正在交接最新总结");
   } catch (error) {
     toast(error.message);
   } finally {
@@ -643,10 +645,9 @@ function renderComposer() {
   input.disabled = state.sending;
   button.disabled = state.sending || !input.value.trim();
   button.textContent = state.sending ? "发送中…" : "发送";
-  const retries = state.snapshot?.retryPolicy?.remainingRetries;
   $("#chatHint").textContent = TERMINAL.has(state.snapshot?.status)
-    ? `任务已结束，仍可咨询或请求从某一步重跑${retries == null ? "" : `（剩余 ${retries} 次）`}`
-    : "控制操作需要再次回复“确认执行”";
+    ? "任务已结束，仍可只读咨询"
+    : state.snapshot?.pendingAdvance ? "与刚完成步骤的执行者讨论；明确要求才更新交接总结，点击按钮继续" : "可只读咨询进度；聊天不操作流程";
 }
 
 async function sendChatMessage(messageId, originalText) {

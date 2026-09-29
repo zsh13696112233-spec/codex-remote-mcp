@@ -69,90 +69,20 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
-  void stopButtonsUseControlMessagesWithoutRestartReservationOrAdvance() {
-    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
-    when(store.binding(ID)).thenReturn(Optional.of(binding));
-    var snapshot = json.createObjectNode();
-    snapshot
-        .putObject("pendingControl")
-        .put("actionId", "stop-action")
-        .put("type", "stop")
-        .put("status", "pending")
-        .put("actorId", "app:user")
-        .put("expiresAt", java.time.Instant.now().plusSeconds(600).toString());
-    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
-    for (boolean confirm : new boolean[] {true, false}) {
-      var action =
+  void retiredControlButtonsCannotChangeWorkflow() {
+    for (String action :
+        java.util.List.of("stop_confirm", "stop_cancel", "restart_confirm", "restart_cancel")) {
+      var click =
           new DingTalkModels.CardAction(
-              "wait-stop",
+              "wait-old",
               null,
               "user",
-              confirm ? "stop_confirm" : "stop_cancel",
-              java.util.Map.of("workflowId", ID, "controlId", "stop-action"));
-      var source =
-          new DingTalkModels.Message(
-              "stop-button", "group", "2", "user", confirm ? "确认执行" : "取消操作", true, false, null);
-      when(store.controlCardMessage(action, "app", ID, "stop-action", confirm))
-          .thenReturn(Optional.of(source));
-      assertThat(bot.safelyHandleAction(action).toString())
-          .contains("confirmRequestSucceeded=true");
-      verify(gateway)
-          .post(
-              eq("/workflows/" + ID + "/messages"),
-              argThat(
-                  body ->
-                      source.content().equals(body.path("text").asText())
-                          && "stop-action".equals(body.path("expectedActionId").asText())));
-    }
-    verify(store, never()).acquireForRestart(any(), any());
-    verify(gateway, never()).post(contains("/advance/"), any());
-  }
-
-  @Test
-  void restartButtonsSubmitBoundActionWithoutAdvancingGate() {
-    String actionId = "restart-action";
-    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
-    when(store.binding(ID)).thenReturn(Optional.of(binding));
-    var snapshot = json.createObjectNode();
-    var pending =
-        snapshot
-            .putObject("pendingControl")
-            .put("actionId", actionId)
-            .put("type", "restart_from")
-            .put("status", "pending")
-            .put("actorId", "app:user")
-            .put("expiresAt", java.time.Instant.now().plusSeconds(600).toString());
-    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
-    for (boolean confirm : new boolean[] {true, false}) {
-      var action =
-          new DingTalkModels.CardAction(
-              "wait-card",
-              null,
-              "user",
-              confirm ? "restart_confirm" : "restart_cancel",
-              java.util.Map.of("workflowId", ID, "controlId", actionId));
-      var source =
-          new DingTalkModels.Message(
-              "button", "group", "2", "user", confirm ? "确认执行" : "取消操作", true, false, null);
-      when(store.controlCardMessage(action, "app", ID, actionId, confirm))
-          .thenReturn(Optional.of(source));
-      var result = bot.safelyHandleAction(action);
-      assertThat(result.toString()).contains("confirmRequestSucceeded=true");
-      verify(gateway)
-          .post(
-              eq("/workflows/" + ID + "/messages"),
-              argThat(
-                  body ->
-                      actionId.equals(body.path("expectedActionId").asText())
-                          && source.content().equals(body.path("text").asText())
-                          && "app:user".equals(body.path("actorId").asText())));
-      pending.put("actionId", "new-action");
-      assertThat(bot.safelyHandleAction(action).toString())
+              action,
+              java.util.Map.of("workflowId", ID, "controlId", "old-action"));
+      assertThat(bot.safelyHandleAction(click).toString())
           .contains("confirmRequestSucceeded=false");
-      pending.put("actionId", actionId);
     }
-    verify(store, times(1)).acquireForRestart("app", ID);
-    verify(gateway, never()).post(contains("/advance/"), any());
+    verify(gateway, never()).post(anyString(), any());
   }
 
   @Test
@@ -243,18 +173,20 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
-  void confirmContinueUsesObservedGateAndDoesNotCallAssistant() {
+  void textContinueIsOnlyAChatMessage() {
     when(gateway.get("/workflows/" + ID)).thenReturn(waiting());
-    when(gateway.post(eq("/workflows/" + ID + "/input-observations"), any()))
-        .thenReturn(json.createObjectNode().put("gateId", "11111111111111111111111111111111"));
     bot.safelyHandleMessage(message(ID + " 确认继续"));
     verify(gateway)
         .post(
-            eq("/workflows/" + ID + "/input-observations"),
-            argThat(body -> body.has("hold") && !body.path("hold").asBoolean()));
+            eq("/workflows/" + ID + "/messages"),
+            argThat(
+                body ->
+                    "确认继续".equals(body.path("text").asText()) && !body.has("expectedActionId")));
+    verify(gateway, never()).post(contains("/confirm"), any());
     verify(gateway)
-        .post("/workflows/" + ID + "/advance/11111111111111111111111111111111/confirm", null);
-    verify(gateway, never()).post(eq("/workflows/" + ID + "/messages"), any());
+        .post(
+            eq("/workflows/" + ID + "/input-observations"),
+            argThat(body -> !body.has("hold") || body.path("hold").asBoolean()));
   }
 
   @Test
@@ -267,14 +199,10 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
-  void runningContinueIsRememberedAndCannotReleaseLaterWaitOnRetry() {
-    when(gateway.post(eq("/workflows/" + ID + "/input-observations"), any()))
-        .thenReturn(json.createObjectNode().put("controlAllowed", false));
-    bot.safelyHandleMessage(message(ID + " 确认继续"));
-    when(gateway.get("/workflows/" + ID)).thenReturn(waiting());
-    bot.safelyHandleMessage(message(ID + " 确认继续"));
+  void runningTextCannotReleaseLaterWait() {
+    bot.safelyHandleMessage(message(ID + " 继续"));
     verify(gateway, never()).post(contains("/confirm"), any());
-    verify(store, atLeastOnce()).markInboundFinished(ID, "assistant-id", false);
+    verify(gateway).post(eq("/workflows/" + ID + "/messages"), any());
   }
 
   @Test
@@ -669,7 +597,7 @@ class DingTalkBotCoordinatorTest {
     verify(gateway).post(eq("/workflows/" + ID + "/messages"), any());
     bot.safelyHandleMessage(cardQuote.withContent("继续"));
     verify(gateway, never()).post(contains("/confirm"), any());
-    verify(store).enqueueReply(any(), eq(ID), any(), contains("当前等待卡片"));
+    verify(gateway, times(2)).post(eq("/workflows/" + ID + "/messages"), any());
   }
 
   @Test
@@ -781,28 +709,11 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
-  void confirmationMustBelongToSender() {
-    var snapshot = json.createObjectNode().put("status", "running");
-    snapshot.putObject("pendingControl").put("actionId", "action").put("actorId", "app:user-1");
-    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
+  void oldConfirmationWordsCarryNoAction() {
     bot.safelyHandleMessage(message(ID + " 确认执行"));
-    verify(gateway, never()).post(eq("/workflows/" + ID + "/messages"), any());
-    verify(store).enqueueReply(anyString(), eq(ID), any(), contains("提议人"));
-  }
-
-  @Test
-  void confirmationCarriesExactAction() {
-    var snapshot = json.createObjectNode().put("status", "running");
-    snapshot
-        .putObject("pendingControl")
-        .put("actionId", "action")
-        .put("actorId", "app:user-2")
-        .put("type", "stop");
-    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
-    bot.safelyHandleMessage(message(ID + " 确认执行"));
-    var request = ArgumentCaptor.forClass(JsonNode.class);
-    verify(gateway).post(eq("/workflows/" + ID + "/messages"), request.capture());
-    assertThat(request.getValue().path("expectedActionId").asText()).isEqualTo("action");
+    verify(gateway)
+        .post(eq("/workflows/" + ID + "/messages"), argThat(body -> !body.has("expectedActionId")));
+    verify(gateway, never()).post(contains("/confirm"), any());
   }
 
   @Test

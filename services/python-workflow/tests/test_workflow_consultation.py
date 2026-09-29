@@ -83,6 +83,15 @@ class ConsultationTests(unittest.IsolatedAsyncioTestCase):
         request = {"name": name, "nodeId": "a", "question": "有没有去重？", **kwargs}
         return await self.service.execute("serial-demo", self.message, 0, request)
 
+    def seed_legacy_attempt(self):
+        # 历史执行仍可咨询，但升级后不再通过业务 API 创建返工。
+        with self.store._connect() as db:
+            db.execute("""INSERT INTO workflow_node_attempts
+                (workflow_id,node_id,attempt_number,status,thread_id,turn_id,response,actual_prompt,archived_at)
+                SELECT workflow_id,node_id,attempt_count,status,thread_id,turn_id,response,actual_prompt,?
+                FROM workflow_nodes WHERE workflow_id='serial-demo' AND node_id='a'""", (utc_now(),))
+            db.execute("UPDATE workflow_nodes SET attempt_count=1,status='pending',job_id=NULL,turn_id=NULL WHERE workflow_id='serial-demo' AND node_id='a'")
+
     async def test_records_select_exact_turn_and_exclude_reasoning(self):
         result = await self.call("read_step_records")
         body = json.dumps(result, ensure_ascii=False)
@@ -148,7 +157,7 @@ class ConsultationTests(unittest.IsolatedAsyncioTestCase):
         self.client.request.assert_not_awaited()
 
     async def test_delayed_event_retains_old_attempt_and_truncation_marker(self):
-        self.store.restart_from_node("serial-demo", "a", revision_instruction="修改")
+        self.seed_legacy_attempt()
         self.store.prepare_node_dispatch("serial-demo", "a")
         self.store.sync_node_job("serial-demo", "a", {"status": "completed", "turn_id": "later-turn"})
         self.store.add_event("serial-demo", node_id="a", source="worker", event_type="appserver.item/completed",
@@ -231,7 +240,7 @@ class ConsultationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["complete"])
 
     async def test_attempts_preserve_old_runtime(self):
-        self.store.restart_from_node("serial-demo", "a", revision_instruction="修改")
+        self.seed_legacy_attempt()
         self.store.prepare_node_dispatch("serial-demo", "a")
         self.store.sync_node_job("serial-demo", "a", {"status": "completed", "thread_id": "original-thread", "turn_id": "later-turn", "cwd": "/new-work", "model": "new-model"})
         old = self.service.store.attempt("serial-demo", "a", 0)

@@ -34,7 +34,7 @@ interface DingTalkWorkflowBindingRepository
              OR (binding.status = 'terminal' AND (binding.waitingAssistant = true
                  OR EXISTS (SELECT card.id FROM DingTalkOutboxEntity card
                      WHERE card.workflowId = binding.workflowId AND card.messageKind = 'waiting_card'
-                       AND card.deliveredAt IS NOT NULL AND card.waitingCardState IN ('countdown', 'held')))))
+                       AND card.deliveredAt IS NOT NULL AND card.waitingCardState IN ('countdown', 'held', 'busy')))))
       ORDER BY binding.createdAt
       """)
   List<DingTalkWorkflowBindingEntity> findPollable(@Param("clientId") String clientId);

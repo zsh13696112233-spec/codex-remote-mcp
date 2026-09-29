@@ -66,39 +66,8 @@ class InputImageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.message("看图", images=[image_id] * 6)
 
-    def test_confirmation_checks_exact_action_and_person(self):
-        request = self.message("停止")
-        proposal = self.store.propose_control("serial-demo", "stop", None, request["messageId"])
-        pending = self.store.get_workflow("serial-demo")["pendingControl"]
-        self.assertEqual(pending["actorId"], "app:alice")
-        for actor, action in (("app:bob", proposal["actionId"]), ("app:alice", "old"), (None, None)):
-            confirmation = self.message("确认执行", actor=actor, action=action)
-            with self.assertRaises(ValueError):
-                self.store.confirm_control("serial-demo", proposal["actionId"], confirmation["messageId"])
-        confirmation = self.message("确认执行", action=proposal["actionId"])
-        self.store.confirm_control("serial-demo", proposal["actionId"], confirmation["messageId"])
-        with self.assertRaises(ValueError):
-            self.store.confirm_control("serial-demo", proposal["actionId"], confirmation["messageId"])
 
-    def test_images_only_reach_business_steps_after_confirmed_rework(self):
-        image_id = self.upload()
-        request = self.message("按图修改", images=[image_id])
-        proposal = self.store.propose_control("serial-demo", "restart_from", "a", request["messageId"], "按参考图修改")
-        self.assertEqual(self.store.node_input_images("serial-demo", "a"), [])
-        confirmation = self.message("确认执行", action=proposal["actionId"])
-        self.store.confirm_control("serial-demo", proposal["actionId"], confirmation["messageId"])
-        self.store.start_control_execution(proposal["actionId"])
-        self.store.restart_from_node("serial-demo", "a", action_id=proposal["actionId"], revision_instruction="按参考图修改", source_message_id=request["messageId"])
-        for node in ("a", "b", "c"):
-            self.assertEqual(self.store.node_input_images("serial-demo", node)[0]["content"], PNG)
-        self.assertNotIn("imageIds", self.store.get_workflow_spec("serial-demo"))
 
-    def test_cancelled_proposal_never_adds_step_images(self):
-        request = self.message("按图修改", images=[self.upload()])
-        proposal = self.store.propose_control("serial-demo", "restart_from", "a", request["messageId"])
-        cancel = self.message("取消操作", action=proposal["actionId"])
-        self.store.cancel_pending_control("serial-demo", cancel["messageId"])
-        self.assertEqual(self.store.node_input_images("serial-demo", "a"), [])
 
     def test_upload_and_read_http_preserve_original_content(self):
         app = create_app(db_path=self.store.path)

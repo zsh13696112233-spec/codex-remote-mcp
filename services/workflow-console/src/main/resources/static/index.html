@@ -37,7 +37,6 @@
       <div class="overview">
         <article><span>当前步骤</span><strong id="current">正在加载任务信息…</strong></article>
         <article><span>步骤进度</span><strong id="progress">0 / 0</strong></article>
-        <article><span>剩余重跑次数</span><strong id="retries">—</strong></article>
         <article><span>运行时长</span><strong id="duration">—</strong></article>
         <article><span>最后更新</span><strong id="updated">—</strong></article>
       </div>
@@ -78,7 +77,7 @@
           <form id="chatForm" class="chat-compose">
             <label for="chatInput" class="sr-only">向任务助手发送消息</label>
             <textarea id="chatInput" maxlength="4000" rows="3" disabled
-              placeholder="随时询问进度；停止、返工或跳过请等当前步骤结束后提出…"></textarea>
+              placeholder="询问进度；等待时与本步骤执行者讨论，明确提出修改后更新交接总结…"></textarea>
             <div class="compose-actions">
               <span id="chatHint" role="status">任务运行期间可随时咨询</span>
               <button id="sendMessage" type="submit" disabled>发送</button>
