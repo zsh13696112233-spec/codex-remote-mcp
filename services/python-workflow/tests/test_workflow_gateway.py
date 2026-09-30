@@ -11,7 +11,7 @@ from codex_orchestrator_mcp import Orchestrator
 from starlette.testclient import TestClient
 from tests.mock_app_server import MockAppServer
 from workflow_gateway import WorkflowGateway, build_argument_parser, create_app
-from workflow_store import SINGLE_OUTPUT_CONSTRAINT, WorkflowStore, utc_now
+from workflow_store import WorkflowStore, utc_now
 
 
 from tests.registry_fixtures import (fixture_orchestrator, fixture_gateway, fixture_app, FixtureWorkflowStore)

@@ -13,10 +13,7 @@ from unittest.mock import patch
 
 from tests.registry_fixtures import FixtureWorkflowStore as WorkflowStore
 from workflow_event_batcher import AsyncEventBatcher
-from workflow_store import (
-    SINGLE_OUTPUT_CONSTRAINT,
-    utc_now,
-)
+from workflow_store import utc_now
 
 
 def serial_workflow() -> dict:
@@ -667,7 +664,7 @@ class WorkflowStoreTests(unittest.TestCase):
         self.store.create_workflow(value)
         first = self.store.prepare_node_dispatch("serial-demo", "a")
         self.assertTrue(first["prompt"].startswith("只写一个 a"))
-        self.assertTrue(first["prompt"].endswith(SINGLE_OUTPUT_CONSTRAINT))
+        self.assertEqual(first["prompt"], "只写一个 a")
         self.store.sync_node_job(
             "serial-demo",
             "a",
@@ -675,7 +672,7 @@ class WorkflowStoreTests(unittest.TestCase):
         )
         second = self.store.prepare_node_dispatch("serial-demo", "b")
         self.assertIn("【第1步结果】\n前序成果", second["prompt"])
-        self.assertTrue(second["prompt"].endswith(SINGLE_OUTPUT_CONSTRAINT))
+        self.assertNotIn("【系统单次产物约束】", second["prompt"])
         node = self.store.get_workflow("serial-demo")["nodes"][1]
         self.assertEqual(node["displayName"], "复核结果")
         self.assertEqual(node["roleName"], "质量审查员")
@@ -691,7 +688,7 @@ class WorkflowStoreTests(unittest.TestCase):
         prompt = self.store.prepare_node_dispatch("serial-demo", "b")["prompt"]
         self.assertLessEqual(len(prompt), 100_000)
         self.assertIn("内容过长，已在此处省略", prompt)
-        self.assertTrue(prompt.endswith(SINGLE_OUTPUT_CONSTRAINT))
+        self.assertNotIn("【系统单次产物约束】", prompt)
 
     def test_chat_message_is_persisted_and_idempotent(self) -> None:
         self.store.create_workflow(serial_workflow())

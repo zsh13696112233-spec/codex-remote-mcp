@@ -23,18 +23,6 @@ REVISION_INSTRUCTION_LIMIT = 4_000
 REVISION_CONTEXT_LIMIT = 20_000
 PROMPT_LIMIT = 100_000
 TRUNCATION_NOTICE = "\n\n【内容过长，已在此处省略】"
-SINGLE_OUTPUT_CONSTRAINT = """
-
-【系统单次产物约束】
-
-本步骤每次执行只允许生成或修改一个面向用户交付的产物版本。
-
-首次生成完成后必须立即停止生成，不得自行重绘、重写、修正、优化、覆盖原文件、生成备选版本或再次调用生成工具。
-
-允许对首次产物进行只读检查；如果发现问题，只能在步骤结果中如实说明，禁止自行修复。
-
-首次产物交由人工审核。用户在步骤间等待期间明确要求修改时，允许在原会话中修订产物和交接总结；讨论本身不是修改授权。
-"""
 EVENT_PAYLOAD_LIMIT = 262_144
 ARTIFACT_LIMIT = 20_000_000
 ARTIFACTS_PER_WORKFLOW_LIMIT = 50
@@ -2833,9 +2821,8 @@ class WorkflowStore(InputImageStore):
                 str(workflow["handoff_mode"]),
             )
             if row["thread_id"]:
-                resume_notice = "\n\n用户已确认新一轮返工。请基于本会话上一版产物完成本次修改，未要求改变的内容保留。本轮允许重新修改并交付一个版本。"
-                prompt_body = actual_prompt[:-len(SINGLE_OUTPUT_CONSTRAINT)]
-                suffix = resume_notice + SINGLE_OUTPUT_CONSTRAINT
+                prompt_body = actual_prompt
+                suffix = "\n\n用户已确认新一轮返工。请基于本会话上一版产物完成本次修改，未要求改变的内容保留。"
                 if len(prompt_body) + len(suffix) > PROMPT_LIMIT:
                     prompt_body = (
                         prompt_body[: max(0, PROMPT_LIMIT - len(suffix) - len(TRUNCATION_NOTICE))]
@@ -2902,7 +2889,7 @@ class WorkflowStore(InputImageStore):
             else ""
         )
         revision_suffix = WorkflowStore._build_revision_suffix(revision_rows)
-        suffix = dependency_suffix + revision_suffix + SINGLE_OUTPUT_CONSTRAINT
+        suffix = dependency_suffix + revision_suffix
         available = PROMPT_LIMIT - len(suffix)
         if available < len(original_prompt):
             base = original_prompt[: max(0, available - len(TRUNCATION_NOTICE))] + TRUNCATION_NOTICE

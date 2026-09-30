@@ -3,7 +3,7 @@ const $=s=>document.querySelector(s);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uid=()=>`node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
 const DEFAULT_EXPECTED_OUTPUT="完成本步骤，并返回清晰、完整且可验证的结果。";
-const MODELS=["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"];
+const MODELS=["gpt-6-astra","gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"];
 const PERMISSION_LABELS={read_only:"只读",workspace_write:"工作区写入",auto_review:"自动审核",full_access:"完全访问"};
 
 async function api(path,options={}){
@@ -312,7 +312,7 @@ function workflowInspectorHtml(){
   return `<div class="inspector-heading"><strong>工作流配置</strong><small>设置工作流的基础运行参数</small></div>
     <label>所属分组 *<select data-sop-field="groupId" required>${groupOptions(d.groupId)}</select></label>
     <label>工作流名称 *<input data-sop-field="name" maxlength="100" value="${esc(d.name)}" placeholder="例如：需求开发与质量验收"></label>
-    <label>步骤默认模型<select data-sop-field="defaultStepModel">${MODELS.map(m=>`<option ${d.defaultStepModel===m?"selected":""}>${m}</option>`).join("")}</select></label>
+    <label>步骤默认模型<select data-sop-field="defaultStepModel">${MODELS.map(m=>`<option value="${m}" ${d.defaultStepModel===m?"selected":""}>${m==="gpt-6-astra"?"GPT-6 Astra":m}</option>`).join("")}</select></label>
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，两分钟后自动继续）</option></select></label>
     <label>主监督执行机 *<div class="agent-picker"><input data-sop-field="supervisorAgentId" maxlength="128" value="${esc(d.supervisorAgentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
     <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="7200" value="${d.supervisorTimeoutSec}"></label>
@@ -380,7 +380,7 @@ function nodeInspectorHtml(s){
     <label>显示名称 *<input data-node-field="displayName" value="${esc(s.displayName)}"></label>
     <label><span class="field-title">本步骤要做什么 * <em class="field-scope current-step">仅当前步骤</em></span><textarea data-node-field="instruction" placeholder="说明具体动作、使用哪些输入以及处理范围">${esc(s.instruction)}</textarea><small class="field-help">这是当前步骤的核心执行要求，不会发送给其他步骤。</small></label>
     <label>执行机 *<div class="agent-picker"><input data-node-field="agentId" maxlength="128" value="${esc(s.agentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部步骤执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("executor","executor")}</div></div></label>
-    <label>模型<select data-node-field="modelOverride"><option value="">继承工作流默认模型</option>${MODELS.map(m=>`<option value="${m}" ${s.modelOverride===m?"selected":""}>${m}</option>`).join("")}</select></label>
+    <label>模型<select data-node-field="modelOverride"><option value="">继承工作流默认模型</option>${MODELS.map(m=>`<option value="${m}" ${s.modelOverride===m?"selected":""}>${m==="gpt-6-astra"?"GPT-6 Astra":m}</option>`).join("")}</select></label>
     <div class="inspector-grid"><label>超时（秒）<input data-node-field="timeoutSec" type="number" min="10" max="7200" value="${s.timeoutSec}"></label><label>工作目录<input data-node-field="workingDirectory" value="${esc(s.workingDirectory)}" placeholder="可选"></label></div>
     <label>权限档位<select data-node-field="permissionProfile">${permissionOptions(s)}</select></label>
     <details class="inspector-advanced"><summary>高级设置</summary>

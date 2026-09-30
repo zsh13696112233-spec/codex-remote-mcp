@@ -120,9 +120,9 @@ SQLite 兼容增加 `workflow_discussions` 保存消息对应的步骤、执行�
 
 聊天控制提议、二次确认、跳过和尾部返工入口已移除；`pendingControl` 固定为 null，历史额度及动作字段仅保留兼容，不产生新操作。历史表和审计不删除。升级前结束活动运行，部署步骤见 [等待讨论升级说明](../../docs/SOP_WAIT_DISCUSSION_UPGRADE.zh-CN.md)。
 
-## 单次产物约束
+## 步骤产物与修改
 
-运行时在首次步骤提示词中限制只交付一个版本，不自行反复修改；等待期间用户明确要求修改时，可在原会话修订产物和总结。问问题不构成修改授权。
+运行时不再统一追加“系统单次产物约束”。步骤可在任务要求和原权限范围内修改多个文件、验证并修复问题；需要限制生成次数的任务应在该步骤执行要求中明确。等待期间仍只有用户明确要求修改或采纳时，才在原会话修订产物和交接总结，普通提问不构成修改授权。已有执行会话中的历史提示词不会被撤回。
 
 ## 文件交接模式
 
@@ -133,7 +133,7 @@ SQLite 兼容增加 `workflow_discussions` 保存消息对应的步骤、执行�
 
 节点权限映射遵循 OpenAI 的 [Sandboxing](https://learn.chatgpt.com/docs/sandboxing) 与 [Agent approvals & security](https://learn.chatgpt.com/docs/agent-approvals-security) 语义：`read_only = read-only + never`，`workspace_write = workspace-write + never`，`auto_review = workspace-write + on-request + auto_review`，`full_access = danger-full-access + never`。启动节点前会读取 `configRequirements/read`；执行机管理策略明确不允许时不会启动 thread。旧 app-server 不支持该方法时保持兼容。
 
-该约束不修改配置中心保存的原始提示词或不可变运行快照，也不在监控页面展示。它当前属于提示词约束，不在运行时拦截第二次工具调用。
+文件交接模式的单步骤最多发布一个附件限制仍保留，它不限制步骤内部修改业务文件或验证修复的次数。
 
 ## 启动网关
 

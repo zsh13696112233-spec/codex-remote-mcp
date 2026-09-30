@@ -18,7 +18,7 @@ import tools.jackson.databind.node.ObjectNode;
 public class ConfigService {
 
   private static final Set<String> SUPPORTED_MODELS =
-      Set.of("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna");
+      Set.of("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna");
   private static final Set<String> EXECUTOR_TYPES = Set.of("local", "remote");
   private static final Set<String> ADVANCE_MODES = Set.of("automatic", "semi_automatic");
   private static final Set<String> HANDOFF_MODES = Set.of("legacy_text", "cumulative_files");
