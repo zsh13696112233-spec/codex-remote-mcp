@@ -63,6 +63,9 @@ class DingTalkOutboxEntity {
   @Column(name = "waiting_card_state", length = 16)
   String waitingCardState;
 
+  @Column(name = "waiting_card_revision", nullable = false)
+  long waitingCardRevision;
+
   @Column(name = "created_at", nullable = false)
   Instant createdAt;
 

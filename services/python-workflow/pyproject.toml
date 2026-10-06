@@ -30,6 +30,7 @@ py-modules = [
   "codex_orchestrator_mcp",
   "workflow_gateway",
   "workflow_database",
+  "workflow_documents",
   "workflow_discussion",
   "workflow_event_batcher",
   "workflow_runtime_client",

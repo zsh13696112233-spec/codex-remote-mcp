@@ -238,6 +238,27 @@ class SidecarStoreTests(unittest.TestCase):
 
 
 class SidecarInternalApiTests(unittest.TestCase):
+    def test_document_sync_requires_lease_and_never_returns_body_in_state(self):
+        spec = remote_workflow("docs-a")
+        spec["advanceMode"] = "semi_automatic"
+        spec["nodes"].append({"id": "b", "agentId": "supervisor-a", "prompt": "实施", "dependsOn": ["a"]})
+        lease = self._claim("docs-a", "supervisor-a", "token-a", spec)
+        path = "/internal/v1/workflows/docs-a/nodes/a"
+        headers = self._auth("token-a", lease)
+        prepared = self.client.post(path + "/prepare", headers=headers, json={"dispatchId":"docs"})
+        self.assertTrue(prepared.json()["captureDocument"])
+        body = {"operation":"sync", "snapshot":{"status":"completed", "response":"总结", "job_id":"doc-job",
+            "document":{"name":"方案", "content":"私有正文", "format":"markdown"}}}
+        self.assertEqual(self.client.post(path + "/state", json=body).status_code,401)
+        self.assertEqual(self.client.post(path + "/state", headers=self._auth("token-a"), json=body).status_code,409)
+        self.assertEqual(self.client.post(path + "/state", headers=self._auth("token-b",lease), json=body).status_code,403)
+        response=self.client.post(path + "/state", headers=headers,json=body)
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertNotIn("私有正文",response.text)
+        self.assertEqual(len(self.store.documents("docs-a","a")),1)
+        self.assertEqual(self.client.post(path + "/state",headers=headers,json=body).status_code,200)
+        self.assertEqual(self.store.documents("docs-a","a")[0]["revision"],1)
+
     def test_consultation_runtime_and_attempt_survive_sanitization(self):
         lease = self._claim("consult-remote", "supervisor-a", "token-a")
         headers = self._auth("token-a", lease)
@@ -306,14 +327,14 @@ class SidecarInternalApiTests(unittest.TestCase):
             headers["X-Workflow-Lease"] = lease
         return headers
 
-    def _claim(self, workflow_id: str, supervisor_id: str, token: str) -> str:
+    def _claim(self, workflow_id: str, supervisor_id: str, token: str, spec=None) -> str:
         heartbeat = self.client.post(
             "/internal/v1/sidecars/heartbeat",
             headers=self._auth(token),
             json={"instanceId": f"instance-{supervisor_id}", "startedAt": self.started},
         )
         self.assertEqual(heartbeat.status_code, 200)
-        self.store.create_workflow(remote_workflow(workflow_id, supervisor_id))
+        self.store.create_workflow(spec or remote_workflow(workflow_id, supervisor_id))
         self.store.claim_next_workflow(
             supervisor_id,
             sidecar_instance_id=f"instance-{supervisor_id}",

@@ -142,3 +142,7 @@ POST /api/workflows/{workflowId}/advance/{gateId}/hold
 ## 安全说明
 
 系统没有登录功能，默认监听 `0.0.0.0` 以支持可信内网访问；应通过主机防火墙限制来源，不得将本系统或 Python 网关直接暴露到公网。如只需本机访问，可设置 `SERVER_ADDRESS=127.0.0.1`。
+
+## 独立文档查看页
+
+半自动第一步结果区显示单份主文档入口，点击进入 `document.html?workflowId=...&documentId=...`，读取最新成功保存的正文，显示所属步骤、版本、更新时间和同步失败状态。保留只读代理 `GET /api/workflows/{workflowId}/documents/{documentId}`；不增加编辑、提交或流程控制接口。Markdown 渲染库本地托管，无 Node 构建，禁用原始 HTML、外部图片和危险链接。详见[文档展示说明](../../docs/SOP_DOCUMENT_DISPLAY.zh-CN.md)。

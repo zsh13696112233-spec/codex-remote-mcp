@@ -27,6 +27,13 @@ class DingTalkStore {
   private final DingTalkTargetDirectory targetDirectory;
   private final ObjectMapper objectMapper;
 
+  private static final String DEFAULT_DOCUMENT_CARD_TEMPLATE_ID =
+      "8bcfcf06-2fe0-4ea0-8818-38698428f391.schema";
+
+  @org.springframework.beans.factory.annotation.Value(
+      "${DINGTALK_DOCUMENT_CARD_TEMPLATE_ID:" + DEFAULT_DOCUMENT_CARD_TEMPLATE_ID + "}")
+  private String documentCardTemplateId = DEFAULT_DOCUMENT_CARD_TEMPLATE_ID;
+
   DingTalkStore(
       DingTalkWorkflowBindingRepository bindings,
       DingTalkInboundMessageRepository inboundMessages,
@@ -402,6 +409,8 @@ class DingTalkStore {
     return objectMapper
         .createObjectNode()
         .put("gateId", snapshot.path("pendingAdvance").path("gateId").asText())
+        .put("documentTemplateId", documentCardTemplateId)
+        .put("documentNodeId", snapshot.path("pendingAdvance").path("completedNodeId").asText())
         .put("invitation", invitation)
         .put("title", DingTalkExecutionNotice.safe(snapshot.path("name").asText("任务等待确认")))
         .put("steps", DingTalkWaitingCard.steps(snapshot))
@@ -417,10 +426,12 @@ class DingTalkStore {
             workflowId, List.of("countdown", "held", "busy"))) {
       if (card.deliveredAt == null) continue;
       String state = DingTalkWaitingCard.cardState(snapshot, toOutbox(card).payload());
-      if (state.equals(card.waitingCardState)) continue;
+      long revision = DingTalkWaitingCard.documentRevision(snapshot, toOutbox(card).payload());
+      if (state.equals(card.waitingCardState) && revision == card.waitingCardRevision) continue;
       var payload = (tools.jackson.databind.node.ObjectNode) toOutbox(card).payload();
       payload.put("cardId", "wait-" + card.id);
-      String updateKey = "waiting-update:" + card.id + ":" + state;
+      String updateKey =
+          "waiting-update:" + card.id + ":" + state + (revision == 0 ? "" : ":" + revision);
       enqueue(
           updateKey,
           workflowId,
@@ -446,6 +457,13 @@ class DingTalkStore {
   public void markWaitingCardRefreshed(String cardId, String state) {
     var card = outbox.findById(cardId.substring(5)).orElseThrow();
     card.waitingCardState = state;
+  }
+
+  @Transactional
+  public void markWaitingCardRefreshed(String cardId, String state, long revision) {
+    var card = outbox.findById(cardId.substring(5)).orElseThrow();
+    card.waitingCardState = state;
+    card.waitingCardRevision = revision;
   }
 
   @Transactional(readOnly = true)

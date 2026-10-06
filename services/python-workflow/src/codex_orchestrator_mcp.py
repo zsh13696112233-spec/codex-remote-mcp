@@ -355,6 +355,7 @@ class Job:
     managed_output_dir: str | None = field(default=None, repr=False)
     staged_artifacts: list[dict[str, Any]] = field(default_factory=list, repr=False)
     captured_files: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    document_result: dict[str, Any] | None = field(default=None, repr=False)
     artifact_contract: bool = field(default=False, repr=False)
     input_images: list[dict[str, Any]] = field(default_factory=list, repr=False)
     input_image_paths: list[str] = field(default_factory=list, repr=False)
@@ -1305,6 +1306,23 @@ class Orchestrator:
                         job.turn_id = self._extract_id(turn_result, "turn")
                         stage = "turn/completed"
                         await self._consume_turn(job, client, deadline)
+                        from workflow_documents import SCHEMA as DOCUMENT_SCHEMA, collect as collect_documents, ERROR as DOCUMENT_ERROR
+                        if job.status == "completed" and job.output_schema == DOCUMENT_SCHEMA:
+                            try:
+                                value = json.loads(job.response or "")
+                                summary = value["summary"]
+                                if not isinstance(summary, str) or not summary.strip() or len(summary) > 20000:
+                                    raise ValueError("文档交接总结无效。")
+                                job.response = summary
+                                try:
+                                    job.document_result = await asyncio.wait_for(collect_documents(client, job.cwd, value.get("document"), [agent.token_file]), 30)
+                                except asyncio.TimeoutError:
+                                    job.document_result = {"name":"主文档", "error":DOCUMENT_ERROR}
+                            except (ValueError, KeyError, TypeError):
+                                job.status = "failed"
+                                job.response = None
+                                job.error = "步骤交接结果格式无效。"
+                                job.document_result = {"name":"主文档", "error":DOCUMENT_ERROR}
                         if job.status == "completed" and job.artifact_contract:
                             stage = "artifact/capture"
                             await self._capture_artifacts(job)
@@ -1819,6 +1837,10 @@ def _workflow_node_snapshot(workflow_id: str, node_id: str) -> dict[str, Any]:
 def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, Any]:
     store = get_workflow_store()
     snapshot = job.snapshot()
+    from workflow_documents import SCHEMA as DOCUMENT_SCHEMA
+    if job.output_schema == DOCUMENT_SCHEMA and not job.completed.is_set() and job.status == "completed":
+        snapshot["status"] = "running"
+        snapshot["response"] = None
     current_node = store.get_node(workflow_id, node_id)
     if current_node.get("jobId") not in {None, job.job_id}:
         return snapshot
@@ -1836,7 +1858,10 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
             snapshot["status"] = "failed"
             snapshot["error"] = str(error)
             snapshot["finished_at"] = snapshot.get("finished_at") or utc_now()
+    if job.completed.is_set() and job.document_result is not None:
+        snapshot["document"] = job.document_result
     store.sync_node_job(workflow_id, node_id, snapshot)
+    snapshot.pop("document", None)
     return snapshot
 
 
@@ -2003,7 +2028,13 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
                 "stepNumber": node["stepNumber"],
                 "steps": store.get_cumulative_artifact_inputs(workflow_id, node_id),
             }
+        from workflow_documents import SCHEMA as DOCUMENT_SCHEMA, INSTRUCTION as DOCUMENT_INSTRUCTION
+        document_options = {}
+        if node.get("captureDocument"):
+            node["prompt"] += DOCUMENT_INSTRUCTION
+            document_options["output_schema"] = DOCUMENT_SCHEMA
         job = await orchestrator.dispatch(
+            **document_options,
             agent_id=node["agentId"],
             prompt=node["prompt"],
             thread_id=node.get("threadId"),

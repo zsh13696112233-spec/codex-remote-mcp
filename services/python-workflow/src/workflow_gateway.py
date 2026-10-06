@@ -1239,6 +1239,15 @@ async def get_workflow(request: Request) -> Response:
         return _error_response(error, 404 if "找不到" in str(error) else 400)
 
 
+async def get_workflow_document(request: Request) -> Response:
+    try:
+        result = await _database_call(request.app.state.gateway.store.documents,
+            request.path_params["workflow_id"], request.path_params.get("node_id"), request.path_params.get("document_id"))
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+    except ValueError:
+        return JSONResponse({"error": "找不到文档或工作流。"}, status_code=404)
+
+
 async def get_workflow_artifact(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     try:
@@ -1660,6 +1669,9 @@ def _sidecar_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"{key} 不能超过 128 个字符。")
             _validate_internal_timestamp(value, key)
             result[key] = value
+    if "document" in snapshot:
+        from workflow_documents import validate_result
+        result["document"] = validate_result(snapshot["document"])
     return result
 
 
@@ -2036,6 +2048,7 @@ def create_app(
             Route("/workflows/{workflow_id}", get_workflow, methods=["GET"]),
             Route("/workflows/{workflow_id}/input-observations", observe_workflow_input, methods=["POST"]),
             Route("/workflows/{workflow_id}/advance/{gate_id}/notified", notify_workflow_advance, methods=["POST"]),
+            Route("/workflows/{workflow_id}/documents/{document_id}", get_workflow_document, methods=["GET"]),
             Route(
                 "/workflows/{workflow_id}/artifacts/{artifact_id}",
                 get_workflow_artifact,

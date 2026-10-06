@@ -349,6 +349,8 @@ class WorkflowStore(InputImageStore):
                                "ON DELETE CASCADE, revision INTEGER NOT NULL DEFAULT 0)")
             connection.execute("INSERT OR IGNORE INTO workflow_revisions(workflow_id) "
                                "SELECT workflow_id FROM workflows")
+            from workflow_documents import initialize as initialize_documents
+            initialize_documents(connection)
             connection.execute("CREATE TABLE IF NOT EXISTS workflow_node_revisions ("
                                "workflow_id TEXT NOT NULL, node_id TEXT NOT NULL, revision INTEGER NOT NULL, "
                                "PRIMARY KEY(workflow_id, node_id), FOREIGN KEY(workflow_id, node_id) "
@@ -1419,6 +1421,16 @@ class WorkflowStore(InputImageStore):
                 """,
                 (workflow_id, *changed),
             ).fetchall()
+            from workflow_documents import view as document_view, METADATA_COLUMNS
+            document_views = {}
+            if workflow["advance_mode"] == "semi_automatic" and len(node_rows) > 1:
+                first_node = node_rows[0]["node_id"]
+                row = connection.execute(
+                    f"SELECT {METADATA_COLUMNS} FROM workflow_documents WHERE workflow_id=? AND node_id=? AND removed=0 "
+                    "ORDER BY CASE WHEN source_key='@main' THEN 0 ELSE 1 END, rowid LIMIT 1",
+                    (workflow_id, first_node)).fetchone()
+                if row is not None:
+                    document_views[first_node] = [document_view(row)]
             last_sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) FROM workflow_events WHERE workflow_id = ?",
                 (workflow_id,),
@@ -1458,6 +1470,7 @@ class WorkflowStore(InputImageStore):
             )
         nodes = [self._node_snapshot(row) for row in node_rows]
         for node in nodes:
+            node["documents"] = document_views.get(node["id"], [])
             node["resultRevision"] = revisions.get(node["id"], 0)
             if node["id"] in unchanged:
                 node.pop("response", None)
@@ -1703,6 +1716,31 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
         assert row is not None
         return self._artifact_snapshot(row)
+
+    def document_enabled(self, workflow_id: str, node_id: str) -> bool:
+        with self._connect() as connection:
+            from workflow_documents import enabled
+            return enabled(connection, workflow_id, node_id)
+
+    def documents(self, workflow_id: str, node_id: str | None = None, document_id: str | None = None) -> Any:
+        from workflow_documents import view, METADATA_COLUMNS
+        for value in (workflow_id, node_id, document_id):
+            if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 128 or any(ord(c) < 32 for c in value)):
+                raise ValueError("文档查询编号无效。")
+        with self._connect() as connection:
+            if not connection.execute("SELECT 1 FROM workflows WHERE workflow_id=?",(workflow_id,)).fetchone():
+                raise ValueError("找不到工作流。")
+            if document_id:
+                row = connection.execute("SELECT * FROM workflow_documents WHERE workflow_id=? AND document_id=?", (workflow_id,document_id)).fetchone()
+                if row is None:
+                    raise ValueError("找不到文档。")
+                result = view(row, body=True)
+                step = connection.execute("SELECT display_name,position FROM workflow_nodes WHERE workflow_id=? AND node_id=?", (workflow_id,row["node_id"])).fetchone()
+                result.update(stepName=step["display_name"], stepNumber=step["position"] + 1)
+                return result
+            if not connection.execute("SELECT 1 FROM workflow_nodes WHERE workflow_id=? AND node_id=?", (workflow_id,node_id)).fetchone():
+                raise ValueError("找不到步骤。")
+            return [view(row) for row in connection.execute(f"SELECT {METADATA_COLUMNS} FROM workflow_documents WHERE workflow_id=? AND node_id=? ORDER BY rowid",(workflow_id,node_id))]
 
     def get_artifact(self, workflow_id: str, artifact_id: str) -> dict[str, Any]:
         with self._connect() as connection:
@@ -2050,6 +2088,9 @@ class WorkflowStore(InputImageStore):
                     raise RuntimeError("讨论尚未确认完成。")
                 if record["state"] == "completed":
                     return
+                if discussion.get("documentResult") is not None:
+                    from workflow_documents import save as save_documents
+                    save_documents(connection, workflow_id, target["nodeId"], "discussion:" + message_id, discussion["documentResult"], now)
                 summary = discussion["summary"]
                 if summary is not None:
                     if not isinstance(summary, str) or not summary.strip() or len(summary) > RESULT_LIMIT:
@@ -2968,8 +3009,7 @@ class WorkflowStore(InputImageStore):
                 selected.insert(0, notice)
         return header + "\n\n".join(selected)
 
-    @staticmethod
-    def _node_dispatch_spec(row: sqlite3.Row, *, already_dispatched: bool) -> dict[str, Any]:
+    def _node_dispatch_spec(self, row: sqlite3.Row, *, already_dispatched: bool) -> dict[str, Any]:
         return {
             "workflowId": row["workflow_id"],
             "nodeId": row["node_id"],
@@ -2978,6 +3018,7 @@ class WorkflowStore(InputImageStore):
             "prompt": row["actual_prompt"] or row["original_prompt"] or row["prompt"],
             "cwd": row["cwd"],
             "write": bool(row["write_enabled"]),
+            "captureDocument": self.document_enabled(row["workflow_id"], row["node_id"]),
             "permissionProfile": row["permission_profile"],
             "model": row["model"],
             "timeoutSec": row["timeout_sec"],
@@ -3076,6 +3117,13 @@ class WorkflowStore(InputImageStore):
             ).fetchone():
                 # 原业务任务的迟到轮询不能覆盖等待期间已保存的新总结。
                 return
+            if snapshot.get("job_id") and old["job_id"] and snapshot["job_id"] != old["job_id"]:
+                raise RuntimeError("步骤执行版本已变化。")
+            if status == "completed" and "document" in snapshot:
+                if old["status"] in {"failed", "cancelled", "interrupted"}:
+                    return
+                from workflow_documents import save as save_documents
+                save_documents(connection, workflow_id, node_id, "job:" + str(snapshot.get("job_id") or old["job_id"]), snapshot["document"], utc_now())
             if snapshot.get("cwd") or snapshot.get("model"):
                 connection.execute(
                     "INSERT INTO workflow_node_runtime(workflow_id,node_id,attempt_number,cwd,model) "

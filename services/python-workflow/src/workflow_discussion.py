@@ -21,12 +21,15 @@ SCHEMA = {
 }
 
 
-def validate(raw: str) -> dict[str, Any]:
+def validate(raw: str, documents_enabled: bool = False) -> dict[str, Any]:
     try:
         value = json.loads(raw)
     except (TypeError, ValueError) as error:
         raise RuntimeError("执行者回答格式无效，交接总结未更新。") from error
-    if not isinstance(value, dict) or set(value) != {"text", "summary"}:
+    # 升级前已结束的讨论可能仍使用旧结果结构。
+    if documents_enabled and isinstance(value, dict) and set(value) == {"text", "summary"}:
+        value["document"] = None
+    if not isinstance(value, dict) or set(value) != ({"text", "summary", "document"} if documents_enabled else {"text", "summary"}):
         raise RuntimeError("执行者回答格式无效，交接总结未更新。")
     for name in ("text", "summary"):
         item = value[name]
@@ -78,6 +81,7 @@ class DiscussionService:
         target = await db(self.store.discussion_target, workflow_id, message["messageId"])
         if target is None:
             return False
+        documents_enabled = await db(self.store.document_enabled, workflow_id, target["nodeId"])
         record = await db(self.store.get_discussion, workflow_id, message["messageId"])
         if record:
             if record["state"] == "completed":
@@ -106,6 +110,14 @@ class DiscussionService:
                 "不得声称执行了未完成的文件修改。\n当前完整交接总结：\n"
                 + (target["response"] or "") + "\n用户本条消息：\n" + message["text"]
             )
+            output_schema = SCHEMA
+            if documents_enabled:
+                from workflow_documents import SCHEMA as DOCUMENT_SCHEMA
+                output_schema = {**SCHEMA, "required": ["text", "summary", "document"],
+                    "properties": {**SCHEMA["properties"], "document": DOCUMENT_SCHEMA["properties"]["document"]}}
+                prompt += ("\n本步骤展示一份主文档，额外返回 document（name/path 对象或 null）。"
+                    "普通提问返回 null。明确修改时报告修改后的主文档；没有可交付文件时返回 null，平台保留旧正文并提示。"
+                    "路径限定原工作目录内 UTF-8 Markdown 或纯文本文件，不返回正文或文档列表。")
             if len(prompt) > PROMPT_LIMIT:
                 raise RuntimeError("讨论内容超过提示词容量限制，已保持等待。")
             images = await db(self.store.input_images, workflow_id, message.get("imageIds", []))
@@ -132,7 +144,7 @@ class DiscussionService:
                         agent_id=target["agentId"], thread_id=target["threadId"], prompt=prompt,
                         cwd=cwd, model=target["model"], write=target["write"],
                         permission_profile=target["permissionProfile"], timeout_sec=target["timeoutSec"],
-                        output_schema=SCHEMA, event_callback=record_event,
+                        output_schema=output_schema, event_callback=record_event,
                         input_images=images)
                 except Exception:
                     await db(self.store.update_discussion, workflow_id, message["messageId"], state="failed")
@@ -174,10 +186,23 @@ class DiscussionService:
         if raw is None:
             raise RuntimeError("执行者未完成讨论，交接总结未更新。")
         try:
-            decision = validate(raw)
+            decision = validate(raw, documents_enabled)
         except RuntimeError:
             await db(self.store.update_discussion, workflow_id, message["messageId"], state="failed")
             raise
+        if documents_enabled and decision["summary"] is not None:
+            from workflow_documents import collect, failure
+            async def capture():
+                if decision.get("document") is None:
+                    return failure()
+                agent = self.orchestrator.get_agent(target["agentId"])
+                async with self.orchestrator._client_factory(agent.url, token=self.orchestrator._resolve_agent_token(agent)) as client:
+                    return await collect(client, target["cwd"], decision.get("document"), [agent.token_file])
+            try:
+                decision["documentResult"] = await asyncio.wait_for(capture(), 30)
+            except Exception:
+                logging.getLogger(__name__).warning("讨论文档同步失败，保留旧正文。")
+                decision["documentResult"] = failure()
         await self.gateway.event_batcher.flush()
         lock = self.gateway._control_locks.setdefault(workflow_id, asyncio.Lock())
         async with lock:

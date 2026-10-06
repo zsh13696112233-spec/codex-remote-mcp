@@ -945,15 +945,14 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       return;
     }
     Map<String, Object> data =
-        DingTalkWaitingCard.render(item.workflowId(), item.payload(), snapshot);
+        DingTalkWaitingCard.render(item.workflowId(), item.payload(), snapshot, monitorUrl);
     String sentMessageId = null;
     if (update) {
       transport.updateCard(cardId, data);
       store.markWaitingCardRefreshed(
           cardId,
-          "disabled".equals(data.get("confirmStatus"))
-              ? "closed"
-              : DingTalkWaitingCard.cardState(snapshot, item.payload()));
+          DingTalkWaitingCard.cardState(snapshot, item.payload()),
+          DingTalkWaitingCard.documentRevision(snapshot, item.payload()));
     } else {
       DingTalkModels.SendResult receipt =
           transport.sendWaitingCard(

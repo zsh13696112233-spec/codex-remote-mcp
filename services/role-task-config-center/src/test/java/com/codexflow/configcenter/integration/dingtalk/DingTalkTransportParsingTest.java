@@ -12,6 +12,15 @@ import tools.jackson.databind.node.ObjectNode;
 class DingTalkTransportParsingTest {
 
   @Test
+  void internalTemplateSelectorIsNotSentAsCardParameter() {
+    var parameters =
+        transport.stringValues(
+            java.util.Map.of("_templateId", "wide-template", "documents", "查看文档"));
+    assertThat(parameters.has("_templateId")).isFalse();
+    assertThat(parameters.path("documents").asText()).isEqualTo("查看文档");
+  }
+
+  @Test
   void parsesRealCardContentTreeAndKeepsReplyImageSeparate() {
     var message =
         transport.toMessage(

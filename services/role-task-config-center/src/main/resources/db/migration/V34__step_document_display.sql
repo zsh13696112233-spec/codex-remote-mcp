@@ -1,0 +1,1 @@
+ALTER TABLE codex_sop_steps ADD COLUMN display_documents BOOLEAN NOT NULL DEFAULT FALSE;

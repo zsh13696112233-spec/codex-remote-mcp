@@ -41,6 +41,62 @@ class DiscussionTests(unittest.IsolatedAsyncioTestCase):
         self.store.update_discussion("serial-demo", message["messageId"], state="finished")
         self.store.complete_discussion("serial-demo", message["messageId"], {"text": "已处理", "summary": summary})
 
+    async def test_document_sync_failure_preserves_body_and_allows_continue(self):
+        from workflow_documents import save, ERROR
+        with self.store._connect() as db:
+            save(db, "serial-demo", "a", "initial", {"name":"方案", "content":"初稿", "format":"markdown"}, utc_now())
+        manifest = {"name":"方案", "path":"plan.md"}
+        reply = json.dumps({"text":"已修改", "summary":"最新总结", "document":manifest})
+        async with MockAppServer(structured_reply=reply) as server:
+            seed_agents(self.store, {"local": {"url": server.url, "cwd":"/work", "capabilities":["supervisor","executor"]}})
+            gateway = fixture_gateway(self.store, Orchestrator())
+            try:
+                with patch("workflow_documents.collect", AsyncMock(return_value={"name":"方案", "error":ERROR})):
+                    await gateway._process_chat_message("serial-demo", self.accept())
+                document = self.store.documents("serial-demo", "a")[0]
+                self.assertEqual(self.store.documents("serial-demo", document_id=document["id"])["content"], "初稿")
+                self.assertEqual(document["error"], ERROR)
+                self.assertEqual(self.store.get_node("serial-demo","a")["response"], "最新总结")
+                self.assertFalse(self.store.get_workflow("serial-demo")["discussionBusy"])
+                # 文档同步失败不阻止已确认完成的讨论放行。
+                self.store.confirm_advance("serial-demo", self.gate)
+            finally:
+                await gateway.event_batcher.close()
+
+    async def test_document_question_does_not_capture_files(self):
+        reply = json.dumps({"text": "方案说明", "summary": None, "document": None})
+        async with MockAppServer(structured_reply=reply) as server:
+            seed_agents(self.store, {"local": {"url": server.url, "cwd": "/work", "capabilities": ["supervisor", "executor"]}})
+            gateway = fixture_gateway(self.store, Orchestrator())
+            try:
+                with patch("workflow_documents.collect", AsyncMock()) as capture:
+                    await gateway._process_chat_message("serial-demo", self.accept("请解释方案"))
+                    capture.assert_not_awaited()
+                self.assertEqual(self.store.get_node("serial-demo", "a")["response"], "原计划：登录、支付")
+                self.assertEqual(self.store.documents("serial-demo", "a"), [])
+            finally:
+                await gateway.event_batcher.close()
+
+    async def test_later_step_modification_does_not_capture_document(self):
+        self.store.confirm_advance("serial-demo", self.gate)
+        self.store.prepare_node_dispatch("serial-demo", "b")
+        self.store.sync_node_job("serial-demo", "b", {
+            "status": "completed", "thread_id": "second-thread", "turn_id": "second-turn",
+            "response": "第二步总结", "cwd": "/work", "finished_at": utc_now()})
+        reply = json.dumps({"text": "已修改", "summary": "第二步新总结"})
+        async with MockAppServer(structured_reply=reply) as server:
+            seed_agents(self.store, {"local": {"url": server.url, "cwd": "/work", "capabilities": ["supervisor", "executor"]}})
+            gateway = fixture_gateway(self.store, Orchestrator())
+            try:
+                with patch("workflow_documents.collect", AsyncMock()) as capture:
+                    await gateway._process_chat_message("serial-demo", self.accept("修改第二步结果"))
+                    capture.assert_not_awaited()
+                self.assertEqual(self.store.get_node("serial-demo", "b")["response"], "第二步新总结")
+                self.assertEqual(self.store.documents("serial-demo", "a"), [])
+                self.assertEqual(self.store.documents("serial-demo", "b"), [])
+            finally:
+                await gateway.event_batcher.close()
+
     def test_latest_summary_is_handed_to_next_step_without_new_attempt(self):
         before = self.store.get_workflow("serial-demo")["nodes"][0]
         first = self.accept()

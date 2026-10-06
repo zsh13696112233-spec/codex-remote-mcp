@@ -72,6 +72,14 @@ public class WorkflowController {
     return gatewayClient.events(workflowId, after, limit, view, before, tail);
   }
 
+  @GetMapping("/workflows/{workflowId}/documents/{documentId}")
+  public ResponseEntity<JsonNode> document(
+      @PathVariable String workflowId, @PathVariable String documentId) {
+    return ResponseEntity.ok()
+        .cacheControl(CacheControl.noStore())
+        .body(gatewayClient.document(workflowId, documentId));
+  }
+
   /** 代理读取工作流文件，浏览器不直接访问 Python 网关或执行机路径。 */
   @GetMapping("/workflows/{workflowId}/artifacts/{artifactId}")
   public ResponseEntity<byte[]> artifact(

@@ -459,6 +459,17 @@ function renderSteps(nodes, initializing = false) {
     }
     card.append(head, details);
 
+    if (Array.isArray(node.documents) && node.documents.length) {
+      const list = make("div", "step-documents");
+      list.append(make("strong", "", "交付文档"));
+      for (const doc of node.documents.slice(0, 1)) {
+        const link = make("a", "", doc.name + (doc.removed ? "（已移除）" : doc.error ? "（未同步）" : " · 查看文档"));
+        link.href = `document.html?workflowId=${encodeURIComponent(state.workflowId)}&documentId=${encodeURIComponent(doc.id)}`;
+        link.target = "_blank"; link.rel = "noopener";
+        list.append(link);
+      }
+      card.append(list);
+    }
     const hasArtifacts = Array.isArray(node.artifacts) && node.artifacts.length > 0;
     if (node.response || node.error || hasArtifacts) {
       const result = make("div", `step-result${node.error ? " error" : ""}`);

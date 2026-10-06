@@ -12,6 +12,28 @@ class DingTalkWaitingCardTest {
   private final ObjectMapper json = new ObjectMapper();
 
   @Test
+  void documentLinksUseFrozenNodeAndConfiguredTemplate() {
+    var payload =
+        json.createObjectNode()
+            .put("gateId", "gate")
+            .put("documentNodeId", "plan")
+            .put("documentTemplateId", "wide.schema")
+            .put("text", "总结");
+    var snapshot = json.createObjectNode();
+    snapshot.putObject("pendingAdvance").put("gateId", "gate").put("state", "held");
+    var node = snapshot.putArray("nodes").addObject().put("id", "plan").put("resultRevision", 4);
+    node.putArray("documents").addObject().put("id", "doc").put("name", "[方案].md");
+    var data = DingTalkWaitingCard.render("flow", payload, snapshot, "http://example.test:8090/");
+    assertThat(data).containsEntry("_templateId", "wide.schema").containsEntry("summary", "总结");
+    assertThat(data.get("documents").toString())
+        .contains("http://example.test:8090/document.html?workflowId=flow&documentId=doc");
+    assertThat(DingTalkWaitingCard.documentRevision(snapshot, payload)).isEqualTo(4);
+    payload.remove("documentTemplateId");
+    assertThat(DingTalkWaitingCard.render("flow", payload, snapshot).get("markdown").toString())
+        .contains("交付文档", "查看文档");
+  }
+
+  @Test
   void replyHistorySurvivesHeldAndClosedStatesAndOldGateCannotContinue() {
     var payload =
         json.createObjectNode().put("gateId", "old").put("text", "完整回答" + "内容".repeat(1000));

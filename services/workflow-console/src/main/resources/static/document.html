@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>交付文档</title>
+  <link rel="stylesheet" href="document.css">
+  <script defer src="vendor/marked-17.0.1.js"></script>
+  <script defer src="vendor/purify-3.3.3.min.js"></script>
+  <script defer src="document.js"></script>
+</head>
+<body>
+  <header><a id="back" href="/">返回运行详情</a><button id="refresh" type="button">刷新文档</button></header>
+  <main>
+    <p class="eyebrow">交付文档 · 最新保存版本</p>
+    <h1 id="title">正在读取文档…</h1>
+    <p id="metadata"></p>
+    <p id="status" role="status">正在加载</p>
+    <article id="content" aria-label="文档正文"></article>
+  </main>
+</body>
+</html>

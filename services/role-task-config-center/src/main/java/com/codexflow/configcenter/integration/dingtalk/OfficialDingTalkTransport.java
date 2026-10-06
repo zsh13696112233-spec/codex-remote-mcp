@@ -423,7 +423,9 @@ class OfficialDingTalkTransport implements DingTalkTransport {
       String atUserId,
       Map<String, Object> cardData) {
     ObjectNode body = objectMapper.createObjectNode();
-    body.put("cardTemplateId", DingTalkWaitingCard.TEMPLATE_ID);
+    body.put(
+        "cardTemplateId",
+        String.valueOf(cardData.getOrDefault("_templateId", DingTalkWaitingCard.TEMPLATE_ID)));
     body.put("outTrackId", cardId).put("callbackType", "STREAM").put("userIdType", 1);
     if ("GROUP".equals(targetType)) {
       body.put("openSpaceId", "dtv1.card//IM_GROUP." + targetId);
@@ -437,7 +439,9 @@ class OfficialDingTalkTransport implements DingTalkTransport {
       body.putObject("imRobotOpenSpaceModel").put("supportForward", false);
       body.putObject("imRobotOpenDeliverModel").put("spaceType", "IM_ROBOT");
     } else throw new IllegalArgumentException("不支持的卡片接收类型。");
-    body.putObject("cardData").set("cardParamMap", stringValues(cardData));
+    var parameters = new java.util.LinkedHashMap<>(cardData);
+    parameters.remove("_templateId");
+    body.putObject("cardData").set("cardParamMap", stringValues(parameters));
     return body;
   }
 
@@ -783,9 +787,12 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     }
   }
 
-  private ObjectNode stringValues(Map<String, Object> values) {
+  ObjectNode stringValues(Map<String, Object> values) {
     ObjectNode result = objectMapper.createObjectNode();
-    values.forEach((key, value) -> result.put(key, value == null ? "" : value.toString()));
+    values.forEach(
+        (key, value) -> {
+          if (!"_templateId".equals(key)) result.put(key, value == null ? "" : value.toString());
+        });
     return result;
   }
 

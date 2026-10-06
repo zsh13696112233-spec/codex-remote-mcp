@@ -97,6 +97,13 @@ public class GatewayClient {
         null);
   }
 
+  public JsonNode document(String workflowId, String documentId) {
+    return exchange(
+        "GET",
+        "/workflows/" + pathSegment(workflowId) + "/documents/" + pathSegment(documentId),
+        null);
+  }
+
   /** 读取工作流发布的任意文件附件。 */
   public BinaryResponse artifact(String workflowId, String artifactId) {
     return binary(
