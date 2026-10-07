@@ -136,9 +136,21 @@ final class DingTalkWaitingCard {
     String completed = snapshot.path("pendingAdvance").path("completedNodeId").asText();
     for (JsonNode node : snapshot.path("nodes"))
       if (!completed.isBlank() && completed.equals(node.path("id").asText())) {
+        String subject = "本步骤结果";
+        if ("semi_automatic".equals(snapshot.path("advanceMode").asText())
+            && node.path("dependsOn").isEmpty()
+            && !snapshot.path("pendingAdvance").path("nextNodeId").asText().isBlank()) {
+          for (JsonNode document : node.path("documents")) {
+            if (document.path("removed").asBoolean()) continue;
+            if (!document.path("id").asText().isBlank() && !document.path("error").isTextual())
+              subject = "计划文档";
+            break;
+          }
+        }
+        String notice = "请查看" + subject + "，如需调整可回复此卡片，确认后点击「继续执行」。";
         String response = node.path("response").asText();
-        if (!response.isBlank()) return response + "\n\n请检查本步骤产出，确认后继续。";
+        return response.isBlank() ? "步骤已完成。" + notice : response + "\n\n" + notice;
       }
-    return "步骤已完成，请检查产出后继续。";
+    return "步骤已完成。请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。";
   }
 }

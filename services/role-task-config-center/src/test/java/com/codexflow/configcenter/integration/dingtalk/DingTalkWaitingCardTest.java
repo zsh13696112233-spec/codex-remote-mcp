@@ -12,6 +12,50 @@ class DingTalkWaitingCardTest {
   private final ObjectMapper json = new ObjectMapper();
 
   @Test
+  void completionInvitesPlanReviewOnlyForFirstStepWithAvailableDocument() {
+    var snapshot = json.createObjectNode().put("advanceMode", "semi_automatic");
+    snapshot.putObject("pendingAdvance").put("completedNodeId", "plan").put("nextNodeId", "build");
+    var nodes = snapshot.putArray("nodes");
+    // 首步身份由依赖确定，不依赖数组位置。
+    nodes.addObject().put("id", "build").putArray("dependsOn").add("plan");
+    var plan = nodes.addObject().put("id", "plan").put("response", "原始总结");
+    plan.putArray("dependsOn");
+    var document = plan.putArray("documents").addObject().put("id", "doc");
+    assertThat(DingTalkWaitingCard.completion(snapshot))
+        .isEqualTo("原始总结\n\n请查看计划文档，如需调整可回复此卡片，确认后点击「继续执行」。");
+
+    document.put("error", "同步失败");
+    assertThat(DingTalkWaitingCard.completion(snapshot))
+        .contains("请查看本步骤结果")
+        .doesNotContain("计划文档");
+    document.remove("error");
+    document.put("removed", true);
+    assertThat(DingTalkWaitingCard.completion(snapshot))
+        .contains("请查看本步骤结果")
+        .doesNotContain("计划文档");
+    document.put("removed", false);
+    plan.withArray("dependsOn").add("earlier");
+    assertThat(DingTalkWaitingCard.completion(snapshot))
+        .contains("请查看本步骤结果")
+        .doesNotContain("计划文档");
+  }
+
+  @Test
+  void completionWithoutDocumentOrResponseStillExplainsReplyAndContinue() {
+    var snapshot = json.createObjectNode().put("advanceMode", "semi_automatic");
+    snapshot.putObject("pendingAdvance").put("completedNodeId", "plan").put("nextNodeId", "build");
+    snapshot.putArray("nodes").addObject().put("id", "plan").put("response", "原始总结");
+    assertThat(DingTalkWaitingCard.completion(snapshot))
+        .isEqualTo("原始总结\n\n请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。");
+    ((ObjectNode) snapshot.path("nodes").get(0)).put("response", " ");
+    assertThat(DingTalkWaitingCard.completion(snapshot))
+        .isEqualTo("步骤已完成。请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。");
+    snapshot.remove("nodes");
+    assertThat(DingTalkWaitingCard.completion(snapshot))
+        .isEqualTo("步骤已完成。请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。");
+  }
+
+  @Test
   void documentLinksUseFrozenNodeAndConfiguredTemplate() {
     var payload =
         json.createObjectNode()
