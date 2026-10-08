@@ -59,6 +59,11 @@ interface DingTalkTransport {
 
   void updateCard(String cardInstanceId, Map<String, Object> cardData);
 
+  default void sendBlockedCard(
+      String cardId, String clientId, String groupId, String personId, Map<String, Object> data) {
+    throw new BlockedNotificationService.NotSentFailure(false);
+  }
+
   default DingTalkModels.SendResult sendWaitingCard(
       String cardId,
       String targetType,

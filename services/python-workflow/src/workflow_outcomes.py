@@ -1,12 +1,13 @@
 """正式步骤业务结果协议；普通讨论与历史步骤不使用此协议。"""
+import copy
 import hashlib
 import json
 from typing import Any
 
 from workflow_documents import DOCUMENT_SCHEMA
 
-VERSION = 1
-SCHEMA = {
+VERSION = 2
+SCHEMA_V1 = {
     "type": "object", "additionalProperties": False,
     "required": ["summary", "outcome", "reason", "jiraComment", "document"],
     "properties": {
@@ -28,8 +29,29 @@ SCHEMA = {
 }
 
 
-def validate(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != set(SCHEMA["required"]):
+SCHEMA = copy.deepcopy(SCHEMA_V1)
+SCHEMA["required"].append("jiraDeveloper")
+SCHEMA["properties"]["jiraDeveloper"] = {
+    "type": "object", "additionalProperties": False,
+    "required": ["status", "accountType", "accountId", "displayName", "detail"],
+    "properties": {
+        "status": {"type": "string", "enum": ["resolved", "empty", "multiple", "unavailable", "not_applicable"]},
+        "accountType": {"type": "string", "enum": ["", "accountId", "key", "name"]},
+        "accountId": {"type": "string", "maxLength": 256},
+        "displayName": {"type": "string", "maxLength": 160},
+        "detail": {"type": "string", "maxLength": 2000},
+    },
+}
+
+
+def schema(version: int) -> dict[str, Any]:
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("步骤结果协议版本无效。")
+    return SCHEMA_V1 if version == 1 else SCHEMA
+
+
+def validate(value: Any, version: int = VERSION) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != set(schema(version)["required"]):
         raise ValueError("步骤业务结果格式无效。")
     for key, limit in (("summary", 20000), ("reason", 2000)):
         if not isinstance(value[key], str) or len(value[key]) > limit:
@@ -57,14 +79,30 @@ def validate(value: Any) -> dict[str, Any]:
         raise ValueError("备注成功必须提供 Jira 编号。")
     if value["outcome"] == "blocked" and jira["status"] != "succeeded" and not jira["detail"].strip():
         raise ValueError("必须说明未确认 Jira 备注成功的原因。")
+    if version == 2:
+        developer = value["jiraDeveloper"]
+        if not isinstance(developer, dict) or set(developer) != set(SCHEMA["properties"]["jiraDeveloper"]["required"]):
+            raise ValueError("Jira 开发人结果格式无效。")
+        if developer["status"] not in ("resolved", "empty", "multiple", "unavailable", "not_applicable"):
+            raise ValueError("Jira 开发人读取状态无效。")
+        for key, limit in (("accountId", 256), ("displayName", 160), ("detail", 2000)):
+            if not isinstance(developer[key], str) or len(developer[key]) > limit:
+                raise ValueError("Jira 开发人字段无效或超过容量限制。")
+        if developer["status"] == "resolved":
+            if developer["accountType"] not in ("accountId", "key", "name") or not developer["accountId"].strip() or not jira["issueKey"].strip():
+                raise ValueError("开发人必须来自唯一 Jira 并提供稳定账号标识。")
+        elif developer["accountType"] != "" or developer["accountId"] != "" or not developer["detail"].strip():
+            raise ValueError("无法确定开发人时不得填写账号，必须说明原因。")
+        if value["outcome"] == "blocked" and developer["status"] == "not_applicable":
+            raise ValueError("阻断时必须报告开发人读取结果。")
     return value
 
 
-def parse(text: str) -> dict[str, Any]:
-    return validate(json.loads(text))
+def parse(text: str, version: int = VERSION) -> dict[str, Any]:
+    return validate(json.loads(text), version)
 
 
-def instruction(workflow_id: str, node_id: str, capture_document: bool | None) -> str:
+def instruction(workflow_id: str, node_id: str, capture_document: bool | None, version: int = VERSION) -> str:
     marker = hashlib.sha256(f"{workflow_id}:{node_id}".encode()).hexdigest()[:24]
     return (
         "\n【平台正式步骤结果协议】最终按指定 JSON 结构返回，不以普通文字请求停止。"
@@ -84,6 +122,12 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None) -
         "无唯一 Jira、无工具或无权限时不要猜测或重新选单，说明原因；"
         "备注失败或未知仍返回 blocked，由平台结束，不再执行下一步。"
         "success 和 no_task 不需写停止评论，jiraComment 使用 not_applicable 并说明。"
+        + ("阻断时从已锁定 Jira 实际读取 Public.Jira.Fields.Developer 指定的开发人字段，"
+           "jiraDeveloper.status 为 resolved/empty/multiple/unavailable；非阻断可为 not_applicable。"
+           "唯一人员使用实际账号字段 accountId、key、name 中可用的最稳定标识，并以 accountType 标明类型，"
+           "accountId 填该字段原值，displayName 填显示名，detail 说明读取结果。"
+           "缺失、多人或读取失败时账号类型和账号填空字符串并说明原因，不猜测，不使用 assignee 或发起人。"
+           "读取失败仍返回 blocked；不得选择钉钉群、人员或发送通知。" if version == 2 else "")
         + ("document 沿用主文档要求。" if capture_document else "document 必须为 null，不采集主文档。")
     )
 

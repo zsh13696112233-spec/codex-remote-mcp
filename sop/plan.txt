@@ -340,3 +340,5 @@ Unity 使用 `127.0.0.1:7890` 本地桥接。前台入口和验证路径按 `<Pu
 - jiraComment 如实返回 succeeded、failed、unknown 或 not_applicable，以及 issueKey、reference、detail；成功时提供可取得的评论编号或链接。无唯一编号、工具或权限时说明原因，不猜测。备注失败或未知仍返回 blocked，由平台结束流程。
 - jiraComment.status 只表示评论结果，不用角色修改结果替代；在 detail 中补充角色修改结果，便于页面展示。
 - no_task 不添加阻断评论，也不触发将角色改为 `Natural Person`；success 继续沿用正常业务流转规则。普通咨询和等待期间讨论不通过本协议控制流程；正式步骤的原始业务约束继续适用。
+
+- 阻断收尾时实际读取已锁定 Jira 的 `Public.Jira.Fields.Developer` 开发人字段，按平台结果协议报告唯一稳定账号（保留原始 accountId/key/name 类型）、显示名及读取结果。空值、多人或读取失败必须说明，不猜测，不使用经办人或聊天发起人替代；仍结束流程。不得自行选择钉钉对象或发送通知。

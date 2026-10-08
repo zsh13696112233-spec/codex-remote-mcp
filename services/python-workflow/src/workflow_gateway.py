@@ -1704,7 +1704,7 @@ def _sidecar_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         result["document"] = validate_result(snapshot["document"])
     if "businessResult" in snapshot:
         from workflow_outcomes import validate
-        result["businessResult"] = validate(snapshot["businessResult"])
+        result["businessResult"] = validate(snapshot["businessResult"], 2 if isinstance(snapshot["businessResult"], dict) and "jiraDeveloper" in snapshot["businessResult"] else 1)
     return result
 
 

@@ -677,6 +677,7 @@ class WorkflowStore(InputImageStore):
             "taskDefinitionId": task_id.strip() if task_id is not None else None,
             "name": value.get("name"),
             "failurePolicy": failure_policy,
+            **({"resultProtocolVersion": value["resultProtocolVersion"]} if "resultProtocolVersion" in value else {}),
             **({"groupId": value["groupId"]} if "groupId" in value else {}),
             "supervisorAgentId": supervisor_agent_id,
             "supervisorCwd": value.get("supervisorCwd"),
@@ -707,7 +708,10 @@ class WorkflowStore(InputImageStore):
 
     def create_workflow(self, value: dict[str, Any]) -> dict[str, Any]:
         spec = self.normalize_spec(value)
-        spec["resultProtocolVersion"] = 1
+        version = value.get("resultProtocolVersion", 2)
+        if type(version) is not int or version not in (1, 2):
+            raise ValueError("步骤结果协议版本无效。")
+        spec["resultProtocolVersion"] = version
         timestamp = utc_now()
         encoded_spec = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
         compressed_spec = zlib.compress(encoded_spec.encode("utf-8"), level=6)
@@ -755,7 +759,7 @@ class WorkflowStore(InputImageStore):
                 )
             except sqlite3.IntegrityError as error:
                 raise ValueError(f"工作流已存在：{spec['workflowId']}") from error
-            connection.execute("UPDATE workflows SET result_protocol_version=1 WHERE workflow_id=?", (spec["workflowId"],))
+            connection.execute("UPDATE workflows SET result_protocol_version=? WHERE workflow_id=?", (version, spec["workflowId"]))
             if spec.get("taskDefinitionId"):
                 connection.execute("INSERT INTO workflow_task_bindings VALUES (?, ?)",
                                    (spec["workflowId"], spec["taskDefinitionId"]))
@@ -3135,19 +3139,19 @@ class WorkflowStore(InputImageStore):
             workflow = connection.execute("SELECT status, termination_json, result_protocol_version FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if workflow["status"] in {"completed", "failed", "cancelled"}:
                 return
-            if workflow["result_protocol_version"] == 1 and old["status"] in TERMINAL_NODE_STATUSES:
+            if workflow["result_protocol_version"] in (1, 2) and old["status"] in TERMINAL_NODE_STATUSES:
                 return
-            if workflow["result_protocol_version"] == 1 and status == "completed":
+            if workflow["result_protocol_version"] in (1, 2) and status == "completed":
                 if old["job_id"] and snapshot.get("job_id") != old["job_id"]:
                     raise RuntimeError("步骤执行版本缺失或已变化。")
                 for key in ("thread_id", "turn_id"):
                     if old[key] and snapshot.get(key) and old[key] != snapshot[key]:
                         raise RuntimeError("步骤执行版本已变化。")
             outcome = None
-            if status == "completed" and workflow["result_protocol_version"] == 1:
+            if status == "completed" and workflow["result_protocol_version"] in (1, 2):
                 from workflow_outcomes import validate
                 try:
-                    outcome = validate(snapshot.get("businessResult"))
+                    outcome = validate(snapshot.get("businessResult"), workflow["result_protocol_version"])
                 except (ValueError, TypeError, KeyError):
                     status = "failed"
                     snapshot = {**snapshot, "error": "步骤业务结果格式无效。"}
@@ -3158,6 +3162,8 @@ class WorkflowStore(InputImageStore):
                         snapshot["error"] = outcome["reason"]
             if outcome is not None and outcome["outcome"] != "success" and not workflow["termination_json"]:
                 termination = {key: outcome[key] for key in ("outcome", "reason", "jiraComment")}
+                if "jiraDeveloper" in outcome:
+                    termination["jiraDeveloper"] = outcome["jiraDeveloper"]
                 termination["nodeId"] = node_id
                 from workflow_outcomes import message
                 text = message(termination)

@@ -43,6 +43,9 @@ class TaskDefinitionEntity extends Timestamped {
   @JoinColumn(name = "dingtalk_target_id")
   DingTalkTargetEntity dingtalkTarget;
 
+  @Column(name = "blocked_notification_group_id", length = 36)
+  String blockedNotificationGroupId;
+
   /** 该钉钉任务绑定当前占用的工作流；不同任务定义之间可以并行。 */
   @Column(name = "dingtalk_active_workflow_id", length = 128)
   String dingtalkActiveWorkflowId;

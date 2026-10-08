@@ -42,14 +42,22 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   private volatile String cachedTokenClientId;
   private volatile long cachedTokenExpiresAt;
 
+  @org.springframework.beans.factory.annotation.Autowired
   OfficialDingTalkTransport(DingTalkProperties properties, ObjectMapper objectMapper) {
-    this.properties = properties;
-    this.objectMapper = objectMapper;
-    this.httpClient =
+    this(
+        properties,
+        objectMapper,
         HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .version(HttpClient.Version.HTTP_1_1)
-            .build();
+            .build());
+  }
+
+  OfficialDingTalkTransport(
+      DingTalkProperties properties, ObjectMapper objectMapper, HttpClient httpClient) {
+    this.properties = properties;
+    this.objectMapper = objectMapper;
+    this.httpClient = httpClient;
   }
 
   @Override
@@ -384,6 +392,52 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     body.put("outTrackId", cardInstanceId);
     body.putObject("cardData").set("cardParamMap", stringValues(cardData));
     authorized("PUT", "/v1.0/card/instances", body);
+  }
+
+  @Override
+  public void sendBlockedCard(
+      String cardId, String clientId, String groupId, String personId, Map<String, Object> data) {
+    ObjectNode body = waitingCardBody(cardId, "GROUP", groupId, personId, data);
+    ((ObjectNode) body.path("imGroupOpenDeliverModel")).put("robotCode", clientId);
+    // 使用冻结的机器人身份获取凭证，配置并发切换也不能换应用发送。
+    String secret = properties.getClientSecret();
+    if (!clientId.equals(properties.getClientId()))
+      throw new BlockedNotificationService.NotSentFailure(false);
+    String token;
+    try {
+      token = fetchAccessToken(clientId, secret).value();
+    } catch (RuntimeException error) {
+      throw new BlockedNotificationService.NotSentFailure(true);
+    }
+    // 单次调用，不复用会自动重发的传输包装；错误响应只保留分类，不回显内容。
+    try {
+      var request =
+          HttpRequest.newBuilder(URI.create(API_HOST + "/v1.0/card/instances/createAndDeliver"))
+              .timeout(Duration.ofSeconds(30))
+              .header("Content-Type", "application/json")
+              .header("x-acs-dingtalk-access-token", token)
+              .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+              .build();
+      var response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+      if (response.statusCode() == 401) {
+        cachedToken = null;
+        cachedTokenExpiresAt = 0;
+        throw new BlockedNotificationService.NotSentFailure(true);
+      }
+      if (response.statusCode() == 429) throw new BlockedNotificationService.NotSentFailure(true);
+      if (response.statusCode() >= 400
+          && response.statusCode() < 500
+          && response.statusCode() != 408
+          && response.statusCode() != 409)
+        throw new BlockedNotificationService.NotSentFailure(false);
+      if (response.statusCode() != 200) throw new IllegalStateException("卡片发送结果未确认。");
+      waitingCardReceipt(objectMapper.readTree(response.body()), "GROUP", groupId);
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("卡片发送结果未确认。");
+    } catch (IOException error) {
+      throw new IllegalStateException("卡片发送结果未确认。");
+    }
   }
 
   @Override

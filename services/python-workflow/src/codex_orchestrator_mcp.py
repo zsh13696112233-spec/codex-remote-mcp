@@ -1308,10 +1308,10 @@ class Orchestrator:
                         job.turn_id = self._extract_id(turn_result, "turn")
                         stage = "turn/completed"
                         await self._consume_turn(job, client, deadline)
-                        from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, parse as parse_outcome
-                        if job.status == "completed" and job.output_schema == OUTCOME_SCHEMA:
+                        from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, parse as parse_outcome
+                        if job.status == "completed" and job.output_schema in (OUTCOME_SCHEMA, SCHEMA_V1):
                             try:
-                                value = parse_outcome(job.response or "")
+                                value = parse_outcome(job.response or "", 1 if job.output_schema == SCHEMA_V1 else 2)
                                 job.business_result = value
                                 job.response = value["summary"]
                             except (ValueError, KeyError, TypeError):
@@ -1855,8 +1855,8 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
     store = get_workflow_store()
     snapshot = job.snapshot()
     from workflow_documents import SCHEMA as DOCUMENT_SCHEMA
-    from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA
-    if job.output_schema in (DOCUMENT_SCHEMA, OUTCOME_SCHEMA) and not job.completed.is_set() and job.status == "completed":
+    from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1
+    if job.output_schema in (DOCUMENT_SCHEMA, OUTCOME_SCHEMA, SCHEMA_V1) and not job.completed.is_set() and job.status == "completed":
         snapshot["status"] = "running"
         snapshot["response"] = None
     current_node = store.get_node(workflow_id, node_id)
@@ -2059,10 +2059,10 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         if node.get("captureDocument"):
             node["prompt"] += DOCUMENT_INSTRUCTION
             document_options["output_schema"] = DOCUMENT_SCHEMA
-        if node.get("resultProtocolVersion") == 1:
-            from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, instruction
-            node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"))
-            document_options["output_schema"] = OUTCOME_SCHEMA
+        if node.get("resultProtocolVersion") in (1, 2):
+            from workflow_outcomes import schema, instruction
+            node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"), node["resultProtocolVersion"])
+            document_options["output_schema"] = schema(node["resultProtocolVersion"])
         job = await orchestrator.dispatch(
             **document_options,
             agent_id=node["agentId"],

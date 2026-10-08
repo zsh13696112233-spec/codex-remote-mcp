@@ -256,6 +256,7 @@ public class ConfigService {
     copy.scheduleIntervalMinutes = source.scheduleIntervalMinutes;
     copy.scheduleEnabled = false;
     copy.notifyDingTalk = false;
+    copy.blockedNotificationGroupId = source.blockedNotificationGroupId;
     copy.enabled = false;
     return json.task(tasks.save(copy));
   }
@@ -386,6 +387,14 @@ public class ConfigService {
       }
       task.dingtalkTarget =
           targetId == null ? null : dingtalkTargets.requiredSelectable(targetId, task.id);
+    }
+    if (body.blockedNotificationGroupId() != null) {
+      String blockedGroup = normalizeNullable(body.blockedNotificationGroupId());
+      if (blockedGroup != null) {
+        var group = dingtalkTargets.requiredSelectable(blockedGroup, task.id);
+        if (!"GROUP".equals(group.targetType)) throw new IllegalArgumentException("阻断通知只能选择群聊。");
+      }
+      task.blockedNotificationGroupId = blockedGroup;
     }
     task.scheduleEnabled = false;
     task.nextIntervalAt = null;

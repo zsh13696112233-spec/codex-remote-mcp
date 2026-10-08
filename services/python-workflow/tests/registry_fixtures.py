@@ -45,6 +45,7 @@ class FixtureWorkflowStore(WorkflowStore):
         if snapshot.get('status') == 'completed' and 'businessResult' not in snapshot:
             snapshot = {**snapshot, 'businessResult': {
                 'summary': snapshot.get('response') or '测试步骤已完成。',
+                'jiraDeveloper': {'status': 'not_applicable', 'accountType': '', 'accountId': '', 'displayName': '', 'detail': '测试无 Jira。'},
                 'outcome': 'success', 'reason': '', 'document': None,
                 'jiraComment': {'status': 'not_applicable', 'issueKey': '', 'reference': '', 'detail': '测试无 Jira。'},
             }}

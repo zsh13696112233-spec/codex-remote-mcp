@@ -100,6 +100,7 @@ class DomainJsonMapper {
     result.put("groupId", task.groupId);
     result.put("name", task.name);
     result.put("objective", task.objective);
+    putNullable(result, "blockedNotificationGroupId", task.blockedNotificationGroupId);
     result.put("sopId", task.sop.id);
     result.put("sopName", task.sop.name);
     putNullable(result, "additionalNotes", task.additionalNotes);

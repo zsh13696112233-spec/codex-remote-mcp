@@ -246,12 +246,14 @@ class SidecarInternalApiTests(unittest.TestCase):
         headers = self._auth("token-a", lease)
         path = "/internal/v1/workflows/blocked-a/nodes/a"
         prepared = self.client.post(path + "/prepare", headers=headers, json={"dispatchId": "one"})
-        self.assertEqual(prepared.json()["resultProtocolVersion"], 1)
+        self.assertEqual(prepared.json()["resultProtocolVersion"], 2)
         body = {"operation": "sync", "snapshot": {"status": "completed", "businessResult": result()}}
         self.assertEqual(self.client.post(path + "/state", headers=self._auth("token-a", "old-lease"), json=body).status_code, 409)
         self.assertIsNone(self.store.get_workflow("blocked-a")["termination"])
         self.assertEqual(self.client.post(path + "/state", headers=headers, json=body).status_code, 200)
         self.assertEqual(self.store.get_workflow("blocked-a")["termination"]["outcome"], "blocked")
+        view = self.client.get("/internal/v1/workflows/blocked-a", headers=headers).json()
+        self.assertEqual(view["termination"]["jiraDeveloper"]["accountId"], "dev-1")
         self.assertEqual(self.client.post("/internal/v1/workflows/blocked-a/nodes/b/prepare", headers=headers, json={"dispatchId": "two"}).status_code, 400)
         self.assertTrue(self.store.has_supervisor_lease("blocked-a"))
         self.store.finish_business_termination("blocked-a")

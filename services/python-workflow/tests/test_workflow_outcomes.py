@@ -17,8 +17,9 @@ from tests.mock_app_server import MockAppServer
 
 def result(outcome="blocked", jira="succeeded"):
     return {"summary": "已核验；未修改业务代码。", "outcome": outcome,
+            "jiraDeveloper": {"status": "resolved", "accountType": "key", "accountId": "dev-1", "displayName": "开发人", "detail": "实际读取"},
             "reason": "缺少产品确认" if outcome != "success" else "", "document": None,
-            "jiraComment": {"status": jira, "issueKey": "TEST-1" if jira == "succeeded" else "",
+            "jiraComment": {"status": jira, "issueKey": "TEST-1",
                             "reference": "123" if jira == "succeeded" else "", "detail": "测试备注结果"}}
 
 
@@ -125,7 +126,7 @@ class OutcomeStoreTests(unittest.TestCase):
 
     def test_protocol_and_marker_are_stable(self):
         self.start()
-        self.assertEqual(self.store.get_spec("serial-demo")["resultProtocolVersion"], 1)
+        self.assertEqual(self.store.get_spec("serial-demo")["resultProtocolVersion"], 2)
         self.assertEqual(instruction("w", "n", False), instruction("w", "n", False))
         self.assertNotEqual(instruction("w", "n", False), instruction("w2", "n", False))
 

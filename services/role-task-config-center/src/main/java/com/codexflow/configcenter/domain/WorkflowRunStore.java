@@ -17,13 +17,16 @@ public class WorkflowRunStore {
   private final GroupService groups;
   private final TaskRunRepository runs;
   private final DomainJsonMapper json;
+  private final BlockedNotificationStore blockedNotifications;
 
   /** 注入任务定义、运行记录数据访问组件和 JSON 映射器。 */
   WorkflowRunStore(
       TaskDefinitionRepository tasks,
       TaskRunRepository runs,
       DomainJsonMapper json,
-      GroupService groups) {
+      GroupService groups,
+      BlockedNotificationStore blockedNotifications) {
+    this.blockedNotifications = blockedNotifications;
     this.tasks = tasks;
     this.groups = groups;
     this.runs = runs;
@@ -62,6 +65,7 @@ public class WorkflowRunStore {
     ObjectNode payload = (ObjectNode) json.read(source.submittedJson);
     String workflowId = UUID.randomUUID().toString();
     payload.put("workflowId", workflowId);
+    if (!payload.has("resultProtocolVersion")) payload.put("resultProtocolVersion", 1);
     payload.put("taskDefinitionId", source.taskDefinition.id);
     ObjectNode snapshot = (ObjectNode) json.read(source.snapshotJson);
     snapshot.put("workflowId", workflowId);
@@ -141,7 +145,14 @@ public class WorkflowRunStore {
 
   @Transactional(readOnly = true)
   public ObjectNode runDetail(String workflowId) {
-    return json.run(findRun(workflowId));
+    ObjectNode detail = json.run(findRun(workflowId));
+    var notification = blockedNotifications.view(workflowId);
+    detail.set(
+        "blockedNotification",
+        json.newObject()
+            .put("state", (String) notification.get("state"))
+            .put("reason", (String) notification.get("reason")));
+    return detail;
   }
 
   @Transactional(readOnly = true)
@@ -254,6 +265,7 @@ public class WorkflowRunStore {
     run.submittedAt = Instant.now();
     run.updatedAt = run.submittedAt;
     runs.saveAndFlush(run);
+    blockedNotifications.reserve(run.workflowId, snapshot.path("blockedNotification"));
     return new PreparedRun(run.workflowId, payload);
   }
 
@@ -264,6 +276,7 @@ public class WorkflowRunStore {
     }
     ObjectNode root = json.newObject();
     root.put("workflowId", workflowId);
+    root.put("resultProtocolVersion", 2);
     root.put("taskDefinitionId", task.id);
     root.put("groupId", task.groupId);
     root.put("name", task.name);
@@ -326,6 +339,8 @@ public class WorkflowRunStore {
   private ObjectNode taskSnapshot(TaskDefinitionEntity task, ObjectNode submitted) {
     ObjectNode snapshot = json.task(task);
     snapshot.put("workflowId", submitted.path("workflowId").asText());
+    snapshot.set(
+        "blockedNotification", blockedNotifications.freezeGroup(task.blockedNotificationGroupId));
     snapshot.set("sop", json.sop(task.sop));
     snapshot.set("submittedJson", submitted.deepCopy());
     return snapshot;
