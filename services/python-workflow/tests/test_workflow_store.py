@@ -679,6 +679,9 @@ class WorkflowStoreTests(unittest.TestCase):
 
     def test_dependency_result_and_final_prompt_are_truncated(self) -> None:
         self.store.create_workflow(serial_workflow())
+        # 历史长结果仍可交接；新协议在边界拒绝超长总结。
+        with self.store._connect() as db:
+            db.execute("UPDATE workflows SET result_protocol_version=0")
         self.store.prepare_node_dispatch("serial-demo", "a")
         self.store.sync_node_job(
             "serial-demo",

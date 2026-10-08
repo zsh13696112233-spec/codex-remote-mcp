@@ -1,5 +1,6 @@
 package com.codexflow.configcenter.application;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -30,6 +31,27 @@ class WorkflowRunServiceTest {
   private GatewayClient gateway;
   private WorkflowRunService service;
   private PreparedRun prepared;
+
+  @Test
+  void summaryIncludesAndPersistsBusinessTermination() {
+    ObjectNode row =
+        objectMapper.createObjectNode().put("workflowId", WORKFLOW_ID).put("status", "running");
+    when(store.listRunSummaries("task", 0, 20)).thenReturn(List.of(row));
+    ObjectNode batch = objectMapper.createObjectNode();
+    batch.putObject("statuses").put(WORKFLOW_ID, "failed");
+    batch
+        .putObject("terminations")
+        .putObject(WORKFLOW_ID)
+        .put("outcome", "blocked")
+        .put("reason", "需要产品确认");
+    when(gateway.post(
+            org.mockito.ArgumentMatchers.eq("/workflow-statuses"),
+            org.mockito.ArgumentMatchers.any()))
+        .thenReturn(batch);
+    var values = service.listRunSummaries("task", 0, 20);
+    assertThat(values.get(0).path("termination").path("outcome").asText()).isEqualTo("blocked");
+    verify(store).recordTerminations(batch.path("terminations"));
+  }
 
   @Test
   void webAndSchedulePersistTheirOwnSourceWithoutNotifications() {

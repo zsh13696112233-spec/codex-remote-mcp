@@ -91,7 +91,19 @@ public class WorkflowRunService {
       ObjectNode request = values.get(0).objectNode();
       var ids = request.putArray("workflowIds");
       values.forEach(value -> ids.add(value.path("workflowId").asText()));
-      JsonNode live = gateway.post("/workflow-statuses", request).path("statuses");
+      JsonNode batch = gateway.post("/workflow-statuses", request);
+      JsonNode live = batch.path("statuses");
+      ObjectNode terminations = request.objectNode();
+      values.forEach(
+          value -> {
+            JsonNode termination =
+                batch.path("terminations").path(value.path("workflowId").asText());
+            if (termination.isObject()) {
+              value.set("termination", termination);
+              terminations.set(value.path("workflowId").asText(), termination);
+            }
+          });
+      store.recordTerminations(terminations);
       store.recordSummaryStatuses(live);
       values.forEach(
           value -> {

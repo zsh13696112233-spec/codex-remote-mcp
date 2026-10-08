@@ -11,6 +11,11 @@ import org.springframework.data.repository.query.Param;
 /** 任务运行记录的 Spring Data JPA 数据访问接口。 */
 interface TaskRunRepository extends JpaRepository<TaskRunEntity, String> {
 
+  @Modifying
+  @Query(
+      "UPDATE TaskRunEntity r SET r.terminationJson = :termination WHERE r.workflowId = :id AND (r.terminationJson IS NULL OR r.terminationJson <> :termination)")
+  void updateTermination(@Param("id") String id, @Param("termination") String termination);
+
   /** 查询指定任务定义的全部运行记录，并按提交时间倒序返回。 */
   List<TaskRunEntity> findByTaskDefinitionIdOrderBySubmittedAtDesc(String taskDefinitionId);
 
@@ -25,6 +30,8 @@ interface TaskRunRepository extends JpaRepository<TaskRunEntity, String> {
 
     String getStatus();
 
+    String getTerminationJson();
+
     Instant getSubmittedAt();
 
     Instant getUpdatedAt();
@@ -32,7 +39,7 @@ interface TaskRunRepository extends JpaRepository<TaskRunEntity, String> {
 
   @Query(
       "SELECT r.workflowId AS workflowId, r.sourceWorkflowId AS sourceWorkflowId, "
-          + "r.groupId AS groupId, r.groupName AS groupName, r.status AS status, r.submittedAt AS submittedAt, r.updatedAt AS updatedAt "
+          + "r.groupId AS groupId, r.groupName AS groupName, r.status AS status, r.terminationJson AS terminationJson, r.submittedAt AS submittedAt, r.updatedAt AS updatedAt "
           + "FROM TaskRunEntity r WHERE r.taskDefinition.id = :taskId "
           + "ORDER BY r.submittedAt DESC, r.workflowId DESC")
   List<Summary> summaries(@Param("taskId") String taskId, Pageable pageable);

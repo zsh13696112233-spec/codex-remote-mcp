@@ -733,6 +733,11 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         String notice =
             DingTalkExecutionNotice.stepLabel(event, snapshot) + "：" + eventNotice(type);
         store.refreshWaitingCards(binding.workflowId(), snapshot);
+        if (TERMINAL_EVENTS.contains(type) && snapshot.path("termination").isObject())
+          notice =
+              "blocked".equals(snapshot.path("termination").path("outcome").asText())
+                  ? "因阻断结束。"
+                  : "无待处理任务，已结束。";
         if (TERMINAL_EVENTS.contains(type) && !snapshot.path("response").asText().isBlank())
           notice += "\n执行结果：\n" + DingTalkExecutionNotice.safe(snapshot.path("response").asText());
         recordProcessWithRetry(

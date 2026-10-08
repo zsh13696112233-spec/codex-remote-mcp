@@ -146,3 +146,8 @@ POST /api/workflows/{workflowId}/advance/{gateId}/hold
 ## 独立文档查看页
 
 半自动第一步结果区显示单份主文档入口，点击进入 `document.html?workflowId=...&documentId=...`，读取最新成功保存的正文，显示所属步骤、版本、更新时间和同步失败状态。保留只读代理 `GET /api/workflows/{workflowId}/documents/{documentId}`；不增加编辑、提交或流程控制接口。Markdown 渲染库本地托管，无 Node 构建，禁用原始 HTML、外部图片和危险链接。详见[文档展示说明](../../docs/SOP_DOCUMENT_DISPLAY.zh-CN.md)。
+
+
+## 业务提前结束展示
+
+状态接口透传可空 `termination`，表示正式步骤报告的阻断或无任务。收尾期间显示“正在结束”，终态区分“因阻断结束”“无待处理任务，已结束”，展示原因及 Jira 备注结果；未启动步骤显示“未执行”。仍使用原有 `failed/completed` 终态停止轮询，页面不新增停止、任务编辑或提交接口。普通讨论不触发停止。详见 [升级与验收](../../docs/SOP_BLOCKED_STOP.zh-CN.md)。

@@ -38,6 +38,7 @@ class MockAppServer:
         self.steer_error = steer_error
         self.steer_commentary = steer_commentary
         self.steer_completes_turn = steer_completes_turn
+        self.explicit_structured_reply = structured_reply is not None
         self.structured_reply = structured_reply or json.dumps({
             "kind": "answer",
             "text": "mock chat reply",
@@ -116,6 +117,11 @@ class MockAppServer:
                             if "outputSchema" in (message.get("params") or {})
                             else "mock final reply"
                         )
+                        if not self.explicit_structured_reply and "outcome" in message.get("params", {}).get("outputSchema", {}).get("properties", {}):
+                            from tests.test_workflow_outcomes import result
+                            value = result("success", "not_applicable")
+                            value["summary"] = "mock final reply"
+                            reply = json.dumps(value)
                         task = asyncio.create_task(self._complete_turn(connection, reply))
                         self._completion_tasks.add(task)
                         task.add_done_callback(self._completion_tasks.discard)

@@ -75,7 +75,7 @@ public class RunCatalogStore {
     args.forEach(count::setParameter);
     var query =
         entities.createQuery(
-            "SELECT r.workflowId, r.runName, r.triggerSource, r.status, r.submittedAt, r.groupId, r.groupName FROM TaskRunEntity r"
+            "SELECT r.workflowId, r.runName, r.triggerSource, r.status, r.submittedAt, r.groupId, r.groupName, r.terminationJson FROM TaskRunEntity r"
                 + where
                 + " ORDER BY r.submittedAt DESC, r.workflowId DESC",
             Object[].class);
@@ -86,16 +86,18 @@ public class RunCatalogStore {
     var items = result.putArray("items");
     for (Object[] row : query.getResultList()) {
       String id = (String) row[0];
-      items
-          .addObject()
-          .put("workflowId", id)
-          .put("name", (String) row[1])
-          .put("triggerSource", (String) row[2])
-          .put("status", (String) row[3])
-          .put("groupId", (String) row[5])
-          .put("groupName", (String) row[6])
-          .put("submittedAt", ((Instant) row[4]).toString())
-          .put("monitorUrl", json.monitorUrl(id));
+      ObjectNode item =
+          items
+              .addObject()
+              .put("workflowId", id)
+              .put("name", (String) row[1])
+              .put("triggerSource", (String) row[2])
+              .put("status", (String) row[3])
+              .put("groupId", (String) row[5])
+              .put("groupName", (String) row[6])
+              .put("submittedAt", ((Instant) row[4]).toString())
+              .put("monitorUrl", json.monitorUrl(id));
+      if (row[7] != null) item.set("termination", json.read((String) row[7]));
     }
     return result;
   }

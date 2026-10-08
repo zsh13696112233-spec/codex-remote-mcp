@@ -176,7 +176,8 @@ class ConsultationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(m == "thread/resume" for m, _ in self.client.calls))
 
     async def test_running_step_never_starts_consultation(self):
-        self.store.sync_node_job("serial-demo", "a", {"status": "running"})
+        with self.store._connect() as db:
+            db.execute("UPDATE workflow_nodes SET status='running' WHERE workflow_id='serial-demo' AND node_id='a'")
         result = await self.call()
         self.assertIn("只查询记录", result["notice"])
         self.assertFalse(any(m == "turn/start" for m, _ in self.client.calls))

@@ -406,6 +406,12 @@ class DingTalkProgressCard {
   }
 
   private static String cardStatus(JsonNode snapshot) {
+    if (snapshot.path("termination").isObject()) {
+      if (!isTerminal(snapshot.path("status").asText())) return "正在结束";
+      return "blocked".equals(snapshot.path("termination").path("outcome").asText())
+          ? "因阻断结束"
+          : "无待处理任务，已结束";
+    }
     if (hasGate(snapshot.path("pendingAdvance"))) {
       return "held".equals(snapshot.path("pendingAdvance").path("state").asText())
           ? "🟡 已暂停"
@@ -431,7 +437,7 @@ class DingTalkProgressCard {
       case "failed" -> "失败";
       case "cancelled" -> "已停止";
       case "timed_out" -> "超时";
-      case "skipped" -> "已跳过";
+      case "skipped" -> "未执行";
       case "cancelling" -> "停止中";
       default -> "准备中";
     };

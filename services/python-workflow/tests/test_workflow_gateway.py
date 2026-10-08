@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from codex_orchestrator_mcp import Orchestrator
 from starlette.testclient import TestClient
 from tests.mock_app_server import MockAppServer
+from tests.test_workflow_outcomes import result as business_result
 from workflow_gateway import WorkflowGateway, build_argument_parser, create_app
 from workflow_store import WorkflowStore, utc_now
 
@@ -578,6 +579,7 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                     {
                         "status": "completed",
                         "response": "A",
+                        "businessResult": business_result("success"),
                         "finished_at": utc_now(),
                     },
                 )

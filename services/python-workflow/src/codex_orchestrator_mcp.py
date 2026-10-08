@@ -356,6 +356,8 @@ class Job:
     staged_artifacts: list[dict[str, Any]] = field(default_factory=list, repr=False)
     captured_files: list[dict[str, Any]] = field(default_factory=list, repr=False)
     document_result: dict[str, Any] | None = field(default=None, repr=False)
+    business_result: dict[str, Any] | None = field(default=None, repr=False)
+    capture_document: bool = field(default=False, repr=False)
     artifact_contract: bool = field(default=False, repr=False)
     input_images: list[dict[str, Any]] = field(default_factory=list, repr=False)
     input_image_paths: list[str] = field(default_factory=list, repr=False)
@@ -1306,7 +1308,22 @@ class Orchestrator:
                         job.turn_id = self._extract_id(turn_result, "turn")
                         stage = "turn/completed"
                         await self._consume_turn(job, client, deadline)
+                        from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, parse as parse_outcome
+                        if job.status == "completed" and job.output_schema == OUTCOME_SCHEMA:
+                            try:
+                                value = parse_outcome(job.response or "")
+                                job.business_result = value
+                                job.response = value["summary"]
+                            except (ValueError, KeyError, TypeError):
+                                job.status = "failed"
+                                job.response = None
+                                job.error = "步骤业务结果格式无效。"
                         from workflow_documents import SCHEMA as DOCUMENT_SCHEMA, collect as collect_documents, ERROR as DOCUMENT_ERROR
+                        if job.status == "completed" and job.business_result is not None and job.capture_document:
+                            try:
+                                job.document_result = await asyncio.wait_for(collect_documents(client, job.cwd, job.business_result.get("document"), [agent.token_file]), 30)
+                            except asyncio.TimeoutError:
+                                job.document_result = {"name": "主文档", "error": DOCUMENT_ERROR}
                         if job.status == "completed" and job.output_schema == DOCUMENT_SCHEMA:
                             try:
                                 value = json.loads(job.response or "")
@@ -1838,7 +1855,8 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
     store = get_workflow_store()
     snapshot = job.snapshot()
     from workflow_documents import SCHEMA as DOCUMENT_SCHEMA
-    if job.output_schema == DOCUMENT_SCHEMA and not job.completed.is_set() and job.status == "completed":
+    from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA
+    if job.output_schema in (DOCUMENT_SCHEMA, OUTCOME_SCHEMA) and not job.completed.is_set() and job.status == "completed":
         snapshot["status"] = "running"
         snapshot["response"] = None
     current_node = store.get_node(workflow_id, node_id)
@@ -1860,8 +1878,16 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
             snapshot["finished_at"] = snapshot.get("finished_at") or utc_now()
     if job.completed.is_set() and job.document_result is not None:
         snapshot["document"] = job.document_result
+    if job.completed.is_set() and job.business_result is not None:
+        snapshot["businessResult"] = job.business_result
     store.sync_node_job(workflow_id, node_id, snapshot)
     snapshot.pop("document", None)
+    outcome = snapshot.pop("businessResult", None)
+    if outcome is not None:
+        snapshot["outcome"] = outcome["outcome"]
+        if outcome["outcome"] == "blocked":
+            snapshot["status"] = "failed"
+            snapshot["error"] = outcome["reason"]
     return snapshot
 
 
@@ -2033,6 +2059,10 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         if node.get("captureDocument"):
             node["prompt"] += DOCUMENT_INSTRUCTION
             document_options["output_schema"] = DOCUMENT_SCHEMA
+        if node.get("resultProtocolVersion") == 1:
+            from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, instruction
+            node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"))
+            document_options["output_schema"] = OUTCOME_SCHEMA
         job = await orchestrator.dispatch(
             **document_options,
             agent_id=node["agentId"],
@@ -2047,6 +2077,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             artifact_handoff=artifact_handoff,
             input_images=store.node_input_images(workflow_id, node_id),
         )
+        job.capture_document = bool(node.get("captureDocument"))
         if artifact_handoff is not None:
             store.update_node_actual_prompt(workflow_id, node_id, job.prompt)
     except Exception as error:
@@ -2122,6 +2153,7 @@ def workflow_status(workflow_id: str) -> dict[str, Any]:
         "advanceMode": snapshot["advanceMode"],
         "handoffMode": snapshot["handoffMode"],
         "pendingAdvance": snapshot["pendingAdvance"],
+        "termination": snapshot.get("termination"),
         "currentSteps": snapshot["currentNodes"],
         "steps": [
             {

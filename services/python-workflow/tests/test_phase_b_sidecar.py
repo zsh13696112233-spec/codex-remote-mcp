@@ -238,6 +238,25 @@ class SidecarStoreTests(unittest.TestCase):
 
 
 class SidecarInternalApiTests(unittest.TestCase):
+    def test_business_termination_crosses_api_and_rejects_stale_lease(self):
+        from tests.test_workflow_outcomes import result
+        spec = remote_workflow("blocked-a")
+        spec["nodes"].append({"id": "b", "agentId": "supervisor-a", "prompt": "后续", "dependsOn": ["a"]})
+        lease = self._claim("blocked-a", "supervisor-a", "token-a", spec)
+        headers = self._auth("token-a", lease)
+        path = "/internal/v1/workflows/blocked-a/nodes/a"
+        prepared = self.client.post(path + "/prepare", headers=headers, json={"dispatchId": "one"})
+        self.assertEqual(prepared.json()["resultProtocolVersion"], 1)
+        body = {"operation": "sync", "snapshot": {"status": "completed", "businessResult": result()}}
+        self.assertEqual(self.client.post(path + "/state", headers=self._auth("token-a", "old-lease"), json=body).status_code, 409)
+        self.assertIsNone(self.store.get_workflow("blocked-a")["termination"])
+        self.assertEqual(self.client.post(path + "/state", headers=headers, json=body).status_code, 200)
+        self.assertEqual(self.store.get_workflow("blocked-a")["termination"]["outcome"], "blocked")
+        self.assertEqual(self.client.post("/internal/v1/workflows/blocked-a/nodes/b/prepare", headers=headers, json={"dispatchId": "two"}).status_code, 400)
+        self.assertTrue(self.store.has_supervisor_lease("blocked-a"))
+        self.store.finish_business_termination("blocked-a")
+        self.assertFalse(self.store.has_supervisor_lease("blocked-a"))
+
     def test_document_sync_requires_lease_and_never_returns_body_in_state(self):
         spec = remote_workflow("docs-a")
         spec["advanceMode"] = "semi_automatic"
@@ -247,7 +266,8 @@ class SidecarInternalApiTests(unittest.TestCase):
         headers = self._auth("token-a", lease)
         prepared = self.client.post(path + "/prepare", headers=headers, json={"dispatchId":"docs"})
         self.assertTrue(prepared.json()["captureDocument"])
-        body = {"operation":"sync", "snapshot":{"status":"completed", "response":"总结", "job_id":"doc-job",
+        from tests.test_workflow_outcomes import result
+        body = {"operation":"sync", "snapshot":{"businessResult": result("success"), "status":"completed", "response":"总结", "job_id":"doc-job",
             "document":{"name":"方案", "content":"私有正文", "format":"markdown"}}}
         self.assertEqual(self.client.post(path + "/state", json=body).status_code,401)
         self.assertEqual(self.client.post(path + "/state", headers=self._auth("token-a"), json=body).status_code,409)

@@ -13,6 +13,21 @@ class DingTalkProgressCardTest {
   private final DingTalkProgressCard progress = new DingTalkProgressCard();
 
   @Test
+  void businessTerminationDoesNotClaimAllWorkCompleted() {
+    for (String outcome : java.util.List.of("blocked", "no_task")) {
+      ObjectNode snapshot = objectMapper.createObjectNode();
+      snapshot.put("status", outcome.equals("blocked") ? "failed" : "completed");
+      snapshot.putObject("termination").put("outcome", outcome);
+      snapshot.put("response", "停止原因：缺少必要条件。Jira 备注结果未确认。");
+      snapshot.putArray("nodes").addObject().put("status", "skipped");
+      var rendered = progress.render(snapshot, "");
+      assertThat(rendered.get("status"))
+          .isEqualTo(outcome.equals("blocked") ? "因阻断结束" : "无待处理任务，已结束");
+      assertThat(rendered.get("cardBody").toString()).contains("Jira 备注结果未确认", "未执行");
+    }
+  }
+
+  @Test
   void textProgressUsesPlainLabelsAndExplainsSemiAutomaticCommands() {
     ObjectNode snapshot = objectMapper.createObjectNode();
     snapshot.put("workflowId", "00000000-0000-4000-8000-000000000101");

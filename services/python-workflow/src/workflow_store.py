@@ -425,6 +425,8 @@ class WorkflowStore(InputImageStore):
                 "max_retry_count": "INTEGER NOT NULL DEFAULT 10",
                 "used_retry_count": "INTEGER NOT NULL DEFAULT 0",
                 "handoff_mode": "TEXT NOT NULL DEFAULT 'legacy_text'",
+                "termination_json": "TEXT",
+                "result_protocol_version": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in workflow_columns:
                     connection.execute(f"ALTER TABLE workflows ADD COLUMN {name} {definition}")
@@ -705,6 +707,7 @@ class WorkflowStore(InputImageStore):
 
     def create_workflow(self, value: dict[str, Any]) -> dict[str, Any]:
         spec = self.normalize_spec(value)
+        spec["resultProtocolVersion"] = 1
         timestamp = utc_now()
         encoded_spec = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
         compressed_spec = zlib.compress(encoded_spec.encode("utf-8"), level=6)
@@ -752,6 +755,7 @@ class WorkflowStore(InputImageStore):
                 )
             except sqlite3.IntegrityError as error:
                 raise ValueError(f"工作流已存在：{spec['workflowId']}") from error
+            connection.execute("UPDATE workflows SET result_protocol_version=1 WHERE workflow_id=?", (spec["workflowId"],))
             if spec.get("taskDefinitionId"):
                 connection.execute("INSERT INTO workflow_task_bindings VALUES (?, ?)",
                                    (spec["workflowId"], spec["taskDefinitionId"]))
@@ -837,11 +841,12 @@ class WorkflowStore(InputImageStore):
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                "SELECT workflow_id FROM workflows "
+                "SELECT workflow_id, termination_json FROM workflows "
                 "WHERE status IN ('running', 'cancelling') "
                 "ORDER BY created_at, workflow_id"
             ).fetchall()
             workflow_ids = [str(row["workflow_id"]) for row in rows]
+            terminations = {row["workflow_id"]: json.loads(row["termination_json"]) for row in rows if row["termination_json"]}
             for workflow_id in workflow_ids:
                 self._supersede_pending_advances(
                     connection, workflow_id, "gateway_restarted", timestamp
@@ -853,6 +858,10 @@ class WorkflowStore(InputImageStore):
                     "AND status IN ('queued', 'running', 'cancelling')",
                     (error, timestamp, workflow_id),
                 )
+                termination = terminations.get(workflow_id)
+                if termination:
+                    self._finish_business_termination_with_connection(connection, workflow_id, termination, timestamp)
+                    continue
                 connection.execute(
                     "UPDATE workflows SET status = 'failed', "
                     "supervisor_status = 'failed', error = ?, finished_at = ?, "
@@ -1253,6 +1262,10 @@ class WorkflowStore(InputImageStore):
             "AND status IN ('queued', 'running', 'cancelling')",
             (error, timestamp, workflow_id),
         )
+        decision = connection.execute("SELECT termination_json FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+        if decision and decision[0]:
+            self._finish_business_termination_with_connection(connection, workflow_id, json.loads(decision[0]), timestamp)
+            return
         connection.execute(
             "UPDATE workflows SET status = 'failed', supervisor_status = 'failed', "
             "error = ?, finished_at = ?, state_version = state_version + 1 "
@@ -1379,7 +1392,7 @@ class WorkflowStore(InputImageStore):
                        response, error, created_at, started_at, finished_at,
                        state_version, assistant_job_id, assistant_thread_id,
                        assistant_turn_id, assistant_status, advance_mode,
-                       max_retry_count, used_retry_count, handoff_mode
+                       max_retry_count, used_retry_count, handoff_mode, termination_json
                 FROM workflows WHERE workflow_id = ?
                 """,
                 (workflow_id,),
@@ -1487,6 +1500,7 @@ class WorkflowStore(InputImageStore):
             "workflowId": workflow["workflow_id"],
             "name": workflow["name"],
             "status": workflow["status"],
+            "termination": json.loads(workflow["termination_json"]) if workflow["termination_json"] else None,
             "failurePolicy": workflow["failure_policy"],
             "advanceMode": workflow["advance_mode"],
             "handoffMode": workflow["handoff_mode"],
@@ -2267,6 +2281,8 @@ class WorkflowStore(InputImageStore):
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM workflows WHERE workflow_id=? AND termination_json IS NOT NULL", (workflow_id,)).fetchone():
+                raise RuntimeError("流程正在按已保存的原因结束，无需重复取消。")
             if event_reason in {"user_requested", "chat_control"}:
                 self._require_control_idle(connection, workflow_id)
             workflow = connection.execute(
@@ -2556,6 +2572,8 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
             if row is None:
                 raise ValueError("找不到对应的步骤确认请求。")
+            if connection.execute("SELECT 1 FROM workflows WHERE workflow_id=? AND termination_json IS NOT NULL", (workflow_id,)).fetchone():
+                raise RuntimeError("流程已报告提前结束，确认按钮已失效。")
             if row["status"] == "confirmed":
                 return {
                     "gateId": gate_id,
@@ -2767,12 +2785,14 @@ class WorkflowStore(InputImageStore):
                     require_lease=True,
                 )
             workflow = connection.execute(
-                "SELECT status, handoff_mode FROM workflows WHERE workflow_id = ?", (workflow_id,)
+                "SELECT status, handoff_mode, termination_json FROM workflows WHERE workflow_id = ?", (workflow_id,)
             ).fetchone()
             if workflow is None:
                 raise ValueError(f"找不到工作流：{workflow_id}")
             if workflow["status"] in {"completed", "failed", "cancelled"}:
                 raise ValueError(f"工作流已结束，不能派发节点：{workflow['status']}")
+            if workflow["termination_json"]:
+                raise ValueError("工作流已报告提前结束，不能启动后续步骤。")
             self._require_discussion_idle(connection, workflow_id)
             row = connection.execute(
                 """
@@ -3011,6 +3031,7 @@ class WorkflowStore(InputImageStore):
 
     def _node_dispatch_spec(self, row: sqlite3.Row, *, already_dispatched: bool) -> dict[str, Any]:
         return {
+            "resultProtocolVersion": self.get_spec(row["workflow_id"]).get("resultProtocolVersion", 0),
             "workflowId": row["workflow_id"],
             "nodeId": row["node_id"],
             "stepNumber": int(row["position"]) + 1,
@@ -3109,6 +3130,42 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
             if old is None:
                 return
+            if old["job_id"] and snapshot.get("job_id") and old["job_id"] != snapshot["job_id"]:
+                raise RuntimeError("步骤执行版本已变化。")
+            workflow = connection.execute("SELECT status, termination_json, result_protocol_version FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            if workflow["status"] in {"completed", "failed", "cancelled"}:
+                return
+            if workflow["result_protocol_version"] == 1 and old["status"] in TERMINAL_NODE_STATUSES:
+                return
+            if workflow["result_protocol_version"] == 1 and status == "completed":
+                if old["job_id"] and snapshot.get("job_id") != old["job_id"]:
+                    raise RuntimeError("步骤执行版本缺失或已变化。")
+                for key in ("thread_id", "turn_id"):
+                    if old[key] and snapshot.get(key) and old[key] != snapshot[key]:
+                        raise RuntimeError("步骤执行版本已变化。")
+            outcome = None
+            if status == "completed" and workflow["result_protocol_version"] == 1:
+                from workflow_outcomes import validate
+                try:
+                    outcome = validate(snapshot.get("businessResult"))
+                except (ValueError, TypeError, KeyError):
+                    status = "failed"
+                    snapshot = {**snapshot, "error": "步骤业务结果格式无效。"}
+                if outcome is not None:
+                    snapshot = {**snapshot, "response": outcome["summary"]}
+                    if outcome["outcome"] == "blocked":
+                        status = "failed"
+                        snapshot["error"] = outcome["reason"]
+            if outcome is not None and outcome["outcome"] != "success" and not workflow["termination_json"]:
+                termination = {key: outcome[key] for key in ("outcome", "reason", "jiraComment")}
+                termination["nodeId"] = node_id
+                from workflow_outcomes import message
+                text = message(termination)
+                now = utc_now()
+                connection.execute("UPDATE workflows SET termination_json=?, response=?, supervisor_last_message=?, state_version=state_version+1 WHERE workflow_id=?",
+                    (json.dumps(termination, ensure_ascii=False), text, text, workflow_id))
+                self._supersede_pending_advances(connection, workflow_id, "business_termination", now)
+                connection.execute("UPDATE workflow_nodes SET status='skipped', error='流程提前结束，本步骤未执行。', finished_at=? WHERE workflow_id=? AND node_id<>? AND status='pending'", (now, workflow_id, node_id))
             if old["status"] == "completed" and status == "completed" and connection.execute(
                 "SELECT 1 FROM workflow_discussions d JOIN workflow_nodes n "
                 "ON d.workflow_id=n.workflow_id AND d.node_id=n.node_id AND d.attempt=n.attempt_count "
@@ -3181,7 +3238,7 @@ class WorkflowStore(InputImageStore):
                     },
                     utc_now(),
                 )
-                if status == "completed":
+                if status == "completed" and (outcome is None or outcome["outcome"] == "success"):
                     self._create_advance_gate_with_connection(
                         connection, workflow_id, node_id
                     )
@@ -3190,11 +3247,12 @@ class WorkflowStore(InputImageStore):
         self, connection: sqlite3.Connection, workflow_id: str, node_id: str
     ) -> None:
         workflow = connection.execute(
-            "SELECT status, advance_mode FROM workflows WHERE workflow_id = ?",
+            "SELECT status, advance_mode, termination_json FROM workflows WHERE workflow_id = ?",
             (workflow_id,),
         ).fetchone()
         if (
             workflow is None
+            or workflow["termination_json"]
             or workflow["status"] in {"completed", "failed", "cancelled"}
             or workflow["advance_mode"] != "semi_automatic"
         ):
@@ -3259,7 +3317,7 @@ class WorkflowStore(InputImageStore):
                     response = COALESCE(?, response), error = COALESCE(?, error),
                     state_version = state_version + CASE
                         WHEN supervisor_status <> ? THEN 1 ELSE 0 END
-                WHERE workflow_id = ?
+                WHERE workflow_id = ? AND termination_json IS NULL AND status NOT IN ('completed','failed','cancelled')
                   AND (supervisor_job_id IS NOT COALESCE(?1, supervisor_job_id)
                     OR supervisor_thread_id IS NOT COALESCE(?2, supervisor_thread_id)
                     OR supervisor_turn_id IS NOT COALESCE(?3, supervisor_turn_id)
@@ -3313,7 +3371,7 @@ class WorkflowStore(InputImageStore):
             connection.execute(
                 """
                 UPDATE workflows SET supervisor_last_message = ?
-                WHERE workflow_id = ? AND supervisor_last_message IS NOT ?
+                WHERE workflow_id = ? AND termination_json IS NULL AND supervisor_last_message IS NOT ?
                 """,
                 (message, workflow_id, message),
             )
@@ -3327,6 +3385,9 @@ class WorkflowStore(InputImageStore):
         error: str | None,
     ) -> None:
         snapshot = self.get_workflow(workflow_id)
+        if snapshot.get("termination"):
+            # 提前结束只由网关在确认执行会话退出后提交，异常路径不得提前释放名额。
+            return
         if snapshot["status"] == "cancelled":
             return
         nodes = snapshot["nodes"]
@@ -3346,11 +3407,13 @@ class WorkflowStore(InputImageStore):
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute(
-                "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
+                "SELECT status, termination_json FROM workflows WHERE workflow_id = ?", (workflow_id,)
             ).fetchone()
             if current is None:
                 raise ValueError(f"找不到工作流：{workflow_id}")
             if current["status"] in {"completed", "failed", "cancelled"}:
+                return
+            if current["termination_json"]:
                 return
             self._supersede_pending_advances(
                 connection, workflow_id, "workflow_finished", timestamp
@@ -3376,6 +3439,48 @@ class WorkflowStore(InputImageStore):
                 {"status": status, "response": response, "error": error},
                 timestamp,
             )
+
+    def has_business_termination(self, workflow_id: str) -> bool:
+        with self._connect() as connection:
+            return connection.execute("SELECT 1 FROM workflows WHERE workflow_id=? AND termination_json IS NOT NULL", (workflow_id,)).fetchone() is not None
+
+    def finish_business_termination(self, workflow_id: str) -> bool:
+        """网关确认主监督已退出后调用；业务步骤仍活动时保留名额。"""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT status, termination_json FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            if row is None or not row["termination_json"]:
+                return False
+            if row["status"] in {"completed", "failed", "cancelled"}:
+                return True
+            if connection.execute("SELECT 1 FROM workflow_nodes WHERE workflow_id=? AND status IN ('queued','running','cancelling')", (workflow_id,)).fetchone():
+                return False
+            self._finish_business_termination_with_connection(connection, workflow_id, json.loads(row["termination_json"]), utc_now())
+            return True
+
+    def _finish_business_termination_with_connection(
+        self, connection: sqlite3.Connection, workflow_id: str,
+        termination: dict[str, Any], now: str,
+    ) -> None:
+        from workflow_outcomes import message
+        status = "failed" if termination["outcome"] == "blocked" else "completed"
+        text = message(termination)
+        connection.execute(
+            "UPDATE workflows SET status=?, supervisor_status=?, response=?, supervisor_last_message=?, "
+            "error=?, finished_at=?, state_version=state_version+1 WHERE workflow_id=?",
+            (status, status, text, text, termination["reason"] if status == "failed" else None, now, workflow_id),
+        )
+        self._release_supervisor_lease_with_connection(connection, workflow_id, "business_termination", now)
+        self._add_event_with_connection(
+            connection, workflow_id, None, "supervisor", f"workflow.{status}",
+            {"status": status, "response": text, "termination": termination}, now,
+        )
+
+    def workflow_terminations(self, workflow_ids: list[str]) -> dict[str, Any]:
+        self.workflow_statuses(workflow_ids)
+        with self._connect() as connection:
+            rows = connection.execute("SELECT workflow_id, termination_json FROM workflows WHERE workflow_id IN (" + ",".join("?" for _ in workflow_ids) + ")", workflow_ids).fetchall()
+            return {row[0]: json.loads(row[1]) if row[1] else None for row in rows}
 
     def _release_supervisor_lease_with_connection(
         self,

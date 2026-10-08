@@ -468,6 +468,10 @@ class WorkflowGateway:
         try:
             while True:
                 before = await _database_call(self.store.get_workflow, workflow_id)
+                if before.get("termination"):
+                    while not await _database_call(self.store.finish_business_termination, workflow_id):
+                        await asyncio.sleep(0.25)
+                    return
                 before_fingerprint = self._node_progress_fingerprint(before)
                 message_buffer = ""
                 last_message_flush_at = 0.0
@@ -534,7 +538,22 @@ class WorkflowGateway:
                     event_type="supervisor.started",
                     payload={"jobId": job.job_id, "agentId": job.agent_id},
                 )
+                last_stop_attempt = 0.0
                 while not job.completed.is_set():
+                    if await _database_call(self.store.has_business_termination, workflow_id):
+                        if job.status != "cancelling" and time.monotonic() - last_stop_attempt >= 5:
+                            last_stop_attempt = time.monotonic()
+                            try:
+                                await self.orchestrator.cancel(job.job_id)
+                            except Exception as error:
+                                await _database_call(self.store.add_event, workflow_id, node_id=None,
+                                    source="gateway", event_type="supervisor.termination_pending",
+                                    payload={"errorType": type(error).__name__})
+                        try:
+                            await asyncio.wait_for(job.completed.wait(), timeout=0.25)
+                        except TimeoutError:
+                            pass
+                        continue
                     current_snapshot = job.snapshot()
                     current_fingerprint = self._supervisor_job_fingerprint(
                         current_snapshot
@@ -555,6 +574,10 @@ class WorkflowGateway:
                 await _database_call(self.store.update_supervisor, workflow_id, job_snapshot)
 
                 latest = await _database_call(self.store.get_workflow, workflow_id)
+                if latest.get("termination"):
+                    while not await _database_call(self.store.finish_business_termination, workflow_id):
+                        await asyncio.sleep(0.25)
+                    return
                 if self._advance_is_held(latest):
                     return
                 if workflow_id in self._control_in_progress:
@@ -660,6 +683,8 @@ class WorkflowGateway:
 
     @staticmethod
     def _workflow_can_continue(spec: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+        if snapshot.get("termination"):
+            return False
         if snapshot["status"] != "running":
             return False
         nodes = snapshot.get("nodes", [])
@@ -713,6 +738,9 @@ class WorkflowGateway:
             "或 interrupted。每次调用 wait_node 时 timeout_sec 使用 10 秒，"
             "等待超时时继续调用，以便及时响应用户咨询。\n"
             "如果 failurePolicy=stop，任一节点失败后不得启动后续节点。\n"
+            "正式步骤可能报告业务阻断或无任务并由平台提前结束；"
+            "发现 termination 或步骤 outcome 为 blocked/no_task 时不得再派发步骤，"
+            "只说明已保存的停止原因，不得宣称所有业务已完成。\n"
             "如果 advanceMode=semi_automatic，dispatch_node 会在成功步骤之间等待最多"
             "两分钟；用户也可以选择保持等待且暂不进入下一步。等待期间收到输入会保持等待，应告诉用户"
             "尚未进入下一步，不得声称下一步已经开始。\n"
@@ -1389,7 +1417,8 @@ async def get_workflow_statuses(request: Request) -> Response:
         if not isinstance(body, dict):
             raise ValueError("请求体必须是 JSON 对象。")
         statuses = await _database_call(gateway.store.workflow_statuses, body.get("workflowIds"))
-        return JSONResponse({"statuses": statuses})
+        terminations = await _database_call(gateway.store.workflow_terminations, body.get("workflowIds"))
+        return JSONResponse({"statuses": statuses, "terminations": terminations})
     except (ValueError, json.JSONDecodeError) as error:
         return _error_response(error, 400)
 
@@ -1600,6 +1629,7 @@ def _sidecar_workflow_view(snapshot: dict[str, Any]) -> dict[str, Any]:
         "name",
         "status",
         "failurePolicy",
+        "termination",
         "advanceMode",
         "handoffMode",
         "pendingAdvance",
@@ -1672,6 +1702,9 @@ def _sidecar_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     if "document" in snapshot:
         from workflow_documents import validate_result
         result["document"] = validate_result(snapshot["document"])
+    if "businessResult" in snapshot:
+        from workflow_outcomes import validate
+        result["businessResult"] = validate(snapshot["businessResult"])
     return result
 
 

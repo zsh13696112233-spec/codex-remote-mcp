@@ -314,5 +314,5 @@ class RuntimePerformanceTests(unittest.TestCase):
         response = client.post("/workflow-task-bindings", json={"taskDefinitionId": "task", "workflowIds": ["one"]})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(client.post("/workflow-statuses", json={"workflowIds": ["one"]}).json(),
-                         {"statuses": {"one": "queued"}})
+                         {"statuses": {"one": "queued"}, "terminations": {"one": None}})
         self.assertEqual(client.post("/workflow-statuses", json={"workflowIds": []}).status_code, 400)

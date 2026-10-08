@@ -59,6 +59,9 @@ class TaskRunEntity {
   @Column(name = "gateway_response_json", columnDefinition = "LONGTEXT")
   String gatewayResponseJson;
 
+  @Column(name = "termination_json", columnDefinition = "TEXT")
+  String terminationJson;
+
   /** 提交失败时记录的错误信息。 */
   @Column(name = "error_message", columnDefinition = "LONGTEXT")
   String errorMessage;

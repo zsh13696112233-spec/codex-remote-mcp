@@ -45,8 +45,23 @@ public class RunCatalogService {
     var ids = request.putArray("workflowIds");
     result.path("items").forEach(row -> ids.add(row.path("workflowId").asText()));
     try {
-      JsonNode statuses = gateway.post("/workflow-statuses", request).path("statuses");
+      JsonNode batch = gateway.post("/workflow-statuses", request);
+      JsonNode statuses = batch.path("statuses");
       if (!statuses.isObject()) throw new IllegalStateException("状态响应格式无效");
+      ObjectNode terminations = result.objectNode();
+      result
+          .path("items")
+          .forEach(
+              row -> {
+                JsonNode termination =
+                    batch.path("terminations").path(row.path("workflowId").asText());
+                if (termination.isObject()
+                    && LIVE.contains(statuses.path(row.path("workflowId").asText()).asText())) {
+                  ((ObjectNode) row).set("termination", termination);
+                  terminations.set(row.path("workflowId").asText(), termination);
+                }
+              });
+      runs.recordTerminations(terminations);
       ObjectNode accepted = result.objectNode();
       for (JsonNode row : result.path("items")) {
         String id = row.path("workflowId").asText();

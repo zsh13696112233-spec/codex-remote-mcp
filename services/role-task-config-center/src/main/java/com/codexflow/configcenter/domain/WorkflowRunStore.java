@@ -130,6 +130,8 @@ public class WorkflowRunStore {
               value.put("monitorUrl", monitorUrl(row.getWorkflowId()));
               value.put("sourceWorkflowId", row.getSourceWorkflowId());
               value.put("status", row.getStatus());
+              if (row.getTerminationJson() != null)
+                value.set("termination", json.read(row.getTerminationJson()));
               value.put("submittedAt", row.getSubmittedAt().toString());
               value.put("updatedAt", row.getUpdatedAt().toString());
               return value;
@@ -178,6 +180,18 @@ public class WorkflowRunStore {
             });
   }
 
+  @Transactional
+  public void recordTerminations(JsonNode values) {
+    if (!values.isObject()) return;
+    values
+        .properties()
+        .forEach(
+            entry -> {
+              if (entry.getValue().isObject())
+                runs.updateTermination(entry.getKey(), json.write(entry.getValue()));
+            });
+  }
+
   /** 保存网关响应及其状态，并返回更新后的运行 JSON。 */
   @Transactional
   public ObjectNode recordGatewayStatus(
@@ -185,6 +199,8 @@ public class WorkflowRunStore {
     TaskRunEntity run = findRun(workflowId);
     run.status = response.path("status").asText(defaultStatus);
     run.gatewayResponseJson = json.write(response);
+    if (response.path("termination").isObject())
+      run.terminationJson = json.write(response.path("termination"));
     run.updatedAt = Instant.now();
     runs.save(run);
     return json.run(run);
@@ -196,6 +212,8 @@ public class WorkflowRunStore {
     TaskRunEntity run = findRun(workflowId);
     run.status = status;
     run.gatewayResponseJson = json.write(response);
+    if (response.path("termination").isObject())
+      run.terminationJson = json.write(response.path("termination"));
     run.updatedAt = Instant.now();
     runs.save(run);
   }

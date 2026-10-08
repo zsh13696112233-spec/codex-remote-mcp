@@ -40,6 +40,16 @@ class FixtureWorkflowStore(WorkflowStore):
         super().__init__(path, *args, **kwargs)
         seed_agents(self, {key: {'allow_write': True, 'allow_full_access': True, 'capabilities': ['supervisor', 'executor']} for key in ('local', 'supervisor-a')})
 
+    def sync_node_job(self, workflow_id, node_id, snapshot, **kwargs):
+        # 既有存储测试的成功执行替身也遵守新协议；非法协议专项直接调用基类。
+        if snapshot.get('status') == 'completed' and 'businessResult' not in snapshot:
+            snapshot = {**snapshot, 'businessResult': {
+                'summary': snapshot.get('response') or '测试步骤已完成。',
+                'outcome': 'success', 'reason': '', 'document': None,
+                'jiraComment': {'status': 'not_applicable', 'issueKey': '', 'reference': '', 'detail': '测试无 Jira。'},
+            }}
+        return super().sync_node_job(workflow_id, node_id, snapshot, **kwargs)
+
 
 def fixture_orchestrator(config_path=None, **kwargs):
     instance = Orchestrator(**kwargs)

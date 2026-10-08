@@ -1,6 +1,6 @@
 const STATUS = {
   pending: "未开始", queued: "进行中", running: "进行中", cancelling: "进行中",
-  completed: "已完成", skipped: "已跳过", failed: "未完成", cancelled: "未完成", interrupted: "未完成"
+  completed: "已完成", skipped: "未执行", failed: "未完成", cancelled: "未完成", interrupted: "未完成"
 };
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const ACTIVE = new Set(["queued", "running", "cancelling"]);
@@ -540,7 +540,7 @@ function render(snapshot) {
   $("#name").textContent = snapshot.name || "未命名任务";
   $("#id").textContent = snapshot.workflowId || state.workflowId;
   const status = $("#status");
-  status.textContent = isInitializing(snapshot) ? "准备中" : zh(snapshot.status);
+  status.textContent = snapshot.termination ? (TERMINAL.has(snapshot.status) ? (snapshot.termination.outcome === "blocked" ? "因阻断结束" : "无待处理任务，已结束") : "正在结束") : isInitializing(snapshot) ? "准备中" : zh(snapshot.status);
   status.className = `status ${visualState(snapshot.status)}`;
   const nodes = snapshot.nodes || [];
   const initializing = isInitializing(snapshot);
@@ -549,7 +549,7 @@ function render(snapshot) {
   const allStepsFinished = nodes.length > 0
     && nodes.every(node => node.status === "completed" || node.status === "skipped");
   const allStepsPending = nodes.length === 0 || nodes.every(node => node.status === "pending");
-  $("#current").textContent = initializing
+  $("#current").textContent = snapshot.termination ? snapshot.response : initializing
     ? initializationMessage(snapshot)
     : snapshot.pendingAdvance?.state === "held"
     ? `任务已暂停，暂不进入第 ${nodes.findIndex(node => node.id === snapshot.pendingAdvance.nextNodeId) + 1} 步`

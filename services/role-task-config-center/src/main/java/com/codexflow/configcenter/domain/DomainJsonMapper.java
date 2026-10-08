@@ -176,6 +176,7 @@ class DomainJsonMapper {
     result.put("status", run.status);
     result.set("snapshot", read(run.snapshotJson));
     result.set("submittedJson", read(run.submittedJson));
+    if (run.terminationJson != null) result.set("termination", read(run.terminationJson));
     if (run.gatewayResponseJson != null) {
       result.set("gatewayResponse", read(run.gatewayResponseJson));
     }
