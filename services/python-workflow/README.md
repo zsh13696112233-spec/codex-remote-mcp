@@ -208,7 +208,7 @@ MCP 逐机任务持久化 `diagnostics` 检测摘要，由安装汇总和批次�
 
 新创建运行由中央冻结 `resultProtocolVersion=1`，正式步骤使用统一结构化结果：`summary`、`outcome`、`reason`、`jiraComment`、`document`。`outcome` 只允许 `success/no_task/blocked`，新协议缺失或非法结果按执行失败处理；旧运行没有版本字段，保留旧协议，不扫描旧回复中的关键词。主文档仍仅在半自动首步且有下一步时采集。
 
-步骤判定阻断后，仅在原授权内尝试向已锁定的唯一 Jira 添加收尾评论，然后返回 `blocked`。评论包括原因、已完成/未执行事项和恢复条件，不改变 Jira 状态或负责人。平台注入稳定去重标记，提交不明时先核查，不能确认不盲目重发；此模型侧约定不提供严格的一次性写入保证。`jiraComment` 包含 `status`（`succeeded/failed/unknown/not_applicable`）、`issueKey`、`reference` 和 `detail`。没有唯一编号或没有授权工具时说明原因，备注失败或未知不阻止流程结束。平台不新增 Jira 凭据或连接。
+步骤判定阻断后，仅在原授权内尝试向已锁定的唯一 Jira 添加收尾评论，然后返回 `blocked`。评论包括原因、已完成/未执行事项和恢复条件，不改变 Jira 状态或负责人。职责明确要求时，还允许在阻断收尾中将处理角色字段改为 `Natural Person`；仓库三份 SOP 提示词已要求此动作。修改前后回查，失败或结果不明仍尝试评论并结束，在 `summary` 和 `jiraComment.detail` 披露角色修改结果，评论状态仍只表示评论结果。无任务结束不触发角色修改。平台注入稳定去重标记，提交不明时先核查，不能确认不盲目重发；此模型侧约定不提供严格的一次性写入保证。`jiraComment` 包含 `status`（`succeeded/failed/unknown/not_applicable`）、`issueKey`、`reference` 和 `detail`。没有唯一编号或没有授权工具时说明原因，备注失败或未知不阻止流程结束。平台不新增 Jira 凭据或连接。
 
 中央事务保存 `termination`（`outcome/reason/nodeId/jiraComment`），立即关闭等待并拒绝后续派发。阻断步骤标记失败，无任务步骤标记完成，其余未启动步骤标记跳过、显示“未执行”。收尾期间保持运行占用，网关等待主监督退出及已派发步骤结束后写入终态并释放租约。阻断映射 `failed`，无任务映射 `completed`；结果文字分别为“因阻断结束”和“无待处理任务，已结束”。重复与迟到结果不能覆盖决定，旧继续按钮无效。重启保留已持久化的提前结束决定，不恢复旧执行会话。
 
