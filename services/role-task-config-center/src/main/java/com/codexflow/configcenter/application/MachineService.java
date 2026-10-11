@@ -54,6 +54,10 @@ public class MachineService {
     return gateway.put("/agents/" + segment(id), body);
   }
 
+  public JsonNode models(String id) {
+    return groups.modelCatalog(id);
+  }
+
   public JsonNode testMachine(String id) {
     return gateway.post("/agents/" + segment(id) + "/test", JsonNodeFactory.instance.objectNode());
   }

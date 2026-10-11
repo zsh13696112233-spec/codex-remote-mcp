@@ -60,6 +60,9 @@ class SopEntity extends Timestamped {
   @Column(name = "default_step_model", nullable = false)
   String defaultStepModel = "gpt-5.6-sol";
 
+  @Column(name = "default_step_reasoning_effort", length = 32)
+  String defaultStepReasoningEffort;
+
   /** SOP 是否可用于创建新的任务运行。 */
   @Column(nullable = false)
   boolean enabled = true;

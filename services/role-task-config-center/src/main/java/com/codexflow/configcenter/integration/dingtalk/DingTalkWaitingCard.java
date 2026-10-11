@@ -41,7 +41,7 @@ final class DingTalkWaitingCard {
     String state = cardState(snapshot, payload);
     String status =
         switch (state) {
-          case "busy" -> "执行者正在处理讨论";
+          case "busy" -> "正在处理";
           case "held" -> "已保持等待";
           case "countdown" -> "等待确认";
           default -> "本轮等待已结束";

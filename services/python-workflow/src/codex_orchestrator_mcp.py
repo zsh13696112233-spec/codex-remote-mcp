@@ -309,6 +309,7 @@ class Job:
     permission_profile: str | None
     model: str | None
     timeout_sec: int
+    reasoning_effort: str | None = None
     output_schema: dict[str, Any] | None = None
     sandbox_mode: Literal[
         "read-only", "workspace-write", "danger-full-access"
@@ -819,6 +820,23 @@ class Orchestrator:
             raise ValueError(f"未知执行机：{agent_id}")
         return agents[agent_id]
 
+    async def agent_models(self, agent_id: str) -> list[dict[str, Any]]:
+        from reasoning_effort import ModelsUnavailable, read_models
+        if not isinstance(agent_id, str) or not agent_id or len(agent_id) > 128:
+            raise ValueError("请选择有效执行机。")
+        agent = self.get_agent(agent_id)
+        if not agent.enabled or "executor" not in agent.capabilities:
+            raise ValueError("请选择已启用的步骤执行机。")
+        try:
+            client = self._client_factory(agent.url, token=self._resolve_agent_token(agent), request_timeout_sec=8)
+            async def query():
+                async with client:
+                    return await read_models(client)
+            return await asyncio.wait_for(query(), timeout=8)
+        except Exception as error:
+            LOGGER.warning("读取执行服务模型能力失败，类型=%s", type(error).__name__)
+            raise ModelsUnavailable("无法读取执行机支持的思考强度，请检查连接后重试。") from None
+
     async def probe_agent(self, agent_id: str, *, timeout_sec: float = 2.5) -> None:
         """连接并初始化指定 app-server，不创建 thread 或 turn。"""
         agents = self.load_agents()
@@ -928,6 +946,7 @@ class Orchestrator:
         permission_profile: str | None = None,
         model: str | None,
         timeout_sec: int,
+        reasoning_effort: str | None = None,
         is_supervisor: bool = False,
         approval_policy: Literal["never", "on-request", "untrusted"] = "never",
         approvals_reviewer: Literal["user", "auto_review"] | None = None,
@@ -938,6 +957,8 @@ class Orchestrator:
         artifact_handoff: dict[str, Any] | None = None,
         input_images: list[dict[str, Any]] | None = None,
     ) -> Job:
+        from reasoning_effort import normalize_effort
+        reasoning_effort = normalize_effort(reasoning_effort)
         prompt = prompt.strip()
         if not prompt:
             raise ValueError("prompt 不能为空。")
@@ -1061,6 +1082,7 @@ class Orchestrator:
             write=write,
             permission_profile=permission_profile,
             model=model or agent.model,
+            reasoning_effort=reasoning_effort,
             timeout_sec=timeout_sec,
             output_schema=output_schema,
             sandbox_mode=sandbox_mode,
@@ -1236,6 +1258,16 @@ class Orchestrator:
                         except TimeoutError:
                             raise JobTotalTimeout(job.timeout_sec) from None
 
+                        if job.reasoning_effort is not None:
+                            from reasoning_effort import read_models, require_effort
+                            stage = "reasoning/check"
+                            try:
+                                models = await asyncio.wait_for(read_models(client), timeout=min(8, max(0.01, deadline - time.monotonic())))
+                            except Exception as error:
+                                LOGGER.warning("步骤能力校验失败，类型=%s", type(error).__name__)
+                                raise RuntimeError("无法读取执行机支持的思考强度，请检查连接后重试。") from None
+                            require_effort(models, job.model, job.reasoning_effort)
+
                         if job.permission_profile is not None:
                             stage = "permission/check"
                             await self._check_config_requirements(client, job, deadline)
@@ -1281,6 +1313,8 @@ class Orchestrator:
                             "input": [{"type": "text", "text": job.prompt}] + [{"type": "localImage", "path": path} for path in job.input_image_paths],
                             "approvalPolicy": job.approval_policy,
                         }
+                        if job.reasoning_effort is not None:
+                            turn_params["effort"] = job.reasoning_effort
                         if job.event_callback is not None:
                             turn_params["summary"] = "auto"
                         if job.artifact_contract and job.managed_output_dir:
@@ -2081,6 +2115,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             write=node["write"],
             permission_profile=node["permissionProfile"],
             model=node["model"],
+            reasoning_effort=node.get("reasoningEffort"),
             timeout_sec=node["timeoutSec"],
             event_callback=record,
             artifact_handoff=artifact_handoff,

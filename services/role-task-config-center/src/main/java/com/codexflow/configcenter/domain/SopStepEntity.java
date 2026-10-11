@@ -70,6 +70,9 @@ class SopStepEntity {
   @Column(name = "model_override")
   String modelOverride;
 
+  @Column(name = "reasoning_effort_override", length = 32)
+  String reasoningEffortOverride;
+
   /** 单步骤执行超时时间，单位为秒。 */
   @Column(name = "timeout_sec", nullable = false)
   int timeoutSec = 1800;

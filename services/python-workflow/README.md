@@ -227,3 +227,13 @@ MCP 逐机任务持久化 `diagnostics` 检测摘要，由安装汇总和批次�
 空值、多人、无法读取分别为 `empty/multiple/unavailable`，账号类型与账号必须为空；非阻断可用 `not_applicable`。建议在 `detail` 说明读取情况，但允许空字符串或纯空白，不因开发人或说明为空把业务结果判为格式无效，也不猜测或补填人员。开发人读取结果不单独阻断业务，已有业务阻断决定仍保留；`resolved` 仍必须提供唯一 Jira 与稳定账号。中央根据冻结版本严格校验，本机和远程共用规则；旧运行没有开发人信息，不从正文提取或补发通知。角色修改结果继续放在 `jiraComment.detail`，其 `status` 仅表示评论结果。
 
 Python 不持有钉钉凭据或发送通知；8091 在确认阻断终态后按冻结群配置通知开发人。升级顺序和验收见 [Jira 阻断通知部署说明](../../docs/JIRA_BLOCKED_NOTIFICATION.zh-CN.md)。
+
+## 步骤思考强度
+
+工作流提交节点增加可选 `reasoningEffort`，仅接受 null 或 `none/minimal/low/medium/high/xhigh/max/ultra`；缺失或 null 保留执行服务默认行为，`none` 是需要模型明确支持的具体档位。配置中心负责计算流程默认与节点覆盖，Python 只接收有效节点值。值随提交快照和 SQLite 节点列持久化，旧库自动补充可空列，旧运行不补填具体强度。
+
+`GET /agents/{agent_id}/models` 通过已登记执行机的管理连接读取 `model/list` 全部分页，仅返回 `models: [{model, supportedReasoningEfforts, defaultReasoningEffort}]`，其中支持档位为字符串数组。不返回连接、认证或工作目录；无效/不可用执行机返回 400，能力读取失败返回 503 和稳定中文提示。查询只读取能力，不创建执行会话，最多等待八秒。
+
+提交前检查明确配置的模型与强度组合；本机及远程 Sidecar 在启动步骤前再次读取能力校验，再通过 `turn/start.effort` 传递。模型不支持或能力查询失败时不会启动该步骤，不静默降级。未配置强度时不查询能力、不发送 effort，兼容旧执行服务。半自动等待讨论继续使用该步骤冻结的强度；主监督和独立任务助手不受此设置影响。远程链路经中央内部节点派发接口传递该字段，不引入 Sidecar SQLite。
+
+上线前结束活动运行，更新中央网关、本机编排或远程 Sidecar，再升级配置中心；仅新增字段，不改变步骤顺序、权限或讨论放行规则。

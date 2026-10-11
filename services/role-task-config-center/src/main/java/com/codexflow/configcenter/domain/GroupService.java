@@ -137,6 +137,27 @@ public class GroupService {
     gateway.post("/agents/validate", body);
   }
 
+  public JsonNode modelCatalog(String agentId) {
+    try {
+      String id =
+          org.springframework.web.util.UriUtils.encodePathSegment(
+              agentId, java.nio.charset.StandardCharsets.UTF_8);
+      return gateway.get("/agents/" + id + "/models");
+    } catch (com.codexflow.configcenter.client.GatewayFailure error) {
+      throw new com.codexflow.configcenter.client.GatewayFailure(503, "无法读取执行机支持的思考强度，请检查连接后重试。");
+    }
+  }
+
+  public void validateEffort(String agentId, String model, String effort) {
+    for (JsonNode entry : modelCatalog(agentId).path("models")) {
+      if (!model.equals(entry.path("model").asText())) continue;
+      for (JsonNode option : entry.path("supportedReasoningEfforts")) {
+        if (effort.equals(option.asText())) return;
+      }
+    }
+    throw new IllegalArgumentException("所选步骤模型不支持该思考强度，请刷新选项后重新选择。");
+  }
+
   public void checkMachineMove(String id, JsonNode body) {
     require(body.path("groupId").asText());
     if (id == null) return;

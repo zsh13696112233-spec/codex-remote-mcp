@@ -290,6 +290,14 @@ public class ConfigService {
     role.enabled = body.enabled() == null ? !updating || role.enabled : body.enabled();
   }
 
+  /** 空值保留执行服务默认或步骤继承语义。 */
+  private static String normalizeEffort(String value) {
+    if (value == null || value.isBlank()) return null;
+    if (!java.util.Set.of("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+        .contains(value)) throw new IllegalArgumentException("思考强度无效。");
+    return value;
+  }
+
   /** 将 SOP 请求字段和完整步骤列表应用到聚合根。 */
   private void applySop(SopEntity sop, SopSaveRequest body) {
     assignSop(sop, body.groupId(), false);
@@ -320,6 +328,18 @@ public class ConfigService {
     sop.defaultStepModel = normalizeNullable(body.defaultStepModel());
     if (sop.defaultStepModel == null) sop.defaultStepModel = defaultModel;
     validateModel(sop.defaultStepModel);
+    sop.defaultStepReasoningEffort = normalizeEffort(body.defaultStepReasoningEffort());
+    for (SopStepRequest step : body.steps()) {
+      String effort = normalizeEffort(step.reasoningEffortOverride());
+      if (effort == null) effort = sop.defaultStepReasoningEffort;
+      if (effort != null)
+        groups.validateEffort(
+            step.agentId(),
+            normalizeNullable(step.modelOverride()) == null
+                ? sop.defaultStepModel
+                : normalizeNullable(step.modelOverride()),
+            effort);
+    }
     if (body.enabled() != null) sop.enabled = body.enabled();
     sop.steps.clear();
     int position = 0;
@@ -360,6 +380,7 @@ public class ConfigService {
     if (body.writeEnabled() != null && body.writeEnabled() != step.writeEnabled) {
       throw new IllegalArgumentException("permissionProfile 与 writeEnabled 字段矛盾。");
     }
+    step.reasoningEffortOverride = normalizeEffort(body.reasoningEffortOverride());
     step.modelOverride = normalizeNullable(body.modelOverride());
     if (step.modelOverride != null) validateModel(step.modelOverride);
     step.timeoutSec = integerInRange(body.timeoutSec(), "timeoutSec", 1800, 10, 7200);

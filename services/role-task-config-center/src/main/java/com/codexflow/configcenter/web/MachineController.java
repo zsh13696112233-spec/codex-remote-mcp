@@ -44,6 +44,11 @@ public class MachineController {
     return service.updateMachine(id, body);
   }
 
+  @GetMapping("/agents/{id}/models")
+  public JsonNode models(@PathVariable String id) {
+    return service.models(id);
+  }
+
   @PostMapping("/agents/{id}/test")
   public JsonNode testMachine(@PathVariable String id) {
     return service.testMachine(id);

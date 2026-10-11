@@ -306,6 +306,11 @@ public class WorkflowRunStore {
       node.put("permissionProfile", step.permissionProfile);
       node.put(
           "model", step.modelOverride == null ? task.sop.defaultStepModel : step.modelOverride);
+      String effort =
+          step.reasoningEffortOverride == null
+              ? task.sop.defaultStepReasoningEffort
+              : step.reasoningEffortOverride;
+      if (effort != null) node.put("reasoningEffort", effort);
       node.put("timeoutSec", step.timeoutSec);
       stepNumber++;
     }

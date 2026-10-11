@@ -472,3 +472,13 @@ V36 新增运行记录 `termination_json`，用于分页摘要和网关离线时
 Flyway V37 保存任务群、人员映射、专用模板和独立通知记录。8090 不增加控制 API、不连接 MySQL，Python 不增加钉钉凭据。部署与真实验收见 [Jira 阻断通知说明](../../docs/JIRA_BLOCKED_NOTIFICATION.zh-CN.md)。
 
 浏览器回归可使用已安装 Playwright 执行 `python3 scripts/verify_blocked_notification_ui.py`（从仓库根目录），只访问临时本地静态服务器和虚构 API，不发送真实通知。
+
+## SOP 步骤思考强度与执行要求编辑
+
+流程设置增加“步骤默认思考强度”，新建和旧配置默认“使用执行服务默认值”；节点默认继承流程，也可单独覆盖。不设置主监督强度。选项通过配置中心 `GET /api/agents/{id}/models` 代理 Python `GET /agents/{id}/models`，按执行机的实际模型能力加载。响应为 `models` 数组，每项包含 `model`、`supportedReasoningEfforts`（字符串数组）和可空 `defaultReasoningEffort`。节点使用有效模型的选项，流程默认显示当前步骤支持档位的并集；保存时逐步骤检查实际组合。失败时保留已选值并提供刷新，不自动替换模型或降级强度。
+
+SOP 保存和查询新增可空 `defaultStepReasoningEffort`，步骤新增可空 `reasoningEffortOverride`；省略、null 或空字符串分别恢复执行服务默认或继承流程。支持值为 `none/minimal/low/medium/high/xhigh/max/ultra`，实际可选值受执行服务能力限制。创建运行时将节点有效值冻结为提交 JSON 的 `nodes[].reasoningEffort`；默认值不发送该字段。历史重试使用原快照，不读取新的 SOP 强度；旧快照没有此字段时保持原行为。保存和提交时均检查明确配置的强度，执行前再次验证，不支持或无法确认时拒绝启动步骤。
+
+“本步骤要做什么”更名为“步骤执行要求”。侧栏只保留“编辑”按钮，不显示小文本框或内容预览；点击后打开居中大窗口，支持长文本与窄屏。确认修改只回填当前步骤草稿，仍需保存工作流；取消、关闭和 Escape 放弃弹窗内修改，点击遮罩不关闭。
+
+升级需先更新中央 Python 网关及实际使用的本机编排进程或远程 Sidecar，再重新构建和重启配置中心。Flyway V38 自动增加两个可空字段，不修改旧数据；监控中心无需升级。浏览器回归使用已有 Playwright 执行 `python3 scripts/verify_sop_effort_ui.py`，仅访问本机静态资源与虚构 API。

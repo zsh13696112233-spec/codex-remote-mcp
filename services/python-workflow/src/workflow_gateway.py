@@ -1,3 +1,4 @@
+from reasoning_effort import ModelsUnavailable
 import argparse
 import asyncio
 import hmac
@@ -181,6 +182,14 @@ class WorkflowGateway:
                     f"执行机 {node['agentId']} 不允许节点 {node['id']} 使用权限档位 {profile}。"
                 )
 
+        catalogs = {}
+        from reasoning_effort import require_effort
+        for node in spec["nodes"]:
+            if node.get("reasoningEffort") is not None:
+                key = node["agentId"]
+                if key not in catalogs:
+                    catalogs[key] = await self.orchestrator.agent_models(key)
+                require_effort(catalogs[key], node.get("model") or agents_by_id[key].get("model"), node["reasoningEffort"])
         snapshot = await _database_call(self.store.create_workflow, spec)
         await self._schedule_pending()
         return await _database_call(
@@ -1251,6 +1260,8 @@ async def create_workflow(request: Request) -> Response:
         payload = await request.json()
         snapshot = await gateway.submit(payload)
         return JSONResponse(snapshot, status_code=202)
+    except ModelsUnavailable as error:
+        return _error_response(error, 503)
     except (ValueError, PermissionError, json.JSONDecodeError) as error:
         return _error_response(error)
 
@@ -1505,6 +1516,16 @@ async def list_agents(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     return JSONResponse({"agents": await asyncio.to_thread(gateway.public_agents),
                          "source": "registry"})
+
+
+async def agent_models(request: Request) -> Response:
+    gateway = request.app.state.gateway
+    try:
+        return JSONResponse({"models": await gateway.orchestrator.agent_models(request.path_params["agent_id"])})
+    except ValueError as error:
+        return _error_response(error, 400)
+    except RuntimeError as error:
+        return _error_response(error, 503)
 
 
 async def manage_machines(request: Request) -> Response:
@@ -2033,6 +2054,7 @@ def create_app(
             Route("/agent-groups/{group_id}", manage_machines, methods=["PUT", "DELETE"]),
             Route("/agents", manage_machines, methods=["POST"]),
             Route("/agents/validate", manage_machines, methods=["POST"]),
+            Route("/agents/{agent_id}/models", agent_models, methods=["GET"]),
             Route("/agents/{agent_id}/test", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}", manage_machines, methods=["PUT"]),
             Route("/internal/v1/agents", internal_group_agents, methods=["GET"]),

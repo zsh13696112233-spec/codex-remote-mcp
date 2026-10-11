@@ -65,6 +65,7 @@ class DomainJsonMapper {
     result.put("handoffMode", sop.handoffMode);
     result.put("dingtalkShowExecutionDetails", sop.dingtalkShowExecutionDetails);
     result.put("defaultStepModel", sop.defaultStepModel);
+    putNullable(result, "defaultStepReasoningEffort", sop.defaultStepReasoningEffort);
     result.put("enabled", sop.enabled);
     var steps = result.putArray("steps");
     for (SopStepEntity step : sop.steps) {
@@ -83,6 +84,7 @@ class DomainJsonMapper {
       item.put("writeEnabled", step.writeEnabled);
       item.put("permissionProfile", step.permissionProfile);
       putNullable(item, "modelOverride", step.modelOverride);
+      putNullable(item, "reasoningEffortOverride", step.reasoningEffortOverride);
       item.put(
           "effectiveModel", step.modelOverride == null ? sop.defaultStepModel : step.modelOverride);
       item.put("timeoutSec", step.timeoutSec);

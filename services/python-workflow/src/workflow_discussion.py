@@ -143,6 +143,7 @@ class DiscussionService:
                     job = await self.orchestrator.dispatch(
                         agent_id=target["agentId"], thread_id=target["threadId"], prompt=prompt,
                         cwd=cwd, model=target["model"], write=target["write"],
+                        reasoning_effort=target.get("reasoningEffort"),
                         permission_profile=target["permissionProfile"], timeout_sec=target["timeoutSec"],
                         output_schema=output_schema, event_callback=record_event,
                         input_images=images)

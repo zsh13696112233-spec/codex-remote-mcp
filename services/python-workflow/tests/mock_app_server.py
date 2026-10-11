@@ -27,7 +27,9 @@ class MockAppServer:
         config_requirements: dict[str, Any] | None = None,
         process_notifications: list[dict[str, Any]] | None = None,
         resume_thread_id: str | None = None,
+        model_catalog: list[dict[str, Any]] | None = None,
     ) -> None:
+        self.model_catalog = model_catalog or []
         self.delay_sec = delay_sec
         self.turn_status = turn_status
         self.turn_error = turn_error
@@ -89,6 +91,8 @@ class MockAppServer:
 
                 if method == "initialize":
                     await self._result(connection, request_id, {"serverInfo": {"name": "mock"}})
+                elif method == "model/list":
+                    await self._result(connection, request_id, {"data": self.model_catalog, "nextCursor": None})
                 elif method in {"fs/createDirectory", "fs/writeFile"}:
                     if self.reject_file_writes:
                         await connection.send(json.dumps({"id": request_id, "error": {"code": -32601, "message": "File API unavailable"}}))

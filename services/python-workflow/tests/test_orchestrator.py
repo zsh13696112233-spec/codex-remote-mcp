@@ -274,6 +274,27 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         values.update(kwargs)
         return await orchestrator.dispatch(**values)
 
+    async def test_effort_is_validated_and_sent_for_new_and_resumed_turns(self) -> None:
+        catalog = [{"model": "test-model", "supportedReasoningEfforts": [{"reasoningEffort": "high"}]}]
+        async with MockAppServer(model_catalog=catalog) as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
+                self.assertEqual((await orchestrator.agent_models("remote"))[0]["supportedReasoningEfforts"], ["high"])
+                for thread in (None, "thread-1"):
+                    job = await self._dispatch(orchestrator, model="test-model", reasoning_effort="high", thread_id=thread)
+                    final = await orchestrator.wait(job.job_id, 5)
+                    self.assertEqual(final.status, "completed", final.snapshot())
+                turns = [x for x in server.requests if x["method"] == "turn/start"]
+                self.assertEqual([x["params"]["effort"] for x in turns], ["high", "high"])
+                count = len(server.requests)
+                job = await self._dispatch(orchestrator, model="test-model", reasoning_effort="ultra")
+                final = await orchestrator.wait(job.job_id, 5)
+                self.assertEqual(final.status, "failed")
+                self.assertFalse(any(x["method"] in {"thread/start", "turn/start"} for x in server.requests[count:]))
+                job = await self._dispatch(orchestrator, model="test-model")
+                await orchestrator.wait(job.job_id, 5)
+                self.assertNotIn("effort", [x for x in server.requests if x["method"] == "turn/start"][-1]["params"])
+
     async def test_probe_agent_only_initializes_connection(self) -> None:
         async with MockAppServer() as server:
             with tempfile.TemporaryDirectory() as directory:

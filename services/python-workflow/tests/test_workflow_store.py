@@ -40,6 +40,23 @@ def serial_workflow() -> dict:
 
 
 class WorkflowStoreTests(unittest.TestCase):
+    def test_effort_survives_storage_and_old_schema_upgrade(self):
+        # Simulate a database created before the nullable column existed.
+        with self.store._connect() as db:
+            db.execute("ALTER TABLE workflow_nodes DROP COLUMN reasoning_effort")
+        upgraded = WorkflowStore(self.store.path)
+        spec = serial_workflow()
+        spec["nodes"][0]["reasoningEffort"] = "high"
+        upgraded.create_workflow(spec)
+        reloaded = WorkflowStore(self.store.path)
+        self.assertEqual(reloaded.get_spec(spec["workflowId"])["nodes"][0]["reasoningEffort"], "high")
+        self.assertEqual(reloaded.prepare_node_dispatch(spec["workflowId"], "a")["reasoningEffort"], "high")
+        self.assertIsNone(reloaded.get_spec(spec["workflowId"])["nodes"][1]["reasoningEffort"])
+        for value in ("", "bogus", [], 1, True):
+            spec["nodes"][0]["reasoningEffort"] = value
+            with self.assertRaisesRegex(ValueError, "思考强度"):
+                WorkflowStore.normalize_spec(spec)
+
     def test_supervisor_timeout_supports_twelve_hours_without_extending_steps(self) -> None:
         value = serial_workflow()
         self.assertEqual(WorkflowStore.normalize_spec(value)["supervisorTimeoutSec"], 7200)

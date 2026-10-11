@@ -16,6 +16,21 @@ from workflow_store import utc_now
 
 
 class DiscussionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discussion_uses_frozen_node_effort(self):
+        with self.store._connect() as db:
+            db.execute("UPDATE workflow_nodes SET reasoning_effort='high' WHERE node_id='a'")
+        catalog = [{"model": "model-original", "supportedReasoningEfforts": [{"reasoningEffort": "high"}]}]
+        async with MockAppServer(model_catalog=catalog, structured_reply=json.dumps({"text": "解释", "summary": None, "document": None})) as server:
+            seed_agents(self.store, {"local": {"url": server.url, "cwd": "/work", "capabilities": ["supervisor", "executor"]}})
+            gateway = fixture_gateway(self.store, Orchestrator())
+            try:
+                await gateway._process_chat_message("serial-demo", self.accept("解释一下"))
+                turns = [x for x in server.requests if x["method"] == "turn/start"]
+                self.assertEqual(turns[0]["params"]["effort"], "high")
+                self.assertEqual(self.store.get_node("serial-demo", "a")["response"], "原计划：登录、支付")
+            finally:
+                await gateway.event_batcher.close()
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

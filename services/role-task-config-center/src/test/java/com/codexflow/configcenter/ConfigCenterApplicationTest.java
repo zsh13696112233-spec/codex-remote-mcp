@@ -173,10 +173,10 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
         .contains("name=\"dingtalkTargetType\" value=\"GROUP\"")
         .contains("name=\"dingtalkTargetType\" value=\"PERSON\"")
         .contains("群聊和人员分开选择")
-        .contains("styles.css?v=20260904-dialog-cancel")
+        .contains("styles.css?v=20261011-effort")
         .contains("sync-wait.css?v=20260905")
         .contains("id=\"syncWait\"")
-        .contains("app.js?v=20260925-sop-picker")
+        .contains("app.js?v=20261011-effort")
         .contains("任务目标")
         .contains("发送给所有步骤")
         .contains("type=\"hidden\" name=\"additionalNotes\"");

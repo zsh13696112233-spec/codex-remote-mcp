@@ -102,11 +102,14 @@ class SidecarStoreTests(unittest.TestCase):
         self.started_a = (datetime.now(UTC) - timedelta(seconds=2)).isoformat()
         self.started_b = datetime.now(UTC).isoformat()
 
-    def _online_and_claim(self, workflow_id: str) -> str:
+    def _online_and_claim(self, workflow_id: str, effort=None) -> str:
         self.store.record_sidecar_heartbeat(
             "supervisor-a", "instance-a", self.started_a, lease_timeout_sec=20
         )
-        self.store.create_workflow(remote_workflow(workflow_id))
+        spec = remote_workflow(workflow_id)
+        if effort is not None:
+            spec["nodes"][0]["reasoningEffort"] = effort
+        self.store.create_workflow(spec)
         claimed = self.store.claim_next_workflow(
             "supervisor-a", sidecar_instance_id="instance-a", lease_timeout_sec=20
         )
@@ -115,6 +118,12 @@ class SidecarStoreTests(unittest.TestCase):
             "supervisor-a", "instance-a", self.started_a, lease_timeout_sec=20
         )
         return str(heartbeat["lease"]["leaseToken"])
+
+    def test_remote_dispatch_preserves_frozen_effort(self):
+        lease = self._online_and_claim("effort-demo", "high")
+        prepared = self.store.prepare_node_dispatch("effort-demo", "a",
+            sidecar_supervisor_id="supervisor-a", lease_token=lease, sidecar_dispatch_id="effort-a")
+        self.assertEqual(prepared["reasoningEffort"], "high")
 
     def test_instance_replacement_fails_workflow_and_fences_old_instance(self) -> None:
         lease_token = self._online_and_claim("replace-demo")

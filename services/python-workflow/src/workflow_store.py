@@ -1,3 +1,5 @@
+from reasoning_effort import normalize_effort
+
 import base64
 import binascii
 import hashlib
@@ -388,6 +390,7 @@ class WorkflowStore(InputImageStore):
                 "original_prompt": "TEXT",
                 "actual_prompt": "TEXT",
                 "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "reasoning_effort": "TEXT",
                 "permission_profile": "TEXT NOT NULL DEFAULT 'read_only'",
                 "dispatch_token": "TEXT",
             }.items():
@@ -640,6 +643,7 @@ class WorkflowStore(InputImageStore):
                     "write": permission_profile != "read_only",
                     "permissionProfile": permission_profile,
                     "model": raw_node.get("model"),
+                    "reasoningEffort": normalize_effort(raw_node.get("reasoningEffort")),
                     "timeoutSec": timeout_sec,
                 }
             )
@@ -771,8 +775,8 @@ class WorkflowStore(InputImageStore):
                         workflow_id, node_id, position, agent_id, executor_type,
                         prompt, display_name, role_name, original_prompt,
                         depends_on_json, cwd, write_enabled, permission_profile, model,
-                        timeout_sec, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                        timeout_sec, reasoning_effort, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                     """,
                     (
                         spec["workflowId"],
@@ -790,6 +794,7 @@ class WorkflowStore(InputImageStore):
                         node["permissionProfile"],
                         node["model"],
                         node["timeoutSec"],
+                        node.get("reasoningEffort"),
                         timestamp,
                     ),
                 )
@@ -2199,7 +2204,7 @@ class WorkflowStore(InputImageStore):
                 (workflow_id, message_id, target["gateId"], target["nodeId"], target["attempt"], target["agentId"], target["threadId"]))
             self._add_event_with_connection(connection, workflow_id, target["nodeId"], "chat", "chat.assistant.progress",
                 {"messageId": message_id, "nodeId": target["nodeId"], "stepNumber": target["stepNumber"],
-                 "text": f"第{target['stepNumber']}步执行者正在处理讨论"}, utc_now())
+                 "text": "正在处理"}, utc_now())
 
     def update_discussion(self, workflow_id, message_id, **values):
         if not values or set(values) - {"state", "turn_id", "job_id", "response"}:
@@ -3047,6 +3052,7 @@ class WorkflowStore(InputImageStore):
             "captureDocument": self.document_enabled(row["workflow_id"], row["node_id"]),
             "permissionProfile": row["permission_profile"],
             "model": row["model"],
+            "reasoningEffort": row["reasoning_effort"],
             "timeoutSec": row["timeout_sec"],
             "status": row["status"],
             "jobId": row["job_id"],
