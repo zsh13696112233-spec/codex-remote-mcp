@@ -148,7 +148,7 @@ final class DingTalkWaitingCard {
           }
         }
         String notice = "请查看" + subject + "，如需调整可回复此卡片，确认后点击「继续执行」。";
-        String response = node.path("response").asText();
+        String response = DingTalkResultText.display(node.path("response").asText());
         return response.isBlank() ? "步骤已完成。" + notice : response + "\n\n" + notice;
       }
     return "步骤已完成。请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。";

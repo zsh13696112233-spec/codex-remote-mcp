@@ -183,6 +183,7 @@ public class BlockedNotificationService {
         .payload()
         .properties()
         .forEach(entry -> payload.put(entry.getKey(), entry.getValue().asText()));
+    payload.put("_atDisplayName", notice.person().path("displayName").asText("开发人"));
     try {
       transport.sendBlockedCard(
           "blocked-" + id,

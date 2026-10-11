@@ -106,11 +106,17 @@ class BlockedNotificationTest {
     String other = target("PERSON", "other");
     store.saveMapping(client, new BlockedNotificationStore.Mapping(person, "key", ""));
     store.saveMapping(client, new BlockedNotificationStore.Mapping(other, "key", "dev-1"));
+    db.update("UPDATE codex_sop_dingtalk_targets SET display_name=? WHERE id=?", "新名称", person);
     service.observe(store.read(id));
     service.send(id);
     service.send(id);
     verify(transport, times(1))
-        .sendBlockedCard(eq("blocked-" + id), eq(client), eq("group"), eq("developer"), anyMap());
+        .sendBlockedCard(
+            eq("blocked-" + id),
+            eq(client),
+            eq("group"),
+            eq("developer"),
+            argThat(data -> "developer".equals(data.get("_atDisplayName"))));
     assertThat(store.view(id).get("state")).isEqualTo("delivered");
   }
 

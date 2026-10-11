@@ -790,7 +790,9 @@ class DingTalkBotCoordinatorTest {
         .putObject("item")
         .put("type", "agentMessage")
         .put("phase", "commentary")
-        .put("text", "正在检查");
+        .put(
+            "text",
+            "{\"summary\":\"正在检查\",\"outcome\":\"blocked\",\"reason\":\"尚未完成配置检查\",\"jiraComment\":{}}");
     events.addObject().put("sequence", 8).put("type", "node.started");
     events
         .addObject()
@@ -807,7 +809,12 @@ class DingTalkBotCoordinatorTest {
       verify(store)
           .recordEvent("app", ID, hidden, "hidden-execution:" + hidden, null, null, null, false);
     }
-    verify(store).recordProcess(eq(ID), isNull(), eq(7L), contains("正在检查"), eq(false), eq(false));
+    var progressBody = ArgumentCaptor.forClass(String.class);
+    verify(store)
+        .recordProcess(eq(ID), isNull(), eq(7L), progressBody.capture(), eq(false), eq(false));
+    assertThat(progressBody.getValue())
+        .contains("进度说明：\n正在检查")
+        .doesNotContain("blocked", "jiraComment", "尚未完成配置检查");
     verify(store).recordProcess(eq(ID), isNull(), eq(8L), contains("已开始执行"), eq(false), eq(false));
     verify(store).completeReply(ID, "question-id", 9L, "正式回答", null);
     verify(store, times(2))
@@ -898,6 +905,27 @@ class DingTalkBotCoordinatorTest {
     ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 1L);
     verify(store).completeReply(ID, "question-id", 1L, "回答", "action");
     verify(store, never()).enqueueCard(any(), any(), any());
+  }
+
+  @Test
+  void protocolAnswersAreFormattedBeforeReplyAndTerminalOutbox() {
+    var binding =
+        new DingTalkModels.Binding(ID, "original-group", "root", "active", 0, null, false);
+    var result = json.createObjectNode().put("summary", "已完成需求核对").put("outcome", "success");
+    result.putObject("jiraComment").put("status", "not_applicable");
+    var event = json.createObjectNode().put("type", "chat.assistant.completed");
+    event.putObject("payload").put("messageId", "question-id").put("text", result.toString());
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 1L);
+    verify(store).completeReply(ID, "question-id", 1L, "已完成需求核对", null);
+    when(gateway.get("/workflows/" + ID))
+        .thenReturn(
+            json.createObjectNode().put("status", "completed").put("response", result.toString()));
+    event = json.createObjectNode().put("type", "workflow.completed");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 2L);
+    var body = ArgumentCaptor.forClass(String.class);
+    verify(store).recordProcess(eq(ID), isNull(), eq(2L), body.capture(), eq(true), eq(true));
+    assertThat(body.getValue()).contains("已完成需求核对").doesNotContain("jiraComment", "not_applicable");
+    verify(gateway, never()).post(anyString(), any());
   }
 
   @Test

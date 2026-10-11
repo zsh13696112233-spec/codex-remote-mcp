@@ -259,6 +259,23 @@ class SidecarInternalApiTests(unittest.TestCase):
         self.store.finish_business_termination("blocked-a")
         self.assertFalse(self.store.has_supervisor_lease("blocked-a"))
 
+    def test_success_with_empty_developer_crosses_api(self):
+        from tests.test_workflow_outcomes import result
+        lease = self._claim("empty-developer", "supervisor-a", "token-a")
+        headers = self._auth("token-a", lease)
+        path = "/internal/v1/workflows/empty-developer/nodes/a"
+        prepared = self.client.post(path + "/prepare", headers=headers, json={"dispatchId": "one"})
+        self.assertEqual(prepared.status_code, 200)
+        value = result("success", "not_applicable")
+        value["jiraDeveloper"].update(status="not_applicable", accountType="", accountId="", displayName="", detail="")
+        body = {"operation": "sync", "snapshot": {"status": "completed", "businessResult": value}}
+        response = self.client.post(path + "/state", headers=headers, json=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        view = self.client.get("/internal/v1/workflows/empty-developer", headers=headers).json()
+        self.assertIsNone(view["termination"])
+        self.assertEqual(view["nodes"][0]["status"], "completed")
+        self.assertEqual(view["nodes"][0]["response"], value["summary"])
+
     def test_document_sync_requires_lease_and_never_returns_body_in_state(self):
         spec = remote_workflow("docs-a")
         spec["advanceMode"] = "semi_automatic"

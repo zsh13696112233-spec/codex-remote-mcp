@@ -640,7 +640,10 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       boolean waitingReply =
           isGateId(replyGate)
               && !"closed".equals(DingTalkWaitingCard.state(replySnapshot, replyGate));
-      String answerText = failed ? "暂时无法完成回复，请重试核对执行结果。" : payload.path("text").asText();
+      String answerText =
+          failed
+              ? "暂时无法完成回复，请重试核对执行结果。"
+              : DingTalkResultText.display(payload.path("text").asText());
       if (payload.has("stepNumber"))
         answerText = "第" + payload.path("stepNumber").asInt() + "步执行者：\n" + answerText;
       if (waitingReply) {
@@ -739,7 +742,10 @@ class DingTalkBotCoordinator implements SmartLifecycle {
                   ? "因阻断结束。"
                   : "无待处理任务，已结束。";
         if (TERMINAL_EVENTS.contains(type) && !snapshot.path("response").asText().isBlank())
-          notice += "\n执行结果：\n" + DingTalkExecutionNotice.safe(snapshot.path("response").asText());
+          notice +=
+              "\n执行结果：\n"
+                  + DingTalkExecutionNotice.safe(
+                      DingTalkResultText.display(snapshot.path("response").asText()));
         recordProcessWithRetry(
             binding.workflowId(),
             null,

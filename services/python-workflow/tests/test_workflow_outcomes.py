@@ -203,6 +203,19 @@ class OutcomeExecutionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(job.business_result["outcome"], "blocked")
             self.assertEqual(job.response, result()["summary"])
 
+    async def test_success_with_empty_developer_and_detail_completes(self):
+        value = result("success", "not_applicable")
+        value["jiraDeveloper"].update(status="not_applicable", accountType="", accountId="", displayName="", detail="")
+        async with MockAppServer(structured_reply=json.dumps(value)) as server:
+            orchestrator = Orchestrator()
+            orchestrator.agent_provider = lambda: {"local": AgentConfig.from_dict("local", {"url": server.url, "cwd": str(Path.cwd())})}
+            job = await orchestrator.dispatch(agent_id="local", prompt="测试", timeout_sec=10, output_schema=SCHEMA, thread_id=None, cwd=None, write=False, model=None)
+            await asyncio.wait_for(job.completed.wait(), 5)
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.business_result, value)
+            self.assertEqual(job.response, value["summary"])
+            self.assertIsNone(job.error)
+
     async def test_invalid_model_output_is_failure(self):
         async with MockAppServer(structured_reply='{"summary":"阻断"}') as server:
             orchestrator = Orchestrator()
@@ -211,3 +224,20 @@ class OutcomeExecutionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(job.completed.wait(), 5)
             self.assertEqual(job.status, "failed")
             self.assertIsNone(job.business_result)
+            self.assertEqual(job.error_kind, "invalid_business_result")
+            self.assertEqual(job.error_stage, "result/validate")
+            self.assertEqual(job.error_details["validation_error"], "步骤业务结果格式无效。")
+
+    async def test_actual_blocked_unavailable_model_result_completes_as_blocked(self):
+        value = result()
+        value["jiraComment"].update(status="not_applicable", issueKey="", reference="", detail="未锁定工单")
+        value["jiraDeveloper"].update(status="not_applicable", accountType="", accountId="", displayName="", detail="未锁定工单，无法读取")
+        async with MockAppServer(structured_reply=json.dumps(value)) as server:
+            orchestrator = Orchestrator()
+            orchestrator.agent_provider = lambda: {"local": AgentConfig.from_dict("local", {"url": server.url, "cwd": str(Path.cwd())})}
+            job = await orchestrator.dispatch(agent_id="local", prompt="测试", timeout_sec=10, output_schema=SCHEMA, thread_id=None, cwd=None, write=False, model=None)
+            await asyncio.wait_for(job.completed.wait(), 5)
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.business_result["outcome"], "blocked")
+            self.assertEqual(job.business_result["jiraDeveloper"]["status"], "unavailable")
+            self.assertEqual(job.response, value["summary"])

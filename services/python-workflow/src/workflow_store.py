@@ -29,6 +29,7 @@ ARTIFACTS_PER_WORKFLOW_LIMIT = 50
 IMAGE_ARTIFACT_LIMIT = ARTIFACT_LIMIT
 IMAGE_ARTIFACTS_PER_WORKFLOW_LIMIT = ARTIFACTS_PER_WORKFLOW_LIMIT
 ADVANCE_TIMEOUT_SEC = 120
+MAX_SUPERVISOR_TIMEOUT_SEC = 43_200
 LEGACY_IMAGE_LINK_PATTERN = re.compile(
     r"\[[^\]]*\]\((?P<path>[^)]+\.(?:png|jpe?g|gif|webp))\)", re.IGNORECASE
 )
@@ -655,8 +656,8 @@ class WorkflowStore(InputImageStore):
         if failure_policy not in {"stop", "continue"}:
             raise ValueError("failurePolicy 只能是 stop 或 continue。")
         supervisor_timeout_sec = int(value.get("supervisorTimeoutSec", 7200))
-        if not 10 <= supervisor_timeout_sec <= 7200:
-            raise ValueError("supervisorTimeoutSec 必须在 10 到 7200 之间。")
+        if not 10 <= supervisor_timeout_sec <= MAX_SUPERVISOR_TIMEOUT_SEC:
+            raise ValueError(f"supervisorTimeoutSec 必须在 10 到 {MAX_SUPERVISOR_TIMEOUT_SEC} 之间。")
         max_retry_count = int(value.get("maxRetryCount", 10))
         if not 0 <= max_retry_count <= 100:
             raise ValueError("maxRetryCount 必须在 0 到 100 之间。")

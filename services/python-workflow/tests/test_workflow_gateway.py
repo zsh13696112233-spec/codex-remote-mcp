@@ -471,6 +471,27 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 await gateway.stop()
                 await gateway.event_batcher.close()
 
+    async def test_dispatch_preserves_extended_supervisor_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            orchestrator = self.FakeOrchestrator()
+            orchestrator.dispatch = AsyncMock(wraps=orchestrator.dispatch)
+            gateway = fixture_gateway(store, orchestrator)
+            spec = self.spec("long-supervisor", "supervisor-a")
+            spec["supervisorTimeoutSec"] = 43200
+            try:
+                await gateway.submit(spec)
+                for _ in range(100):
+                    if orchestrator.dispatch.await_count:
+                        break
+                    await asyncio.sleep(0.01)
+                orchestrator.dispatch.assert_awaited_once()
+                self.assertEqual(orchestrator.dispatch.call_args.kwargs["timeout_sec"], 43200)
+                self.assertTrue(orchestrator.dispatch.call_args.kwargs["is_supervisor"])
+            finally:
+                await gateway.stop()
+                await gateway.event_batcher.close()
+
     async def test_connection_failure_releases_slot_for_next_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = FixtureWorkflowStore(Path(directory, "workflows.db"))

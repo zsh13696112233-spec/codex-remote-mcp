@@ -31,7 +31,7 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
 from workflow_event_batcher import AsyncEventBatcher
-from workflow_store import ARTIFACT_LIMIT, WorkflowStore
+from workflow_store import ARTIFACT_LIMIT, MAX_SUPERVISOR_TIMEOUT_SEC, WorkflowStore
 from workflow_runtime_client import InternalApiClient
 
 DEFAULT_WORKFLOW_DB_PATH = Path(__file__).with_name("workflows.db")
@@ -928,6 +928,7 @@ class Orchestrator:
         permission_profile: str | None = None,
         model: str | None,
         timeout_sec: int,
+        is_supervisor: bool = False,
         approval_policy: Literal["never", "on-request", "untrusted"] = "never",
         approvals_reviewer: Literal["user", "auto_review"] | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -942,8 +943,10 @@ class Orchestrator:
             raise ValueError("prompt 不能为空。")
         if len(prompt) > MAX_PROMPT_LENGTH:
             raise ValueError(f"prompt 不能超过 {MAX_PROMPT_LENGTH} 个字符。")
-        if not 10 <= timeout_sec <= 7200:
-            raise ValueError("timeout_sec 必须在 10 到 7200 秒之间。")
+        # 仅网关派发主监督时启用较长预算，普通执行和 MCP 工具保持原上限。
+        max_timeout_sec = MAX_SUPERVISOR_TIMEOUT_SEC if is_supervisor else 7200
+        if not 10 <= timeout_sec <= max_timeout_sec:
+            raise ValueError(f"timeout_sec 必须在 10 到 {max_timeout_sec} 秒之间。")
 
         agents = self.load_agents()
         if agent_id not in agents:
@@ -1314,10 +1317,16 @@ class Orchestrator:
                                 value = parse_outcome(job.response or "", 1 if job.output_schema == SCHEMA_V1 else 2)
                                 job.business_result = value
                                 job.response = value["summary"]
-                            except (ValueError, KeyError, TypeError):
+                            except (ValueError, KeyError, TypeError) as error:
                                 job.status = "failed"
                                 job.response = None
                                 job.error = "步骤业务结果格式无效。"
+                                job.error_kind = "invalid_business_result"
+                                job.error_stage = "result/validate"
+                                job.error_details = {"validation_error": (
+                                    str(error) if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError)
+                                    else "步骤结果不是有效的 JSON 对象或字段类型不正确。"
+                                )}
                         from workflow_documents import SCHEMA as DOCUMENT_SCHEMA, collect as collect_documents, ERROR as DOCUMENT_ERROR
                         if job.status == "completed" and job.business_result is not None and job.capture_document:
                             try:

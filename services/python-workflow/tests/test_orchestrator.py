@@ -285,6 +285,20 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                     [request["method"] for request in server.requests], ["initialize"]
                 )
 
+    async def test_long_timeout_is_only_available_for_supervisor_dispatch(self) -> None:
+        async with MockAppServer() as server:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = fixture_orchestrator(self._write_config(directory, server.url))
+                for timeout in (9, 43201):
+                    with self.assertRaisesRegex(ValueError, "43200"):
+                        await self._dispatch(orchestrator, timeout_sec=timeout, is_supervisor=True)
+                with self.assertRaisesRegex(ValueError, "7200"):
+                    await self._dispatch(orchestrator, timeout_sec=7201)
+                job = await self._dispatch(orchestrator, timeout_sec=43200, is_supervisor=True)
+                self.assertEqual(job.timeout_sec, 43200)
+                final = await orchestrator.wait(job.job_id, 5)
+                self.assertEqual(final.status, "completed", final.snapshot())
+
 
     async def test_final_answer_reconciles_turn_after_event_grace_expires(self) -> None:
         class FakeClient:

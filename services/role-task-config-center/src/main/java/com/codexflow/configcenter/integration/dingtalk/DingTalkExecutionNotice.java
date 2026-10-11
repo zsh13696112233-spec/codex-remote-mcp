@@ -72,7 +72,10 @@ final class DingTalkExecutionNotice {
         && "agentMessage".equals(type)
         && "commentary".equals(item.path("phase").asText())
         && !"assistant".equals(event.path("source").asText())) {
-      text = "进度说明：\n" + item.path("text").asText();
+      String progress = item.path("text").asText();
+      // 执行者也可能用结果结构承载中间进度。只展示总结，不能将其状态字段当作正式结果。
+      String summary = DingTalkResultText.progress(progress);
+      text = "进度说明：\n" + (summary == null ? progress : summary);
     } else {
       String tool =
           switch (type) {
@@ -222,14 +225,25 @@ final class DingTalkExecutionNotice {
 
   private static void detail(StringBuilder text, String label, JsonNode value) {
     if (value.isMissingNode() || value.isNull()) return;
+    String result = DingTalkResultText.toolResult(value);
+    if (result != null) {
+      text.append("\n").append(label).append("：").append(clipped(safe(result), 1500));
+      return;
+    }
     JsonNode display = withoutImageTransport(value);
     String content = display.isTextual() ? display.asText() : display.toString();
     if (!content.isBlank())
       text.append("\n").append(label).append("：").append(clipped(content, 1500));
   }
 
-  // 仅排除图片和钉钉传输字段；工具命令、路径、参数及文本结果按原内容展示。
+  // 解开平台结果并排除图片传输字段；其他工具详情沿用原行为，不代表全面脱敏。
   private static JsonNode withoutImageTransport(JsonNode value) {
+    if (value.isTextual() || value.isObject()) {
+      String result =
+          DingTalkResultText.extract(value.isTextual() ? value.asText() : value.toString());
+      if (result != null)
+        return tools.jackson.databind.node.JsonNodeFactory.instance.textNode(safe(result));
+    }
     if (value.isObject()) {
       var copy = ((tools.jackson.databind.node.ObjectNode) value).deepCopy();
       String type = value.path("type").asText();

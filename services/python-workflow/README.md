@@ -77,6 +77,8 @@ Skill 包通过中央 `skill_group_packages` 关联表加入一个或多个现�
 
 ## 步骤流转模式
 
+`supervisorTimeoutSec` 支持 10～43200 秒（最长 12 小时），省略时仍为 7200 秒；节点 `timeoutSec` 仍为 10～7200 秒。网关派发主监督使用独立的较长超时上限，普通执行及 MCP 单任务派发保持原上限。已有运行使用提交时的时长快照，修改 SOP 不会延长正在执行的运行；按原快照重试也沿用原值。
+
 消息图片上传等入队前处理通过现有 `POST /workflows/{workflowId}/input-observations` 传入 `receiving: true`，同一等待在接收结束前禁止继续；入队事务自动清除此标记，接收失败用同一接口传入 `hold: false, receiving: false` 解除接收阻塞而不恢复倒计时。字段省略保留原行为。`discussionBusy` 同时包含接收、排队和执行阶段。
 
 工作流提交可携带 `advanceMode`：
@@ -206,6 +208,8 @@ MCP 逐机任务持久化 `diagnostics` 检测摘要，由安装汇总和批次�
 
 ## 业务阻断与无任务提前结束
 
+平台统一追加的协议提示明确：阻断但未锁定唯一工单、无权限或开发人读取失败时，开发人状态使用 `unavailable`，评论状态独立填写，不需要修改 SOP 角色职责。模型结果解析仅兼容一种版本 2 误填：`blocked` 搭配开发人 `not_applicable`，人员账号类型、账号、显示名全部为空且说明为字符串（允许为空）时，规范为 `unavailable` 后再完整校验。原始回答仍保留在执行事件中，成功规范化记录无业务正文的诊断日志；不改变阻断决定、不自动重发业务操作。其余非法结果仍失败，执行诊断通过 `error_kind=invalid_business_result`、`error_stage=result/validate` 和 `error_details.validation_error` 保留校验原因，普通页面仍使用稳定中文错误。版本 1 及旧运行语义不变；中央状态写入仍校验字段、类型、容量与账号状态一致性。
+
 新创建运行由中央默认冻结 `resultProtocolVersion=2`，正式步骤使用统一结构化结果：`summary`、`outcome`、`reason`、`jiraComment`、`document`、`jiraDeveloper`。提交可显式指定版本 1 用于原快照兼容，已有版本 1 运行保持原五字段协议。`outcome` 只允许 `success/no_task/blocked`，新协议缺失或非法结果按执行失败处理；旧运行没有版本字段，保留旧协议，不扫描旧回复中的关键词。主文档仍仅在半自动首步且有下一步时采集。
 
 步骤判定阻断后，仅在原授权内尝试向已锁定的唯一 Jira 添加收尾评论，然后返回 `blocked`。评论包括原因、已完成/未执行事项和恢复条件，不改变 Jira 状态或负责人。职责明确要求时，还允许在阻断收尾中将处理角色字段改为 `Natural Person`；仓库三份 SOP 提示词已要求此动作。修改前后回查，失败或结果不明仍尝试评论并结束，在 `summary` 和 `jiraComment.detail` 披露角色修改结果，评论状态仍只表示评论结果。无任务结束不触发角色修改。平台注入稳定去重标记，提交不明时先核查，不能确认不盲目重发；此模型侧约定不提供严格的一次性写入保证。`jiraComment` 包含 `status`（`succeeded/failed/unknown/not_applicable`）、`issueKey`、`reference` 和 `detail`。没有唯一编号或没有授权工具时说明原因，备注失败或未知不阻止流程结束。平台不新增 Jira 凭据或连接。
@@ -220,6 +224,6 @@ MCP 逐机任务持久化 `diagnostics` 检测摘要，由安装汇总和批次�
 
 `jiraDeveloper` 严格包含 `status/accountType/accountId/displayName/detail`。阻断时实际读取已锁定 Jira 的 `Public.Jira.Fields.Developer`：唯一人员为 `resolved`，账号优先使用实际返回的 `accountId`，其次 `key`、`name`，`accountType` 标明所选字段，`accountId` 保留原值；禁止使用姓名、经办人或发起人推断。账号上限 256、显示名 160、说明 2000 字符。
 
-空值、多人、无法读取分别为 `empty/multiple/unavailable`，账号类型与账号必须为空并说明原因；非阻断可用 `not_applicable`。读取失败不阻止业务阻断结束。中央根据冻结版本严格校验，本机和远程共用规则；旧运行没有开发人信息，不从正文提取或补发通知。角色修改结果继续放在 `jiraComment.detail`，其 `status` 仅表示评论结果。
+空值、多人、无法读取分别为 `empty/multiple/unavailable`，账号类型与账号必须为空；非阻断可用 `not_applicable`。建议在 `detail` 说明读取情况，但允许空字符串或纯空白，不因开发人或说明为空把业务结果判为格式无效，也不猜测或补填人员。开发人读取结果不单独阻断业务，已有业务阻断决定仍保留；`resolved` 仍必须提供唯一 Jira 与稳定账号。中央根据冻结版本严格校验，本机和远程共用规则；旧运行没有开发人信息，不从正文提取或补发通知。角色修改结果继续放在 `jiraComment.detail`，其 `status` 仅表示评论结果。
 
 Python 不持有钉钉凭据或发送通知；8091 在确认阻断终态后按冻结群配置通知开发人。升级顺序和验收见 [Jira 阻断通知部署说明](../../docs/JIRA_BLOCKED_NOTIFICATION.zh-CN.md)。

@@ -40,6 +40,25 @@ def serial_workflow() -> dict:
 
 
 class WorkflowStoreTests(unittest.TestCase):
+    def test_supervisor_timeout_supports_twelve_hours_without_extending_steps(self) -> None:
+        value = serial_workflow()
+        self.assertEqual(WorkflowStore.normalize_spec(value)["supervisorTimeoutSec"], 7200)
+        for timeout in (10, 7200, 7201, 43200):
+            with self.subTest(timeout=timeout):
+                value["workflowId"] = f"timeout-{timeout}"
+                value["supervisorTimeoutSec"] = timeout
+                self.store.create_workflow(value)
+                reloaded = WorkflowStore(self.store.path)
+                self.assertEqual(reloaded.get_spec(value["workflowId"])["supervisorTimeoutSec"], timeout)
+        for timeout in (9, 43201):
+            value["supervisorTimeoutSec"] = timeout
+            with self.assertRaisesRegex(ValueError, "supervisorTimeoutSec"):
+                WorkflowStore.normalize_spec(value)
+        value["supervisorTimeoutSec"] = 43200
+        value["nodes"][0]["timeoutSec"] = 7201
+        with self.assertRaisesRegex(ValueError, "timeoutSec.*7200"):
+            WorkflowStore.normalize_spec(value)
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

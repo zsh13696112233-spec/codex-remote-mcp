@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import logging
 from typing import Any
 
 from workflow_documents import DOCUMENT_SCHEMA
@@ -35,7 +36,8 @@ SCHEMA["properties"]["jiraDeveloper"] = {
     "type": "object", "additionalProperties": False,
     "required": ["status", "accountType", "accountId", "displayName", "detail"],
     "properties": {
-        "status": {"type": "string", "enum": ["resolved", "empty", "multiple", "unavailable", "not_applicable"]},
+        "status": {"type": "string", "enum": ["resolved", "empty", "multiple", "unavailable", "not_applicable"],
+                   "description": "阻断时禁止 not_applicable；未锁定唯一工单、无权限或读取失败使用 unavailable，并清空人员信息、说明原因。"},
         "accountType": {"type": "string", "enum": ["", "accountId", "key", "name"]},
         "accountId": {"type": "string", "maxLength": 256},
         "displayName": {"type": "string", "maxLength": 160},
@@ -91,15 +93,30 @@ def validate(value: Any, version: int = VERSION) -> dict[str, Any]:
         if developer["status"] == "resolved":
             if developer["accountType"] not in ("accountId", "key", "name") or not developer["accountId"].strip() or not jira["issueKey"].strip():
                 raise ValueError("开发人必须来自唯一 Jira 并提供稳定账号标识。")
-        elif developer["accountType"] != "" or developer["accountId"] != "" or not developer["detail"].strip():
-            raise ValueError("无法确定开发人时不得填写账号，必须说明原因。")
+        elif developer["accountType"] != "" or developer["accountId"] != "":
+            raise ValueError("无法确定开发人时不得填写账号。")
         if value["outcome"] == "blocked" and developer["status"] == "not_applicable":
             raise ValueError("阻断时必须报告开发人读取结果。")
     return value
 
 
 def parse(text: str, version: int = VERSION) -> dict[str, Any]:
-    return validate(json.loads(text), version)
+    value = json.loads(text)
+    developer = value.get("jiraDeveloper") if isinstance(value, dict) else None
+    normalized = (
+        version == 2 and isinstance(developer, dict)
+        and value.get("outcome") == "blocked"
+        and developer.get("status") == "not_applicable"
+        and all(developer.get(key) == "" for key in ("accountType", "accountId", "displayName"))
+        and isinstance(developer.get("detail"), str)
+    )
+    if normalized:
+        developer["status"] = "unavailable"
+    value = validate(value, version)
+    if normalized:
+        # 原始回答保留在执行事件中；日志不包含业务正文或账号。
+        logging.getLogger(__name__).warning("阻断结果开发人状态已规范化：not_applicable -> unavailable。")
+    return value
 
 
 def instruction(workflow_id: str, node_id: str, capture_document: bool | None, version: int = VERSION) -> str:
@@ -124,10 +141,15 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
         "success 和 no_task 不需写停止评论，jiraComment 使用 not_applicable 并说明。"
         + ("阻断时从已锁定 Jira 实际读取 Public.Jira.Fields.Developer 指定的开发人字段，"
            "jiraDeveloper.status 为 resolved/empty/multiple/unavailable；非阻断可为 not_applicable。"
+           "outcome 为 blocked 时禁止使用 not_applicable；未锁定唯一 Jira、无权限或读取失败均用 unavailable，"
+           "accountType、accountId、displayName 留空，detail 说明原因。"
+           "jiraComment 与 jiraDeveloper 状态独立：未锁定工单时评论可为 not_applicable，但开发人必须为 unavailable。"
+           "开发人字段为空时使用 empty；开发人为空、多人、无法获取或不适用均不单独阻断业务。"
+           "detail 尽量说明读取情况，但开发人说明为空不影响结果有效性；不得猜测或补填人员。"
            "唯一人员使用实际账号字段 accountId、key、name 中可用的最稳定标识，并以 accountType 标明类型，"
            "accountId 填该字段原值，displayName 填显示名，detail 说明读取结果。"
            "缺失、多人或读取失败时账号类型和账号填空字符串并说明原因，不猜测，不使用 assignee 或发起人。"
-           "读取失败仍返回 blocked；不得选择钉钉群、人员或发送通知。" if version == 2 else "")
+           "已经因业务必要条件判定 blocked 的，不因开发人读取失败改变该决定；不得选择钉钉群、人员或发送通知。" if version == 2 else "")
         + ("document 沿用主文档要求。" if capture_document else "document 必须为 null，不采集主文档。")
     )
 

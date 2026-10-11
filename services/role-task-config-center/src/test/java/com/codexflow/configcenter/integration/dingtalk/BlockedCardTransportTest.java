@@ -41,6 +41,97 @@ class BlockedCardTransportTest {
   }
 
   @Test
+  void blockedCardContainsPlatformMentionAndMatchingRecipient() {
+    var body =
+        transport()
+            .blockedCardBody(
+                "stable-card",
+                "target-group",
+                "staff-123",
+                Map.of("_templateId", "dedicated.schema", "body", "缺少源码", "_atDisplayName", "张三"));
+    assertThat(body.path("cardAtUserIds").size()).isEqualTo(1);
+    assertThat(body.path("cardAtUserIds").get(0).asText()).isEqualTo("staff-123");
+    assertThat(body.path("userIdType").asInt()).isEqualTo(1);
+    assertThat(body.path("imGroupOpenDeliverModel").path("atUserIds").path("staff-123").asText())
+        .isEqualTo("张三");
+    var parameters = body.path("cardData").path("cardParamMap");
+    assertThat(parameters.path("body").asText())
+        .isEqualTo("缺少源码\n\n请 <a atId=\"staff-123\">张三</a> 查看阻断原因。");
+    assertThat(parameters.has("_atDisplayName")).isFalse();
+    assertThat(parameters.has("_templateId")).isFalse();
+  }
+
+  @Test
+  void mentionEscapesAttributesAndNamesWithoutMutatingFrozenPayload() {
+    var data = Map.<String, Object>of("body", "原正文", "_atDisplayName", "张<三>&\"");
+    var body = transport().blockedCardBody("card", "group", "id\"<>&", data);
+    assertThat(body.path("cardData").path("cardParamMap").path("body").asText())
+        .contains("atId=\"id&quot;&lt;&gt;&amp;\"", "张&lt;三&gt;&amp;&quot;</a>");
+    assertThat(body.path("cardAtUserIds").get(0).asText()).isEqualTo("id\"<>&");
+    assertThat(data.get("body")).isEqualTo("原正文");
+  }
+
+  @Test
+  void missingOrAllRecipientCannotSendBlockedCard() {
+    var transport = transport();
+    for (String person : new String[] {null, "", " ", "@ALL"}) {
+      assertThatThrownBy(
+              () ->
+                  transport.sendBlockedCard(
+                      "card", "frozen-client", "group", person, Map.of("body", "阻断")))
+          .isInstanceOf(BlockedNotificationService.NotSentFailure.class);
+    }
+    verifyNoInteractions(http);
+  }
+
+  @Test
+  void blockedSendCarriesMentionInActualHttpRequest() throws Exception {
+    var transport = transport();
+    when(http.send(
+            any(HttpRequest.class),
+            org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any()))
+        .thenAnswer(invocation -> response(200, "{\"accessToken\":\"test-token\"}"))
+        .thenAnswer(
+            invocation -> {
+              HttpRequest request = invocation.getArgument(0);
+              var subscriber =
+                  HttpResponse.BodySubscribers.ofString(java.nio.charset.StandardCharsets.UTF_8);
+              request
+                  .bodyPublisher()
+                  .orElseThrow()
+                  .subscribe(
+                      new java.util.concurrent.Flow.Subscriber<java.nio.ByteBuffer>() {
+                        public void onSubscribe(
+                            java.util.concurrent.Flow.Subscription subscription) {
+                          subscriber.onSubscribe(subscription);
+                        }
+
+                        public void onNext(java.nio.ByteBuffer item) {
+                          subscriber.onNext(java.util.List.of(item));
+                        }
+
+                        public void onError(Throwable error) {
+                          subscriber.onError(error);
+                        }
+
+                        public void onComplete() {
+                          subscriber.onComplete();
+                        }
+                      });
+              var body = json.readTree(subscriber.getBody().toCompletableFuture().get());
+              assertThat(body.path("cardAtUserIds").get(0).asText()).isEqualTo("developer");
+              assertThat(body.path("cardData").path("cardParamMap").path("body").asText())
+                  .contains("<a atId=\"developer\">开发人</a>");
+              assertThat(body.path("cardTemplateId").asText()).isEqualTo("dedicated.schema");
+              return response(
+                  200,
+                  "{\"success\":true,\"result\":{\"deliverResults\":[{\"spaceType\":\"IM_GROUP\",\"spaceId\":\"target-group\",\"success\":true}]}}");
+            });
+    send(transport);
+    verify(http, times(2)).send(any(HttpRequest.class), any());
+  }
+
+  @Test
   void successRequiresExactTargetDeliveryReceipt() throws Exception {
     var transport = transport();
     when(http.send(

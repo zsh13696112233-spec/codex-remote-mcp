@@ -19,7 +19,7 @@ CREATE TABLE codex_blocked_notifications (
  state VARCHAR(24) NOT NULL,
  reason VARCHAR(1000) NOT NULL,
  attempts INTEGER NOT NULL DEFAULT 0,
- next_at TIMESTAMP(6) NOT NULL,
- updated_at TIMESTAMP(6) NOT NULL
+ next_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+ updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE INDEX idx_blocked_notification_due ON codex_blocked_notifications(state, next_at);

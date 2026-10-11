@@ -20,6 +20,25 @@
 
 ## 故障与恢复
 
+### V37 时间戳默认值错误
+
+若 V37 创建 `codex_blocked_notifications` 时出现 `Invalid default value for 'updated_at'`，先只读检查数据库设置与迁移状态：
+
+```sql
+SELECT VERSION(), @@SESSION.explicit_defaults_for_timestamp, @@SESSION.sql_mode;
+SELECT version, description, success FROM flyway_schema_history WHERE version = '37';
+```
+
+关闭显式时间戳默认值且启用严格零日期检查时，第二个未指定默认值的非空 TIMESTAMP 会产生非法零日期默认值。修正后的 V37 为 `next_at` 和 `updated_at` 显式指定 `DEFAULT CURRENT_TIMESTAMP(6)`，不加自动更新时间规则；业务代码仍显式写入时间，轮询只更新 `next_at`。
+
+此修正仅用于 V37 尚未成功应用的环境。已经成功应用原 V37 的数据库不能直接换用修改后的迁移，否则会发生校验和不一致；应保留原 V37，通过新的迁移演进，不能用 repair 掩盖历史差异。
+
+MySQL 的 DDL 可能已部分提交：任务群字段、模板表及默认行、人员映射表可能已存在。只清除失败记录后重启会再次遇到字段或表重复，新增 V38 也不能越过失败的 V37。停止配置中心并备份后，先核对实际表结构、迁移记录和是否存在业务数据，再制定恢复步骤。仅在确认是无业务数据的开发环境且用户明确授权后，才可清理本次失败产生的对象和 V37 失败记录；不要清库、清除其他迁移记录或关闭 Flyway 校验。
+
+恢复完成后，Windows 从仓库根目录执行 `mvn -f services/role-task-config-center/pom.xml clean test`（macOS 用 `mvnd`），再启动配置中心，避免继续使用 `target/classes` 中的旧脚本。H2 不复现 MySQL 的隐式零日期规则，仍需目标 MySQL 验证。
+
+### 通知投递恢复
+
 发送状态持久化，普通事件重复和应用重启不会创建第二条记录。只有获取发送凭证前的失败、明确未发送的认证或限流响应允许有限重试；网络超时、服务异常和无法核对的回执保留“结果未确认”。发送中记录超过两分钟未完成也转为结果未确认，不重新投递。
 
 当前没有接入可证实指定群投递结果的查询 API；请先核查群内是否已有卡片，不能仅凭实例存在认定已投递。系统不提供一键强制重发或换人补发，以避免结果不明时重复提醒。已确认为无法通知的历史记录不会在修改映射或模板后自动补发；修正后用新运行或新测试验收。

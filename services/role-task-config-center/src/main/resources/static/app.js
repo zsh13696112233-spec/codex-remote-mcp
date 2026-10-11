@@ -6,6 +6,10 @@ const DEFAULT_EXPECTED_OUTPUT="完成本步骤，并返回清晰、完整且可�
 const MODELS=["gpt-6-astra","gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"];
 const PERMISSION_LABELS={read_only:"只读",workspace_write:"工作区写入",auto_review:"自动审核",full_access:"完全访问"};
 
+function blockedGroupOptions(selected) {
+  return '<option value="">未启用</option>'+state.dingtalkTargets.filter(t=>t.targetType==="GROUP"&&((t.enabled&&t.available)||t.id===selected)).map(t=>`<option value="${esc(t.id)}">${esc(t.displayName)}${!t.enabled||!t.available?'（已不可用）':''}</option>`).join("");
+}
+
 async function api(path,options={}){
   const r=await fetch(path,{headers:{"Content-Type":"application/json"},...options});
   const text=await r.text();let body={};
@@ -316,7 +320,7 @@ function workflowInspectorHtml(){
     <label>步骤默认模型<select data-sop-field="defaultStepModel">${MODELS.map(m=>`<option value="${m}" ${d.defaultStepModel===m?"selected":""}>${m==="gpt-6-astra"?"GPT-6 Astra":m}</option>`).join("")}</select></label>
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，两分钟后自动继续）</option></select></label>
     <label>主监督执行机 *<div class="agent-picker"><input data-sop-field="supervisorAgentId" maxlength="128" value="${esc(d.supervisorAgentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
-    <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="7200" value="${d.supervisorTimeoutSec}"></label>
+    <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="43200" value="${d.supervisorTimeoutSec}"><small>最多 43200 秒（12 小时），保存后用于新运行。</small></label>
     <label class="check"><input data-sop-field="dingtalkShowExecutionDetails" type="checkbox" ${d.dingtalkShowExecutionDetails?"checked":""}> 钉钉显示思考过程和工具调用</label>
     <p class="meta">关闭后仍发送进度说明、步骤结果和确认通知。修改仅对新运行生效。</p>
     <label class="check"><input data-sop-field="enabled" type="checkbox" ${d.enabled?"checked":""}> 启用该工作流</label>`;
@@ -420,7 +424,7 @@ function validateSop(){
   if(d.steps.some(step=>roleById(step.roleId)?.groupId!==d.groupId))return"步骤角色必须属于当前分组。";
   for(const step of d.steps){const executor=state.agents.find(a=>a.agentId===step.agentId);if(!executor?.capabilities?.includes("executor")||executor.groupId!==supervisor.groupId)return"所有步骤必须选择与主监督同组的执行机。"}
   if(!d.steps.length)return"请至少拖入一个角色节点。";
-  if(d.supervisorTimeoutSec<10||d.supervisorTimeoutSec>7200)return"主监督最长时间必须在 10 到 7200 秒之间。";
+  if(d.supervisorTimeoutSec<10||d.supervisorTimeoutSec>43200)return"主监督最长时间必须在 10 到 43200 秒（12 小时）之间。";
   if(d.maxRetryCount<0||d.maxRetryCount>100)return"单次任务最多重跑次数必须在 0 到 100 之间。";
   for(let i=0;i<d.steps.length;i++){
     const s=d.steps[i];if(!s.displayName.trim())return`请填写第 ${i+1} 个节点的显示名称。`;

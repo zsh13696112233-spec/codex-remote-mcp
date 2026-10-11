@@ -397,7 +397,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   @Override
   public void sendBlockedCard(
       String cardId, String clientId, String groupId, String personId, Map<String, Object> data) {
-    ObjectNode body = waitingCardBody(cardId, "GROUP", groupId, personId, data);
+    ObjectNode body = blockedCardBody(cardId, groupId, personId, data);
     ((ObjectNode) body.path("imGroupOpenDeliverModel")).put("robotCode", clientId);
     // 使用冻结的机器人身份获取凭证，配置并发切换也不能换应用发送。
     String secret = properties.getClientSecret();
@@ -438,6 +438,30 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     } catch (IOException error) {
       throw new IllegalStateException("卡片发送结果未确认。");
     }
+  }
+
+  ObjectNode blockedCardBody(
+      String cardId, String groupId, String personId, Map<String, Object> data) {
+    if (personId == null || personId.isBlank() || "@ALL".equals(personId))
+      throw new BlockedNotificationService.NotSentFailure(false);
+    var parameters = new java.util.LinkedHashMap<>(data);
+    Object displayName = parameters.remove("_atDisplayName");
+    String name = displayName == null ? "开发人" : String.valueOf(displayName);
+    if (name.isBlank()) name = "开发人";
+    // 卡片内 @ 必须同时提供 cardAtUserIds 和 Markdown 的 atId 标签。
+    // 在脱敏后的正文之外添加平台标记，账号只取冻结的钉钉人员，不取 Jira 账号。
+    parameters.put(
+        "body",
+        String.valueOf(parameters.getOrDefault("body", ""))
+            + "\n\n请 <a atId=\""
+            + org.springframework.web.util.HtmlUtils.htmlEscape(personId)
+            + "\">"
+            + org.springframework.web.util.HtmlUtils.htmlEscape(name)
+            + "</a> 查看阻断原因。");
+    ObjectNode body = waitingCardBody(cardId, "GROUP", groupId, personId, parameters);
+    body.putArray("cardAtUserIds").add(personId);
+    ((ObjectNode) body.path("imGroupOpenDeliverModel").path("atUserIds")).put(personId, name);
+    return body;
   }
 
   @Override

@@ -1,9 +1,6 @@
 /* 配置中心的阻断通知配置、人员映射及投递状态。 */
 const blockedApi = "/api/dingtalk/blocked-notifications";
 const blockedLabels = {not_enabled:"未启用",watching:"等待运行结束",pending:"待发送",sending:"正在发送",delivered:"已投递",failed:"失败",unknown:"结果未确认",unavailable:"无法通知",not_applicable:"无需通知"};
-function blockedGroupOptions(selected) {
-  return '<option value="">未启用</option>'+state.dingtalkTargets.filter(t=>t.targetType==="GROUP"&&((t.enabled&&t.available)||t.id===selected)).map(t=>`<option value="${esc(t.id)}">${esc(t.displayName)}${!t.enabled||!t.available?'（已不可用）':''}</option>`).join("");
-}
 async function loadBlockedConfig() {
   const panel=document.querySelector("#blockedConfigPanel");
   try {
@@ -39,10 +36,15 @@ document.addEventListener("click",async event=>{
   const mapping=event.target.closest("[data-jira-mapping]");if(!mapping)return;
   event.preventDefault();const targetId=mapping.closest("[data-target-id]").dataset.targetId;
   const dialog=blockedDialog("Jira 开发人映射");
+  dialog.classList.add("jira-mapping-dialog");
+  dialog.setAttribute("aria-label","Jira 开发人映射");
   try {
     const mappings=await api(blockedApi+"/mappings"),value=mappings.find(m=>m.targetId===targetId)||{};
     if(!dialog.isConnected)return;
-    dialog.querySelector("[data-blocked-body]").innerHTML=`<form data-blocked-mapping="${esc(targetId)}"><p>填写 Jira 实际返回的账号类型与原值，不使用显示姓名。清空账号后保存可解除映射。</p><label>账号类型<select name="accountType"><option value="accountId">accountId</option><option value="key">key</option><option value="name">name</option></select></label><label>稳定账号<input name="accountId" maxlength="256" value="${esc(value.accountId||"")}"></label><button type="submit">保存映射</button><p data-error role="alert"></p></form>`;
+    dialog.querySelector("[data-blocked-body]").innerHTML=`<form data-blocked-mapping="${esc(targetId)}"><p class="jira-mapping-intro">关联 Jira 开发人账号，用于阻断通知时 @ 对应的钉钉人员。</p><label>账号类型<select name="accountType"><option value="accountId">accountId</option><option value="key">key</option><option value="name">name</option></select></label><label>稳定账号<input name="accountId" maxlength="256" placeholder="请输入 Jira 返回的账号原值" aria-describedby="jira-mapping-help" value="${esc(value.accountId||"")}"></label><p id="jira-mapping-help" class="jira-mapping-help">账号类型与原值须与 Jira 返回一致，请勿填写显示姓名。<br>清空账号后点击「保存映射」可解除关联。</p><p data-error role="alert"></p></form>`;
+    const footer=dialog.querySelector("footer");
+    footer.insertAdjacentHTML("beforeend",'<button type="submit" class="primary">保存映射</button>');
+    dialog.querySelector("form").append(footer);
     dialog.querySelector("select").value=value.accountType||"accountId";
   }catch(error){if(dialog.isConnected)dialog.querySelector("[data-blocked-body]").textContent=error.message;}
 });

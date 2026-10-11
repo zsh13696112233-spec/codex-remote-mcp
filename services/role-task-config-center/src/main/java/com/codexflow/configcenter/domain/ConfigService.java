@@ -302,7 +302,7 @@ public class ConfigService {
     sop.supervisorAgentId = body.supervisorAgentId().trim();
     sop.failurePolicy = "stop";
     sop.supervisorTimeoutSec =
-        integerInRange(body.supervisorTimeoutSec(), "supervisorTimeoutSec", 7200, 10, 7200);
+        integerInRange(body.supervisorTimeoutSec(), "supervisorTimeoutSec", 7200, 10, 43200);
     sop.maxRetryCount = integerInRange(body.maxRetryCount(), "maxRetryCount", 10, 0, 100);
     sop.advanceMode = normalizeNullable(body.advanceMode());
     if (sop.advanceMode == null) sop.advanceMode = "automatic";

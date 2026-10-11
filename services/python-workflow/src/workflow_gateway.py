@@ -523,6 +523,7 @@ class WorkflowGateway:
                     write=bool(spec.get("supervisorWrite", False)),
                     model=spec.get("supervisorModel"),
                     timeout_sec=int(spec.get("supervisorTimeoutSec", 7200)),
+                    is_supervisor=True,
                     approval_policy="on-request",
                     approvals_reviewer="auto_review",
                     event_callback=record,
