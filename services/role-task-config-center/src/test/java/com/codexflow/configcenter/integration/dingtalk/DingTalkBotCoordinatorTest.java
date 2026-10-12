@@ -19,6 +19,37 @@ import tools.jackson.databind.node.ObjectNode;
 
 /** 统一入口不依赖群绑定；回答与每次提问关联。 */
 class DingTalkBotCoordinatorTest {
+  @Test
+  void retryAndStopUseScopedRunServiceAndRejectUnownedCards() {
+    String gate = "11111111111111111111111111111111";
+    when(store.binding(ID))
+        .thenReturn(
+            Optional.of(new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false)));
+    for (String name : new String[] {"retry", "stop"}) {
+      var action =
+          new DingTalkModels.CardAction(
+              "wait-card",
+              "group",
+              "user",
+              "advance_" + name,
+              java.util.Map.of("workflowId", ID, "gateId", gate));
+      when(store.ownsWaitingCard(action, ID, gate)).thenReturn(false);
+      bot.safelyHandleAction(action);
+      verify(runs, never()).waitingAction(ID, gate, name);
+      when(store.ownsWaitingCard(action, ID, gate)).thenReturn(true);
+      var result = bot.safelyHandleAction(action);
+      assertThat(
+              json.valueToTree(result)
+                  .path("cardData")
+                  .path("cardParamMap")
+                  .path("confirmRequestSucceeded")
+                  .asText())
+          .isEqualTo("true");
+      verify(runs).waitingAction(ID, gate, name);
+    }
+    verify(gateway, never()).post(contains("/confirm"), any());
+  }
+
   private static final String ID = "00000000-0000-4000-8000-000000000101";
   private static final String OTHER = "00000000-0000-4000-8000-000000000102";
   private final ObjectMapper json = new ObjectMapper();

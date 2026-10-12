@@ -36,7 +36,43 @@ public record SopSaveRequest(
     @NotEmpty List<@Valid SopStepRequest> steps,
     @NotBlank @Size(max = 36) String groupId,
     Boolean dingtalkShowExecutionDetails,
-    @Size(max = 32) String defaultStepReasoningEffort) {
+    @Size(max = 32) String defaultStepReasoningEffort,
+    Integer confirmationMinutes,
+    Integer blockedMinutes) {
+  public SopSaveRequest(
+      String name,
+      String description,
+      String supervisorAgentId,
+      Integer supervisorTimeoutSec,
+      String defaultStepModel,
+      Boolean enabled,
+      Integer maxRetryCount,
+      String advanceMode,
+      String handoffMode,
+      String dingtalkTargetId,
+      List<SopStepRequest> steps,
+      String groupId,
+      Boolean dingtalkShowExecutionDetails,
+      String defaultStepReasoningEffort) {
+    this(
+        name,
+        description,
+        supervisorAgentId,
+        supervisorTimeoutSec,
+        defaultStepModel,
+        enabled,
+        maxRetryCount,
+        advanceMode,
+        handoffMode,
+        dingtalkTargetId,
+        steps,
+        groupId,
+        dingtalkShowExecutionDetails,
+        defaultStepReasoningEffort,
+        null,
+        null);
+  }
+
   public SopSaveRequest(
       String name,
       String description,

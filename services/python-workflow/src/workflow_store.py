@@ -53,9 +53,10 @@ def utc_now() -> str:
 
 
 from workflow_input_images import InputImageStore
+from workflow_waits import WaitStore, normalize_policy
 
 
-class WorkflowStore(InputImageStore):
+class WorkflowStore(InputImageStore, WaitStore):
     """跨 HTTP 网关和 MCP 子进程共享的 SQLite 工作流状态库。"""
 
     def __init__(self, path: Path | str) -> None:
@@ -431,9 +432,15 @@ class WorkflowStore(InputImageStore):
                 "handoff_mode": "TEXT NOT NULL DEFAULT 'legacy_text'",
                 "termination_json": "TEXT",
                 "result_protocol_version": "INTEGER NOT NULL DEFAULT 0",
+                "wait_policy_json": "TEXT",
             }.items():
                 if name not in workflow_columns:
                     connection.execute(f"ALTER TABLE workflows ADD COLUMN {name} {definition}")
+            wait_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflow_advance_gates)")}
+            for name, definition in {"kind": "TEXT NOT NULL DEFAULT 'legacy'", "business_result_json": "TEXT", "execution_started": "INTEGER NOT NULL DEFAULT 0", "execution_job_id": "TEXT", "execution_turn_id": "TEXT"}.items():
+                if name not in wait_columns:
+                    connection.execute(f"ALTER TABLE workflow_advance_gates ADD COLUMN {name} {definition}")
+            connection.execute("CREATE INDEX IF NOT EXISTS workflow_wait_due ON workflow_advance_gates(status,expires_at)")
             artifact_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(workflow_artifacts)").fetchall()
@@ -677,7 +684,11 @@ class WorkflowStore(InputImageStore):
         if handoff_mode not in {"legacy_text", "cumulative_files"}:
             raise ValueError("handoffMode 只能是 legacy_text 或 cumulative_files。")
 
+        policy = normalize_policy(value.get("waitPolicy"))
+        if policy and (advance_mode != "semi_automatic" or handoff_mode != "legacy_text"):
+            raise ValueError("等待策略仅支持半自动文字交接流程。")
         return {
+            **({"waitPolicy": policy} if policy else {}),
             "workflowId": workflow_id,
             "taskDefinitionId": task_id.strip() if task_id is not None else None,
             "name": value.get("name"),
@@ -770,6 +781,8 @@ class WorkflowStore(InputImageStore):
             except sqlite3.IntegrityError as error:
                 raise ValueError(f"工作流已存在：{spec['workflowId']}") from error
             connection.execute("UPDATE workflows SET result_protocol_version=? WHERE workflow_id=?", (version, spec["workflowId"]))
+            if spec.get("waitPolicy"):
+                connection.execute("UPDATE workflows SET wait_policy_json=? WHERE workflow_id=?", (json.dumps(spec["waitPolicy"]), spec["workflowId"]))
             if spec.get("taskDefinitionId"):
                 connection.execute("INSERT INTO workflow_task_bindings VALUES (?, ?)",
                                    (spec["workflowId"], spec["taskDefinitionId"]))
@@ -1482,10 +1495,10 @@ class WorkflowStore(InputImageStore):
             pending_advance_row = connection.execute(
                 """
                 SELECT gate_id, completed_node_id, next_node_id, status,
-                       expires_at, held_at, confirmed_at, notified_at
+                       expires_at, held_at, confirmed_at, notified_at, kind
                 FROM workflow_advance_gates
                 WHERE workflow_id = ?
-                  AND ((status = 'pending' AND expires_at > ?) OR status = 'held')
+                  AND ((status = 'pending' AND (expires_at > ? OR kind != 'legacy')) OR status IN ('held','executing','closing','finishing'))
                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (workflow_id, utc_now()),
@@ -2165,7 +2178,7 @@ class WorkflowStore(InputImageStore):
             raise RuntimeError("这条消息对应的步骤等待已结束，不能修改或转交其他步骤。")
         node = connection.execute("SELECT * FROM workflow_nodes WHERE workflow_id=? AND node_id=?",
             (workflow_id, gate["completed_node_id"])).fetchone()
-        if node is None or node["status"] != "completed":
+        if node is None or node["status"] not in {"completed", "waiting"}:
             raise RuntimeError("原步骤结果已变化，不能继续讨论。")
         record = connection.execute("SELECT attempt FROM workflow_discussions WHERE workflow_id=? AND message_id=?",
             (workflow_id, message_id)).fetchone()
@@ -2292,14 +2305,22 @@ class WorkflowStore(InputImageStore):
         reason: str = "用户已取消任务。",
         source: str = "gateway",
         event_reason: str = "user_requested",
+        gate_id: str | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if gate_id is not None:
+                old = connection.execute("SELECT status FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+                if old and old[0] == "cancelled":
+                    return self.get_workflow(workflow_id)
+                self._check_policy_wait(connection, workflow_id, gate_id)
             if connection.execute("SELECT 1 FROM workflows WHERE workflow_id=? AND termination_json IS NOT NULL", (workflow_id,)).fetchone():
                 raise RuntimeError("流程正在按已保存的原因结束，无需重复取消。")
             if event_reason in {"user_requested", "chat_control"}:
                 self._require_control_idle(connection, workflow_id)
+                if connection.execute("SELECT 1 FROM workflow_advance_gates WHERE workflow_id=? AND status IN ('executing','closing','finishing')", (workflow_id,)).fetchone():
+                    raise RuntimeError("等待操作正在处理，暂不能取消，请稍后查看结果。")
             workflow = connection.execute(
                 "SELECT status FROM workflows WHERE workflow_id = ?", (workflow_id,)
             ).fetchone()
@@ -2362,8 +2383,11 @@ class WorkflowStore(InputImageStore):
         return {
             "gateId": row["gate_id"],
             "completedNodeId": row["completed_node_id"],
-            "nextNodeId": row["next_node_id"],
-            "state": "held" if row["status"] == "held" else "countdown",
+            "nextNodeId": row["next_node_id"] or None,
+            "state": ("busy" if row["status"] in {"executing", "closing", "finishing"} else "held" if row["status"] == "held" else "countdown"),
+            "kind": row["kind"],
+            "nodeId": row["completed_node_id"],
+            "availableActions": (["confirm", "hold"] if row["kind"] == "legacy" else ["retry", "hold", "stop"] if row["kind"] == "blocked" else ["confirm", "hold", "stop"]) if row["status"] in {"pending", "held"} else [],
             "expiresAt": row["expires_at"],
             "heldAt": row["held_at"],
             "notifiedAt": row["notified_at"],
@@ -2445,6 +2469,8 @@ class WorkflowStore(InputImageStore):
             return result
 
     def mark_advance_notified(self, workflow_id: str, gate_id: str, sent_at: str) -> dict[str, Any]:
+        if self.policy_wait(workflow_id, gate_id):
+            return {"updated": False}
         try:
             # Java Instant 可以携带纳秒；归一到微秒以兼容 Python 3.10。
             normalized = re.sub(r"(\.\d{6})\d+", r"\1", sent_at.replace("Z", "+00:00"))
@@ -2477,7 +2503,7 @@ class WorkflowStore(InputImageStore):
             row = connection.execute(
                 """
                 SELECT gate_id, completed_node_id, next_node_id, status,
-                       expires_at, held_at, confirmed_at, notified_at
+                       expires_at, held_at, confirmed_at, notified_at, kind
                 FROM workflow_advance_gates
                 WHERE workflow_id = ? AND next_node_id = ?
                   AND status IN ('pending', 'held')
@@ -2488,6 +2514,8 @@ class WorkflowStore(InputImageStore):
         return self._advance_gate_snapshot(row)
 
     def hold_advance(self, workflow_id: str, gate_id: str) -> dict[str, Any]:
+        if self.policy_wait(workflow_id, gate_id):
+            return self.hold_policy_wait(workflow_id, gate_id)
         now = utc_now()
         expired = False
         stale = False
@@ -2575,6 +2603,8 @@ class WorkflowStore(InputImageStore):
         return result
 
     def confirm_advance(self, workflow_id: str, gate_id: str) -> dict[str, Any]:
+        if self.policy_wait(workflow_id, gate_id):
+            return self.claim_policy_wait(workflow_id, gate_id, "confirm")
         now = utc_now()
         expired = False
         stale = False
@@ -2705,7 +2735,7 @@ class WorkflowStore(InputImageStore):
                 "SELECT * FROM workflow_advance_gates WHERE workflow_id = ? AND gate_id = ?",
                 (workflow_id, gate_id),
             ).fetchone()
-            if row is None or row["status"] != "pending" or row["expires_at"] > now:
+            if row is None or row["kind"] != "legacy" or row["status"] != "pending" or row["expires_at"] > now:
                 return False
             if node_id is not None and node_id != row["next_node_id"]:
                 raise ValueError("等待与目标步骤不一致。")
@@ -2734,14 +2764,14 @@ class WorkflowStore(InputImageStore):
     ) -> None:
         rows = connection.execute(
             "SELECT * FROM workflow_advance_gates WHERE workflow_id = ? "
-            "AND status IN ('pending', 'held')",
+            "AND status IN ('pending', 'held', 'executing', 'closing', 'finishing')",
             (workflow_id,),
         ).fetchall()
         if not rows:
             return
         connection.execute(
             "UPDATE workflow_advance_gates SET status = 'superseded', updated_at = ? "
-            "WHERE workflow_id = ? AND status IN ('pending', 'held')",
+            "WHERE workflow_id = ? AND status IN ('pending', 'held', 'executing', 'closing', 'finishing')",
             (now, workflow_id),
         )
         for row in rows:
@@ -2809,6 +2839,8 @@ class WorkflowStore(InputImageStore):
             if workflow["termination_json"]:
                 raise ValueError("工作流已报告提前结束，不能启动后续步骤。")
             self._require_discussion_idle(connection, workflow_id)
+            if connection.execute("SELECT 1 FROM workflow_advance_gates WHERE workflow_id=? AND kind!='legacy' AND status IN ('pending','held','executing','closing','finishing')", (workflow_id,)).fetchone():
+                raise RuntimeError("任务正在等待人工确认或处理，不能派发步骤。")
             row = connection.execute(
                 """
                 SELECT * FROM workflow_nodes
@@ -3045,8 +3077,10 @@ class WorkflowStore(InputImageStore):
         return header + "\n\n".join(selected)
 
     def _node_dispatch_spec(self, row: sqlite3.Row, *, already_dispatched: bool) -> dict[str, Any]:
+        spec = self.get_spec(row["workflow_id"])
         return {
-            "resultProtocolVersion": self.get_spec(row["workflow_id"]).get("resultProtocolVersion", 0),
+            "resultProtocolVersion": spec.get("resultProtocolVersion", 0),
+            "waitPolicy": spec.get("waitPolicy"),
             "workflowId": row["workflow_id"],
             "nodeId": row["node_id"],
             "stepNumber": int(row["position"]) + 1,
@@ -3146,12 +3180,15 @@ class WorkflowStore(InputImageStore):
             ).fetchone()
             if old is None:
                 return
+            if old["status"] == "queued" and old["job_id"] is None and connection.execute(
+                "SELECT 1 FROM workflow_advance_gates WHERE workflow_id=? AND completed_node_id=? AND status='executing' AND execution_started=1", (workflow_id, node_id)).fetchone():
+                return  # 等待操作已领取，但新执行尚未绑定；拒绝上一轮迟到结果。
             if old["job_id"] and snapshot.get("job_id") and old["job_id"] != snapshot["job_id"]:
                 raise RuntimeError("步骤执行版本已变化。")
             workflow = connection.execute("SELECT status, termination_json, result_protocol_version FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if workflow["status"] in {"completed", "failed", "cancelled"}:
                 return
-            if workflow["result_protocol_version"] in (1, 2) and old["status"] in TERMINAL_NODE_STATUSES:
+            if workflow["result_protocol_version"] in (1, 2) and old["status"] in TERMINAL_NODE_STATUSES | {"waiting"}:
                 return
             if workflow["result_protocol_version"] in (1, 2) and status == "completed":
                 if old["job_id"] and snapshot.get("job_id") != old["job_id"]:
@@ -3172,6 +3209,13 @@ class WorkflowStore(InputImageStore):
                     if outcome["outcome"] == "blocked":
                         status = "failed"
                         snapshot["error"] = outcome["reason"]
+            if outcome is not None and outcome["outcome"] == "blocked" and self._wait_policy(connection, workflow_id):
+                if snapshot.get("cwd") or snapshot.get("model"):
+                    connection.execute("INSERT INTO workflow_node_runtime(workflow_id,node_id,attempt_number,cwd,model) SELECT workflow_id,node_id,attempt_count,?,? FROM workflow_nodes WHERE workflow_id=? AND node_id=? ON CONFLICT(workflow_id,node_id,attempt_number) DO UPDATE SET cwd=COALESCE(excluded.cwd,cwd),model=COALESCE(excluded.model,model)", (snapshot.get("cwd"), snapshot.get("model"), workflow_id, node_id))
+                connection.execute("UPDATE workflow_nodes SET status='waiting',response=?,error=?,finished_at=?,thread_id=COALESCE(?,thread_id),turn_id=COALESCE(?,turn_id) WHERE workflow_id=? AND node_id=?",
+                    (outcome["summary"], outcome["reason"], finished_at or utc_now(), snapshot.get("thread_id"), snapshot.get("turn_id"), workflow_id, node_id))
+                self._create_policy_wait(connection, workflow_id, node_id, outcome)
+                return
             if outcome is not None and outcome["outcome"] != "success" and not workflow["termination_json"]:
                 termination = {key: outcome[key] for key in ("outcome", "reason", "jiraComment")}
                 if "jiraDeveloper" in outcome:
@@ -3274,6 +3318,8 @@ class WorkflowStore(InputImageStore):
             or workflow["status"] in {"completed", "failed", "cancelled"}
             or workflow["advance_mode"] != "semi_automatic"
         ):
+            return
+        if self._create_policy_wait(connection, workflow_id, node_id):
             return
         completed = connection.execute(
             "SELECT position FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
@@ -3432,6 +3478,8 @@ class WorkflowStore(InputImageStore):
             if current["status"] in {"completed", "failed", "cancelled"}:
                 return
             if current["termination_json"]:
+                return
+            if connection.execute("SELECT 1 FROM workflow_advance_gates WHERE workflow_id=? AND kind!='legacy' AND status IN ('pending','held','executing','closing','finishing')", (workflow_id,)).fetchone():
                 return
             self._supersede_pending_advances(
                 connection, workflow_id, "workflow_finished", timestamp

@@ -119,9 +119,9 @@ def parse(text: str, version: int = VERSION) -> dict[str, Any]:
     return value
 
 
-def instruction(workflow_id: str, node_id: str, capture_document: bool | None, version: int = VERSION) -> str:
+def instruction(workflow_id: str, node_id: str, capture_document: bool | None, version: int = VERSION, *, defer_blocked: bool = False) -> str:
     marker = hashlib.sha256(f"{workflow_id}:{node_id}".encode()).hexdigest()[:24]
-    return (
+    result = (
         "\n【平台正式步骤结果协议】最终按指定 JSON 结构返回，不以普通文字请求停止。"
         "summary 为完整交接总结；outcome 为 success（可以继续）、no_task（无待处理任务）"
         "或 blocked（必要条件不满足，无法继续）。提前结束必须用 reason 说明原因。"
@@ -152,6 +152,17 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
            "已经因业务必要条件判定 blocked 的，不因开发人读取失败改变该决定；不得选择钉钉群、人员或发送通知。" if version == 2 else "")
         + ("document 沿用主文档要求。" if capture_document else "document 必须为 null，不采集主文档。")
     )
+
+    if defer_blocked:
+        start = result.index("确认阻断后停止业务写入")
+        end = result.index("jiraComment.status 为", start)
+        result = result[:start] + (
+            "本运行采用半自动人工等待。首次或再次发现业务阻碍时返回 blocked，由平台等待人工回复，"
+            "本次不代表正式结束，禁止执行停止评论和转交 Natural Person 等阻断收尾。"
+            "本规则优先于历史角色职责中的立即停止收尾要求。jiraComment 使用 not_applicable，说明等待人工处理。"
+        ) + result[end:]
+        result = result.replace("备注失败或未知仍返回 blocked，由平台结束，不再执行下一步。", "等待期间不允许进入后续步骤；正式超时后平台另行授权阻断收尾。")
+    return result
 
 
 def message(termination: dict[str, Any]) -> str:

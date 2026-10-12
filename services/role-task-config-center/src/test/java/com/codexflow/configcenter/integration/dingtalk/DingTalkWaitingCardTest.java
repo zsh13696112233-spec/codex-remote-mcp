@@ -12,6 +12,38 @@ class DingTalkWaitingCardTest {
   private final ObjectMapper json = new ObjectMapper();
 
   @Test
+  void policyCardsDistinguishRetryFinalConfirmationAndStop() {
+    for (String kind : new String[] {"advance", "blocked", "finish"}) {
+      var snapshot = json.createObjectNode();
+      var gate =
+          snapshot
+              .putObject("pendingAdvance")
+              .put("gateId", "gate")
+              .put("kind", kind)
+              .put("state", "countdown")
+              .put("expiresAt", Instant.now().plusSeconds(300).toString());
+      var payload = json.createObjectNode().put("gateId", "gate").put("waitKind", kind);
+      var data = DingTalkWaitingCard.render("workflow", payload, snapshot);
+      assertThat(data.get("confirmLabel"))
+          .isEqualTo(kind.equals("blocked") ? "重新执行" : kind.equals("finish") ? "确认结束" : "进入下一步");
+      assertThat(data.get("confirmAction"))
+          .isEqualTo(kind.equals("blocked") ? "advance_retry" : "advance_confirm");
+      assertThat(data.get("showStop")).isEqualTo("true");
+      assertThat(data.get("notice").toString()).contains("北京时间").contains("无人回复");
+      gate.put("state", "held");
+      assertThat(DingTalkWaitingCard.render("workflow", payload, snapshot).get("notice").toString())
+          .contains("已取消倒计时");
+      gate.put("state", "busy");
+      var busy = DingTalkWaitingCard.render("workflow", payload, snapshot);
+      assertThat(busy.get("confirmStatus")).isEqualTo("disabled");
+      assertThat(busy.get("stopStatus")).isEqualTo("disabled");
+      gate.put("gateId", "new");
+      assertThat(DingTalkWaitingCard.render("workflow", payload, snapshot).get("stopStatus"))
+          .isEqualTo("disabled");
+    }
+  }
+
+  @Test
   void completionInvitesPlanReviewOnlyForFirstStepWithAvailableDocument() {
     var snapshot = json.createObjectNode().put("advanceMode", "semi_automatic");
     snapshot.putObject("pendingAdvance").put("completedNodeId", "plan").put("nextNodeId", "build");
@@ -50,6 +82,11 @@ class DingTalkWaitingCardTest {
     ((ObjectNode) snapshot.path("nodes").get(0)).put("response", " ");
     assertThat(DingTalkWaitingCard.completion(snapshot))
         .isEqualTo("步骤已完成。请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。");
+    ((ObjectNode) snapshot.path("pendingAdvance")).put("kind", "blocked");
+    assertThat(DingTalkWaitingCard.completion(snapshot))
+        .contains("当前步骤无法继续", "重新执行")
+        .doesNotContain("步骤已完成");
+    ((ObjectNode) snapshot.path("pendingAdvance")).remove("kind");
     snapshot.remove("nodes");
     assertThat(DingTalkWaitingCard.completion(snapshot))
         .isEqualTo("步骤已完成。请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。");

@@ -48,6 +48,12 @@ class SopEntity extends Timestamped {
   @Column(name = "advance_mode", nullable = false)
   String advanceMode = "automatic";
 
+  @Column(name = "confirmation_minutes", nullable = false)
+  int confirmationMinutes = 2;
+
+  @Column(name = "blocked_minutes", nullable = false)
+  int blockedMinutes = 30;
+
   /** 步骤之间传递文字结果或累计文件的交接方式。 */
   @Column(name = "handoff_mode", nullable = false)
   String handoffMode = "legacy_text";

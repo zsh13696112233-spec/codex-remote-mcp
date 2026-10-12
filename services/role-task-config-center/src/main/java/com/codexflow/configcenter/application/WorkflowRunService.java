@@ -60,6 +60,23 @@ public class WorkflowRunService {
     return submitPrepared(reservation.prepared());
   }
 
+  /** 等待卡片的控制操作由中央原子校验等待编号与步骤版本。 */
+  public JsonNode waitingAction(String workflowId, String gateId, String action) {
+    if (!java.util.UUID.fromString(workflowId).toString().equalsIgnoreCase(workflowId)) {
+      throw new IllegalArgumentException("任务编号无效。");
+    }
+    if (!java.util.Set.of("retry", "stop").contains(action) || !gateId.matches("[a-fA-F0-9]{32}")) {
+      throw new IllegalArgumentException("等待操作无效。");
+    }
+    JsonNode response =
+        gateway.post("/workflows/" + workflowId + "/advance/" + gateId + "/" + action, null);
+    if ("stop".equals(action)) {
+      store.recordGatewayStatus(workflowId, response, "cancelled");
+      if (isTerminal(response.path("status").asText())) launches.release(workflowId);
+    }
+    return response;
+  }
+
   /** 请求网关取消运行，并持久化网关返回的最新状态。 */
   public ObjectNode cancel(String workflowId) {
     JsonNode live = gateway.get("/workflows/" + workflowId);

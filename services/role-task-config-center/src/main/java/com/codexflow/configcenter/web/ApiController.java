@@ -165,6 +165,12 @@ public class ApiController {
   }
 
   /** 取消指定工作流运行。 */
+  @PostMapping("/task-runs/{workflowId}/advance/{gateId}/{action}")
+  public tools.jackson.databind.JsonNode waitingAction(
+      @PathVariable String workflowId, @PathVariable String gateId, @PathVariable String action) {
+    return workflowRuns.waitingAction(workflowId, gateId, action);
+  }
+
   @PostMapping("/task-runs/{workflowId}/cancel")
   public ObjectNode cancel(@PathVariable String workflowId) {
     return workflowRuns.cancel(workflowId);

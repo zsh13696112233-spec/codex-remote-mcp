@@ -77,6 +77,9 @@ class WorkflowGateway:
         self._sidecar_watchdog_task: asyncio.Task[None] | None = None
         self._supervisor_runtime: dict[str, dict[str, Any]] = {}
         self._closing = False
+        from workflow_wait_service import WaitService
+        self.wait_service = WaitService(self)
+        self._wait_task = None
 
     async def start(self) -> None:
         recovered = await _database_call(
@@ -94,6 +97,7 @@ class WorkflowGateway:
         for workflow_id in await _database_call(self.store.list_chat_workflows):
             self._ensure_chat_worker(workflow_id)
         await self._schedule_pending()
+        self._wait_task = asyncio.create_task(self.wait_service.run(), name="workflow-wait-scheduler")
         self._supervisor_probe_task = asyncio.create_task(
             self._supervisor_probe_loop(), name="supervisor-reachability-probe"
         )
@@ -103,6 +107,10 @@ class WorkflowGateway:
 
     async def stop(self) -> None:
         self._closing = True
+        if self._wait_task is not None:
+            self._wait_task.cancel()
+            await asyncio.gather(self._wait_task, return_exceptions=True)
+        await self.wait_service.stop()
         if self._supervisor_probe_task is not None:
             self._supervisor_probe_task.cancel()
             await asyncio.gather(self._supervisor_probe_task, return_exceptions=True)
@@ -679,7 +687,7 @@ class WorkflowGateway:
     @staticmethod
     def _advance_is_held(snapshot: dict[str, Any]) -> bool:
         pending = snapshot.get("pendingAdvance")
-        return isinstance(pending, dict) and pending.get("state") == "held"
+        return isinstance(pending, dict) and (pending.get("state") == "held" or pending.get("kind", "legacy") != "legacy")
 
     @staticmethod
     def _supervisor_job_fingerprint(snapshot: dict[str, Any]) -> tuple[Any, ...]:
@@ -724,6 +732,7 @@ class WorkflowGateway:
             "workflowId": spec["workflowId"],
             "failurePolicy": spec["failurePolicy"],
             "advanceMode": spec.get("advanceMode", "automatic"),
+            "waitPolicy": spec.get("waitPolicy"),
             "nodes": [
                 {
                     "id": node["id"],
@@ -751,7 +760,10 @@ class WorkflowGateway:
             "正式步骤可能报告业务阻断或无任务并由平台提前结束；"
             "发现 termination 或步骤 outcome 为 blocked/no_task 时不得再派发步骤，"
             "只说明已保存的停止原因，不得宣称所有业务已完成。\n"
-            "如果 advanceMode=semi_automatic，dispatch_node 会在成功步骤之间等待最多"
+            "如果配置了 waitPolicy，以中央 pendingAdvance 为准：遇阻仅等待人工处理，不能宣布终止；"
+            "最后一步成功也必须等待最终确认，不能宣称任务已结束。平台处理计时、重新执行和结束，"
+            "存在等待时本轮监督可返回说明，不自行重新执行步骤或收尾。\n"
+            "旧运行没有 waitPolicy 时，如果 advanceMode=semi_automatic，dispatch_node 会在成功步骤之间等待最多"
             "两分钟；用户也可以选择保持等待且暂不进入下一步。等待期间收到输入会保持等待，应告诉用户"
             "尚未进入下一步，不得声称下一步已经开始。\n"
             "你面对的是完全不懂技术的普通用户。所有对外可见消息必须使用简单中文，"
@@ -801,7 +813,7 @@ class WorkflowGateway:
             result = await _database_call(
                 self.store.confirm_advance, workflow_id, gate_id
             )
-            if result.get("resumedFromHold"):
+            if result.get("resumedFromHold") and result.get("status") != "finishing":
                 await self._resume_supervisor_if_needed(workflow_id)
             return result
 
@@ -1176,10 +1188,12 @@ class WorkflowGateway:
         # 排队工作流由正常调度器领取，先释放锁，避免嵌套获取同一把锁。
         await self._schedule_pending()
 
-    async def cancel(self, workflow_id: str) -> dict[str, Any]:
+    async def cancel(self, workflow_id: str, gate_id: str | None = None) -> dict[str, Any]:
         from workflow_discussion import DiscussionService
         lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
         async with lock:
+            if gate_id is not None:
+                await _database_call(self.store.check_wait_stop, workflow_id, gate_id)
             service = DiscussionService(self)
             job = self._discussion_jobs.get(workflow_id)
             if job:
@@ -1206,7 +1220,7 @@ class WorkflowGateway:
                 await asyncio.gather(worker, return_exceptions=True)
             result = await _database_call(
                 self.store.cancel_workflow, workflow_id, reason="用户已取消任务。",
-                source="gateway", event_reason="user_requested")
+                source="gateway", event_reason="user_requested", gate_id=gate_id)
         # 先在存储事务中拒绝业务步骤执行中的取消，再清理空闲编排器。
         task = self._tasks.get(workflow_id)
         job_id = result["supervisor"].get("jobId")
@@ -1223,6 +1237,26 @@ def _error_response(error: Exception, status_code: int = 400) -> JSONResponse:
         {"error": str(error), "errorType": type(error).__name__},
         status_code=status_code,
     )
+
+
+async def act_workflow_wait(request: Request) -> Response:
+    gateway = request.app.state.gateway
+    workflow_id, gate_id = request.path_params["workflow_id"], request.path_params["gate_id"]
+    try:
+        if not 1 <= len(gate_id) <= 128:
+            raise ValueError("步骤确认编号无效。")
+        if request.path_params["action"] == "stop":
+            return JSONResponse(await gateway.cancel(workflow_id, gate_id))
+        if request.path_params["action"] != "retry":
+            raise ValueError("等待操作无效。")
+        lock = gateway._control_locks.setdefault(workflow_id, asyncio.Lock())
+        async with lock:
+            result = await _database_call(gateway.store.claim_policy_wait, workflow_id, gate_id, "retry")
+        return JSONResponse(result)
+    except (ValueError, TypeError) as error:
+        return _error_response(error)
+    except RuntimeError as error:
+        return _error_response(error, 409)
 
 
 async def observe_workflow_input(request: Request) -> Response:
@@ -2130,6 +2164,7 @@ def create_app(
                 hold_workflow_advance,
                 methods=["POST"],
             ),
+            Route("/workflows/{workflow_id}/advance/{gate_id}/{action}", act_workflow_wait, methods=["POST"]),
             Route(
                 "/workflows/{workflow_id}/events/history",
                 get_event_history,

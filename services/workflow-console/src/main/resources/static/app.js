@@ -1,6 +1,6 @@
 const STATUS = {
   pending: "未开始", queued: "进行中", running: "进行中", cancelling: "进行中",
-  completed: "已完成", skipped: "未执行", failed: "未完成", cancelled: "未完成", interrupted: "未完成"
+  waiting: "等待人工处理", completed: "已完成", skipped: "未执行", failed: "未完成", cancelled: "未完成", interrupted: "未完成"
 };
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const ACTIVE = new Set(["queued", "running", "cancelling"]);
@@ -490,13 +490,16 @@ function renderSteps(nodes, initializing = false) {
     if (advance?.completedNodeId === node.id) {
       const next = nodes.find(item => item.id === advance.nextNodeId);
       const held = advance.state === "held";
+      const policy = advance.kind && advance.kind !== "legacy";
+      const blocked = advance.kind === "blocked";
+      const finalWait = advance.kind === "finish";
       const gate = make("div", "advance-waiting");
       const copy = make("div", "advance-copy");
       copy.append(
-        make("strong", "", held
+        make("strong", "", policy ? (blocked ? "当前步骤遇到阻碍，等待人工处理" : finalWait ? "最终结果等待确认" : "等待进入下一步") : held
           ? `保持等待：暂不进入${next?.displayName || "下一步骤"}`
           : `等待进入下一步：${next?.displayName || "下一步骤"}`),
-        make("span", "", held
+        make("span", "", policy ? (held ? "已取消倒计时，讨论后请通过按钮操作。" : `无人回复将在 ${new Date(advance.expiresAt).toLocaleString()} 自动${blocked?"阻断结束":finalWait?"正常结束":"进入下一步"}。回复后取消倒计时。`) + (blocked ? "请通过钉钉卡片“重新执行”处理本步骤，或在配置中心终止任务。" : "") : held
           ? "正在与本步骤执行者讨论。明确提出修改或采纳后更新交接总结，完成后请点击继续。"
           : "两分钟内未回复将自动继续。收到讨论消息后保持等待，点击继续交接最新版总结。")
       );
@@ -512,8 +515,8 @@ function renderSteps(nodes, initializing = false) {
       confirm.dataset.advanceExpires = advance.expiresAt;
       confirm.dataset.advanceAction = "confirm";
       confirm.onclick = () => confirmAdvance(advance.gateId);
-      actions.append(confirm);
-      if (!held) {
+      if (!blocked) actions.append(confirm);
+      if (!held && advance.state !== "busy") {
         const hold = make("button", "advance-hold", "保持等待");
         hold.type = "button";
         hold.dataset.advanceGate = advance.gateId;
@@ -551,6 +554,10 @@ function render(snapshot) {
   const allStepsPending = nodes.length === 0 || nodes.every(node => node.status === "pending");
   $("#current").textContent = snapshot.termination ? snapshot.response : initializing
     ? initializationMessage(snapshot)
+    : snapshot.pendingAdvance?.kind === "blocked"
+    ? "当前步骤遇到阻碍，等待人工处理"
+    : snapshot.pendingAdvance?.kind === "finish"
+    ? "最终结果等待确认结束"
     : snapshot.pendingAdvance?.state === "held"
     ? `任务已暂停，暂不进入第 ${nodes.findIndex(node => node.id === snapshot.pendingAdvance.nextNodeId) + 1} 步`
     : snapshot.pendingAdvance
@@ -600,6 +607,15 @@ function renderAdvanceCountdown() {
     const acting = action?.gateId === button.dataset.advanceGate;
     const held = button.dataset.advanceState === "held";
     const remaining = Math.max(0, Math.ceil((new Date(button.dataset.advanceExpires) - Date.now()) / 1000));
+    const gate = state.snapshot?.pendingAdvance;
+    if (gate?.kind && gate.kind !== "legacy") {
+      const confirm = button.dataset.advanceAction === "confirm";
+      const label = gate.kind === "finish" ? "确认结束" : "进入下一步";
+      const busy = gate.state === "busy" || (state.snapshot.discussionBusy && confirm);
+      button.disabled = !!acting || busy || (!held && remaining <= 0);
+      button.textContent = acting ? "正在处理…" : busy ? "正在处理…" : confirm ? label + (!held && remaining > 0 ? `（剩余 ${remaining} 秒）` : "") : "保持等待";
+      return;
+    }
     if (state.snapshot?.discussionBusy && button.dataset.advanceAction === "confirm") {
       button.textContent = "讨论处理中…";
       button.disabled = true;

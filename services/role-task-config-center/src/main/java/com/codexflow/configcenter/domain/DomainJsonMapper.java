@@ -62,6 +62,8 @@ class DomainJsonMapper {
     result.put("supervisorTimeoutSec", sop.supervisorTimeoutSec);
     result.put("maxRetryCount", sop.maxRetryCount);
     result.put("advanceMode", sop.advanceMode);
+    result.put("confirmationMinutes", sop.confirmationMinutes);
+    result.put("blockedMinutes", sop.blockedMinutes);
     result.put("handoffMode", sop.handoffMode);
     result.put("dingtalkShowExecutionDetails", sop.dingtalkShowExecutionDetails);
     result.put("defaultStepModel", sop.defaultStepModel);

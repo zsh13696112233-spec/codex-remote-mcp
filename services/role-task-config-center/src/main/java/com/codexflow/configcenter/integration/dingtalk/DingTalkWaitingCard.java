@@ -15,7 +15,8 @@ final class DingTalkWaitingCard {
   static String state(JsonNode snapshot, String gateId) {
     JsonNode gate = snapshot.path("pendingAdvance");
     if (!gateId.equals(gate.path("gateId").asText())) return "closed";
-    if (snapshot.path("discussionBusy").asBoolean()) return "busy";
+    if (snapshot.path("discussionBusy").asBoolean() || "busy".equals(gate.path("state").asText()))
+      return "busy";
     if ("held".equals(gate.path("state").asText())) return "held";
     if ("countdown".equals(gate.path("state").asText())
         && Instant.parse(gate.path("expiresAt").asText()).isAfter(Instant.now()))
@@ -53,7 +54,33 @@ final class DingTalkWaitingCard {
           case "countdown" -> "默认两分钟无人操作自动继续。可右键引用此卡片提问；仅打开输入框不会暂停倒计时，消息送达并成功保持后才取消自动继续。";
           default -> "此卡片已不能继续任务，请查看最新状态。";
         };
+    JsonNode gate = snapshot.path("pendingAdvance");
+    String kind = payload.path("waitKind").asText("legacy");
+    boolean policy = !"legacy".equals(kind);
+    String label =
+        "blocked".equals(kind)
+            ? "重新执行"
+            : "finish".equals(kind) ? "确认结束" : policy ? "进入下一步" : "继续执行";
+    if (policy) {
+      String dueAction = "blocked".equals(kind) ? "阻断结束" : "finish".equals(kind) ? "正常结束" : "进入下一步";
+      rule =
+          switch (state) {
+            case "countdown" ->
+                "无人回复将在 " + deadline(gate) + " 自动" + dueAction + "。回复此卡片可讨论，消息送达后取消倒计时。";
+            case "held" -> "已取消倒计时；讨论完成后请点击“" + label + "”，也可终止任务。";
+            case "busy" -> "正在处理，请等待处理结果。";
+            default -> "本轮等待已结束，请查看最新状态。";
+          };
+    }
     Map<String, Object> values = new LinkedHashMap<>();
+    values.put("confirmLabel", label);
+    values.put("confirmAction", "blocked".equals(kind) ? "advance_retry" : "advance_confirm");
+    values.put("showStop", policy ? "true" : "false");
+    values.put(
+        "stopStatus",
+        "closed".equals(state) || "busy".equals(gate.path("state").asText())
+            ? "disabled"
+            : "normal");
     values.put("showConfirm", "true");
     values.put("restartMode", "false");
     values.put("stopMode", "false");
@@ -112,6 +139,13 @@ final class DingTalkWaitingCard {
     return values;
   }
 
+  private static String deadline(JsonNode gate) {
+    return java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+            .withZone(java.time.ZoneId.of("Asia/Shanghai"))
+            .format(Instant.parse(gate.path("expiresAt").asText()))
+        + "（北京时间）";
+  }
+
   static String cardState(JsonNode snapshot, JsonNode payload) {
     if (payload.path("restartControl").asBoolean()) return "closed";
     return state(snapshot, payload.path("gateId").asText());
@@ -126,7 +160,10 @@ final class DingTalkWaitingCard {
       String label = "第" + index + "步「" + node.path("displayName").asText("未命名") + "」";
       String id = node.path("id").asText();
       if (id.equals(gate.path("completedNodeId").asText()))
-        result.append("已完成：").append(label).append("\n\n");
+        result
+            .append("blocked".equals(gate.path("kind").asText()) ? "遇到阻碍：" : "已完成：")
+            .append(label)
+            .append("\n\n");
       if (id.equals(gate.path("nextNodeId").asText())) result.append("下一步：").append(label);
     }
     return DingTalkExecutionNotice.safe(result.toString());
@@ -147,9 +184,18 @@ final class DingTalkWaitingCard {
             break;
           }
         }
-        String notice = "请查看" + subject + "，如需调整可回复此卡片，确认后点击「继续执行」。";
+        String kind = snapshot.path("pendingAdvance").path("kind").asText("legacy");
+        String notice =
+            switch (kind) {
+              case "blocked" -> "当前步骤无法继续。请回复此卡片讨论或补充信息，再点击「重新执行」处理本步骤。";
+              case "finish" -> "请查看最终结果，如需调整可回复此卡片，确认后点击「确认结束」。";
+              case "advance" -> "请查看" + subject + "，如需调整可回复此卡片，确认后点击「进入下一步」。";
+              default -> "请查看" + subject + "，如需调整可回复此卡片，确认后点击「继续执行」。";
+            };
         String response = DingTalkResultText.display(node.path("response").asText());
-        return response.isBlank() ? "步骤已完成。" + notice : response + "\n\n" + notice;
+        return response.isBlank()
+            ? ("blocked".equals(kind) ? "" : "步骤已完成。") + notice
+            : response + "\n\n" + notice;
       }
     return "步骤已完成。请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。";
   }

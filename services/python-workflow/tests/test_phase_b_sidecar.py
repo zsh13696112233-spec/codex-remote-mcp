@@ -247,6 +247,25 @@ class SidecarStoreTests(unittest.TestCase):
 
 
 class SidecarInternalApiTests(unittest.TestCase):
+    def test_remote_wait_policy_is_frozen_and_blocked_keeps_lease(self):
+        from tests.test_workflow_outcomes import result
+        spec = remote_workflow("wait-remote")
+        spec["advanceMode"] = "semi_automatic"
+        spec["waitPolicy"] = {"version": 1, "confirmationMinutes": 2, "blockedMinutes": 30}
+        lease = self._claim("wait-remote", "supervisor-a", "token-a", spec)
+        headers = self._auth("token-a", lease)
+        path = "/internal/v1/workflows/wait-remote/nodes/a"
+        prepared = self.client.post(path + "/prepare", headers=headers, json={"dispatchId": "one"})
+        self.assertEqual(prepared.json()["waitPolicy"], spec["waitPolicy"])
+        body = {"operation": "sync", "snapshot": {"status": "completed", "businessResult": result()}}
+        self.assertEqual(self.client.post(path + "/state", headers=self._auth("token-a", "old"), json=body).status_code, 409)
+        self.assertEqual(self.client.post(path + "/state", headers=headers, json=body).status_code, 200)
+        view = self.client.get("/internal/v1/workflows/wait-remote", headers=headers).json()
+        self.assertEqual(view["nodes"][0]["status"], "waiting")
+        self.assertEqual(view["pendingAdvance"]["kind"], "blocked")
+        self.assertIsNone(view["termination"])
+        self.assertTrue(self.store.has_supervisor_lease("wait-remote"))
+
     def test_business_termination_crosses_api_and_rejects_stale_lease(self):
         from tests.test_workflow_outcomes import result
         spec = remote_workflow("blocked-a")

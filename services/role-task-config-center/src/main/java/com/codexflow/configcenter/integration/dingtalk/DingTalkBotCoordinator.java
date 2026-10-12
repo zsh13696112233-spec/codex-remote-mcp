@@ -460,11 +460,16 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     Optional<DingTalkModels.Binding> binding = store.binding(workflowId);
     if (binding.isEmpty()) return false;
     if (hasText(event.cardInstanceId()) && event.cardInstanceId().startsWith("wait-")) {
-      if (!"advance_confirm".equals(action) || !store.ownsWaitingCard(event, workflowId, gateId))
-        return false;
+      if (!Set.of("advance_confirm", "advance_retry", "advance_stop").contains(action)
+          || !store.ownsWaitingCard(event, workflowId, gateId)) return false;
       boolean confirmed = true;
       try {
-        gateway.post("/workflows/" + workflowId + "/advance/" + gateId + "/confirm", null);
+        if ("advance_confirm".equals(action)) {
+          gateway.post("/workflows/" + workflowId + "/advance/" + gateId + "/confirm", null);
+        } else {
+          workflowRunService.waitingAction(
+              workflowId, gateId, "advance_retry".equals(action) ? "retry" : "stop");
+        }
       } catch (GatewayFailure error) {
         if (error.getStatusCode() != 409 && error.getStatusCode() != 404) throw error;
         confirmed = false;
@@ -718,7 +723,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           JsonNode gate = snapshot.path("pendingAdvance");
           if (isGateId(gateId)
               && gateId.equals(gate.path("gateId").asText())
-              && "countdown".equals(gate.path("state").asText())) {
+              && Set.of("countdown", "held").contains(gate.path("state").asText())) {
             store.recordWaitingCard(binding.workflowId(), sequence, snapshot, true);
           } else {
             store.recordEvent(
@@ -735,6 +740,18 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         }
         String notice =
             DingTalkExecutionNotice.stepLabel(event, snapshot) + "：" + eventNotice(type);
+        if (!payload.path("kind").asText("legacy").equals("legacy")
+            && type.startsWith("step.advance.")) {
+          String kind = payload.path("kind").asText();
+          notice =
+              "step.advance.timed_out".equals(type)
+                  ? "blocked".equals(kind)
+                      ? "等待到期无人回复，正在按阻断原因结束。"
+                      : "finish".equals(kind) ? "结果确认等待已到期，正在结束任务。" : "确认等待已到期，准备进入下一步。"
+                  : "retry".equals(payload.path("action").asText())
+                      ? "已接受重新执行请求，正在处理当前步骤。"
+                      : "finish".equals(kind) ? "已确认最终结果，正在结束任务。" : "已确认，准备进入下一步。";
+        }
         store.refreshWaitingCards(binding.workflowId(), snapshot);
         if (TERMINAL_EVENTS.contains(type) && snapshot.path("termination").isObject())
           notice =

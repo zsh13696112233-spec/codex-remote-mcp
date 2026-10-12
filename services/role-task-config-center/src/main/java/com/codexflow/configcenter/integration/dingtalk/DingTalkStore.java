@@ -28,7 +28,7 @@ class DingTalkStore {
   private final ObjectMapper objectMapper;
 
   private static final String DEFAULT_DOCUMENT_CARD_TEMPLATE_ID =
-      "8bcfcf06-2fe0-4ea0-8818-38698428f391.schema";
+      "35c2fa5f-c25c-4d4b-8abd-dd07c953b14d.schema";
 
   @org.springframework.beans.factory.annotation.Value(
       "${DINGTALK_DOCUMENT_CARD_TEMPLATE_ID:" + DEFAULT_DOCUMENT_CARD_TEMPLATE_ID + "}")
@@ -414,6 +414,7 @@ class DingTalkStore {
     return objectMapper
         .createObjectNode()
         .put("gateId", snapshot.path("pendingAdvance").path("gateId").asText())
+        .put("waitKind", snapshot.path("pendingAdvance").path("kind").asText("legacy"))
         .put("documentTemplateId", documentCardTemplateId)
         .put("documentNodeId", snapshot.path("pendingAdvance").path("completedNodeId").asText())
         .put("invitation", invitation)

@@ -2028,7 +2028,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         gate = store.pending_advance_for_node(workflow_id, node_id)
         if gate is None:
             break
-        if gate["state"] == "held":
+        if gate["state"] == "held" or gate.get("kind", "legacy") != "legacy":
             await asyncio.sleep(0.25)
             continue
         remaining = (
@@ -2104,7 +2104,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             document_options["output_schema"] = DOCUMENT_SCHEMA
         if node.get("resultProtocolVersion") in (1, 2):
             from workflow_outcomes import schema, instruction
-            node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"), node["resultProtocolVersion"])
+            node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"), node["resultProtocolVersion"], defer_blocked=bool(node.get("waitPolicy")))
             document_options["output_schema"] = schema(node["resultProtocolVersion"])
         job = await orchestrator.dispatch(
             **document_options,
