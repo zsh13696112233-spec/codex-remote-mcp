@@ -729,6 +729,11 @@ class WorkflowStore(InputImageStore):
             connection.execute("BEGIN IMMEDIATE")
             from mcp_store import ensure_available
             ensure_available(connection, [spec["supervisorAgentId"], *(node["agentId"] for node in spec["nodes"])])
+            # Serialize deletion against new submissions, including old snapshots without a group.
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE name='registered_agents'").fetchone():
+                for agent_id in {spec["supervisorAgentId"], *(node["agentId"] for node in spec["nodes"])}:
+                    if connection.execute("SELECT 1 FROM registered_agents WHERE id=? AND deleted_at IS NOT NULL", (agent_id,)).fetchone():
+                        raise ValueError("所选机器已删除，请重新选择机器。")
             if spec.get("taskDefinitionId"):
                 self._require_task_idle(connection, spec["taskDefinitionId"], spec["workflowId"])
             if spec.get("groupId"):

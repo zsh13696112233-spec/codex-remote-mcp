@@ -29,7 +29,8 @@ def seed_agents(store, agents):
             value['capabilities'] = list(config.capabilities)
             parsed = urlparse(config.url)
             # 测试替身可能共用一个监听端口；登记行使用独立测试地址。
-            db.execute("""INSERT INTO registered_agents VALUES (?, 'fixture', ?, ?, ?, 'passed', NULL)
+            db.execute("""INSERT INTO registered_agents (id,group_id,ip,port,config,test_status,tested_at)
+                VALUES (?, 'fixture', ?, ?, ?, 'passed', NULL)
                 ON CONFLICT(id) DO UPDATE SET config=excluded.config""",
                 (key, key, parsed.port or 4500, json.dumps(value)))
     return registry

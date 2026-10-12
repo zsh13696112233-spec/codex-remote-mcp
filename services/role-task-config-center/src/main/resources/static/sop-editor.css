@@ -78,3 +78,5 @@
   .role-palette{align-items:flex-start;flex-direction:column;gap:8px}.role-palette-list{width:100%}.canvas-toolbar{align-items:flex-start;flex-direction:column}
   .flow-canvas{padding:15px;min-height:500px}.inspector-grid{grid-template-columns:1fr}
 }
+
+.agent-picker-menu button>span{min-width:0;overflow-wrap:anywhere}.agent-picker-menu button>small{flex-shrink:0}

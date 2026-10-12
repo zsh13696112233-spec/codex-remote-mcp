@@ -44,9 +44,19 @@ public class MachineController {
     return service.updateMachine(id, body);
   }
 
+  @DeleteMapping("/agents/{id}")
+  public JsonNode deleteMachine(@PathVariable String id) {
+    return service.deleteMachine(id);
+  }
+
   @GetMapping("/agents/{id}/models")
   public JsonNode models(@PathVariable String id) {
     return service.models(id);
+  }
+
+  @PutMapping("/agents/{id}/remark")
+  public JsonNode updateRemark(@PathVariable String id, @RequestBody JsonNode body) {
+    return service.updateRemark(id, body);
   }
 
   @PostMapping("/agents/{id}/test")

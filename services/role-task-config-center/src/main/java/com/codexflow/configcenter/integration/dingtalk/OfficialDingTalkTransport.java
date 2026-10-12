@@ -125,14 +125,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
         || !"/robot/sendBySession".equals(uri.getPath())) {
       throw new IllegalArgumentException("回复会话不可用，请重新向机器人发送消息。");
     }
-    ObjectNode body = objectMapper.createObjectNode().put("msgtype", "text");
-    body.putObject("text").put("content", payload.path("text").asText());
-    if ("GROUP".equals(targetType) && !payload.path("atUserId").asText("").isBlank()) {
-      body.putObject("at")
-          .put("isAtAll", false)
-          .putArray("atUserIds")
-          .add(payload.path("atUserId").asText());
-    }
+    ObjectNode body = replyBody(targetType, payload);
     try {
       var request =
           HttpRequest.newBuilder(uri)
@@ -152,6 +145,18 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     } catch (IOException error) {
       throw new IllegalStateException("钉钉回复失败。");
     }
+  }
+
+  ObjectNode replyBody(String targetType, JsonNode payload) {
+    ObjectNode body = objectMapper.createObjectNode().put("msgtype", "text");
+    body.putObject("text").put("content", payload.path("text").asText());
+    if ("GROUP".equals(targetType) && !payload.path("atUserId").asText("").isBlank()) {
+      body.putObject("at")
+          .put("isAtAll", false)
+          .putArray("atUserIds")
+          .add(payload.path("atUserId").asText());
+    }
+    return body;
   }
 
   @Override

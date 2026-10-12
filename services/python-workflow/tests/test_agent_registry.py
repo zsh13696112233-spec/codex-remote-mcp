@@ -35,6 +35,136 @@ class RegistryTests(unittest.TestCase):
         return self.registry.save_agent({"ip": ip, "port": 4500, "groupId": group or self.group,
                                          "capabilities": capabilities or ["supervisor", "executor"]})
 
+    def test_remark_roundtrip_preserves_execution_and_test_state(self):
+        body = {"ip": "127.0.0.1", "port": 4500, "groupId": self.group,
+                "capabilities": ["executor"], "remark": "  开发机  "}
+        response = self.client.post("/agents", json=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        machine = response.json()
+        key = machine["agentId"]
+        self.assertEqual(machine["remark"], "开发机")
+        self.registry.record_test(key, True)
+        before = self.registry.rows()[key]
+        self.config_values["machine_defaults"].update(allow_write=True, token_env="CHANGED_REFERENCE")
+        for remark, expected in (("  测试机  ", "测试机"), ("   ", "")):
+            response = self.client.put("/agents/" + key, json={**machine, "remark": remark})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["remark"], expected)
+            row = self.registry.rows()[key]
+            for field in ("config", "tested_at", "test_status"):
+                self.assertEqual(row[field], before[field])
+        reopened = AgentRegistry(WorkflowStore(self.root / "runtime.db"))
+        self.assertEqual(reopened.rows()[key]["remark"], "")
+        self.assertEqual(self.client.get("/agents").json()["agents"][0]["remark"], "")
+
+    def test_remark_validation_and_omitted_field_compatibility(self):
+        machine = self.machine(capabilities=["executor"])
+        key = machine["agentId"]
+        self.assertEqual(machine["remark"], "")
+        saved = self.registry.save_agent({**machine, "remark": "😀" * 100}, key)
+        for value in (None, 1, False, [], {}, "字" * 101):
+            response = self.client.put("/agents/" + key, json={**machine, "remark": value})
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertIn("备注", response.json()["error"])
+        body = {k: v for k, v in machine.items() if k != "remark"}
+        self.assertEqual(self.registry.save_agent(body, key)["remark"], saved["remark"])
+        self.assertEqual(AgentRegistry(self.gateway.store).rows()[key]["remark"], saved["remark"])
+
+    def test_remark_edit_ignores_capability_order_and_keeps_machine_identity(self):
+        machine = self.machine(capabilities=["executor", "supervisor"])
+        key = machine["agentId"]
+        self.registry.record_test(key, True)
+        before = self.registry.rows()[key]
+        self.config_values["machine_defaults"].update(allow_write=True, token_env="CHANGED_REFERENCE")
+        updated = self.registry.save_agent({**machine, "capabilities": ["supervisor", "executor"],
+                                            "remark": "双角色机器"}, key)
+        self.assertEqual(updated["agentId"], key)
+        for field in ("config", "tested_at", "test_status"):
+            self.assertEqual(self.registry.rows()[key][field], before[field])
+
+    def test_inline_remark_endpoint_only_updates_remark_and_is_repeatable(self):
+        machine = self.machine(capabilities=["executor"])
+        key = machine["agentId"]
+        self.registry.record_test(key, True)
+        before = self.registry.rows()[key]
+        self.config_values["machine_defaults"].update(allow_write=True, token_env="CHANGED_REFERENCE")
+        for value in ("  卡片备注  ", "卡片备注", ""):
+            response = self.client.put("/agents/" + key + "/remark", json={"remark": value})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json(), {"agentId": key, "remark": value.strip()})
+            self.assertEqual(self.registry.rows()[key], {**before, "remark": value.strip()})
+        for body in ({}, {"remark": None}, {"remark": "字" * 101}, {"remark": "备注", "enabled": False}):
+            response = self.client.put("/agents/" + key + "/remark", json=body)
+            self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.client.put("/agents/missing/remark", json={"remark": "备注"}).status_code, 400)
+
+    def test_business_delete_hides_machine_and_preserves_history(self):
+        machine = self.machine()
+        key = machine["agentId"]
+        spec = {"workflowId": "deleted-history", "supervisorAgentId": key,
+                "nodes": [{"id": "one", "prompt": "测试", "executor": {"agentId": key}}]}
+        self.gateway.store.create_workflow(spec)
+        for status in ("queued", "running", "cancelling"):
+            with self.gateway.store._connect() as db:
+                db.execute("UPDATE workflows SET status=? WHERE workflow_id='deleted-history'", (status,))
+            response = self.client.delete("/agents/" + key)
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertIn(key, self.registry.rows())
+        with self.gateway.store._connect() as db:
+            db.execute("UPDATE workflows SET status='completed' WHERE workflow_id='deleted-history'")
+        before = self.registry.rows()[key]
+        for _ in range(2):
+            response = self.client.delete("/agents/" + key)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json()["deleted"])
+        self.assertNotIn(key, self.registry.rows())
+        self.assertNotIn(key, AgentRegistry(self.gateway.store).configs())
+        self.assertEqual(self.client.get("/agents").json()["agents"], [])
+        self.assertEqual(self.gateway.store.get_spec("deleted-history")["supervisorAgentId"], key)
+        with self.gateway.store._connect() as db:
+            archived = dict(db.execute("SELECT * FROM registered_agents WHERE id=?", (key,)).fetchone())
+        self.assertIsNotNone(archived.pop("deleted_at"))
+        self.assertEqual(archived, {k: v for k, v in before.items() if k != "deleted_at"})
+        self.assertEqual(self.client.put("/agents/" + key, json=machine).status_code, 400)
+        self.assertEqual(self.client.put("/agents/" + key + "/remark", json={"remark": "改名"}).status_code, 400)
+        self.assertEqual(self.client.post("/agents/" + key + "/test", json={}).status_code, 400)
+        with self.assertRaisesRegex(ValueError, "已删除"):
+            self.gateway.store.create_workflow({**spec, "workflowId": "deleted-race"})
+        self.assertEqual(self.client.delete("/agents/missing").status_code, 400)
+
+    def test_business_delete_blocks_pending_installations(self):
+        machine = self.machine(capabilities=["executor"])
+        key = machine["agentId"]
+        with self.gateway.store._connect() as db:
+            db.execute("INSERT INTO skill_packages VALUES('delete-package','{}','2026-01-01')")
+            db.execute("INSERT INTO skill_batches(id,package_id,request_json,created_at) VALUES('delete-batch','delete-package','{}','2026-01-01')")
+            db.execute("INSERT INTO skill_tasks(id,batch_id,agent_id,name,state,created_at,updated_at) VALUES('delete-task','delete-batch',?,'test','queued','2026-01-01','2026-01-01')", (key,))
+        with self.assertRaisesRegex(ValueError, "安装任务"):
+            self.registry.delete_agent(key)
+        self.assertIn(key, self.registry.rows())
+
+    def test_old_machine_schema_upgrade_preserves_records(self):
+        machine = self.machine(capabilities=["executor"])
+        key = machine["agentId"]
+        self.registry.record_test(key, True)
+        before = self.registry.rows()[key]
+        # Reconstruct the previous schema only in this temporary test database.
+        with self.gateway.store._connect() as db:
+            db.executescript("""
+                PRAGMA foreign_keys=OFF;
+                CREATE TABLE old_agents (
+                    id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES agent_groups(id),
+                    ip TEXT NOT NULL, port INTEGER NOT NULL, config TEXT NOT NULL,
+                    test_status TEXT NOT NULL DEFAULT 'untested', tested_at TEXT, UNIQUE(ip, port));
+                INSERT INTO old_agents SELECT id,group_id,ip,port,config,test_status,tested_at FROM registered_agents;
+                DROP TABLE registered_agents;
+                ALTER TABLE old_agents RENAME TO registered_agents;
+            """)
+        for _ in range(2):
+            upgraded = AgentRegistry(self.gateway.store)
+            self.assertEqual(upgraded.rows()[key], before)
+        self.assertEqual(upgraded.save_agent({**machine, "remark": "升级后"}, key)["remark"], "升级后")
+
     def test_skill_settings_persist_and_do_not_elevate_permissions(self):
         machine = self.machine(capabilities=["executor"])
         key = machine["agentId"]

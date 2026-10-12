@@ -42,6 +42,20 @@ class McpStoreTests(unittest.TestCase):
         self.body = {"requestId": str(uuid.uuid4()), "packageId": self.package['id'],
                      "groupId": self.group, "agentIds": [self.agent]}
 
+    def test_machine_delete_protects_pending_mcp_and_blocks_historical_retry(self):
+        batch = self.manager.create(self.body)
+        task = batch["tasks"][0]["id"]
+        with self.assertRaisesRegex(ValueError, "安装任务"):
+            self.registry.delete_agent(self.agent)
+        with self.store._connect() as db:
+            db.execute("UPDATE mcp_tasks SET state='failed',occupied=0 WHERE id=?", (task,))
+        self.registry.delete_agent(self.agent)
+        with self.assertRaisesRegex(SkillError, "已删除"):
+            self.manager.store.action(task, str(uuid.uuid4()), "retry")
+        with self.assertRaises(SkillError):
+            self.manager.create({**self.body, "requestId": str(uuid.uuid4())})
+        self.assertEqual(self.manager.store.batch(batch["id"])["tasks"][0]["state"], "failed")
+
     def test_group_mcp_counts_include_shared_packages_once(self):
         other = self.registry.save_group({"name": "另一个组"})["id"]
         counts = {g["id"]: g["mcpCount"] for g in self.registry.groups()}

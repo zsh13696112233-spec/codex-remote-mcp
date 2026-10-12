@@ -69,6 +69,35 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void separateAnswerMentionSuppressesCardAtAndFailedDeliveryDoesNotComplete() {
+    var payload =
+        json.createObjectNode()
+            .put("gateId", "old")
+            .put("answer", true)
+            .put("answerMention", true)
+            .put("atUserId", "asker")
+            .put("text", "回答");
+    when(transport.sendWaitingCard(any(), any(), any(), isNull(), any()))
+        .thenReturn(new DingTalkModels.SendResult("carrier"));
+    bot.deliver(
+        new DingTalkModels.Outbox("mention-answer", ID, "group", null, "waiting_card", payload));
+    verify(transport)
+        .sendWaitingCard(eq("wait-mention-answer"), eq("GROUP"), eq("group"), isNull(), any());
+    verify(store).markOutboxSent("mention-answer", "carrier");
+    when(transport.sendWaitingCard(any(), any(), any(), isNull(), any()))
+        .thenThrow(new IllegalStateException("失败"));
+    bot.deliver(
+        new DingTalkModels.Outbox("failed-answer", ID, "group", null, "waiting_card", payload));
+    verify(store, never()).markOutboxSent(eq("failed-answer"), any());
+    verify(store).markOutboxFailed(eq("failed-answer"), any());
+    payload.put("deliveredAt", java.time.Instant.now().toString()).put("sentMessageId", "carrier");
+    bot.deliver(
+        new DingTalkModels.Outbox("recovered-answer", ID, "group", null, "waiting_card", payload));
+    verify(store).markOutboxSent("recovered-answer", "carrier");
+    verify(transport, times(2)).sendWaitingCard(any(), any(), any(), isNull(), any());
+  }
+
+  @Test
   void retiredControlButtonsCannotChangeWorkflow() {
     for (String action :
         java.util.List.of("stop_confirm", "stop_cancel", "restart_confirm", "restart_cancel")) {

@@ -175,6 +175,23 @@ class SharedGroupsIntegrationTest {
   }
 
   @Test
+  void machineDeletionProtectsSopsAndSubmittingHistory() {
+    String r = role(A).path("id").asText();
+    String s = sop(A, r).path("id").asText();
+    String t = task(A, s).path("id").asText();
+    entities.flush();
+    assertThatThrownBy(() -> groups.checkMachineDelete("machine-a")).hasMessageContaining("SOP");
+    String run = runs.prepareLatest(t, "schedule").workflowId();
+    entities.flush();
+    jdbc.update("UPDATE codex_sop_sops SET deleted=TRUE WHERE id=?", s);
+    assertThatThrownBy(() -> groups.checkMachineDelete("machine-a")).hasMessageContaining("运行");
+    jdbc.update("UPDATE codex_sop_task_runs SET status='completed' WHERE workflow_id=?", run);
+    groups.checkMachineDelete("machine-a");
+    assertThat(runs.runDetail(run).path("submittedJson").path("supervisorAgentId").asText())
+        .isEqualTo("machine-a");
+  }
+
+  @Test
   void freezesRunGroupAndLegacyRunsRemainUnassigned() {
     String r = role(A).path("id").asText(),
         s = sop(A, r).path("id").asText(),

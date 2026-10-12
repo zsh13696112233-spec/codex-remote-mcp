@@ -970,7 +970,9 @@ class DingTalkBotCoordinator implements SmartLifecycle {
               cardId,
               item.targetType(),
               item.targetExternalId(),
-              item.payload().path("atUserId").asText(null),
+              item.payload().path("answerMention").asBoolean()
+                  ? null
+                  : item.payload().path("atUserId").asText(null),
               data);
       sentMessageId = receipt == null ? null : receipt.messageId();
       Instant sentAt = Instant.now();

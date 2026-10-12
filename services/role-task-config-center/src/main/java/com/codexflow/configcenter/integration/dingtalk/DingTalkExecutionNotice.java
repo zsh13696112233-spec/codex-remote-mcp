@@ -323,8 +323,6 @@ final class DingTalkExecutionNotice {
     String result =
         protectedText
             .toString()
-            .replaceAll("[A-Za-z]:[\\\\/][^\\s<>\"，。；]+", "[路径已隐藏]")
-            .replaceAll("(?<![\\w])/(?:[^\\s/]+/)+[^\\s，。；]*", "[路径已隐藏]")
             .replaceAll("(?i)(?:bearer\\s+\\S+|sk-[A-Za-z0-9_-]+)", "[凭据已隐藏]")
             .replaceAll("(?i)(token|password|secret|api[_-]?key)\\s*[:=]\\s*[^\\s,;]+", "$1=[已隐藏]")
             .replaceAll("\\b(?:thr|thread|turn|agent)_[A-Za-z0-9_-]+", "[内部编号已隐藏]");

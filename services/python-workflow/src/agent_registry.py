@@ -33,6 +33,12 @@ class AgentRegistry:
                     enabled INTEGER NOT NULL DEFAULT 0, root TEXT NOT NULL DEFAULT '',
                     checked_at TEXT, check_message TEXT);
             """)
+            # Serialize additive upgrades when the gateway and local MCP start together.
+            db.execute("BEGIN IMMEDIATE")
+            if "remark" not in {row["name"] for row in db.execute("PRAGMA table_info(registered_agents)")}:
+                db.execute("ALTER TABLE registered_agents ADD COLUMN remark TEXT NOT NULL DEFAULT ''")
+            if "deleted_at" not in {row["name"] for row in db.execute("PRAGMA table_info(registered_agents)")}:
+                db.execute("ALTER TABLE registered_agents ADD COLUMN deleted_at TEXT")
             # 旧部署授权仅导入一次；此后网页保存的数据库记录是唯一事实来源。
             legacy = setting("skill_deployment", {}).get("agents", {})
             for row in db.execute("SELECT id FROM registered_agents").fetchall():
@@ -104,7 +110,7 @@ class AgentRegistry:
 
     def rows(self) -> dict[str, dict[str, Any]]:
         with self.store._connect() as db:
-            return {row["id"]: dict(row) for row in db.execute("SELECT * FROM registered_agents ORDER BY id")}
+            return {row["id"]: dict(row) for row in db.execute("SELECT * FROM registered_agents WHERE deleted_at IS NULL ORDER BY id")}
 
     def configs(self) -> dict[str, "AgentConfig"]:
         return {key: self.config_from_row(key, row) for key, row in self.rows().items()}
@@ -118,7 +124,7 @@ class AgentRegistry:
         return AgentConfig.from_dict(agent_id, config)
 
     def public(self) -> list[dict[str, Any]]:
-        return [{"agentId": key, "name": row["ip"], "ip": row["ip"], "port": row["port"],
+        return [{"agentId": key, "name": row["ip"], "remark": row["remark"], "ip": row["ip"], "port": row["port"],
                  "groupId": row["group_id"], "testStatus": row["test_status"], "testedAt": row["tested_at"],
                  "enabled": json.loads(row["config"]).get("enabled", True),
                  "skillInstallation": self.skill_settings(key),
@@ -126,8 +132,45 @@ class AgentRegistry:
                  "capabilities": json.loads(row["config"]).get("capabilities", [])}
                 for key, row in self.rows().items()]
 
+    def delete_agent(self, agent_id: str) -> dict[str, bool]:
+        with self.store._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT deleted_at FROM registered_agents WHERE id=?", (agent_id,)).fetchone()
+            if row is None:
+                raise ValueError("找不到机器。")
+            if row["deleted_at"] is not None:
+                return {"deleted": True}
+            if db.execute("""SELECT 1 FROM workflows w WHERE w.status IN ('queued','running','cancelling')
+                AND (w.supervisor_agent_id=? OR EXISTS
+                (SELECT 1 FROM workflow_nodes n WHERE n.workflow_id=w.workflow_id AND n.agent_id=?))
+                LIMIT 1""", (agent_id, agent_id)).fetchone():
+                raise ValueError("机器仍有关联任务运行，请结束运行后再删除。")
+            from mcp_store import ensure_available
+            ensure_available(db, [agent_id])
+            for table, states in (("skill_tasks", ("queued", "running")),
+                                  ("mcp_tasks", ("queued", "transferring", "installing", "registering", "verifying", "review"))):
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
+                    marks = ",".join("?" for _ in states)
+                    if db.execute(f"SELECT 1 FROM {table} WHERE agent_id=? AND state IN ({marks}) LIMIT 1",
+                                  (agent_id, *states)).fetchone():
+                        raise ValueError("机器仍有未完成的安装任务，请处理后再删除。")
+            db.execute("UPDATE registered_agents SET deleted_at=? WHERE id=?",
+                       (datetime.now(timezone.utc).isoformat(), agent_id))
+        return {"deleted": True}
+
+    def save_remark(self, body: dict[str, Any], agent_id: str) -> dict[str, str]:
+        if set(body) != {"remark"} or not isinstance(body.get("remark"), str) or len(body["remark"].strip()) > 100:
+            raise ValueError("请只提交机器备注，必须是最多 100 个字符的文本。")
+        remark = body["remark"].strip()
+        with self.store._connect() as db:
+            if not db.execute("UPDATE registered_agents SET remark=? WHERE id=? AND deleted_at IS NULL", (remark, agent_id)).rowcount:
+                raise ValueError("找不到机器。")
+        return {"agentId": agent_id, "remark": remark}
+
     def save_agent(self, body: dict[str, Any], agent_id: str | None = None) -> dict[str, Any]:
         from codex_orchestrator_mcp import AgentConfig
+        if "remark" in body and (not isinstance(body["remark"], str) or len(body["remark"].strip()) > 100):
+            raise ValueError("机器备注必须是最多 100 个字符的文本。")
         if not isinstance(body.get("ip"), str) or "%" in body["ip"]:
             raise ValueError("请输入有效的 IP 地址，不支持域名。")
         try:
@@ -150,8 +193,9 @@ class AgentRegistry:
             if not db.execute("SELECT 1 FROM agent_groups WHERE id=?", (body.get("groupId"),)).fetchone():
                 raise ValueError("请选择有效分组。")
             old = db.execute("SELECT * FROM registered_agents WHERE id=?", (agent_id,)).fetchone() if agent_id else None
-            if agent_id and old is None:
+            if agent_id and (old is None or old["deleted_at"] is not None):
                 raise ValueError("找不到机器。")
+            remark = body["remark"].strip() if "remark" in body else (old["remark"] if old else "")
             if old is not None and old["group_id"] != body["groupId"]:
                 active = db.execute("""SELECT 1 FROM workflows w
                     WHERE w.status IN ('queued','running','cancelling') AND
@@ -162,7 +206,7 @@ class AgentRegistry:
                     raise ValueError("机器仍有关联任务运行，请结束运行后再改组。")
             agent_id = agent_id or "machine-" + uuid.uuid4().hex
             if db.execute("SELECT 1 FROM registered_agents WHERE ip=? AND port=? AND id<>?", (ip, port, agent_id)).fetchone():
-                raise ValueError("该 IP 和端口已登记。")
+                raise ValueError("该 IP 和端口已登记（含已业务删除的机器）。")
             from mcp_store import ensure_available
             from mcp_packages import installation_settings
             ensure_available(db, [agent_id])
@@ -199,39 +243,46 @@ class AgentRegistry:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='skill_tasks'").fetchone():
                     if db.execute("SELECT 1 FROM skill_tasks WHERE agent_id=? AND state IN ('queued','running') LIMIT 1", (agent_id,)).fetchone():
                         raise ValueError("这台机器仍有待处理的 Skill 下发，请结束后再修改分组、安装设置或连接地址。")
-            previous_credentials = (config.get("token_env"), config.get("token_file"))
-            # 保存时同步部署凭据引用；切换来源时移除旧引用，不能同时保留两种来源。
-            for credential_key in ("token_env", "token_file"):
-                config.pop(credential_key, None)
-                value = setting("machine_defaults." + credential_key)
-                if value:
-                    config[credential_key] = value
-            credentials_changed = previous_credentials != (config.get("token_env"), config.get("token_file"))
-            # 未提供目录默认值时保留历史登记。
-            artifact_root = setting("machine_defaults.artifact_root")
-            if artifact_root is not None:
-                config["artifact_root"] = artifact_root
-            parsed = urlparse(config.get("url", ""))
-            protocol = parsed.scheme or setting("machine_defaults.protocol", "ws")
-            url = config["url"] if old and old["ip"] == ip and old["port"] == port else f"{protocol}://{'[' + ip + ']' if ':' in ip else ip}:{port}{parsed.path}"
-            config.update(url=url,
-                          capabilities=list(dict.fromkeys(capabilities)), enabled=enabled,
-                          allow_cwd_override=True,
-                          allow_write=setting("machine_defaults.allow_write", False),
-                          allow_full_access=setting("machine_defaults.allow_full_access", False))
-            if "supervisor" in capabilities:
-                config["capacity"] = 1
-                was_supervisor = old is not None and "supervisor" in json.loads(old["config"]).get("capabilities", [])
-                if not was_supervisor:
-                    config["orchestration_mode"] = setting("machine_defaults.orchestration_mode", "remote_sidecar")
-                if config["orchestration_mode"] == "remote_sidecar":
-                    endpoint_changed = old is None or old["ip"] != ip or old["port"] != port
-                    if endpoint_changed or not was_supervisor:
-                        config["sidecar_token_file"] = sidecar_token_path(ip, port)
-            else:
-                for key in ("capacity", "sidecar_token_env", "sidecar_token_file"):
-                    config.pop(key, None)
-                config.pop("orchestration_mode", None)
+            remark_only = (old is not None and remark != old["remark"]
+                           and (ip, port, body["groupId"], set(capabilities), enabled)
+                           == (old["ip"], old["port"], old["group_id"], set(config.get("capabilities", [])), config.get("enabled", True))
+                           and not settings_changed
+                           and mcp_rule == installation_settings(json.loads(previous_mcp[0]) if previous_mcp else {}))
+            credentials_changed = False
+            if not remark_only:
+                previous_credentials = (config.get("token_env"), config.get("token_file"))
+                # 保存时同步部署凭据引用；切换来源时移除旧引用，不能同时保留两种来源。
+                for credential_key in ("token_env", "token_file"):
+                    config.pop(credential_key, None)
+                    value = setting("machine_defaults." + credential_key)
+                    if value:
+                        config[credential_key] = value
+                credentials_changed = previous_credentials != (config.get("token_env"), config.get("token_file"))
+                # 未提供目录默认值时保留历史登记。
+                artifact_root = setting("machine_defaults.artifact_root")
+                if artifact_root is not None:
+                    config["artifact_root"] = artifact_root
+                parsed = urlparse(config.get("url", ""))
+                protocol = parsed.scheme or setting("machine_defaults.protocol", "ws")
+                url = config["url"] if old and old["ip"] == ip and old["port"] == port else f"{protocol}://{'[' + ip + ']' if ':' in ip else ip}:{port}{parsed.path}"
+                config.update(url=url,
+                              capabilities=list(dict.fromkeys(capabilities)), enabled=enabled,
+                              allow_cwd_override=True,
+                              allow_write=setting("machine_defaults.allow_write", False),
+                              allow_full_access=setting("machine_defaults.allow_full_access", False))
+                if "supervisor" in capabilities:
+                    config["capacity"] = 1
+                    was_supervisor = old is not None and "supervisor" in json.loads(old["config"]).get("capabilities", [])
+                    if not was_supervisor:
+                        config["orchestration_mode"] = setting("machine_defaults.orchestration_mode", "remote_sidecar")
+                    if config["orchestration_mode"] == "remote_sidecar":
+                        endpoint_changed = old is None or old["ip"] != ip or old["port"] != port
+                        if endpoint_changed or not was_supervisor:
+                            config["sidecar_token_file"] = sidecar_token_path(ip, port)
+                else:
+                    for key in ("capacity", "sidecar_token_env", "sidecar_token_file"):
+                        config.pop(key, None)
+                    config.pop("orchestration_mode", None)
             AgentConfig.from_dict(agent_id, config)
             if config.get("orchestration_mode") == "remote_sidecar":
                 reference = (config.get("sidecar_token_env"), config.get("sidecar_token_file"))
@@ -241,13 +292,14 @@ class AgentRegistry:
                         raise ValueError("主监督凭据引用重复，请在部署路径模板中使用 IP 和端口区分机器。")
             changed = old is None or credentials_changed or (old["ip"], old["port"], old["group_id"], json.loads(old["config"]).get("capabilities")) != (ip, port, body["groupId"], config["capabilities"])
             try:
-                db.execute("""INSERT INTO registered_agents VALUES (?, ?, ?, ?, ?, ?, ?)
+                db.execute("""INSERT INTO registered_agents
+                    (id, group_id, ip, port, config, test_status, tested_at, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET group_id=excluded.group_id, ip=excluded.ip,
                     port=excluded.port, config=excluded.config, test_status=excluded.test_status,
-                    tested_at=excluded.tested_at""", (agent_id, body["groupId"], ip, port, json.dumps(config),
-                    "untested" if changed else old["test_status"], None if changed else old["tested_at"]))
+                    tested_at=excluded.tested_at, remark=excluded.remark""", (agent_id, body["groupId"], ip, port, json.dumps(config),
+                    "untested" if changed else old["test_status"], None if changed else old["tested_at"], remark))
             except sqlite3.IntegrityError as error:
-                raise ValueError("该 IP 和端口已登记。") from error
+                raise ValueError("该 IP 和端口已登记（含已业务删除的机器）。") from error
             db.execute("""INSERT INTO agent_skill_settings(agent_id,enabled,root) VALUES(?,?,?)
                 ON CONFLICT(agent_id) DO UPDATE SET enabled=excluded.enabled,root=excluded.root""",
                 (agent_id, int(skill_enabled), skill_root))

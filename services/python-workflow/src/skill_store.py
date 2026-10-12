@@ -102,7 +102,7 @@ class SkillStore:
         if not db.execute("SELECT 1 FROM skill_group_packages WHERE group_id=? AND package_id=?", (group_id, package_id)).fetchone():
             raise SkillError("请先将 Skill 加入所选分组。", 409)
         for agent in agents:
-            if not db.execute("SELECT 1 FROM registered_agents WHERE id=? AND group_id=?", (agent, group_id)).fetchone():
+            if not db.execute("SELECT 1 FROM registered_agents WHERE id=? AND group_id=? AND deleted_at IS NULL", (agent, group_id)).fetchone():
                 raise SkillError("执行机必须属于所选分组。", 409)
         return name
 

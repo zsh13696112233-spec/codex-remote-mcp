@@ -44,6 +44,35 @@ class MachineServiceTest {
   }
 
   @Test
+  void machineRemarksPassThroughWithoutChangingIdentifiers() {
+    var body = JsonNodeFactory.instance.objectNode().put("remark", "开发机");
+    var saved = body.deepCopy().put("agentId", "worker");
+    var listing = JsonNodeFactory.instance.objectNode();
+    listing.putArray("agents").add(saved);
+    when(gateway.post("/agents", body)).thenReturn(saved);
+    when(gateway.put("/agents/worker", body)).thenReturn(saved);
+    when(gateway.get("/agents")).thenReturn(listing);
+    org.assertj.core.api.Assertions.assertThat(service.createMachine(body)).isEqualTo(saved);
+    org.assertj.core.api.Assertions.assertThat(service.updateMachine("worker", body))
+        .isEqualTo(saved);
+    org.assertj.core.api.Assertions.assertThat(service.machines()).isEqualTo(listing);
+    verify(gateway).put("/agents/worker", body);
+  }
+
+  @Test
+  void businessDeleteChecksReferencesBeforeCallingGateway() {
+    service.deleteMachine("worker");
+    var order = inOrder(groups, gateway);
+    order.verify(groups).lock();
+    order.verify(groups).checkMachineDelete("worker");
+    order.verify(gateway).delete("/agents/worker");
+    doThrow(new IllegalStateException("机器被引用")).when(groups).checkMachineDelete("used");
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.deleteMachine("used"))
+        .hasMessageContaining("引用");
+    verify(gateway, never()).delete("/agents/used");
+  }
+
+  @Test
   void managementUsesGatewayAndEncodesIdentifiers() {
     var body = JsonNodeFactory.instance.objectNode().put("name", "第一组");
     service.createGroup(body);
@@ -52,11 +81,13 @@ class MachineServiceTest {
     service.createMachine(body);
     service.updateMachine("worker", body);
     service.testMachine("worker");
+    service.updateRemark("worker", body);
     verify(groups).save(null, body);
     verify(groups).save("group/a", body);
     verify(groups).delete("empty");
     verify(gateway).post("/agents", body);
     verify(gateway).put("/agents/worker", body);
+    verify(gateway).put("/agents/worker/remark", body);
     verify(gateway).post(eq("/agents/worker/test"), any());
   }
 }

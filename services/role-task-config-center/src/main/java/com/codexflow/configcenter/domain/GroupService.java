@@ -165,24 +165,32 @@ public class GroupService {
       if (!id.equals(machine.path("agentId").asText())
           || Objects.equals(body.path("groupId").asText(), machine.path("groupId").asText()))
         continue;
-      if (count(
-              "SELECT COUNT(*) FROM codex_sop_sops s WHERE s.deleted=FALSE AND (s.supervisor_agent_id=? OR EXISTS (SELECT 1 FROM codex_sop_steps n WHERE n.sop_id=s.id AND n.agent_id=?))",
-              id,
-              id)
-          > 0) throw new ConflictFailure("机器已被有效 SOP 引用，请先调整 SOP 后再改组。");
-      // 活动历史可能来自已删除或已更换机器的配置；只读取提交快照中的机器编号。
-      for (String payload :
-          jdbc.queryForList(
-              "SELECT submitted_json FROM codex_sop_task_runs WHERE status IN ('submitting','queued','running','cancelling')",
-              String.class)) {
-        JsonNode spec = mapper.readTree(payload);
-        boolean referenced = id.equals(spec.path("supervisorAgentId").asText());
-        for (JsonNode node : spec.path("nodes"))
-          referenced |=
-              id.equals(node.path("executor").path("agentId").asText())
-                  || id.equals(node.path("agentId").asText());
-        if (referenced) throw new ConflictFailure("机器仍有关联任务运行，请结束运行后再改组。");
-      }
+      checkMachineReferences(id, "改组");
+    }
+  }
+
+  public void checkMachineDelete(String id) {
+    checkMachineReferences(id, "删除");
+  }
+
+  private void checkMachineReferences(String id, String action) {
+    if (count(
+            "SELECT COUNT(*) FROM codex_sop_sops s WHERE s.deleted=FALSE AND (s.supervisor_agent_id=? OR EXISTS (SELECT 1 FROM codex_sop_steps n WHERE n.sop_id=s.id AND n.agent_id=?))",
+            id,
+            id)
+        > 0) throw new ConflictFailure("机器已被有效 SOP 引用，请先调整 SOP 后再" + action + "。");
+    // 活动历史可能来自已删除或已更换机器的配置；只读取提交快照中的机器编号。
+    for (String payload :
+        jdbc.queryForList(
+            "SELECT submitted_json FROM codex_sop_task_runs WHERE status IN ('submitting','queued','running','cancelling')",
+            String.class)) {
+      JsonNode spec = mapper.readTree(payload);
+      boolean referenced = id.equals(spec.path("supervisorAgentId").asText());
+      for (JsonNode node : spec.path("nodes"))
+        referenced |=
+            id.equals(node.path("executor").path("agentId").asText())
+                || id.equals(node.path("agentId").asText());
+      if (referenced) throw new ConflictFailure("机器仍有关联任务运行，请结束运行后再" + action + "。");
     }
   }
 }

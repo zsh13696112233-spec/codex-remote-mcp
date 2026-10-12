@@ -118,7 +118,7 @@ class McpStore:
                               (body["packageId"], body["groupId"])).fetchone():
                 raise SkillError("此 MCP 包不属于所选分组。", 409)
             for agent, snapshot in snapshots.items():
-                row = db.execute("SELECT group_id,config,test_status FROM registered_agents WHERE id=?", (agent,)).fetchone()
+                row = db.execute("SELECT group_id,config,test_status FROM registered_agents WHERE id=? AND deleted_at IS NULL", (agent,)).fetchone()
                 if (not row or row["group_id"] != body["groupId"] or row["config"] != snapshot["config"]
                         or row["test_status"] != "passed"):
                     raise SkillError("执行机设置已变化，请刷新后重试。", 409)
@@ -219,6 +219,8 @@ class McpStore:
             row = db.execute("SELECT * FROM mcp_tasks WHERE id=?", (key,)).fetchone()
             if not row:
                 raise SkillError("找不到安装任务。", 404)
+            if db.execute("SELECT 1 FROM registered_agents WHERE id=? AND deleted_at IS NOT NULL", (row["agent_id"],)).fetchone():
+                raise SkillError("机器已删除，不能重试或检测安装。", 409)
             if row["state"] in ACTIVE and row["state"] != "review":
                 raise SkillError("安装任务仍在进行。", 409)
             if row["state"] == "review" and action != "check":

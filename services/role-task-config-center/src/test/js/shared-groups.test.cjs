@@ -11,10 +11,10 @@ function fixture(search='') {
   function element(){return {innerHTML:'',value:'',textContent:'',dataset:{},close(){},style:{},classList:{add(){},remove(){},toggle(){}},addEventListener(){},querySelector(){return element()},querySelectorAll(){return []},closest(){return element()}}}
   const navButtons=['roles','groups','skills'].map(page=>({...element(),dataset:{page}}));
   const document={querySelector(selector){if(!nodes.has(selector))nodes.set(selector,element());return nodes.get(selector)},querySelectorAll(selector){return selector==='nav button'?navButtons:[]},addEventListener(){},createElement:element};
-  const context=vm.createContext({document,window:{addEventListener(){}},location:{search,href:'http://localhost/'+search},history:{replaceState(){}},URL,URLSearchParams,console,setInterval(){},setTimeout(){},confirm(){return false},fetch(){throw Error('Unexpected network request')}});
+  const context=vm.createContext({document,window:{addEventListener(){}},location:{search,href:'http://localhost/'+search},history:{replaceState(){}},URL,URLSearchParams,console,queueMicrotask(){},setInterval(){},setTimeout(){},confirm(){return false},fetch(){throw Error('Unexpected network request')}});
   for(const name of ['groups.js','machines.js','run-catalog.js','task-schedules.js','skills.js','app.js']) {
     let script=fs.readFileSync(path.join(__dirname,'../../main/resources/static',name),'utf8');
-    if(name==='app.js')script=script.slice(0,script.indexOf('const initialPage='));
+    if(name==='app.js')script=script.slice(0,script.indexOf('const initialPage='))+script.slice(script.indexOf('const effortCatalogs ='));
     vm.runInContext(script,context,{filename:name});
   }
   const run=code=>vm.runInContext(code,context);
@@ -305,4 +305,32 @@ test('rebuilding the SOP editor invalidates an older selection response',async()
   run('renderSopWorkspace()');release();
   assert.equal(await pending,false);
   assert.equal(run('state.sop.draft.id'),'s1');
+});
+
+test('SOP machine remarks label both selectors while payloads retain IDs',()=>{
+  const {run,context}=fixture('?groupId=a');context.queueMicrotask=()=>{};
+  run(`state.agentsAvailable=true;state.agents[0].remark='<开发>';state.agents[0].ip='192.0.2.1';state.agents[0].port=4500;
+    state.agents.push({...state.agents[0],agentId:'duplicate',ip:'192.0.2.2'});
+    setDraft({...blankSop(),name:'草稿',supervisorAgentId:'ma',steps:[{roleId:'ra',displayName:'步骤',agentId:'ma'}]});`);
+  for(const scope of ['supervisor','executor']){
+    const html=run(`agentChoiceButtons('${scope}','${scope}')`);
+    assert.match(html,/&lt;开发&gt;（192.0.2.1:4500）/);assert.match(html,/192.0.2.2:4500/);
+    assert.match(html,/data-agent-id="ma"/);
+  }
+  assert.match(run('workflowInspectorHtml()'),/data-agent-display="supervisor" readonly title="[^"\n]*" value="&lt;开发&gt;（192.0.2.1:4500）"/);
+  assert.match(run('nodeInspectorHtml(state.sop.draft.steps[0])'),/data-agent-display="executor" readonly title="[^"\n]*" value="&lt;开发&gt;（192.0.2.1:4500）"/);
+  assert.equal(run('sopPayload().supervisorAgentId'),'ma');assert.equal(run('sopPayload().steps[0].agentId'),'ma');
+  run(`state.agents[0].remark=''`);assert.equal(run(`agentSelectionLabel('ma')`),'192.0.2.1:4500');
+  assert.equal(run(`agentDisplayLabel({ip:'::1',port:4500,remark:'本机'})`),'本机（[::1]:4500）');
+  assert.equal(run(`agentSelectionLabel('missing')`),'missing（不可用）');
+});
+test('machine refresh updates labels and menus without mutating an unsaved SOP',()=>{
+  const {run,context,nodes}=fixture('?groupId=a');
+  run(`state.agentsAvailable=true;setDraft({...blankSop(),name:'未保存草稿',supervisorAgentId:'ma',steps:[{roleId:'ra',agentId:'ma'}]});state.sop.selectedNodeId=state.sop.draft.steps[0]._clientId;`);
+  const before=run('JSON.stringify(state.sop.draft)');
+  const inputs=['supervisor','executor'].map(scope=>({dataset:{agentDisplay:scope},value:'旧名称',menu:{},closest(){return {querySelector:()=>this.menu}}}));
+  context.document.querySelectorAll=selector=>selector==='[data-agent-display]'?inputs:[];
+  run(`state.agents[0].remark='新备注';state.agents[0].ip='192.0.2.1';state.agents[0].port=4500;updateAgentRuntimeUi()`);
+  for(const input of inputs){assert.equal(input.value,'新备注（192.0.2.1:4500）');assert.match(input.menu.innerHTML,/新备注/)}
+  assert.equal(run('JSON.stringify(state.sop.draft)'),before);
 });

@@ -43,6 +43,129 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
   }
 
   @Test
+  void answerMentionFollowsSuccessfulCardAndSurvivesRecoveryWithoutDuplicates() {
+    String client = "answer-mention-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("mention-start")).workflowId();
+    var snapshot = objectMapper.createObjectNode();
+    snapshot.putObject("pendingAdvance").put("gateId", "mention-gate").put("state", "held");
+    var binding = store.binding(workflow).orElseThrow();
+    for (int i = 0; i < 4; i++) {
+      String user = "asker-" + i;
+      String webhook = i == 3 ? null : "https://oapi.dingtalk.com/robot/sendBySession?test=" + i;
+      var question =
+          new DingTalkModels.Message(
+              "mention-question-" + i,
+              "mention-group",
+              i == 2 ? "1" : "2",
+              user,
+              "问题",
+              true,
+              false,
+              null,
+              null,
+              List.of(),
+              webhook,
+              null);
+      var inbound = store.registerInbound(client, binding, question);
+      store.recordInputGate(question.messageId(), "mention-gate");
+      store.completeReply(workflow, inbound.workflowMessageId(), i + 1, "回答", null, snapshot);
+      String key = "assistant:" + inbound.workflowMessageId();
+      String card =
+          jdbc.queryForObject(
+              "select id from codex_sop_dingtalk_outbox where dedup_key = ?", String.class, key);
+      assertThat(
+              jdbc.queryForObject(
+                  "select count(*) from codex_sop_dingtalk_outbox where dedup_key = ?",
+                  Integer.class,
+                  key + ":mention"))
+          .isZero();
+      store.markOutboxFailed(card, new IllegalStateException("暂时失败"));
+      assertThat(
+              jdbc.queryForObject(
+                  "select count(*) from codex_sop_dingtalk_outbox where dedup_key = ?",
+                  Integer.class,
+                  key + ":mention"))
+          .isZero();
+      // 模拟已收到投递回执后重启；补记发送成功时入队，重复恢复不重复入队。
+      store.markAdvanceDelivered(card, "carrier-" + i, java.time.Instant.now());
+      if (i == 0) {
+        new TransactionTemplate(transactions)
+            .executeWithoutResult(
+                tx -> {
+                  store.markOutboxSent(card, "carrier-0");
+                  tx.setRollbackOnly();
+                });
+        assertThat(
+                jdbc.queryForObject(
+                    "select count(*) from codex_sop_dingtalk_outbox where dedup_key = ?",
+                    Integer.class,
+                    key + ":mention"))
+            .isZero();
+        assertThat(
+                jdbc.queryForObject(
+                    "select status from codex_sop_dingtalk_outbox where id = ?",
+                    String.class,
+                    card))
+            .isEqualTo("failed");
+      }
+      store.markOutboxSent(card, "carrier-" + i);
+      store.markOutboxSent(card, "carrier-" + i);
+      var reminders =
+          jdbc.queryForList(
+              "select payload_json from codex_sop_dingtalk_outbox where dedup_key = ?",
+              String.class,
+              key + ":mention");
+      if (i >= 2) {
+        assertThat(reminders).isEmpty();
+        continue;
+      }
+      assertThat(reminders).hasSize(1);
+      var payload = objectMapper.readTree(reminders.get(0));
+      assertThat(payload.path("text").asText()).isEqualTo("@" + user);
+      assertThat(payload.path("atUserId").asText()).isEqualTo(user);
+      assertThat(payload.path("sessionWebhook").asText()).isEqualTo(webhook);
+      String reminder =
+          jdbc.queryForObject(
+              "select id from codex_sop_dingtalk_outbox where dedup_key = ?",
+              String.class,
+              key + ":mention");
+      store.markOutboxFailed(reminder, new IllegalStateException("暂时失败"));
+      assertThat(
+              jdbc.queryForObject(
+                  "select status from codex_sop_dingtalk_outbox where id = ?",
+                  String.class,
+                  reminder))
+          .isEqualTo("failed");
+      jdbc.update("update codex_sop_dingtalk_outbox set attempt_count = 3 where id = ?", reminder);
+      store.markOutboxFailed(reminder, new IllegalStateException("会话已过期"));
+      assertThat(
+              jdbc.queryForObject(
+                  "select status from codex_sop_dingtalk_outbox where id = ?",
+                  String.class,
+                  reminder))
+          .isEqualTo("abandoned");
+      assertThat(
+              jdbc.queryForObject(
+                  "select status from codex_sop_dingtalk_outbox where id = ?", String.class, card))
+          .isEqualTo("sent");
+    }
+    store.refreshWaitingCards(workflow, objectMapper.createObjectNode());
+    var updates =
+        jdbc.queryForList(
+            "select id from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'waiting_card_update'",
+            String.class,
+            workflow);
+    for (String update : updates) store.markOutboxSent(update, null);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id = ? and message_kind = 'reply'",
+                Integer.class,
+                workflow))
+        .isEqualTo(2);
+  }
+
+  @Test
   void quotedProgressSurvivesHistoryLimitAndDuplicateDeliveryWithoutMergingDifferentGates() {
     String client = "quote-history-" + UUID.randomUUID();
     createTask(client);

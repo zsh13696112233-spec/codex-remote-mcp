@@ -54,8 +54,19 @@ public class MachineService {
     return gateway.put("/agents/" + segment(id), body);
   }
 
+  @org.springframework.transaction.annotation.Transactional
+  public JsonNode deleteMachine(String id) {
+    groups.lock();
+    groups.checkMachineDelete(id);
+    return gateway.delete("/agents/" + segment(id));
+  }
+
   public JsonNode models(String id) {
     return groups.modelCatalog(id);
+  }
+
+  public JsonNode updateRemark(String id, JsonNode body) {
+    return gateway.put("/agents/" + segment(id) + "/remark", body);
   }
 
   public JsonNode testMachine(String id) {

@@ -321,7 +321,7 @@ function workflowInspectorHtml(){
     <label>步骤默认模型<select data-sop-field="defaultStepModel">${MODELS.map(m=>`<option value="${m}" ${d.defaultStepModel===m?"selected":""}>${m==="gpt-6-astra"?"GPT-6 Astra":m}</option>`).join("")}</select></label>
     <div data-effort-control="workflow">${effortControlHtml()}</div>
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，两分钟后自动继续）</option></select></label>
-    <label>主监督执行机 *<div class="agent-picker"><input data-sop-field="supervisorAgentId" maxlength="128" value="${esc(d.supervisorAgentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
+    <label>主监督执行机 *<div class="agent-picker"><input data-agent-display="supervisor" readonly title="${esc(agentSelectionLabel(d.supervisorAgentId))}" value="${esc(agentSelectionLabel(d.supervisorAgentId))}" placeholder="请选择主监督执行机"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
     <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="43200" value="${d.supervisorTimeoutSec}"><small>最多 43200 秒（12 小时），保存后用于新运行。</small></label>
     <label class="check"><input data-sop-field="dingtalkShowExecutionDetails" type="checkbox" ${d.dingtalkShowExecutionDetails?"checked":""}> 钉钉显示思考过程和工具调用</label>
     <p class="meta">关闭后仍发送进度说明、步骤结果和确认通知。修改仅对新运行生效。</p>
@@ -350,20 +350,31 @@ function supervisorSelectionStatusHtml(agentId){
 function agentChoiceButtons(capability,scope){
   const agents=suggestedAgents(capability);
   return agents.length?agents.map(a=>{
-    if(capability!=="supervisor")return `<button type="button" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}"><span>${esc(a.name||a.agentId)}${a.port?` : ${a.port}`:""}</span>${a.defaultModel?`<small>${esc(a.defaultModel)}</small>`:""}</button>`;
+    if(capability!=="supervisor")return `<button type="button" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}"><span>${esc(agentDisplayLabel(a))}</span>${a.defaultModel?`<small>${esc(a.defaultModel)}</small>`:""}</button>`;
     const view=supervisorRuntimeView(a.agentId);
-    return `<button type="button" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}" title="${esc(view.detail)}"><span class="agent-choice-main"><i class="agent-status-dot ${view.state}"></i><span>${esc(a.name||a.agentId)}${a.port?` : ${a.port}`:""}</span></span><small class="agent-runtime-status ${view.state}">${esc(view.label)}</small></button>`;
+    return `<button type="button" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}" title="${esc(view.detail)}"><span class="agent-choice-main"><i class="agent-status-dot ${view.state}"></i><span>${esc(agentDisplayLabel(a))}</span></span><small class="agent-runtime-status ${view.state}">${esc(view.label)}</small></button>`;
   }).join(""):'<span class="agent-picker-empty">暂无可用建议</span>';
 }
+function agentDisplayLabel(agent){
+  const host=agent.ip||agent.name||agent.agentId;
+  const address=agent.port?`${host.includes(':')?`[${host}]`:host}:${agent.port}`:host;
+  return agent.remark?.trim()?`${agent.remark.trim()}（${address}）`:address;
+}
+function agentSelectionLabel(agentId){
+  if(!agentId)return "";
+  const agent=state.agents.find(a=>a.agentId===agentId);
+  if(!agent)return `${agentId}（${state.agentsAvailable?'不可用':'状态未知'}）`;
+  return agentDisplayLabel(agent)+(agent.enabled===false?'（已停用）':'');
+}
 function updateAgentRuntimeUi(){
-  document.querySelectorAll('[data-agent-choice="supervisor"]').forEach(button=>{
-    const view=supervisorRuntimeView(button.dataset.agentId),dot=button.querySelector(".agent-status-dot"),label=button.querySelector(".agent-runtime-status");
-    if(dot)dot.className=`agent-status-dot ${view.state}`;
-    if(label){label.className=`agent-runtime-status ${view.state}`;label.textContent=view.label}
-    button.title=view.detail;
+  document.querySelectorAll('[data-agent-display]').forEach(input=>{
+    const scope=input.dataset.agentDisplay;
+    const id=scope==='supervisor'?state.sop.draft?.supervisorAgentId:selectedStep()?.agentId;
+    input.value=agentSelectionLabel(id);input.title=input.value;
+    input.closest('.agent-picker').querySelector('.agent-picker-menu').innerHTML=agentChoiceButtons(scope==='supervisor'?'supervisor':'executor',scope);
   });
-  const selected=document.querySelector("[data-supervisor-selection-status]"),input=document.querySelector('[data-sop-field="supervisorAgentId"]');
-  if(selected&&input){const view=supervisorRuntimeView(input.value.trim());selected.className=`agent-selection-status ${view.state}`;selected.innerHTML=`<i></i><span>${esc(view.label)}</span><b>${esc(view.detail)}</b>`}
+  const selected=document.querySelector("[data-supervisor-selection-status]");
+  if(selected){const view=supervisorRuntimeView(state.sop.draft?.supervisorAgentId||"");selected.className=`agent-selection-status ${view.state}`;selected.innerHTML=`<i></i><span>${esc(view.label)}</span><b>${esc(view.detail)}</b>`}
 }
 async function refreshAgentRuntimeStatuses(){
   if(document.hidden||!["sops","runtime"].includes(state.page)||state.agentRefreshInFlight)return;
@@ -386,7 +397,7 @@ function nodeInspectorHtml(s){
     <div class="selected-role"><i>${esc(role.name.slice(0,1))}</i><div><strong>${esc(role.name)}</strong><small>${esc(role.duty||"暂无职责说明")}</small></div>${role.enabled===false?'<b>已停用</b>':""}</div>
     <label>显示名称 *<input data-node-field="displayName" value="${esc(s.displayName)}"></label>
     <div class="instruction-field"><span class="field-title">步骤执行要求 * <em class="field-scope current-step">当前步骤</em></span><button type="button" data-instruction-edit aria-haspopup="dialog" aria-controls="instructionDialog">编辑</button><small class="field-help">说明具体动作、使用哪些输入以及处理范围，仅用于当前步骤。</small></div>
-    <label>执行机 *<div class="agent-picker"><input data-node-field="agentId" maxlength="128" value="${esc(s.agentId||"")}" placeholder="例如：local" autocomplete="off"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部步骤执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("executor","executor")}</div></div></label>
+    <label>执行机 *<div class="agent-picker"><input data-agent-display="executor" readonly title="${esc(agentSelectionLabel(s.agentId))}" value="${esc(agentSelectionLabel(s.agentId))}" placeholder="请选择执行机"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部步骤执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("executor","executor")}</div></div></label>
     <label>模型<select data-node-field="modelOverride"><option value="">继承工作流默认模型</option>${MODELS.map(m=>`<option value="${m}" ${s.modelOverride===m?"selected":""}>${m==="gpt-6-astra"?"GPT-6 Astra":m}</option>`).join("")}</select></label>
     <div data-effort-control="node">${effortControlHtml(s)}</div>
     <div class="inspector-grid"><label>超时（秒）<input data-node-field="timeoutSec" type="number" min="10" max="7200" value="${s.timeoutSec}"></label><label>工作目录<input data-node-field="workingDirectory" value="${esc(s.workingDirectory)}" placeholder="可选"></label></div>
@@ -420,7 +431,7 @@ function updateField(target,obj,field){
 }
 function validateSop(){
   const d=state.sop.draft;if(!d)return"请先选择或新建工作流。";if(!d.groupId||!groupState.items.some(g=>g.id===d.groupId))return"请先选择有效分组。";if(!d.name.trim())return"请输入工作流名称。";
-  if(!(d.supervisorAgentId||"").trim())return"请输入主监督执行机 ID。";
+  if(!(d.supervisorAgentId||"").trim())return"请选择主监督执行机。";
   const supervisor=state.agents.find(a=>a.agentId===d.supervisorAgentId);
   if(!supervisor?.capabilities?.includes("supervisor"))return"请选择已登记的主监督。";
   if(supervisor.groupId!==d.groupId)return"请选择当前分组的主监督。";

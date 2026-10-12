@@ -248,10 +248,24 @@ class DingTalkExecutionNoticeTest {
   }
 
   @Test
-  void removesSensitiveLocationsAndCredentialsFromPublicText() {
+  void preservesUnixAndWindowsPathsInCardBody() {
+    String text = "方案在 C:/work/项目/方案.md 和 /home/user/project/方案.md";
+    var payload =
+        new ObjectMapper()
+            .createObjectNode()
+            .put("gateId", "old")
+            .put("text", DingTalkExecutionNotice.safe(text));
+    var card =
+        DingTalkWaitingCard.render("workflow", payload, new ObjectMapper().createObjectNode());
+    assertThat(card.get("markdown").toString()).contains(text).doesNotContain("[路径已隐藏]");
+  }
+
+  @Test
+  void preservesFilePathsWhileRemovingInternalLinksAndCredentials() {
     String text =
         "正在读取 C:\\private\\input.png https://internal.example/x token=secret sk-abc123 thread_123";
     assertThat(DingTalkExecutionNotice.safe(text))
-        .doesNotContain("private", "internal.example", "secret", "sk-abc123", "thread_123");
+        .contains("C:\\private\\input.png")
+        .doesNotContain("internal.example", "secret", "sk-abc123", "thread_123");
   }
 }

@@ -224,6 +224,11 @@ class DingTalkStore {
                         .put("answer", true)
                         .put("atUserId", inbound.senderUserId)
                         .put("actionId", actionId);
+                if (group
+                    && hasTextValue(inbound.senderUserId)
+                    && hasTextValue(inbound.sessionWebhook)) {
+                  payload.put("answerMention", true).put("sessionWebhook", inbound.sessionWebhook);
+                }
               }
               enqueue(
                   "assistant:" + workflowMessageId,
@@ -1026,11 +1031,34 @@ class DingTalkStore {
 
   @Transactional
   public void markOutboxSent(String id, String sentMessageId) {
-    DingTalkOutboxEntity item = outbox.findById(id).orElseThrow();
+    DingTalkOutboxEntity item = outbox.lockById(id).orElseThrow();
+    boolean alreadySent = "sent".equals(item.status);
     item.status = "sent";
     item.lastError = null;
     item.sentMessageId = sentMessageId;
     item.updatedAt = Instant.now();
+    // 与发送状态一起提交；恢复已投递卡片时也经过此处，避免漏建或重复提醒。
+    JsonNode payload = toOutbox(item).payload();
+    if (!alreadySent
+        && "waiting_card".equals(item.messageKind)
+        && "GROUP".equals(item.targetType)
+        && payload.path("answer").asBoolean()
+        && payload.path("answerMention").asBoolean()) {
+      enqueue(
+          item.dedupKey + ":mention",
+          item.workflowId,
+          item.conversationId,
+          item.targetType,
+          item.targetExternalId,
+          item.replyToMessageId,
+          "reply",
+          objectMapper
+              .createObjectNode()
+              .put("text", "@" + payload.path("atUserId").asText())
+              .put("atUserId", payload.path("atUserId").asText())
+              .put("sessionWebhook", payload.path("sessionWebhook").asText())
+              .put("answerMention", true));
+    }
     if ("card".equals(item.messageKind) && item.workflowId != null && sentMessageId != null) {
       DingTalkWorkflowBindingEntity binding = requiredBinding(item.workflowId);
       binding.progressCardInstanceId = sentMessageId;
@@ -1073,7 +1101,12 @@ class DingTalkStore {
   public void markOutboxFailed(String id, RuntimeException error) {
     DingTalkOutboxEntity item = outbox.findById(id).orElseThrow();
     item.status =
-        "reply".equals(item.messageKind) && item.advanceGateId == null ? "abandoned" : "failed";
+        "reply".equals(item.messageKind)
+                && item.advanceGateId == null
+                && (!toOutbox(item).payload().path("answerMention").asBoolean()
+                    || item.attemptCount >= 3)
+            ? "abandoned"
+            : "failed";
     item.lastError = abbreviate(error.getMessage(), 2000);
     item.nextAttemptAt =
         Instant.now().plus(Math.min(60, 1L << Math.min(item.attemptCount, 6)), ChronoUnit.SECONDS);

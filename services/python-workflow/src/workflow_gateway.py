@@ -1545,6 +1545,10 @@ async def manage_machines(request: Request) -> Response:
                 raise ValueError("请选择有效分组。")
             await _database_call(registry.validate, body["supervisorId"], ids, group_id=body.get("groupId"))
             result = {"valid": True}
+        elif request.method == "DELETE" and path.startswith("/agents/"):
+            result = await _database_call(registry.delete_agent, key)
+        elif path.endswith("/remark"):
+            result = await _database_call(registry.save_remark, body, key)
         elif path.endswith("/test"):
             if key not in registry.rows():
                 raise ValueError("找不到机器。")
@@ -2056,7 +2060,8 @@ def create_app(
             Route("/agents/validate", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}/models", agent_models, methods=["GET"]),
             Route("/agents/{agent_id}/test", manage_machines, methods=["POST"]),
-            Route("/agents/{agent_id}", manage_machines, methods=["PUT"]),
+            Route("/agents/{agent_id}/remark", manage_machines, methods=["PUT"]),
+            Route("/agents/{agent_id}", manage_machines, methods=["PUT", "DELETE"]),
             Route("/internal/v1/agents", internal_group_agents, methods=["GET"]),
             Route(
                 "/internal/v1/sidecars/heartbeat",

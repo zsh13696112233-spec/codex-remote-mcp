@@ -120,7 +120,8 @@ class DingTalkResultTextTest {
     var value = (ObjectNode) json.readTree(result());
     value.put("summary", "结果 C:\\private\\file.txt token=secret http://127.0.0.1:8080");
     assertThat(DingTalkResultText.display(value.toString()))
-        .doesNotContain("private", "secret", "127.0.0.1");
+        .contains("C:\\private\\file.txt")
+        .doesNotContain("secret", "127.0.0.1");
   }
 
   @Test

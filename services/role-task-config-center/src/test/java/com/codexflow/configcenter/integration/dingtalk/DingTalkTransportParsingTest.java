@@ -12,6 +12,17 @@ import tools.jackson.databind.node.ObjectNode;
 class DingTalkTransportParsingTest {
 
   @Test
+  void mentionOnlyReplyIncludesTextAndActualAtParameter() {
+    var payload =
+        new ObjectMapper().createObjectNode().put("text", "@asker").put("atUserId", "asker");
+    var body = transport.replyBody("GROUP", payload);
+    assertThat(body.path("text").path("content").asText()).isEqualTo("@asker");
+    assertThat(body.path("at").path("atUserIds").get(0).asText()).isEqualTo("asker");
+    assertThat(body.path("at").path("isAtAll").asBoolean()).isFalse();
+    assertThat(transport.replyBody("PERSON", payload).has("at")).isFalse();
+  }
+
+  @Test
   void internalTemplateSelectorIsNotSentAsCardParameter() {
     var parameters =
         transport.stringValues(
