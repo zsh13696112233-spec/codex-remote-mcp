@@ -351,9 +351,10 @@ function supervisorSelectionStatusHtml(agentId){
 function agentChoiceButtons(capability,scope){
   const agents=suggestedAgents(capability);
   return agents.length?agents.map(a=>{
-    if(capability!=="supervisor")return `<button type="button" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}"><span>${esc(agentDisplayLabel(a))}</span>${a.defaultModel?`<small>${esc(a.defaultModel)}</small>`:""}</button>`;
+    const remark=a.remark?.trim(),address=agentDisplayLabel({...a,remark:''});
+    if(capability!=="supervisor")return `<button type="button" class="agent-choice" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}" title="${esc(agentDisplayLabel(a))}${a.defaultModel?` · ${esc(a.defaultModel)}`:''}"><span class="agent-choice-main"><span>${esc(remark||address)}</span></span>${a.defaultModel?`<small class="agent-choice-model">${esc(a.defaultModel)}</small>`:""}${remark?`<span class="agent-choice-address">${esc(address)}</span>`:''}</button>`;
     const view=supervisorRuntimeView(a.agentId);
-    return `<button type="button" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}" title="${esc(view.detail)}"><span class="agent-choice-main"><i class="agent-status-dot ${view.state}"></i><span>${esc(agentDisplayLabel(a))}</span></span><small class="agent-runtime-status ${view.state}">${esc(view.label)}</small></button>`;
+    return `<button type="button" class="agent-choice agent-supervisor-choice" data-agent-choice="${scope}" data-agent-id="${esc(a.agentId)}" title="${esc(agentDisplayLabel(a))} · ${esc(view.detail)}"><span class="agent-choice-main"><i class="agent-status-dot ${view.state}"></i><span>${esc(remark||address)}</span></span><small class="agent-runtime-status ${view.state}">${esc(view.label)}</small>${remark?`<span class="agent-choice-address">${esc(address)}</span>`:''}</button>`;
   }).join(""):'<span class="agent-picker-empty">暂无可用建议</span>';
 }
 function agentDisplayLabel(agent){
@@ -680,18 +681,18 @@ function effortControlHtml(step=null) {
   const missing=steps.some(x=>!x.agentId), loading=steps.some(x=>x.agentId&&(!effortCatalogs.has(x.agentId)||effortCatalogs.get(x.agentId).loading));
   const errors=steps.some(x=>effortCatalogs.get(x.agentId)?.error);
   const options=Object.keys(EFFORT_LABELS).filter(x=>values.has(x));
-  let help=!steps.length?'添加步骤后可选择具体强度。':missing?'请先选择步骤执行机。':loading?'正在读取支持的思考强度…':errors?'思考强度加载失败，请重试。':'强度越高通常耗时越长；保存时会检查每个步骤是否支持。';
+  let help=!steps.length?'添加步骤后可选择具体强度。':missing?'请先选择步骤执行机。':loading?'正在读取支持的思考强度…':errors?'思考强度加载失败，请刷新页面重试。':'';
   const effective=step?(value||d.defaultStepReasoningEffort):null;
   if(step&&effective&&!loading&&!errors&&!missing&&!values.has(effective))help='当前模型不支持所选或继承的强度，请重新选择。';
-  return `<label>${step?'思考强度':'步骤默认思考强度'}<select ${step?'data-node-field="reasoningEffortOverride"':'data-sop-field="defaultStepReasoningEffort"'}><option value="">${step?'继承流程设置':'使用执行服务默认值'}</option>${value&&!values.has(value)?`<option value="${esc(value)}" selected>${esc(EFFORT_LABELS[value]||value)}（待验证）</option>`:''}${options.map(x=>`<option value="${x}" ${x===value?'selected':''}>${EFFORT_LABELS[x]}</option>`).join('')}</select><small>${help}</small></label>${steps.length?'<button type="button" data-effort-refresh>刷新选项</button>':''}`;
+  return `<label>${step?'思考强度':'步骤默认思考强度'}<select ${step?'data-node-field="reasoningEffortOverride"':'data-sop-field="defaultStepReasoningEffort"'}><option value="">${step?'继承流程设置':'使用执行服务默认值'}</option>${value&&!values.has(value)?`<option value="${esc(value)}" selected>${esc(EFFORT_LABELS[value]||value)}（待验证）</option>`:''}${options.map(x=>`<option value="${x}" ${x===value?'selected':''}>${EFFORT_LABELS[x]}</option>`).join('')}</select>${help?`<small>${help}</small>`:''}</label>`;
 }
-async function refreshEffortControls(force=false) {
+async function refreshEffortControls() {
   if(state.page!=='sops'||!state.sop.draft)return;
   const steps=state.sop.tab==='node'&&selectedStep()?[selectedStep()]:state.sop.draft.steps;
   const requests=[];
   for(const id of new Set(steps.map(s=>s.agentId).filter(Boolean))) {
     const old=effortCatalogs.get(id);
-    if(old?.loading||(!force&&old))continue;
+    if(old)continue;
     const record={loading:true};effortCatalogs.set(id,record);
     requests.push(api(`/api/agents/${encodeURIComponent(id)}/models`).then(result=>{
       record.models=Array.isArray(result.models)?result.models:[];
@@ -717,7 +718,6 @@ function openInstructionEditor() {
 }
 document.addEventListener('click',e=>{
   if(e.target.closest('[data-instruction-edit]'))openInstructionEditor();
-  if(e.target.closest('[data-effort-refresh]'))refreshEffortControls(true);
 });
 document.querySelector('#instructionForm').addEventListener('submit',e=>{
   e.preventDefault();

@@ -758,7 +758,9 @@ class DingTalkBotCoordinator implements SmartLifecycle {
               "blocked".equals(snapshot.path("termination").path("outcome").asText())
                   ? "因阻断结束。"
                   : "无待处理任务，已结束。";
-        if (TERMINAL_EVENTS.contains(type) && !snapshot.path("response").asText().isBlank())
+        if ("workflow.cancelled".equals(type)) {
+          notice += cancellationSummary(snapshot);
+        } else if (TERMINAL_EVENTS.contains(type) && !snapshot.path("response").asText().isBlank())
           notice +=
               "\n执行结果：\n"
                   + DingTalkExecutionNotice.safe(
@@ -806,6 +808,24 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     } catch (RuntimeException ignored) {
       // 下一轮事件轮询会继续校正状态；不影响已经持久化的助手回复。
     }
+  }
+
+  private static String cancellationSummary(JsonNode snapshot) {
+    int completed = 0;
+    int notStarted = 0;
+    for (JsonNode node : snapshot.path("nodes")) {
+      String status = node.path("status").asText();
+      if ("completed".equals(status)) {
+        completed++;
+      } else if (Set.of("cancelled", "pending", "queued").contains(status)
+          && !node.hasNonNull("startedAt")) {
+        notStarted++;
+      }
+    }
+    String summary = "\n停止后不会继续执行后续步骤。";
+    if (completed > 0) summary += "\n已完成 " + completed + " 步，已有结果已保留。";
+    if (notStarted > 0) summary += "\n" + notStarted + " 个步骤未执行。";
+    return summary;
   }
 
   private void recordProcessWithRetry(

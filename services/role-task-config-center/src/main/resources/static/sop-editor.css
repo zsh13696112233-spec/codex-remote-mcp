@@ -80,3 +80,12 @@
 }
 
 .agent-picker-menu button>span{min-width:0;overflow-wrap:anywhere}.agent-picker-menu button>small{flex-shrink:0}
+
+.agent-picker-menu .agent-choice{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px}
+.agent-choice .agent-choice-main>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-choice .agent-runtime-status,.agent-choice .agent-choice-model{white-space:nowrap}
+.agent-choice .agent-choice-model{max-width:90px;overflow:hidden;text-overflow:ellipsis}
+.agent-choice .agent-choice-address{grid-column:1/-1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#7c8493;font-size:11px;font-weight:500}
+
+.agent-supervisor-choice .agent-choice-address{padding-left:16px}
+.agent-picker>input{text-overflow:ellipsis}

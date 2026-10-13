@@ -2135,7 +2135,11 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             },
         )
         raise
-    store.attach_node_job(workflow_id, node_id, job.snapshot())
+    try:
+        store.attach_node_job(workflow_id, node_id, job.snapshot())
+    except Exception:
+        await orchestrator.cancel(job.job_id)
+        raise
     _track_workflow_node(workflow_id, node_id, job)
     return job.snapshot()
 

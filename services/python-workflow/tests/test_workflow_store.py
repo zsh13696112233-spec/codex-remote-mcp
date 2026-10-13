@@ -40,6 +40,25 @@ def serial_workflow() -> dict:
 
 
 class WorkflowStoreTests(unittest.TestCase):
+    def test_supervisor_failure_closes_steps_and_rejects_late_results(self):
+        self.store.create_workflow(serial_workflow())
+        self.store.prepare_node_dispatch("serial-demo", "a")
+        self.store.sync_node_job("serial-demo", "a", {"status": "completed", "response": "保留结果"})
+        self.store.prepare_node_dispatch("serial-demo", "b")
+        self.store.attach_node_job("serial-demo", "b", {"job_id": "job-b", "status": "running"})
+        self.store.finish_workflow("serial-demo", supervisor_status="failed", response=None, error="429")
+        snapshot = self.store.get_workflow("serial-demo")
+        self.assertEqual([n["status"] for n in snapshot["nodes"]], ["completed", "interrupted", "skipped"])
+        self.assertEqual(snapshot["nodes"][0]["response"], "保留结果")
+        self.assertIn("需核实", snapshot["nodes"][1]["error"])
+        self.assertTrue(snapshot["nodes"][1]["finishedAt"])
+        self.assertEqual(snapshot["error"], "429")
+        self.store.sync_node_job("serial-demo", "b", {"job_id": "job-b", "status": "completed"})
+        with self.assertRaisesRegex(RuntimeError, "已结束"):
+            self.store.attach_node_job("serial-demo", "b", {"job_id": "late", "status": "running"})
+        self.store.finish_workflow("serial-demo", supervisor_status="failed", response=None, error="late")
+        self.assertEqual(self.store.get_workflow("serial-demo"), snapshot)
+
     def test_effort_survives_storage_and_old_schema_upgrade(self):
         # Simulate a database created before the nullable column existed.
         with self.store._connect() as db:

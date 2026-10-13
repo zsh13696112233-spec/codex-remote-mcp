@@ -3119,6 +3119,11 @@ class WorkflowStore(InputImageStore, WaitStore):
                     lease_token=lease_token,
                     require_lease=True,
                 )
+            if connection.execute(
+                "SELECT 1 FROM workflows WHERE workflow_id=? AND status IN ('completed','failed','cancelled')",
+                (workflow_id,),
+            ).fetchone():
+                raise RuntimeError("工作流已结束，不能绑定新的步骤执行。")
             connection.execute(
                 """
                 UPDATE workflow_nodes
@@ -3493,6 +3498,26 @@ class WorkflowStore(InputImageStore, WaitStore):
                 """,
                 (status, supervisor_status, response, error, timestamp, workflow_id),
             )
+            if status != "completed":
+                unfinished = connection.execute(
+                    "SELECT node_id, status FROM workflow_nodes WHERE workflow_id=? "
+                    "AND status IN ('pending', 'queued', 'running', 'cancelling', 'waiting')",
+                    (workflow_id,),
+                ).fetchall()
+                for node in unfinished:
+                    node_status = "skipped" if node["status"] == "pending" else "interrupted"
+                    node_error = (
+                        "工作流已结束，本步骤未执行。" if node_status == "skipped" else
+                        "工作流异常结束，本步骤已中断跟踪；执行端是否停止及外部操作结果需核实。"
+                    )
+                    connection.execute(
+                        "UPDATE workflow_nodes SET status=?, error=COALESCE(error, ?), "
+                        "finished_at=COALESCE(finished_at, ?) WHERE workflow_id=? AND node_id=?",
+                        (node_status, node_error, timestamp, workflow_id, node["node_id"]),
+                    )
+                    self._add_event_with_connection(connection, workflow_id, node["node_id"],
+                        "gateway", f"node.{node_status}",
+                        {"status": node_status, "error": node_error}, timestamp)
             self._release_supervisor_lease_with_connection(
                 connection, workflow_id, f"workflow_{status}", timestamp
             )

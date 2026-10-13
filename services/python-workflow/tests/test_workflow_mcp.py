@@ -13,6 +13,25 @@ from workflow_store import WorkflowStore
 from tests.registry_fixtures import (fixture_orchestrator, fixture_gateway, fixture_app, FixtureWorkflowStore)
 
 class WorkflowMcpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dispatch_finished_during_start_cancels_unattached_job(self):
+        from tests.test_workflow_store import serial_workflow
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            store.create_workflow(serial_workflow())
+            job = Mock(job_id="late-job")
+            job.snapshot.return_value = {"job_id": "late-job", "status": "queued"}
+            async def dispatch(**kwargs):
+                store.finish_workflow("serial-demo", supervisor_status="failed", response=None, error="429")
+                return job
+            orchestrator = Mock()
+            orchestrator.dispatch = AsyncMock(side_effect=dispatch)
+            orchestrator.cancel = AsyncMock()
+            with patch.object(service, "_workflow_store", store), patch.object(service, "orchestrator", orchestrator):
+                with self.assertRaisesRegex(RuntimeError, "已结束"):
+                    await service.dispatch_node("serial-demo", "a")
+            orchestrator.cancel.assert_awaited_once_with("late-job")
+            self.assertEqual(store.get_node("serial-demo", "a")["status"], "interrupted")
+
     async def test_dispatch_rechecks_deadline_when_release_loses_to_delivery(self) -> None:
         store = Mock()
         store.pending_advance_for_node.side_effect = [

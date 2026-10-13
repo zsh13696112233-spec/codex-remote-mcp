@@ -989,6 +989,47 @@ class DingTalkBotCoordinatorTest {
   }
 
   @Test
+  void cancellationUsesStepStateInsteadOfStaleSupervisorResponse() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var snapshot =
+        json.createObjectNode()
+            .put("status", "cancelled")
+            .put("response", "第1步仍在最后确认中，我会等待平台继续处理。");
+    var nodes = snapshot.putArray("nodes");
+    nodes.addObject().put("status", "completed").put("response", "方案已保存");
+    nodes.addObject().put("status", "cancelled").putNull("startedAt");
+    nodes.addObject().put("status", "cancelled").putNull("startedAt");
+    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
+    var event = json.createObjectNode().put("type", "workflow.cancelled");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 2L);
+    verify(store)
+        .recordProcess(
+            eq(ID),
+            isNull(),
+            eq(2L),
+            eq("任务执行：任务已停止。\n停止后不会继续执行后续步骤。\n已完成 1 步，已有结果已保留。\n2 个步骤未执行。"),
+            eq(true),
+            eq(true));
+    assertThat(snapshot.path("response").asText()).contains("等待平台");
+    assertThat(nodes.get(0).path("response").asText()).isEqualTo("方案已保存");
+  }
+
+  @Test
+  void cancellationDoesNotCallStartedOrSkippedStepsUnexecuted() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var snapshot = json.createObjectNode().put("status", "cancelled").put("response", "继续等待");
+    var nodes = snapshot.putArray("nodes");
+    nodes.addObject().put("status", "cancelled").put("startedAt", "2026-10-13T12:00:00+08:00");
+    nodes.addObject().put("status", "skipped");
+    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
+    var event = json.createObjectNode().put("type", "workflow.cancelled");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 2L);
+    verify(store)
+        .recordProcess(
+            eq(ID), isNull(), eq(2L), eq("任务执行：任务已停止。\n停止后不会继续执行后续步骤。"), eq(true), eq(true));
+  }
+
+  @Test
   void normalGroupMessageWithoutMentionIsIgnored() {
     bot.safelyHandleMessage(
         new DingTalkModels.Message("id", "group", "2", "user", "销售日报", false, false, null));

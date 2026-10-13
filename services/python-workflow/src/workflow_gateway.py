@@ -610,7 +610,7 @@ class WorkflowGateway:
                     else:
                         consecutive_no_progress_turns = 0
                     if consecutive_no_progress_turns >= 3:
-                        await _database_call(self.store.finish_workflow,
+                        await self._finish_supervisor_workflow(
                             workflow_id,
                             supervisor_status="failed",
                             response=job_snapshot.get("response"),
@@ -630,7 +630,7 @@ class WorkflowGateway:
                     )
                     continue
 
-                await _database_call(self.store.finish_workflow,
+                await self._finish_supervisor_workflow(
                     workflow_id,
                     supervisor_status=str(job_snapshot["status"]),
                     response=job_snapshot.get("response"),
@@ -647,7 +647,7 @@ class WorkflowGateway:
             except ValueError:
                 pass
             if workflow_id not in self._control_in_progress and not held and active:
-                await _database_call(self.store.finish_workflow,
+                await self._finish_supervisor_workflow(
                     workflow_id,
                     supervisor_status="cancelled",
                     response=None,
@@ -667,12 +667,40 @@ class WorkflowGateway:
                 event_type="supervisor.failed_to_start",
                 payload={"error": str(error), "errorType": type(error).__name__},
             )
-            await _database_call(self.store.finish_workflow,
+            await self._finish_supervisor_workflow(
                 workflow_id,
                 supervisor_status="failed",
                 response=None,
                 error=str(error),
             )
+
+    async def _finish_supervisor_workflow(
+        self, workflow_id: str, *, supervisor_status: str,
+        response: str | None, error: str | None,
+    ) -> None:
+        snapshot = await _database_call(self.store.get_workflow, workflow_id)
+        if snapshot["status"] in TERMINAL_WORKFLOW_STATUSES or snapshot.get("termination") or self._advance_is_held(snapshot):
+            return
+        # 步骤通常由独立 MCP/Sidecar 进程持有，不能用网关进程的 jobs 查找。
+        for node in snapshot["nodes"]:
+            if node["status"] not in {"queued", "running", "cancelling"}:
+                continue
+            outcome = "unconfirmed"
+            error_type = None
+            if node.get("threadId") and node.get("turnId"):
+                try:
+                    await asyncio.wait_for(self.orchestrator.interrupt_turn(
+                        agent_id=node["agentId"], thread_id=node["threadId"],
+                        turn_id=node["turnId"],
+                    ), timeout=10)
+                    outcome = "requested"
+                except Exception as failure:
+                    error_type = type(failure).__name__
+            await _database_call(self.store.add_event, workflow_id, node_id=node["id"],
+                source="gateway", event_type="node.interruption_requested",
+                payload={"outcome": outcome, "errorType": error_type})
+        await _database_call(self.store.finish_workflow, workflow_id,
+            supervisor_status=supervisor_status, response=response, error=error)
 
     @staticmethod
     def _node_progress_fingerprint(snapshot: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:

@@ -101,6 +101,39 @@ class SupervisorPromptTests(unittest.TestCase):
         self.assertNotIn("token_env", value)
 
 
+class SupervisorFailureCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failure_interrupts_external_step_before_finishing(self):
+        from tests.test_workflow_store import serial_workflow
+        for failure in (None, ConnectionError("private endpoint")):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as directory:
+                store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+                store.create_workflow(serial_workflow())
+                store.prepare_node_dispatch("serial-demo", "a")
+                store.attach_node_job("serial-demo", "a", {
+                    "job_id": "external-job", "thread_id": "original-thread",
+                    "turn_id": "original-turn", "status": "running",
+                })
+                orchestrator = type("Fake", (), {})()
+                async def interrupt(**kwargs):
+                    self.assertNotEqual(store.get_workflow("serial-demo")["status"], "failed")
+                    if failure:
+                        raise failure
+                orchestrator.interrupt_turn = AsyncMock(side_effect=interrupt)
+                gateway = fixture_gateway(store, orchestrator)
+                await gateway._finish_supervisor_workflow("serial-demo",
+                    supervisor_status="failed", response=None, error="429")
+                orchestrator.interrupt_turn.assert_awaited_once_with(
+                    agent_id="local", thread_id="original-thread", turn_id="original-turn")
+                snapshot = store.get_workflow("serial-demo")
+                self.assertEqual(snapshot["status"], "failed")
+                self.assertEqual(snapshot["nodes"][0]["status"], "interrupted")
+                events = store.list_events("serial-demo")
+                self.assertNotIn("private endpoint", json.dumps(events))
+                await gateway._finish_supervisor_workflow("serial-demo",
+                    supervisor_status="failed", response=None, error="429")
+                self.assertEqual(orchestrator.interrupt_turn.await_count, 1)
+
+
 class SupervisorReachabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_probe_uses_two_failures_and_recovers_online(self) -> None:
         class FakeOrchestrator:

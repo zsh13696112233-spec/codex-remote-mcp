@@ -60,11 +60,13 @@ def main():
             page.route('**/api/**', route_api)
             url = f'http://127.0.0.1:{server.server_port}/?page=sops&groupId={GROUP}'
             page.goto(url)
-            page.locator('[data-effort-control]').get_by_text('思考强度加载失败，请重试。').wait_for()
+            page.locator('[data-effort-control]').get_by_text('思考强度加载失败，请刷新页面重试。').wait_for()
             fail[0] = False
-            page.locator('[data-effort-refresh]').click()
+            assert page.locator('[data-effort-refresh]').count() == 0
+            page.reload()
             default = page.locator('[data-sop-field=defaultStepReasoningEffort]')
             default.locator('option[value=high]').wait_for(state='attached')
+            assert page.get_by_text('强度越高通常耗时越长；保存时会检查每个步骤是否支持。', exact=True).count() == 0
             default.select_option('high')
             page.locator('.flow-node').click()
             override = page.locator('[data-node-field=reasoningEffortOverride]')
