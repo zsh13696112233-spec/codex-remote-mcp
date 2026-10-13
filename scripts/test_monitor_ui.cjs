@@ -89,3 +89,18 @@ test('partial result responses retain cached output, while restarted attempts cl
   await app.run('refresh()');
   assert.equal(app.run('state.snapshot.nodes[0].response'), null);
 });
+
+test('all step documents are displayed and unavailable bodies have no links', () => {
+  const app = load();
+  app.run(`renderSteps([{id:'a', status:'completed', documents:[
+    ...Array.from({length:7}, (_, i) => ({id:'doc-'+i, name:'文档'+i, available:true})),
+    {id:'missing',name:'缺失文件',available:false,error:'未同步'},
+    {id:'previous',name:'旧正文',available:true,error:'未同步'}
+  ]}])`);
+  const all = [];
+  const walk = element => {all.push(element); element.children.forEach(walk);};
+  walk(app.elements.get('#steps'));
+  assert.equal(all.filter(element => element.href?.startsWith('document.html')).length, 8);
+  assert.equal(all.find(element => element.textContent === '缺失文件（未同步）').href, undefined);
+  assert.ok(all.find(element => element.textContent?.includes('查看上次成功版本')));
+});

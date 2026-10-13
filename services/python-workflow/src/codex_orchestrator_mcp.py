@@ -357,6 +357,7 @@ class Job:
     staged_artifacts: list[dict[str, Any]] = field(default_factory=list, repr=False)
     captured_files: list[dict[str, Any]] = field(default_factory=list, repr=False)
     document_result: dict[str, Any] | None = field(default=None, repr=False)
+    document_results: list[dict[str, Any]] | None = field(default=None, repr=False)
     business_result: dict[str, Any] | None = field(default=None, repr=False)
     capture_document: bool = field(default=False, repr=False)
     artifact_contract: bool = field(default=False, repr=False)
@@ -1345,10 +1346,10 @@ class Orchestrator:
                         job.turn_id = self._extract_id(turn_result, "turn")
                         stage = "turn/completed"
                         await self._consume_turn(job, client, deadline)
-                        from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, parse as parse_outcome
-                        if job.status == "completed" and job.output_schema in (OUTCOME_SCHEMA, SCHEMA_V1):
+                        from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, parse as parse_outcome
+                        if job.status == "completed" and job.output_schema in (OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3):
                             try:
-                                value = parse_outcome(job.response or "", 1 if job.output_schema == SCHEMA_V1 else 2)
+                                value = parse_outcome(job.response or "", 1 if job.output_schema == SCHEMA_V1 else 3 if job.output_schema == SCHEMA_V3 else 2)
                                 job.business_result = value
                                 job.response = value["summary"]
                             except (ValueError, KeyError, TypeError) as error:
@@ -1362,6 +1363,9 @@ class Orchestrator:
                                     else "步骤结果不是有效的 JSON 对象或字段类型不正确。"
                                 )}
                         from workflow_documents import SCHEMA as DOCUMENT_SCHEMA, collect as collect_documents, ERROR as DOCUMENT_ERROR
+                        if job.status == "completed" and job.output_schema == SCHEMA_V3 and job.business_result is not None:
+                            from workflow_documents import collect_many
+                            job.document_results = await collect_many(client, job.cwd, job.business_result["documents"], [agent.token_file])
                         if job.status == "completed" and job.business_result is not None and job.capture_document:
                             try:
                                 job.document_result = await asyncio.wait_for(collect_documents(client, job.cwd, job.business_result.get("document"), [agent.token_file]), 30)
@@ -1898,8 +1902,8 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
     store = get_workflow_store()
     snapshot = job.snapshot()
     from workflow_documents import SCHEMA as DOCUMENT_SCHEMA
-    from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1
-    if job.output_schema in (DOCUMENT_SCHEMA, OUTCOME_SCHEMA, SCHEMA_V1) and not job.completed.is_set() and job.status == "completed":
+    from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3
+    if job.output_schema in (DOCUMENT_SCHEMA, OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3) and not job.completed.is_set() and job.status == "completed":
         snapshot["status"] = "running"
         snapshot["response"] = None
     current_node = store.get_node(workflow_id, node_id)
@@ -1921,10 +1925,13 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
             snapshot["finished_at"] = snapshot.get("finished_at") or utc_now()
     if job.completed.is_set() and job.document_result is not None:
         snapshot["document"] = job.document_result
+    if job.completed.is_set() and job.document_results is not None:
+        snapshot["documents"] = job.document_results
     if job.completed.is_set() and job.business_result is not None:
         snapshot["businessResult"] = job.business_result
     store.sync_node_job(workflow_id, node_id, snapshot)
     snapshot.pop("document", None)
+    snapshot.pop("documents", None)
     outcome = snapshot.pop("businessResult", None)
     if outcome is not None:
         snapshot["outcome"] = outcome["outcome"]
@@ -2102,7 +2109,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         if node.get("captureDocument"):
             node["prompt"] += DOCUMENT_INSTRUCTION
             document_options["output_schema"] = DOCUMENT_SCHEMA
-        if node.get("resultProtocolVersion") in (1, 2):
+        if node.get("resultProtocolVersion") in (1, 2, 3):
             from workflow_outcomes import schema, instruction
             node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"), node["resultProtocolVersion"], defer_blocked=bool(node.get("waitPolicy")))
             document_options["output_schema"] = schema(node["resultProtocolVersion"])

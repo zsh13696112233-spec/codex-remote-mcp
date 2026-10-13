@@ -1,8 +1,10 @@
-"""半自动第一步主文档：受控读取与中央快照。"""
+"""半自动主文档与全自动交付文档：受控读取、中央快照和结束汇总。"""
 import asyncio
 import base64
 import hashlib
 import logging
+import json
+import re
 import sqlite3
 import uuid
 from pathlib import PurePosixPath, PureWindowsPath
@@ -175,3 +177,95 @@ def view(row: sqlite3.Row, body: bool = False) -> dict[str, Any]:
     if body:
         result['content'] = row['content']
     return result
+
+
+async def collect_many(client: Any, cwd: str, documents: list[dict[str, str]], denied_paths=()) -> list[dict[str, Any]]:
+    """逐份采集；来源指纹仅用于中央去重，不进入公开结果。"""
+    results = {}
+    for document in documents:
+        value = document['path']
+        try:
+            path, _ = path_for(cwd, value)
+            identity = str(path).casefold() if isinstance(path, PureWindowsPath) else str(path)
+            if path.suffix.lower() not in {'.md', '.txt'}:
+                raise ValueError(ERROR)
+        except ValueError:
+            identity = cwd + '/' + value
+            item = failure()
+        else:
+            item = await collect(client, cwd, document, denied_paths)
+        if valid_name(document['name']):
+            item['name'] = document['name']
+        key = hashlib.sha256(identity.encode()).hexdigest()
+        results[key] = {**item, 'sourceKey': key}
+    return list(results.values())
+
+
+def validate_many(items: Any) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        raise ValueError('文档快照清单无效。')
+    keys = set()
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get('sourceKey'), str) or not re.fullmatch(r'[0-9a-f]{64}', item['sourceKey']):
+            raise ValueError('文档来源标识无效。')
+        if item['sourceKey'] in keys:
+            raise ValueError('文档来源标识重复。')
+        keys.add(item['sourceKey'])
+        validate_result({key: value for key, value in item.items() if key != 'sourceKey'})
+    return items
+
+
+def save_many(connection: sqlite3.Connection, workflow_id: str, node_id: str, source_id: str,
+              items: list[dict[str, Any]], now: str) -> None:
+    node = connection.execute("""SELECT n.agent_id FROM workflow_nodes n JOIN workflows w USING(workflow_id)
+        WHERE n.workflow_id=? AND n.node_id=? AND w.advance_mode='automatic' AND w.result_protocol_version=3""",
+        (workflow_id, node_id)).fetchone()
+    if node is None:
+        raise ValueError('仅新版全自动步骤可以保存文档清单。')
+    validate_many(items)
+    if connection.execute('SELECT 1 FROM workflow_document_batches WHERE workflow_id=? AND node_id=? AND source_id=?',
+                          (workflow_id, node_id, source_id)).fetchone():
+        return
+    for item in items:
+        key = hashlib.sha256((node['agent_id'] + '/' + item['sourceKey']).encode()).hexdigest()
+        document_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f'{workflow_id}/{node_id}/{key}'))
+        previous = connection.execute("""SELECT content,format,revision FROM workflow_documents
+            WHERE workflow_id=? AND source_key=? AND content IS NOT NULL ORDER BY updated_at DESC,rowid DESC LIMIT 1""",
+            (workflow_id, key)).fetchone()
+        content = item.get('content', previous['content'] if previous else None)
+        fmt = item.get('format', previous['format'] if previous else None)
+        checksum = hashlib.sha256(content.encode()).hexdigest() if content is not None else None
+        connection.execute("""INSERT INTO workflow_documents VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(workflow_id,document_id) DO UPDATE SET name=excluded.name,content=excluded.content,
+            format=excluded.format,checksum=excluded.checksum,revision=excluded.revision,
+            updated_at=excluded.updated_at,error=excluded.error,removed=0""",
+            (workflow_id, node_id, document_id, key, item['name'], content, fmt, checksum,
+             previous['revision'] + 1 if previous else 1, now, item.get('error'), 0))
+    connection.execute('INSERT INTO workflow_document_batches VALUES(?,?,?)', (workflow_id, node_id, source_id))
+    connection.execute('UPDATE workflows SET state_version=state_version+1 WHERE workflow_id=?', (workflow_id,))
+    connection.execute("""INSERT INTO workflow_node_revisions VALUES(?,?,1)
+        ON CONFLICT(workflow_id,node_id) DO UPDATE SET revision=revision+1""", (workflow_id, node_id))
+
+
+def ordered_nodes(nodes: list) -> list:
+    """依赖决定业务顺序；相互独立的步骤按既有位置稳定排序。"""
+    pending = list(nodes)
+    ordered, done = [], set()
+    while pending:
+        node = next(n for n in pending if set(json.loads(n['depends_on_json'])) <= done)
+        ordered.append(node)
+        done.add(node['node_id'])
+        pending.remove(node)
+    return ordered
+
+
+def automatic_views(connection: sqlite3.Connection, workflow_id: str, nodes: list) -> tuple[dict, list]:
+    by_node, latest = {}, {}
+    for number, node in enumerate(ordered_nodes(nodes), 1):
+        rows = connection.execute(f"SELECT {METADATA_COLUMNS},source_key FROM workflow_documents WHERE workflow_id=? AND node_id=? AND removed=0 ORDER BY rowid",
+                                 (workflow_id, node['node_id'])).fetchall()
+        by_node[node['node_id']] = [view(row) for row in rows]
+        for row in rows:
+            latest.pop(row['source_key'], None)
+            latest[row['source_key']] = {**view(row), 'stepName': node['display_name'], 'stepNumber': number}
+    return by_node, list(latest.values())

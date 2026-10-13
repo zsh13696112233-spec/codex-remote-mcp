@@ -146,7 +146,7 @@ POST /api/workflows/{workflowId}/advance/{gateId}/hold
 
 ## 独立文档查看页
 
-半自动第一步结果区显示单份主文档入口，点击进入 `document.html?workflowId=...&documentId=...`，读取最新成功保存的正文，显示所属步骤、版本、更新时间和同步失败状态。保留只读代理 `GET /api/workflows/{workflowId}/documents/{documentId}`；不增加编辑、提交或流程控制接口。Markdown 渲染库本地托管，无 Node 构建，禁用原始 HTML、外部图片和危险链接。详见[文档展示说明](../../docs/SOP_DOCUMENT_DISPLAY.zh-CN.md)。
+半自动第一步结果区显示单份主文档入口，新版全自动各步骤显示全部已采集文档；未同步且无正文的条目不提供链接。钉钉结束汇总复用相同查看页，点击进入 `document.html?workflowId=...&documentId=...`，读取最新成功保存的正文，显示所属步骤、版本、更新时间和同步失败状态。保留只读代理 `GET /api/workflows/{workflowId}/documents/{documentId}`；不增加编辑、提交或流程控制接口。Markdown 渲染库本地托管，无 Node 构建，禁用原始 HTML、外部图片和危险链接。详见[文档展示说明](../../docs/SOP_DOCUMENT_DISPLAY.zh-CN.md)。
 
 
 ## 业务提前结束展示

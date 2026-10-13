@@ -725,8 +725,10 @@ class WorkflowStore(InputImageStore, WaitStore):
     def create_workflow(self, value: dict[str, Any]) -> dict[str, Any]:
         spec = self.normalize_spec(value)
         version = value.get("resultProtocolVersion", 2)
-        if type(version) is not int or version not in (1, 2):
+        if type(version) is not int or version not in (1, 2, 3):
             raise ValueError("步骤结果协议版本无效。")
+        if version == 3 and spec["advanceMode"] != "automatic":
+            raise ValueError("版本3仅适用于全自动运行。")
         spec["resultProtocolVersion"] = version
         timestamp = utc_now()
         encoded_spec = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
@@ -1420,7 +1422,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                        response, error, created_at, started_at, finished_at,
                        state_version, assistant_job_id, assistant_thread_id,
                        assistant_turn_id, assistant_status, advance_mode,
-                       max_retry_count, used_retry_count, handoff_mode, termination_json
+                       max_retry_count, used_retry_count, handoff_mode, termination_json, result_protocol_version
                 FROM workflows WHERE workflow_id = ?
                 """,
                 (workflow_id,),
@@ -1464,6 +1466,10 @@ class WorkflowStore(InputImageStore, WaitStore):
             ).fetchall()
             from workflow_documents import view as document_view, METADATA_COLUMNS
             document_views = {}
+            document_summary = []
+            if workflow["advance_mode"] == "automatic" and workflow["result_protocol_version"] == 3:
+                from workflow_documents import automatic_views
+                document_views, document_summary = automatic_views(connection, workflow_id, node_rows)
             if workflow["advance_mode"] == "semi_automatic" and len(node_rows) > 1:
                 first_node = node_rows[0]["node_id"]
                 row = connection.execute(
@@ -1567,6 +1573,7 @@ class WorkflowStore(InputImageStore, WaitStore):
             "lastEventSequence": last_sequence,
             "pendingChatCount": pending_chat_count,
             "pendingControl": None,
+            "documents": document_summary,
             "discussionBusy": discussion_busy or pending_chat_count > 0,
             "nodes": nodes,
         }
@@ -1779,6 +1786,10 @@ class WorkflowStore(InputImageStore, WaitStore):
                 result = view(row, body=True)
                 step = connection.execute("SELECT display_name,position FROM workflow_nodes WHERE workflow_id=? AND node_id=?", (workflow_id,row["node_id"])).fetchone()
                 result.update(stepName=step["display_name"], stepNumber=step["position"] + 1)
+                if connection.execute("SELECT 1 FROM workflows WHERE workflow_id=? AND result_protocol_version=3", (workflow_id,)).fetchone():
+                    from workflow_documents import ordered_nodes
+                    nodes = connection.execute("SELECT node_id,depends_on_json FROM workflow_nodes WHERE workflow_id=? ORDER BY position", (workflow_id,)).fetchall()
+                    result['stepNumber'] = next(index for index, node in enumerate(ordered_nodes(nodes), 1) if node['node_id'] == row['node_id'])
                 return result
             if not connection.execute("SELECT 1 FROM workflow_nodes WHERE workflow_id=? AND node_id=?", (workflow_id,node_id)).fetchone():
                 raise ValueError("找不到步骤。")
@@ -3193,16 +3204,16 @@ class WorkflowStore(InputImageStore, WaitStore):
             workflow = connection.execute("SELECT status, termination_json, result_protocol_version FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if workflow["status"] in {"completed", "failed", "cancelled"}:
                 return
-            if workflow["result_protocol_version"] in (1, 2) and old["status"] in TERMINAL_NODE_STATUSES | {"waiting"}:
+            if workflow["result_protocol_version"] in (1, 2, 3) and old["status"] in TERMINAL_NODE_STATUSES | {"waiting"}:
                 return
-            if workflow["result_protocol_version"] in (1, 2) and status == "completed":
+            if workflow["result_protocol_version"] in (1, 2, 3) and status == "completed":
                 if old["job_id"] and snapshot.get("job_id") != old["job_id"]:
                     raise RuntimeError("步骤执行版本缺失或已变化。")
                 for key in ("thread_id", "turn_id"):
                     if old[key] and snapshot.get(key) and old[key] != snapshot[key]:
                         raise RuntimeError("步骤执行版本已变化。")
             outcome = None
-            if status == "completed" and workflow["result_protocol_version"] in (1, 2):
+            if status == "completed" and workflow["result_protocol_version"] in (1, 2, 3):
                 from workflow_outcomes import validate
                 try:
                     outcome = validate(snapshot.get("businessResult"), workflow["result_protocol_version"])
@@ -3214,6 +3225,12 @@ class WorkflowStore(InputImageStore, WaitStore):
                     if outcome["outcome"] == "blocked":
                         status = "failed"
                         snapshot["error"] = outcome["reason"]
+            if outcome is not None and workflow["result_protocol_version"] == 3:
+                from workflow_documents import save_many
+                if outcome['documents'] and not snapshot.get('documents'):
+                    raise ValueError('步骤已交付文档，但缺少文档采集结果。')
+                save_many(connection, workflow_id, node_id,
+                          "job:" + str(snapshot.get("job_id") or old["job_id"]), snapshot.get("documents", []), utc_now())
             if outcome is not None and outcome["outcome"] == "blocked" and self._wait_policy(connection, workflow_id):
                 if snapshot.get("cwd") or snapshot.get("model"):
                     connection.execute("INSERT INTO workflow_node_runtime(workflow_id,node_id,attempt_number,cwd,model) SELECT workflow_id,node_id,attempt_count,?,? FROM workflow_nodes WHERE workflow_id=? AND node_id=? ON CONFLICT(workflow_id,node_id,attempt_number) DO UPDATE SET cwd=COALESCE(excluded.cwd,cwd),model=COALESCE(excluded.model,model)", (snapshot.get("cwd"), snapshot.get("model"), workflow_id, node_id))

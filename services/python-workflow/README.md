@@ -219,18 +219,18 @@ MCP 逐机任务持久化 `diagnostics` 检测摘要，由安装汇总和批次�
 
 ## 交付文档展示
 
-仅半自动流程的首个业务步骤且存在下一步时自动展示一份主文档，无可配置开关。结构化结果返回总结及可为空的 `document: {name, path}`；全自动、单步骤及后续步骤不采集。中央 SQLite 保存正文，远程通过带认证与租约的步骤状态接口提交单个 `document`，不读取 SQLite。讨论明确修改才同步，缺失或失败保留旧正文并提示，允许继续；改名和重试沿用稳定链接。历史开关字段保留兼容但不起作用。容量、只读接口及部署见[文档展示说明](../../docs/SOP_DOCUMENT_DISPLAY.zh-CN.md)。
+仅半自动流程的首个业务步骤且存在下一步时自动展示一份主文档，无可配置开关。结构化结果返回总结及可为空的 `document: {name, path}`；半自动单步骤及后续步骤不采集；新版全自动另按版本 3 清单采集。中央 SQLite 保存正文，远程通过带认证与租约的步骤状态接口提交单个 `document`，不读取 SQLite。讨论明确修改才同步，缺失或失败保留旧正文并提示，允许继续；改名和重试沿用稳定链接。历史开关字段保留兼容但不起作用。容量、只读接口及部署见[文档展示说明](../../docs/SOP_DOCUMENT_DISPLAY.zh-CN.md)。
 
 
 ## 业务阻断与无任务提前结束
 
 平台统一追加的协议提示明确：阻断但未锁定唯一工单、无权限或开发人读取失败时，开发人状态使用 `unavailable`，评论状态独立填写，不需要修改 SOP 角色职责。模型结果解析仅兼容一种版本 2 误填：`blocked` 搭配开发人 `not_applicable`，人员账号类型、账号、显示名全部为空且说明为字符串（允许为空）时，规范为 `unavailable` 后再完整校验。原始回答仍保留在执行事件中，成功规范化记录无业务正文的诊断日志；不改变阻断决定、不自动重发业务操作。其余非法结果仍失败，执行诊断通过 `error_kind=invalid_business_result`、`error_stage=result/validate` 和 `error_details.validation_error` 保留校验原因，普通页面仍使用稳定中文错误。版本 1 及旧运行语义不变；中央状态写入仍校验字段、类型、容量与账号状态一致性。
 
-新创建运行由中央默认冻结 `resultProtocolVersion=2`，正式步骤使用统一结构化结果：`summary`、`outcome`、`reason`、`jiraComment`、`document`、`jiraDeveloper`。提交可显式指定版本 1 用于原快照兼容，已有版本 1 运行保持原五字段协议。`outcome` 只允许 `success/no_task/blocked`，新协议缺失或非法结果按执行失败处理；旧运行没有版本字段，保留旧协议，不扫描旧回复中的关键词。主文档仍仅在半自动首步且有下一步时采集。
+既有网关调用未显式指定版本时仍默认冻结 `resultProtocolVersion=2`，正式步骤使用统一结构化结果：`summary`、`outcome`、`reason`、`jiraComment`、`document`、`jiraDeveloper`。提交可显式指定版本 1 用于原快照兼容，已有版本 1 运行保持原五字段协议。`outcome` 只允许 `success/no_task/blocked`，新协议缺失或非法结果按执行失败处理；旧运行没有版本字段，保留旧协议，不扫描旧回复中的关键词。单主文档仍仅在半自动首步且有下一步时采集。配置中心新全自动运行显式冻结版本 3，以 `documents: [{name, path}]` 替代 `document`，每步采集全部交付文档；汇总元数据位于工作流顶层 `documents`，其余结果及 Jira 语义不变。旧快照不升级，详见[文档展示说明](../../docs/SOP_DOCUMENT_DISPLAY.zh-CN.md)。
 
 未配置新等待策略的运行，步骤判定阻断后，仅在原授权内尝试向已锁定的唯一 Jira 添加收尾评论，然后返回 `blocked`。评论包括原因、已完成/未执行事项和恢复条件，不改变 Jira 状态或负责人。职责明确要求时，还允许在阻断收尾中将处理角色字段改为 `Natural Person`；仓库三份 SOP 提示词已要求此动作。修改前后回查，失败或结果不明仍尝试评论并结束，在 `summary` 和 `jiraComment.detail` 披露角色修改结果，评论状态仍只表示评论结果。无任务结束不触发角色修改。平台注入稳定去重标记，提交不明时先核查，不能确认不盲目重发；此模型侧约定不提供严格的一次性写入保证。`jiraComment` 包含 `status`（`succeeded/failed/unknown/not_applicable`）、`issueKey`、`reference` 和 `detail`。没有唯一编号或没有授权工具时说明原因，备注失败或未知不阻止流程结束。平台不新增 Jira 凭据或连接。
 
-正式结束决定形成后，中央事务保存 `termination`（`outcome/reason/nodeId/jiraComment`，版本 2 同时保存 `jiraDeveloper`），立即关闭等待并拒绝后续派发。阻断步骤标记失败，无任务步骤标记完成，其余未启动步骤标记跳过、显示“未执行”。收尾期间保持运行占用，网关等待主监督退出及已派发步骤结束后写入终态并释放租约。阻断映射 `failed`，无任务映射 `completed`；结果文字分别为“因阻断结束”和“无待处理任务，已结束”。重复与迟到结果不能覆盖决定，旧继续按钮无效。重启保留已持久化的提前结束决定，不恢复旧执行会话。
+正式结束决定形成后，中央事务保存 `termination`（`outcome/reason/nodeId/jiraComment`，版本 2、3 同时保存 `jiraDeveloper`），立即关闭等待并拒绝后续派发。阻断步骤标记失败，无任务步骤标记完成，其余未启动步骤标记跳过、显示“未执行”。收尾期间保持运行占用，网关等待主监督退出及已派发步骤结束后写入终态并释放租约。阻断映射 `failed`，无任务映射 `completed`；结果文字分别为“因阻断结束”和“无待处理任务，已结束”。重复与迟到结果不能覆盖决定，旧继续按钮无效。重启保留已持久化的提前结束决定，不恢复旧执行会话。
 
 `GET /workflows/{workflowId}` 新增可空 `termination`；`POST /workflow-statuses` 保留原 `statuses` 字符串映射，新增同编号的 `terminations` 映射；终态事件附加 `termination`。内部步骤快照增加 `businessResult`，本机和远程使用相同校验，远程继续校验机器认证与租约。旧客户端可继续识别原终态，但须升级展示才能区分业务结束原因。
 

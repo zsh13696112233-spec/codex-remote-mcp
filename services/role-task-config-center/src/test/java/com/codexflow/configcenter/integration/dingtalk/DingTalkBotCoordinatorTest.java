@@ -20,6 +20,39 @@ import tools.jackson.databind.node.ObjectNode;
 /** 统一入口不依赖群绑定；回答与每次提问关联。 */
 class DingTalkBotCoordinatorTest {
   @Test
+  void terminalDocumentsReplaceTextAndUseFrozenCardWithoutWaitingRequests() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var snapshot =
+        json.createObjectNode()
+            .put("advanceMode", "automatic")
+            .put("status", "completed")
+            .put("response", "执行结果");
+    snapshot.putArray("documents").addObject().put("name", "结果.md");
+    when(gateway.get("/workflows/" + ID)).thenReturn(snapshot);
+    var event = json.createObjectNode().put("type", "workflow.completed");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 2L);
+    verify(store)
+        .recordDocumentSummary(eq(ID), eq(2L), contains("执行结果"), eq(snapshot), anyString());
+    verify(store, never())
+        .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean());
+    clearInvocations(gateway);
+    var payload = json.createObjectNode();
+    payload.putObject("card").put("summary", "冻结结果").put("_templateId", "template");
+    when(transport.sendDocumentSummaryCard(any(), any(), any(), any()))
+        .thenReturn(new DingTalkModels.SendResult("carrier"));
+    bot.deliver(
+        new DingTalkModels.Outbox("summary", ID, "group", null, "document_summary_card", payload));
+    verify(transport)
+        .sendDocumentSummaryCard(
+            eq("documents-summary"),
+            eq("GROUP"),
+            eq("group"),
+            argThat(data -> data.get("summary").equals("冻结结果")));
+    verify(store).markOutboxSent("summary", "carrier");
+    verifyNoInteractions(gateway);
+  }
+
+  @Test
   void retryAndStopUseScopedRunServiceAndRejectUnownedCards() {
     String gate = "11111111111111111111111111111111";
     when(store.binding(ID))

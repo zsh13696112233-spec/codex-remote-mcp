@@ -43,6 +43,77 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
   }
 
   @Test
+  void documentSummaryIsAtomicDeduplicatedAndUnknownDeliveryDoesNotRetry() {
+    String client = "documents-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("documents-start")).workflowId();
+    var snapshot =
+        objectMapper
+            .createObjectNode()
+            .put("name", "任务")
+            .put("status", "completed")
+            .put("advanceMode", "automatic");
+    snapshot
+        .putArray("documents")
+        .addObject()
+        .put("name", "方案.md")
+        .put("id", "doc")
+        .put("available", true);
+    new TransactionTemplate(transactions)
+        .executeWithoutResult(
+            transaction -> {
+              store.recordDocumentSummary(workflow, 1, "回滚", snapshot, "https://monitor.example");
+              transaction.setRollbackOnly();
+            });
+    assertThat(store.binding(workflow).orElseThrow().eventCursor()).isZero();
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id=?",
+                Integer.class,
+                workflow))
+        .isZero();
+    store.recordDocumentSummary(workflow, 1, "完成", snapshot, "https://monitor.example");
+    store.recordDocumentSummary(workflow, 1, "重复", snapshot, "https://monitor.example");
+    store.recordDocumentSummary(workflow, 2, "另一终态事件", snapshot, "https://monitor.example");
+    var ids =
+        jdbc.queryForList(
+            "select id from codex_sop_dingtalk_outbox where workflow_id=? and message_kind='document_summary_card'",
+            String.class,
+            workflow);
+    assertThat(ids).hasSize(1);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id=? and message_kind='text'",
+                Integer.class,
+                workflow))
+        .isZero();
+    assertThat(store.binding(workflow).orElseThrow().eventCursor()).isEqualTo(2);
+    assertThat(store.binding(workflow).orElseThrow().status()).isEqualTo("terminal");
+    String id = ids.get(0);
+    store.markOutboxFailed(id, new DingTalkDocumentSummaryCard.NotSentFailure(true));
+    assertThat(
+            jdbc.queryForObject(
+                "select status from codex_sop_dingtalk_outbox where id=?", String.class, id))
+        .isEqualTo("failed");
+    store.markOutboxFailed(id, new IllegalStateException("network unknown"));
+    assertThat(
+            jdbc.queryForObject(
+                "select status from codex_sop_dingtalk_outbox where id=?", String.class, id))
+        .isEqualTo("abandoned");
+    assertThat(
+            jdbc.queryForObject(
+                "select last_error from codex_sop_dingtalk_outbox where id=?", String.class, id))
+        .contains("结果未确认")
+        .doesNotContain("network");
+    jdbc.update("update codex_sop_dingtalk_outbox set status='sending' where id=?", id);
+    store.initialize(client);
+    assertThat(
+            jdbc.queryForObject(
+                "select status from codex_sop_dingtalk_outbox where id=?", String.class, id))
+        .isEqualTo("abandoned");
+  }
+
+  @Test
   void answerMentionFollowsSuccessfulCardAndSurvivesRecoveryWithoutDuplicates() {
     String client = "answer-mention-" + UUID.randomUUID();
     createTask(client);

@@ -765,6 +765,15 @@ class DingTalkBotCoordinator implements SmartLifecycle {
               "\n执行结果：\n"
                   + DingTalkExecutionNotice.safe(
                       DingTalkResultText.display(snapshot.path("response").asText()));
+        if (TERMINAL_EVENTS.contains(type) && DingTalkDocumentSummaryCard.applicable(snapshot)) {
+          String finalNotice = notice;
+          DingTalkDatabaseRetry.run(
+              "结束卡片入队",
+              () ->
+                  store.recordDocumentSummary(
+                      binding.workflowId(), sequence, finalNotice, snapshot, monitorUrl));
+          return true;
+        }
         recordProcessWithRetry(
             binding.workflowId(),
             null,
@@ -887,6 +896,15 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   @SuppressWarnings("unchecked")
   void deliver(DingTalkModels.Outbox item) {
     try {
+      if ("document_summary_card".equals(item.messageKind())) {
+        Map<String, Object> data =
+            objectMapper.convertValue(item.payload().path("card"), Map.class);
+        DingTalkModels.SendResult receipt =
+            transport.sendDocumentSummaryCard(
+                "documents-" + item.id(), item.targetType(), item.targetExternalId(), data);
+        store.markOutboxSent(item.id(), receipt.messageId());
+        return;
+      }
       if ("waiting_card".equals(item.messageKind())
           || "waiting_card_update".equals(item.messageKind())) {
         deliverWaitingCard(item);

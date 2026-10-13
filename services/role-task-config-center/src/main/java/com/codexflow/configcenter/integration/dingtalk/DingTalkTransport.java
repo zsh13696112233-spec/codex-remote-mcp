@@ -64,6 +64,11 @@ interface DingTalkTransport {
     throw new BlockedNotificationService.NotSentFailure(false);
   }
 
+  default DingTalkModels.SendResult sendDocumentSummaryCard(
+      String cardId, String targetType, String targetId, Map<String, Object> cardData) {
+    throw new DingTalkDocumentSummaryCard.NotSentFailure(false);
+  }
+
   default DingTalkModels.SendResult sendWaitingCard(
       String cardId,
       String targetType,

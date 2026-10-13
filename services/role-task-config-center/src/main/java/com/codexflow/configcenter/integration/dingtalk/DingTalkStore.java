@@ -53,7 +53,9 @@ class DingTalkStore {
   public void initialize(String clientId) {
     for (DingTalkOutboxEntity item : outbox.findAll()) {
       if ("sending".equals(item.status)) {
-        item.status = "pending";
+        item.status = "document_summary_card".equals(item.messageKind) ? "abandoned" : "pending";
+        if ("document_summary_card".equals(item.messageKind))
+          item.lastError = "文档汇总卡片发送结果未确认，未自动重发。";
         item.nextAttemptAt = Instant.now();
         item.updatedAt = Instant.now();
       }
@@ -265,9 +267,35 @@ class DingTalkStore {
       boolean terminal,
       boolean attention,
       JsonNode executionEvent) {
+    recordProcess(
+        workflowId, workflowMessageId, sequence, text, terminal, attention, executionEvent, null);
+  }
+
+  @Transactional
+  public void recordDocumentSummary(
+      String workflowId, long sequence, String text, JsonNode snapshot, String monitorUrl) {
+    var card =
+        objectMapper.valueToTree(
+            DingTalkDocumentSummaryCard.render(
+                workflowId, snapshot, text, monitorUrl, documentCardTemplateId));
+    recordProcess(workflowId, null, sequence, text, true, true, null, card);
+  }
+
+  private void recordProcess(
+      String workflowId,
+      String workflowMessageId,
+      long sequence,
+      String text,
+      boolean terminal,
+      boolean attention,
+      JsonNode executionEvent,
+      JsonNode summaryCard) {
     DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
     if (sequence <= binding.eventCursor) return;
-    String key = "process:" + workflowId + ":" + sequence;
+    String key =
+        summaryCard == null
+            ? "process:" + workflowId + ":" + sequence
+            : "document-summary:" + workflowId;
     if (workflowMessageId != null) {
       inboundMessages
           .findByWorkflowIdAndWorkflowMessageId(workflowId, workflowMessageId)
@@ -303,8 +331,8 @@ class DingTalkStore {
           binding.targetType,
           binding.targetExternalId,
           binding.rootMessageId,
-          "text",
-          payload);
+          summaryCard == null ? "text" : "document_summary_card",
+          summaryCard == null ? payload : objectMapper.createObjectNode().set("card", summaryCard));
       if (attention
           && "dingtalk".equals(binding.triggerSource)
           && "GROUP".equals(binding.targetType)
@@ -1101,6 +1129,16 @@ class DingTalkStore {
   @Transactional
   public void markOutboxFailed(String id, RuntimeException error) {
     DingTalkOutboxEntity item = outbox.findById(id).orElseThrow();
+    if ("document_summary_card".equals(item.messageKind)) {
+      boolean notSent = error instanceof DingTalkDocumentSummaryCard.NotSentFailure;
+      boolean retry = notSent && ((DingTalkDocumentSummaryCard.NotSentFailure) error).retryable;
+      item.status = retry ? "failed" : "abandoned";
+      item.lastError = notSent ? error.getMessage() : "文档汇总卡片发送结果未确认，未自动重发。";
+      item.nextAttemptAt =
+          Instant.now().plusSeconds(Math.min(60, 1L << Math.min(item.attemptCount, 6)));
+      item.updatedAt = Instant.now();
+      return;
+    }
     item.status =
         "reply".equals(item.messageKind)
                 && item.advanceGateId == null

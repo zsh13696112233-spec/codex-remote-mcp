@@ -276,7 +276,7 @@ public class WorkflowRunStore {
     }
     ObjectNode root = json.newObject();
     root.put("workflowId", workflowId);
-    root.put("resultProtocolVersion", 2);
+    root.put("resultProtocolVersion", "automatic".equals(task.sop.advanceMode) ? 3 : 2);
     root.put("taskDefinitionId", task.id);
     root.put("groupId", task.groupId);
     root.put("name", task.name);

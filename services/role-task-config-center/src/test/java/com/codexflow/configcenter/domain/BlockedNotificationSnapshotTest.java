@@ -60,7 +60,7 @@ class BlockedNotificationSnapshotTest extends com.codexflow.configcenter.Grouped
     String first = null;
     for (String source : List.of("web", "schedule", "dingtalk")) {
       var prepared = runs.prepareLatest(task, source);
-      assertThat(prepared.payload().path("resultProtocolVersion").asInt()).isEqualTo(2);
+      assertThat(prepared.payload().path("resultProtocolVersion").asInt()).isEqualTo(3);
       assertThat(notices.read(prepared.workflowId()).group().path("externalId").asText())
           .isEqualTo("snapshot-group");
       assertThat(notices.read(prepared.workflowId()).state()).isEqualTo("watching");

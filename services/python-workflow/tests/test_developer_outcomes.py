@@ -71,7 +71,7 @@ class DeveloperOutcomeTests(unittest.TestCase):
         with self.assertRaises(ValueError): validate(value, 1)
         self.assertNotIn("jiraDeveloper", schema(1)["required"])
         self.assertIn("jiraDeveloper", schema(2)["required"])
-        for version in (True, 0, 3, "2"):
+        for version in (True, 0, 4, "2"):
             with self.assertRaises(ValueError): schema(version)
 
     def test_unresolved_never_carries_account(self):

@@ -304,6 +304,27 @@ class SidecarInternalApiTests(unittest.TestCase):
         self.assertEqual(view["nodes"][0]["status"], "completed")
         self.assertEqual(view["nodes"][0]["response"], value["summary"])
 
+    def test_automatic_document_list_uses_authenticated_central_storage(self):
+        from tests.test_automatic_documents import outcome, captured
+        spec = remote_workflow("automatic-docs")
+        spec['resultProtocolVersion'] = 3
+        lease = self._claim("automatic-docs", "supervisor-a", "token-a", spec)
+        path = "/internal/v1/workflows/automatic-docs/nodes/a"
+        headers = self._auth("token-a", lease)
+        prepared = self.client.post(path + "/prepare", headers=headers, json={"dispatchId": "documents"})
+        self.assertEqual(prepared.json()['resultProtocolVersion'], 3)
+        body = {'operation': 'sync', 'snapshot': {'status': 'completed', 'job_id': 'docs-job',
+                'businessResult': outcome(), 'documents': [captured(key=str(i)) for i in range(7)]}}
+        self.assertEqual(self.client.post(path + '/state', json=body).status_code, 401)
+        self.assertEqual(self.client.post(path + '/state', headers=self._auth('token-a'), json=body).status_code, 409)
+        self.assertEqual(self.client.post(path + '/state', headers=self._auth('token-b', lease), json=body).status_code, 403)
+        response = self.client.post(path + '/state', headers=headers, json=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn('初版', response.text)
+        self.assertEqual(len(self.store.get_workflow('automatic-docs')['documents']), 7)
+        self.assertEqual(self.client.post(path + '/state', headers=headers, json=body).status_code, 200)
+        self.assertEqual(self.store.documents('automatic-docs', 'a')[0]['revision'], 1)
+
     def test_document_sync_requires_lease_and_never_returns_body_in_state(self):
         spec = remote_workflow("docs-a")
         spec["advanceMode"] = "semi_automatic"

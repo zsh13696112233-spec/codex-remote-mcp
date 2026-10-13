@@ -470,6 +470,49 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   }
 
   @Override
+  public DingTalkModels.SendResult sendDocumentSummaryCard(
+      String cardId, String targetType, String targetId, Map<String, Object> cardData) {
+    if (String.valueOf(cardData.getOrDefault("_templateId", "")).isBlank())
+      throw new DingTalkDocumentSummaryCard.NotSentFailure(false);
+    ObjectNode body = waitingCardBody(cardId, targetType, targetId, null, cardData);
+    String token;
+    try {
+      token = accessToken();
+    } catch (RuntimeException error) {
+      throw new DingTalkDocumentSummaryCard.NotSentFailure(true);
+    }
+    // 单次投递；超时或响应不明确不能自动重发结束通知。
+    try {
+      var request =
+          HttpRequest.newBuilder(URI.create(API_HOST + "/v1.0/card/instances/createAndDeliver"))
+              .timeout(Duration.ofSeconds(30))
+              .header("Content-Type", "application/json")
+              .header("x-acs-dingtalk-access-token", token)
+              .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+              .build();
+      var response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+      if (response.statusCode() == 401) {
+        cachedToken = null;
+        cachedTokenExpiresAt = 0;
+        throw new DingTalkDocumentSummaryCard.NotSentFailure(true);
+      }
+      if (response.statusCode() == 429) throw new DingTalkDocumentSummaryCard.NotSentFailure(true);
+      if (response.statusCode() >= 400
+          && response.statusCode() < 500
+          && response.statusCode() != 408
+          && response.statusCode() != 409)
+        throw new DingTalkDocumentSummaryCard.NotSentFailure(false);
+      if (response.statusCode() != 200) throw new IllegalStateException("文档汇总卡片发送结果未确认。");
+      return waitingCardReceipt(objectMapper.readTree(response.body()), targetType, targetId);
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("文档汇总卡片发送结果未确认。");
+    } catch (IOException error) {
+      throw new IllegalStateException("文档汇总卡片发送结果未确认。");
+    }
+  }
+
+  @Override
   public DingTalkModels.SendResult sendWaitingCard(
       String cardId,
       String targetType,

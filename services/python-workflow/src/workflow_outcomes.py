@@ -46,10 +46,19 @@ SCHEMA["properties"]["jiraDeveloper"] = {
 }
 
 
+SCHEMA_V3 = copy.deepcopy(SCHEMA)
+SCHEMA_V3["required"].remove("document")
+SCHEMA_V3["required"].append("documents")
+del SCHEMA_V3["properties"]["document"]
+SCHEMA_V3["properties"]["documents"] = {
+    "type": "array", "items": DOCUMENT_SCHEMA["anyOf"][1],
+}
+
+
 def schema(version: int) -> dict[str, Any]:
-    if type(version) is not int or version not in (1, 2):
+    if type(version) is not int or version not in (1, 2, 3):
         raise ValueError("步骤结果协议版本无效。")
-    return SCHEMA_V1 if version == 1 else SCHEMA
+    return {1: SCHEMA_V1, 2: SCHEMA, 3: SCHEMA_V3}[version]
 
 
 def validate(value: Any, version: int = VERSION) -> dict[str, Any]:
@@ -62,8 +71,10 @@ def validate(value: Any, version: int = VERSION) -> dict[str, Any]:
         raise ValueError("步骤业务结果无效。")
     if value["outcome"] != "success" and not value["reason"].strip():
         raise ValueError("提前结束必须提供原因。")
-    document = value["document"]
-    if document is not None:
+    documents = value["documents"] if version == 3 else ([] if value["document"] is None else [value["document"]])
+    if not isinstance(documents, list):
+        raise ValueError("步骤文档清单格式无效。")
+    for document in documents:
         if not isinstance(document, dict) or set(document) != {"name", "path"}:
             raise ValueError("步骤文档字段无效。")
         for key, limit in (("name", 160), ("path", 4096)):
@@ -81,7 +92,7 @@ def validate(value: Any, version: int = VERSION) -> dict[str, Any]:
         raise ValueError("备注成功必须提供 Jira 编号。")
     if value["outcome"] == "blocked" and jira["status"] != "succeeded" and not jira["detail"].strip():
         raise ValueError("必须说明未确认 Jira 备注成功的原因。")
-    if version == 2:
+    if version in (2, 3):
         developer = value["jiraDeveloper"]
         if not isinstance(developer, dict) or set(developer) != set(SCHEMA["properties"]["jiraDeveloper"]["required"]):
             raise ValueError("Jira 开发人结果格式无效。")
@@ -104,7 +115,7 @@ def parse(text: str, version: int = VERSION) -> dict[str, Any]:
     value = json.loads(text)
     developer = value.get("jiraDeveloper") if isinstance(value, dict) else None
     normalized = (
-        version == 2 and isinstance(developer, dict)
+        version in (2, 3) and isinstance(developer, dict)
         and value.get("outcome") == "blocked"
         and developer.get("status") == "not_applicable"
         and all(developer.get(key) == "" for key in ("accountType", "accountId", "displayName"))
@@ -149,10 +160,17 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
            "唯一人员使用实际账号字段 accountId、key、name 中可用的最稳定标识，并以 accountType 标明类型，"
            "accountId 填该字段原值，displayName 填显示名，detail 说明读取结果。"
            "缺失、多人或读取失败时账号类型和账号填空字符串并说明原因，不猜测，不使用 assignee 或发起人。"
-           "已经因业务必要条件判定 blocked 的，不因开发人读取失败改变该决定；不得选择钉钉群、人员或发送通知。" if version == 2 else "")
-        + ("document 沿用主文档要求。" if capture_document else "document 必须为 null，不采集主文档。")
+           "已经因业务必要条件判定 blocked 的，不因开发人读取失败改变该决定；不得选择钉钉群、人员或发送通知。" if version in (2, 3) else "")
+        + ("" if version == 3 else "document 沿用主文档要求。" if capture_document else "document 必须为 null，不采集主文档。")
     )
 
+    if version == 3:
+        result += (
+            "documents 返回本步骤实际交付的全部文档，每项为 name（展示名称）和 path（实际工作目录内文件路径）。"
+            "无文档返回空数组。只交付 UTF-8 .md/.txt，每份最大512 KiB；不返回正文，"
+            "不列入参考资料、日志、代码、敏感配置或凭据。不限制文档数量。"
+            "成功、无任务或遇阻均报告已经交付的文档，不为填充清单额外生成文件。"
+        )
     if defer_blocked:
         start = result.index("确认阻断后停止业务写入")
         end = result.index("jiraComment.status 为", start)
