@@ -69,7 +69,7 @@ class SkillStore:
             raise SkillError("请选择有效分组。") from error
         if key != group_id:
             raise SkillError("请使用列表中的分组编号。")
-        row = db.execute("SELECT name FROM agent_groups WHERE id=?", (key,)).fetchone()
+        row = db.execute("SELECT name FROM agent_groups WHERE id=? AND deleted_at IS NULL", (key,)).fetchone()
         if not row:
             raise SkillError("所选分组不存在，请刷新列表。", 409)
         return row[0]

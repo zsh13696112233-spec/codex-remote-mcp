@@ -334,3 +334,17 @@ test('machine refresh updates labels and menus without mutating an unsaved SOP',
   for(const input of inputs){assert.equal(input.value,'新备注（192.0.2.1:4500）');assert.match(input.menu.innerHTML,/新备注/)}
   assert.equal(run('JSON.stringify(state.sop.draft)'),before);
 });
+
+
+test('deleted group selection returns to all groups after reload',async()=>{
+  const {run,context}=fixture('?groupId=a&runPage=2');
+  let replaced;
+  context.history.replaceState=(_state,_title,url)=>{replaced=String(url)};
+  context.api=async()=>({groups:[{id:'b',name:'乙组'}]});
+  await run('loadGroups()');
+  assert.equal(run('groupState.selected'),'');
+  assert.equal(run('runCatalogFilters.page'),0);
+  assert.equal(new URL(replaced).searchParams.has('groupId'),false);
+  assert.equal(new URL(replaced).searchParams.has('runPage'),false);
+  assert.doesNotMatch(run('groupOptions()'),/value="a"/);
+});

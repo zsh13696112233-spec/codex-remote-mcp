@@ -119,10 +119,15 @@ public class GroupService {
   public JsonNode delete(String id) {
     validateId(id);
     lock();
-    for (String table : List.of("roles", "sops", "task_definitions", "task_runs")) {
-      if (count("SELECT COUNT(*) FROM codex_sop_" + table + " WHERE group_id=?", id) > 0)
-        throw new ConflictFailure("分组仍有配置或运行历史引用，不能删除。");
+    for (String table : List.of("roles", "sops", "task_definitions")) {
+      if (count(
+              "SELECT COUNT(*) FROM codex_sop_" + table + " WHERE deleted=FALSE AND group_id=?", id)
+          > 0) throw new ConflictFailure("分组仍有有效配置，请先删除或移出后再删除分组。");
     }
+    if (count(
+            "SELECT COUNT(*) FROM codex_sop_task_runs WHERE group_id=? AND status IN ('submitting','queued','running','cancelling')",
+            id)
+        > 0) throw new ConflictFailure("分组仍有未结束运行，请结束后再删除。");
     return gateway.delete("/agent-groups/" + id);
   }
 

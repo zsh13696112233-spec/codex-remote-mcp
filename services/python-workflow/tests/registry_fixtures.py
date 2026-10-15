@@ -14,7 +14,7 @@ from workflow_gateway import WorkflowGateway, create_app
 def seed_agents(store, agents):
     registry = AgentRegistry(store)
     with store._connect() as db:
-        db.execute("INSERT OR IGNORE INTO agent_groups VALUES ('fixture', '测试分组')")
+        db.execute("INSERT OR IGNORE INTO agent_groups(id, name) VALUES ('fixture', '测试分组')")
         for index, (key, value) in enumerate(agents.items()):
             value = dict(value)
             if value.get('capacity') == 0:

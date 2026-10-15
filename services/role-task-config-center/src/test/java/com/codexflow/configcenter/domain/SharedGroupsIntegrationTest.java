@@ -144,12 +144,33 @@ class SharedGroupsIntegrationTest {
     ObjectNode count = groups.catalog();
     assertThat(count.path("groups").get(0).path("roleCount").asInt()).isEqualTo(1);
     assertThat(count.path("groups").get(0).path("machineCount").asInt()).isEqualTo(1);
+    assertThatThrownBy(() -> groups.delete(A)).hasMessageContaining("有效配置");
     configs.deleteRole(id);
     entities.flush();
     assertThat(groups.catalog().path("groups").get(0).path("roleCount").asInt()).isZero();
-    assertThatThrownBy(() -> groups.delete(A)).hasMessageContaining("引用");
+    groups.delete(A);
+    verify(gateway).delete("/agent-groups/" + A);
     groups.delete(B);
     verify(gateway).delete("/agent-groups/" + B);
+  }
+
+  @Test
+  void groupDeletionPreservesFinishedRunsButProtectsActiveRuns() {
+    String r = role(A).path("id").asText();
+    String s = sop(A, r).path("id").asText();
+    String t = task(A, s).path("id").asText();
+    String run = runs.prepareLatest(t, "schedule").workflowId();
+    entities.flush();
+    for (String table : List.of("roles", "sops", "task_definitions"))
+      jdbc.update("UPDATE codex_sop_" + table + " SET deleted=TRUE WHERE group_id=?", A);
+    assertThatThrownBy(() -> groups.delete(A)).hasMessageContaining("未结束运行");
+    verify(gateway, never()).delete(anyString());
+    jdbc.update("UPDATE codex_sop_task_runs SET status='completed' WHERE workflow_id=?", run);
+    entities.clear();
+    groups.delete(A);
+    verify(gateway).delete("/agent-groups/" + A);
+    assertThat(runs.runDetail(run).path("groupName").asText()).isEqualTo("甲组");
+    assertThat(runs.runDetail(run).path("submittedJson").path("groupId").asText()).isEqualTo(A);
   }
 
   @Test

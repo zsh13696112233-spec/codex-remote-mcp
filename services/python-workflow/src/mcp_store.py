@@ -57,7 +57,7 @@ class McpStore:
 
     def group(self, db, group_id):
         key = identifier(group_id)
-        row = db.execute("SELECT name FROM agent_groups WHERE id=?", (key,)).fetchone()
+        row = db.execute("SELECT name FROM agent_groups WHERE id=? AND deleted_at IS NULL", (key,)).fetchone()
         if not row:
             raise SkillError("请选择有效分组。", 409)
         return row[0]

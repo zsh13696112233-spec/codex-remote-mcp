@@ -114,7 +114,7 @@ class SkillGroupTests(unittest.TestCase):
         self.assertFalse(self.remote.writes)
         self.assertEqual(self.store.batch(task["batch_id"])["tasks"][0]["state"], "failed")
 
-    def test_limits_apply_after_filtering_and_deletion_protects_history(self):
+    def test_limits_apply_after_filtering_and_deletion_preserves_history(self):
         old = self.manager.create(self.request())
         task = self.store.claim()
         self.store.finish(task, "测试失败")
@@ -134,8 +134,9 @@ class SkillGroupTests(unittest.TestCase):
             self.registry.delete_group(self.a)
         with self.db._connect() as db:
             db.execute("DELETE FROM skill_group_packages WHERE group_id=?", (self.a,))
-        with self.assertRaisesRegex(ValueError, "历史"):
-            self.registry.delete_group(self.a)
+        self.registry.delete_group(self.a)
+        self.assertNotIn(self.a, [g["id"] for g in self.registry.groups()])
+        self.assertEqual(self.store.batch(old["id"])["groupName"], "甲组")
 
     def test_concurrent_move_and_deployment_never_cross_groups(self):
         def move():

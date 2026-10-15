@@ -313,6 +313,41 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "仍有机器"):
             self.registry.delete_group(self.group)
 
+    def test_group_soft_delete_preserves_history_and_rejects_new_use(self):
+        machine = self.machine(capabilities=["executor"])
+        self.registry.delete_agent(machine["agentId"])
+        for _ in range(2):
+            response = self.client.delete("/agent-groups/" + self.group)
+            self.assertEqual(response.status_code, 200, response.text)
+        reopened = AgentRegistry(WorkflowStore(self.root / "runtime.db"))
+        self.assertEqual(reopened.groups(), [])
+        with self.gateway.store._connect() as db:
+            row = db.execute("SELECT * FROM agent_groups WHERE id=?", (self.group,)).fetchone()
+            self.assertEqual(row["name"], "第一组")
+            self.assertIsNotNone(row["deleted_at"])
+            self.assertEqual(db.execute("SELECT group_id FROM registered_agents WHERE id=?",
+                                       (machine["agentId"],)).fetchone()[0], self.group)
+            from skill_packages import SkillError
+            from skill_store import SkillStore
+            from mcp_store import McpStore
+            with self.assertRaises(SkillError):
+                SkillStore(self.gateway.store).require_group(db, self.group)
+            with self.assertRaises(SkillError):
+                McpStore(self.gateway.store).group(db, self.group)
+        with self.assertRaisesRegex(ValueError, "有效分组"):
+            self.machine("127.0.0.2")
+        with self.assertRaisesRegex(ValueError, "找不到分组"):
+            reopened.save_group({"name": "不能恢复"}, self.group)
+
+    def test_old_group_schema_upgrade_preserves_records(self):
+        with self.gateway.store._connect() as db:
+            db.execute("ALTER TABLE agent_groups DROP COLUMN deleted_at")
+        for _ in range(2):
+            reopened = AgentRegistry(self.gateway.store)
+            self.assertEqual(reopened.groups()[0]["id"], self.group)
+        reopened.delete_group(self.group)
+        self.assertEqual(reopened.groups(), [])
+
     def test_group_crud_and_scope(self):
         other = self.registry.save_group({"name": "第二组"})["id"]
         self.registry.save_group({"name": "新名称"}, other)

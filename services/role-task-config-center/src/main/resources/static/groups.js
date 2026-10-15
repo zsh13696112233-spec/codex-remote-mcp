@@ -10,7 +10,11 @@ function groupOptions(id='',placeholder='请先选择分组'){return `<option va
 function groupMark(x){return `<span class="group-tag">${esc(x.groupName||groupName(x.groupId))}</span>`}
 function groupCheckbox(x){return `<input type="checkbox" data-group-item="${esc(x.id)}" aria-label="选择${esc(x.name)}归组">`}
 async function loadGroups(){
-  try{const result=await api('/api/groups');groupState.items=result.groups||[];groupState.error=''}
+  try{const result=await api('/api/groups');groupState.items=result.groups||[];groupState.error='';
+    if(groupState.selected&&!groupState.items.some(g=>g.id===groupState.selected)){
+      groupState.selected='';runCatalogFilters.page=0;
+      const url=new URL(location.href);url.searchParams.delete('groupId');url.searchParams.delete('runPage');history.replaceState(null,'',url);
+    }}
   catch(error){groupState.error='分组暂时无法加载，请刷新重试。'}
 }
 function renderGroupFilter(){
@@ -66,7 +70,7 @@ document.addEventListener('click',async e=>{
     if(b.hasAttribute('data-open-groups'))return document.querySelector('nav [data-page=groups]').click();
     if(b.dataset.groupJump){if(!await selectGroup(b.dataset.id))return;return document.querySelector(`nav [data-page="${b.dataset.groupJump}"]`).click()}
     if(b.dataset.groupEdit)return editGroup(b.dataset.groupEdit);
-    if(b.dataset.groupDelete){if(!confirm('仅无配置、机器、Skill、MCP 和历史引用的空分组可删除，确定删除？'))return;b.disabled=true;await api(`/api/groups/${encodeURIComponent(b.dataset.groupDelete)}`,{method:'DELETE'});await render();return}
+    if(b.dataset.groupDelete){if(!confirm('删除后分组将从管理和选择列表隐藏，历史记录保留。仍有有效配置、机器、Skill、MCP 收录或未结束运行时不能删除。确定删除？'))return;b.disabled=true;await api(`/api/groups/${encodeURIComponent(b.dataset.groupDelete)}`,{method:'DELETE'});await render();return}
     if(b.hasAttribute('data-assign-group')){const ids=[...document.querySelectorAll('[data-group-item]:checked')].map(x=>x.dataset.groupItem);if(!ids.length){toast('请先勾选需要归组的数据。');return}if(state.page==='sops'&&!confirmDiscard())return;const kind=state.page;document.querySelector('#sopManageDialog')?.close();groupDialog(`为 ${ids.length} 条数据指定分组`,`<label>目标分组<select name="groupId" required>${groupOptions(concreteGroup())}</select></label><p>整批校验通过后保存，关联不符时整批保持原样。</p>`,async f=>{await api('/api/groups/assign',{method:'POST',body:JSON.stringify({kind,ids,groupId:f.elements.groupId.value})});state.sop.draft=null;state.sop.baseline='';await render();toast('归组已完成')})}
   }catch(error){toast(error.message)}finally{b.disabled=false}
 });

@@ -39,6 +39,8 @@ class AgentRegistry:
                 db.execute("ALTER TABLE registered_agents ADD COLUMN remark TEXT NOT NULL DEFAULT ''")
             if "deleted_at" not in {row["name"] for row in db.execute("PRAGMA table_info(registered_agents)")}:
                 db.execute("ALTER TABLE registered_agents ADD COLUMN deleted_at TEXT")
+            if "deleted_at" not in {row["name"] for row in db.execute("PRAGMA table_info(agent_groups)")}:
+                db.execute("ALTER TABLE agent_groups ADD COLUMN deleted_at TEXT")
             # 旧部署授权仅导入一次；此后网页保存的数据库记录是唯一事实来源。
             legacy = setting("skill_deployment", {}).get("agents", {})
             for row in db.execute("SELECT id FROM registered_agents").fetchall():
@@ -68,7 +70,7 @@ class AgentRegistry:
 
     def groups(self) -> list[dict[str, Any]]:
         with self.store._connect() as db:
-            rows = [dict(row) for row in db.execute("SELECT id, name FROM agent_groups ORDER BY name")]
+            rows = [dict(row) for row in db.execute("SELECT id, name FROM agent_groups WHERE deleted_at IS NULL ORDER BY name")]
             available = db.execute("SELECT 1 FROM sqlite_master WHERE name='skill_group_packages'").fetchone()
             mcp_available = db.execute("SELECT 1 FROM sqlite_master WHERE name='mcp_package_groups'").fetchone()
             for row in rows:
@@ -83,11 +85,11 @@ class AgentRegistry:
         with self.store._connect() as db:
             try:
                 if group_id:
-                    if not db.execute("UPDATE agent_groups SET name=? WHERE id=?", (name.strip(), group_id)).rowcount:
+                    if not db.execute("UPDATE agent_groups SET name=? WHERE id=? AND deleted_at IS NULL", (name.strip(), group_id)).rowcount:
                         raise ValueError("找不到分组。")
                 else:
                     group_id = str(uuid.uuid4())
-                    db.execute("INSERT INTO agent_groups VALUES (?, ?)", (group_id, name.strip()))
+                    db.execute("INSERT INTO agent_groups(id, name) VALUES (?, ?)", (group_id, name.strip()))
             except sqlite3.IntegrityError as error:
                 raise ValueError("分组名称已存在。") from error
         return {"id": group_id, "name": name.strip()}
@@ -95,18 +97,19 @@ class AgentRegistry:
     def delete_group(self, group_id: str) -> None:
         with self.store._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name='skill_group_packages'").fetchone():
-                for table in ("skill_group_packages", "skill_batches"):
-                    if db.execute(f"SELECT 1 FROM {table} WHERE group_id=? LIMIT 1", (group_id,)).fetchone():
-                        raise ValueError("分组仍有 Skill 或下发历史引用，不能删除。")
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name='mcp_package_groups'").fetchone():
-                for table in ("mcp_package_groups", "mcp_batches"):
-                    if db.execute(f"SELECT 1 FROM {table} WHERE group_id=?", (group_id,)).fetchone():
-                        raise ValueError("分组仍有 MCP 包或下发历史引用。")
-            if db.execute("SELECT 1 FROM registered_agents WHERE group_id=?", (group_id,)).fetchone():
-                raise ValueError("分组内仍有机器，不能删除。")
-            if not db.execute("DELETE FROM agent_groups WHERE id=?", (group_id,)).rowcount:
+            row = db.execute("SELECT deleted_at FROM agent_groups WHERE id=?", (group_id,)).fetchone()
+            if row is None:
                 raise ValueError("找不到分组。")
+            if row["deleted_at"] is not None:
+                return
+            for table, label in (("skill_group_packages", "Skill"), ("mcp_package_groups", "MCP")):
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
+                    if db.execute(f"SELECT 1 FROM {table} WHERE group_id=? LIMIT 1", (group_id,)).fetchone():
+                        raise ValueError(f"分组仍有 {label} 包收录，不能删除。")
+            if db.execute("SELECT 1 FROM registered_agents WHERE group_id=? AND deleted_at IS NULL", (group_id,)).fetchone():
+                raise ValueError("分组内仍有机器，不能删除。")
+            db.execute("UPDATE agent_groups SET deleted_at=? WHERE id=?",
+                       (datetime.now(timezone.utc).isoformat(), group_id))
 
     def rows(self) -> dict[str, dict[str, Any]]:
         with self.store._connect() as db:
@@ -190,7 +193,7 @@ class AgentRegistry:
             raise ValueError("请选择有效分组。")
         with self.store._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if not db.execute("SELECT 1 FROM agent_groups WHERE id=?", (body.get("groupId"),)).fetchone():
+            if not db.execute("SELECT 1 FROM agent_groups WHERE id=? AND deleted_at IS NULL", (body.get("groupId"),)).fetchone():
                 raise ValueError("请选择有效分组。")
             old = db.execute("SELECT * FROM registered_agents WHERE id=?", (agent_id,)).fetchone() if agent_id else None
             if agent_id and (old is None or old["deleted_at"] is not None):

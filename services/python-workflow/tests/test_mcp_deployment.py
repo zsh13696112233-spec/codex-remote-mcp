@@ -56,6 +56,20 @@ class McpStoreTests(unittest.TestCase):
             self.manager.create({**self.body, "requestId": str(uuid.uuid4())})
         self.assertEqual(self.manager.store.batch(batch["id"])["tasks"][0]["state"], "failed")
 
+    def test_group_delete_preserves_mcp_history(self):
+        batch = self.manager.create(self.body)
+        task = batch["tasks"][0]["id"]
+        self.manager.store.update(task, state="failed", occupied=0)
+        self.registry.delete_agent(self.agent)
+        with self.assertRaisesRegex(ValueError, "MCP"):
+            self.registry.delete_group(self.group)
+        with self.store._connect() as db:
+            db.execute("DELETE FROM mcp_package_groups WHERE group_id=?", (self.group,))
+        self.registry.delete_group(self.group)
+        self.assertEqual(self.registry.groups(), [])
+        self.assertEqual(self.manager.store.batch(batch["id"])["group_name"], "测试组")
+        self.assertEqual(self.manager.store.batches()[0]["id"], batch["id"])
+
     def test_group_mcp_counts_include_shared_packages_once(self):
         other = self.registry.save_group({"name": "另一个组"})["id"]
         counts = {g["id"]: g["mcpCount"] for g in self.registry.groups()}
