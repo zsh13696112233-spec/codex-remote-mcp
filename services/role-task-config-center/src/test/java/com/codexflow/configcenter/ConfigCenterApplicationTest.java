@@ -210,7 +210,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
     SopSaveRequest blank =
         grouped(
             new SopSaveRequest(
-                "测试", null, " ", null, null, true, 10, "automatic", "legacy_text", List.of()));
+                "测试", null, " ", null, null, true, "automatic", "legacy_text", List.of()));
     SopSaveRequest tooLong =
         grouped(
             new SopSaveRequest(
@@ -220,7 +220,6 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
                 null,
                 null,
                 true,
-                10,
                 "automatic",
                 "legacy_text",
                 List.of()));
@@ -264,7 +263,6 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
                 7200,
                 null,
                 true,
-                10,
                 "automatic",
                 "cumulative_files",
                 List.of(step)));
@@ -285,7 +283,6 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
                 7200,
                 null,
                 true,
-                10,
                 "automatic",
                 "cumulative_files",
                 List.of(step)));
@@ -391,9 +388,9 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
         .hasMessageContaining("permissionProfile");
   }
 
-  /** 确认重跑额度会冻结到网关载荷，整项任务重试沿用上限但不会携带已使用次数。 */
+  /** 新配置移除重跑额度，历史快照仍可按原值读取并重试。 */
   @Test
-  void retryLimitIsValidatedAndFrozenIntoFreshRunPayloads() {
+  void retiredRetryLimitIsIgnoredWithoutChangingHistoricalSnapshots() {
     String roleId =
         jdbc.queryForObject(
             "select id from codex_sop_roles order by created_at limit 1", String.class);
@@ -402,7 +399,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
             "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
     SopSaveRequest sopBody =
-        grouped(new SopSaveRequest("额度快照测试", null, null, null, true, 7, List.of(step)));
+        grouped(new SopSaveRequest("额度快照测试", null, null, null, true, List.of(step)));
     ObjectNode createdSop = service.createSop(sopBody);
     ObjectNode createdTask =
         service.createTask(
@@ -413,8 +410,9 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
     PreparedRun first = runStore.prepareLatest(createdTask.path("id").asText());
     PreparedRun retried = runStore.prepareRetry(first.workflowId());
 
-    assertThat(first.payload().path("maxRetryCount").asInt()).isEqualTo(7);
-    assertThat(retried.payload().path("maxRetryCount").asInt()).isEqualTo(7);
+    assertThat(createdSop.has("maxRetryCount")).isFalse();
+    assertThat(first.payload().has("maxRetryCount")).isFalse();
+    assertThat(retried.payload().has("maxRetryCount")).isFalse();
     assertThat(first.payload().path("advanceMode").asText()).isEqualTo("automatic");
     assertThat(createdSop.path("handoffMode").asText()).isEqualTo("legacy_text");
     assertThat(first.payload().path("handoffMode").asText()).isEqualTo("legacy_text");
@@ -423,18 +421,28 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
     assertThat(retried.payload().has("usedRetryCount")).isFalse();
     ObjectNode legacyPayload = first.payload().deepCopy();
     legacyPayload.remove("handoffMode");
+    legacyPayload.put("maxRetryCount", 7);
     jdbc.update(
         "update codex_sop_task_runs set submitted_json = ? where workflow_id = ?",
         legacyPayload.toString(),
         first.workflowId());
     PreparedRun legacyRetry = runStore.prepareRetry(first.workflowId());
     assertThat(legacyRetry.payload().has("handoffMode")).isFalse();
-    assertThatThrownBy(
-            () ->
-                service.createSop(
-                    grouped(
-                        new SopSaveRequest("非法额度", null, null, null, true, 101, List.of(step)))))
-        .hasMessageContaining("maxRetryCount");
+    assertThat(legacyRetry.payload().path("maxRetryCount").asInt()).isEqualTo(7);
+    assertThat(
+            jdbc.queryForObject(
+                "select submitted_json from codex_sop_task_runs where workflow_id = ?",
+                String.class,
+                first.workflowId()))
+        .isEqualTo(legacyPayload.toString());
+    var mapper = new tools.jackson.databind.ObjectMapper();
+    ObjectNode legacyRequest = mapper.valueToTree(sopBody);
+    legacyRequest.put("maxRetryCount", 101);
+    assertThat(
+            mapper
+                .valueToTree(mapper.treeToValue(legacyRequest, SopSaveRequest.class))
+                .has("maxRetryCount"))
+        .isFalse();
   }
 
   /** 确认半自动模式会保存并冻结到原快照重试。 */
@@ -451,7 +459,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
         service.createSop(
             grouped(
                 new SopSaveRequest(
-                    "半自动快照", null, null, null, true, 10, "semi_automatic", List.of(step))));
+                    "半自动快照", null, null, null, true, "semi_automatic", List.of(step))));
     ObjectNode task =
         service.createTask(
             grouped(
@@ -468,7 +476,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
                 service.createSop(
                     grouped(
                         new SopSaveRequest(
-                            "非法模式", null, null, null, true, 10, "manual", List.of(step)))))
+                            "非法模式", null, null, null, true, "manual", List.of(step)))))
         .hasMessageContaining("advanceMode");
   }
 
@@ -486,15 +494,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
         service.createSop(
             grouped(
                 new SopSaveRequest(
-                    "文字交接快照",
-                    null,
-                    null,
-                    null,
-                    true,
-                    10,
-                    "automatic",
-                    "legacy_text",
-                    List.of(step))));
+                    "文字交接快照", null, null, null, true, "automatic", "legacy_text", List.of(step))));
     ObjectNode task =
         service.createTask(
             grouped(
@@ -516,7 +516,6 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
                             null,
                             null,
                             true,
-                            10,
                             "automatic",
                             "unsupported",
                             List.of(step)))))

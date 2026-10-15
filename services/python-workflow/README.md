@@ -1,6 +1,6 @@
 # Python 工作流服务
 
-钉钉普通过程消息使用 `GET /workflows/{workflowId}/events/history?view=bot`：除步骤与终态事件外，返回 `appserver.item/started` 和 `appserver.item/completed`。主监督和步骤沿用现有事件上报，任务助手新增 `source: assistant`，并在 payload 中携带对应提问的 `messageId`。助手中间事件先刷新入库，再保存最终回答；模型结构化答案和原始推理增量不作为公开过程消息发送。带事件回调的执行请求使用 `turn/start` 的 `summary: auto` 请求可读摘要，模型未提供时不编造。Java 只提取工具状态、完整可读摘要和用户可见进度说明，普通监控页面的事件过滤保持兼容。
+钉钉普通过程消息使用 `GET /workflows/{workflowId}/events/history?view=bot`：除步骤与终态事件外，返回 `appserver.item/started` 和 `appserver.item/completed`。主监督和步骤沿用现有事件上报，任务助手新增 `source: assistant`，并在 payload 中携带对应提问的 `messageId`。助手中间事件先刷新入库，再保存最终回答；模型结构化答案和原始推理增量不作为公开过程消息发送。带事件回调的执行请求使用 `turn/start` 的 `summary: auto` 请求可读摘要，模型未提供时不编造。Java 按 SOP 详情开关展示工具状态、可读摘要和执行者／讨论过程说明，监督机自由进度文字始终隐藏。监控页面默认使用生命周期事件展示阶段变化；独立详情视图 `monitor_details` 在服务端投影公开摘要、执行说明和工具状态／成功文本结果，隐藏监督机自由播报及内部工具操作，不改变 `bot` 视图。详情展示和过滤边界见[监控中心 README](../workflow-console/README.md)。
 
 本模块同时提供 HTTP 工作流网关、Codex Orchestrator MCP 服务和 SQLite 状态存储，是整套平台的执行核心。
 
@@ -27,7 +27,7 @@ python-workflow/
 - 配置中心提交携带可选 `taskDefinitionId`。中央运行库在同一写事务中校验同一任务只能有一个活动运行，不依赖主监督是否相同。
 - `POST /workflow-task-bindings` 接收 `taskDefinitionId` 和最多 200 个 `workflowIds`，只用于配置中心补齐历史归属。重复绑定幂等、归属不可改、缺失运行不创建；原始快照不变。`POST /workflow-statuses` 按最多 200 个 `workflowIds` 批量返回 `{statuses: {workflowId: status}}`，不加载结果和提示词。
 - `GET /workflows/{workflowId}` 返回 `revision` 和各步骤 `resultRevision`。可携带 `knownRevision` 与 JSON 数组形式的 `knownResults`（按步骤顺序，最多 100 项）。无状态变化时返回 `{unchanged: true, revision, lastEventSequence}`；步骤结果版本相同时省略该步骤的 `response/error/artifacts` 并返回 `resultUnchanged: true`，调用方复用缓存。缺省参数仍返回完整状态。
-- 历史事件支持 `view=all|monitor|bot`，缺省仍为完整审计事件。`after` 向后增量读取，`tail=true` 取最近一页，`before` 向前回看；不能混用方向。响应增加 `nextCursor/hasMore/oldestCursor/hasOlder`，事件始终按序号升序返回。增量调用必须使用 `nextCursor`，即使过滤后为空也可前进，且不会越过尚未交付的符合条件事件。
+- 历史事件支持 `view=all|monitor|monitor_details|bot`，缺省仍为完整审计事件。`after` 向后增量读取，`tail=true` 取最近一页，`before` 向前回看；不能混用方向。响应增加 `nextCursor/hasMore/oldestCursor/hasOlder`，事件始终按序号升序返回。增量调用必须使用 `nextCursor`，即使过滤后为空也可前进，且不会越过尚未交付的符合条件事件。
 - 较大的新事件正文采用透明无损压缩；旧数据库兼容升级，旧正文仍可读取。SQLite 操作在网关后台线程执行，避免写锁等待阻塞消息和心跳处理。升级时网关与本机 MCP 必须同步更新，旧版本无法读取新的压缩正文。
 
 本机 MCP、网关和远程 Sidecar 共用事件批处理器：每批最多 64 条且只属于一个工作流，按入队顺序提交；事件编号与时间在入队时固定，失败重试复用编号。取消等待会先等待已开始的写入结束，关闭时刷新剩余事件；远程认证和租约校验仍由内部 API 客户端负责。
@@ -234,13 +234,13 @@ MCP 逐机任务持久化 `diagnostics` 检测摘要，由安装汇总和批次�
 
 `GET /workflows/{workflowId}` 新增可空 `termination`；`POST /workflow-statuses` 保留原 `statuses` 字符串映射，新增同编号的 `terminations` 映射；终态事件附加 `termination`。内部步骤快照增加 `businessResult`，本机和远程使用相同校验，远程继续校验机器认证与租约。旧客户端可继续识别原终态，但须升级展示才能区分业务结束原因。
 
-仅正式业务步骤可控制提前结束。等待期间讨论、普通咨询仍不能停止流程。已结束运行的问题解决后通过配置中心创建重试运行，不支持从聊天恢复终态。带 `waitPolicy` 的新半自动运行先等待人工处理，未结束时可通过卡片重新执行当前遇阻步骤。升级说明见 [阻断结束升级与验收](../../docs/SOP_BLOCKED_STOP.zh-CN.md)。
+仅正式业务步骤可控制提前结束。等待期间讨论、普通咨询仍不能停止流程。已结束运行的问题解决后通过配置中心创建重试运行，不支持从聊天恢复终态。带版本 2 `waitPolicy` 的新半自动运行持续等待人工处理，未结束时可通过卡片重新执行当前遇阻步骤。升级说明见 [阻断结束升级与验收](../../docs/SOP_BLOCKED_STOP.zh-CN.md)。
 
 ### Jira 开发人结果（版本 2）
 
-`jiraDeveloper` 严格包含 `status/accountType/accountId/displayName/detail`。阻断时实际读取已锁定 Jira 的 `Public.Jira.Fields.Developer`：唯一人员为 `resolved`，账号优先使用实际返回的 `accountId`，其次 `key`、`name`，`accountType` 标明所选字段，`accountId` 保留原值；禁止使用姓名、经办人或发起人推断。账号上限 256、显示名 160、说明 2000 字符。
+`jiraDeveloper` 严格包含 `status/accountType/accountId/displayName/detail`。凡正式步骤处理唯一 Jira，成功或阻断均返回 `jiraComment.issueKey` 并实际读取该 Jira 的 `Public.Jira.Fields.Developer`，不因评论为 `not_applicable` 省略编号或开发人，不为展示新增评论或修改 Jira：唯一人员为 `resolved`，账号优先使用实际返回的 `accountId`，其次 `key`、`name`，`accountType` 标明所选字段，`accountId` 保留原值；禁止使用姓名、经办人或发起人推断。账号上限 256、显示名 160、说明 2000 字符。
 
-空值、多人、无法读取分别为 `empty/multiple/unavailable`，账号类型与账号必须为空；非阻断可用 `not_applicable`。建议在 `detail` 说明读取情况，但允许空字符串或纯空白，不因开发人或说明为空把业务结果判为格式无效，也不猜测或补填人员。开发人读取结果不单独阻断业务，已有业务阻断决定仍保留；`resolved` 仍必须提供唯一 Jira 与稳定账号。中央根据冻结版本严格校验，本机和远程共用规则；旧运行没有开发人信息，不从正文提取或补发通知。角色修改结果继续放在 `jiraComment.detail`，其 `status` 仅表示评论结果。
+空值、多人、无法读取分别为 `empty/multiple/unavailable`，账号类型与账号必须为空；未处理 Jira 的非阻断步骤可用 `not_applicable`。多人可在显示名内返回实际姓名列表，不选择其中一人。建议在 `detail` 说明读取情况，但允许空字符串或纯空白，不因开发人或说明为空把业务结果判为格式无效，也不猜测或补填人员。开发人读取结果不单独阻断业务，已有业务阻断决定仍保留；`resolved` 仍必须提供唯一 Jira 与稳定账号。中央根据冻结版本严格校验，本机和远程共用规则；旧运行没有开发人信息，不从正文提取或补发通知。角色修改结果继续放在 `jiraComment.detail`，其 `status` 仅表示评论结果。
 
 Python 不持有钉钉凭据或发送通知；8091 在确认阻断终态后按冻结群配置通知开发人。升级顺序和验收见 [Jira 阻断通知部署说明](../../docs/JIRA_BLOCKED_NOTIFICATION.zh-CN.md)。
 
@@ -256,13 +256,13 @@ Python 不持有钉钉凭据或发送通知；8091 在确认阻断终态后按�
 
 ## 半自动等待策略
 
-新提交的半自动 `legacy_text` 运行携带 `waitPolicy: {"version":1,"confirmationMinutes":2,"blockedMinutes":30}`，两项为 1～720 分钟整数。配置中心创建运行时冻结；缺少策略的旧快照、旧快照重试及累计文件交接保持原行为。全自动不携带此策略。
+新提交的半自动运行携带 `waitPolicy: {"version":2}`，支持文字和累计文件交接，不接受等待时长字段。配置中心创建运行时冻结；每一步成功后必须手动确认，最后一步（含单步骤）必须确认结束，遇阻一直等待人工重新执行或终止任务。全自动不携带此策略。历史版本 1 策略仍按冻结的 `confirmationMinutes` / `blockedMinutes` 计时，缺少策略的旧快照保持原行为；原快照重试不自动升级。
 
 复用中央等待记录，`pendingAdvance.kind` 为 `advance`（中间成功）、`blocked`（业务遇阻）、`finish`（最后成功）；旧等待为 `legacy`。增加 `nodeId`、`availableActions`，最后一步 `nextNodeId` 为空。步骤遇阻使用 `waiting`，显示“等待人工处理”，此时无 `termination`，后续步骤仍未开始。执行等待动作时 `pendingAdvance.state=busy`。
 
-三个场景都从进入等待起计时；卡片通知回执不延长时间。人工消息入站后取消倒计时、保持等待，接收图片、排队和讨论期间不得放行。新等待由中央网关每秒检查并事务领取，到期分别进入下一步、阻断收尾或正常结束。无需新增调度服务，Sidecar 仍只访问中央 API。等待期间暂停空闲主监督，不消耗其执行超时，但继续占用运行名额。
+版本 2 的三类等待创建时直接持久化为 `held`，设置 `heldAt`，不进入到期扫描；沿用历史表中非空的截止时间列保存创建时间，但 `held` 状态下该值无计时意义。消息、通知回执和机器人回复都不会启动倒计时；接收图片、排队和讨论期间不得确认。中央网关继续事务领取人工操作，定时到期处理仅用于历史计时策略。Sidecar 仍只访问中央 API。等待期间暂停空闲主监督，不消耗其执行超时，但继续占用运行名额；网关重启及租约失效仍按既有中断规则处理。
 
-确认接口按等待类型处理下一步或最终结束，拒绝遇阻放行。新增 `POST /workflows/{workflowId}/advance/{gateId}/retry` 和 `/stop`，只处理当前有效新等待；重复领取不重复执行，旧卡片不能影响后续步骤。`retry` 在原会话重新处理当前步骤并归档旧执行版本，不重跑其他步骤；成功后重新等待确认，再次遇阻创建新倒计时。讨论本身不执行流程控制。`stop` 为人工取消，不回滚已有写入，不执行阻断 Jira 收尾或开发人通知。
+确认接口按等待类型处理下一步或最终结束，拒绝遇阻放行。新增 `POST /workflows/{workflowId}/advance/{gateId}/retry` 和 `/stop`，只处理当前有效新等待；重复领取不重复执行，旧卡片不能影响后续步骤。`retry` 在原会话重新处理当前步骤并归档旧执行版本，不重跑其他步骤；本机累计文件交接沿用前序文件输入，保存本轮产物后才进入新等待，成功保存后清理本轮托管目录；成功后重新等待确认，再次遇阻继续等待人工处理；版本 1 历史策略才重新计时。讨论本身不执行流程控制。`stop` 为人工取消，不回滚已有写入，不执行阻断 Jira 收尾或开发人通知。
 
 首次遇阻禁止停止评论和转交 Jira 处理角色；超时后平台关闭交互，再授权原执行者仅执行阻断收尾。收尾结果不允许改变工单身份和原阻断决定；失败或未知仍结束并明确披露，不自动重发。重新执行遇到已确认的技术错误按失败结束；外部写入终态不明时保持禁止放行并记录诊断，不盲目重复操作。
 
@@ -271,3 +271,23 @@ SQLite 兼容新增等待字段和索引，不恢复已结束任务。网关重�
 ## 主监督异常收尾
 
 主监督失败（包括上游限流重试耗尽）时，网关通过已保存的原执行标识向活动步骤发送限时中断请求，适用于本机 MCP 和远程 Sidecar 持有的步骤。随后同一事务保存工作流终态、将未结束步骤标为中断、未启动步骤标为未执行，并释放运行名额；已完成结果保留。迟到结果和绑定不能重新打开终态步骤。中断请求成功不等于已确认外部操作停止；步骤提示保留结果待核实说明，连接失败仅记录错误类型，不自动重发业务操作。该修复不回写历史终态记录，上线前仍需核实旧运行执行端及外部写入结果。
+
+
+## 精简消息的事件与提示词
+
+监督提示词要求等待超时静默继续，不猜测正常推进或正在收尾；最终以“本轮流程已结束”区分执行结束与业务验收结论。执行者减少内部操作流水，正式结果仍须保留阻断原因和未验证项，结果协议不变。
+
+`view=monitor` 返回聊天与受理、步骤启动、失败／超时／取消、等待和终态事件，不返回监督机原始播报；`view=all` 原始审计保持完整。`node.started` 新增 `payload.attemptNumber`，用于历史重放时区分首次启动与重新执行，旧事件由消费者兼容。新的监控部分索引与旧索引并存，已有数据库无需清理或导出；分页与增量游标语义不变。
+
+部署时同步中央网关、实际执行编排的本机 MCP／远程 Sidecar 和两个 Java 服务；不修改运行快照或业务流转规则。
+
+
+## 已移除的历史重跑额度
+
+提交中的旧 `maxRetryCount` 字段被忽略，不再校验、写入新运行规格或参与执行；状态接口、主监督查询工具及助手上下文不再返回 `retryPolicy`（含 `maxRetries/usedRetries/remainingRetries`）。SQLite 的历史额度列和原有规格快照保留，不清理业务数据。半自动“重新执行”的步骤版本计数继续保留，历史整项重试仍创建新工作流，不增加次数限制；消息投递及数据库技术重试保持原规则。升级需同步 Python 网关、MCP／Sidecar 和 Java 配置中心，无需删列或修改已应用迁移。
+
+### 结束卡片 Jira 展示信息
+
+正式步骤结果通过既有校验后，在同一中央事务保存 `jira_context_json`，查询快照新增可空 `jiraContext: {issueKey, developerStatus, developerName}`，不包含账号、原始说明或工具输出。SQLite 自动新增可空列，旧记录不从总结回填。后续步骤未返回编号时保留已知信息；同一编号的 `not_applicable` 不覆盖已保存信息，实际读取结果覆盖旧值；不同编号不继承前一工单开发人。重复、迟到及无效结果沿用原拒绝规则。本机与远程 Sidecar 共用中央保存链路，不改变流程状态、等待或阻断通知规则。
+
+需同步升级中央 Python 与实际执行的 MCP／Sidecar，使成功步骤按提示返回已有 Jira 字段；旧协议继续兼容，缺少展示信息不单独导致业务失败。卡片展示规则见配置中心 README。

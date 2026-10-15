@@ -150,8 +150,10 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
         "无唯一 Jira、无工具或无权限时不要猜测或重新选单，说明原因；"
         "备注失败或未知仍返回 blocked，由平台结束，不再执行下一步。"
         "success 和 no_task 不需写停止评论，jiraComment 使用 not_applicable 并说明。"
-        + ("阻断时从已锁定 Jira 实际读取 Public.Jira.Fields.Developer 指定的开发人字段，"
-           "jiraDeveloper.status 为 resolved/empty/multiple/unavailable；非阻断可为 not_applicable。"
+        + ("凡本步骤处理了唯一 Jira，无论成功或阻断，都在 jiraComment.issueKey 返回该编号，"
+           "并从该 Jira 实际读取 Public.Jira.Fields.Developer 指定的开发人字段，用于结束卡片展示；"
+           "评论 not_applicable 不代表编号或开发人不适用，不为展示新增评论或修改 Jira。"
+           "jiraDeveloper.status 为 resolved/empty/multiple/unavailable；未处理 Jira 的非阻断步骤可为 not_applicable。"
            "outcome 为 blocked 时禁止使用 not_applicable；未锁定唯一 Jira、无权限或读取失败均用 unavailable，"
            "accountType、accountId、displayName 留空，detail 说明原因。"
            "jiraComment 与 jiraDeveloper 状态独立：未锁定工单时评论可为 not_applicable，但开发人必须为 unavailable。"
@@ -159,6 +161,7 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
            "detail 尽量说明读取情况，但开发人说明为空不影响结果有效性；不得猜测或补填人员。"
            "唯一人员使用实际账号字段 accountId、key、name 中可用的最稳定标识，并以 accountType 标明类型，"
            "accountId 填该字段原值，displayName 填显示名，detail 说明读取结果。"
+           "多人时 displayName 填实际读取的姓名列表（不超过160字符），不选择其中一人。"
            "缺失、多人或读取失败时账号类型和账号填空字符串并说明原因，不猜测，不使用 assignee 或发起人。"
            "已经因业务必要条件判定 blocked 的，不因开发人读取失败改变该决定；不得选择钉钉群、人员或发送通知。" if version in (2, 3) else "")
         + ("" if version == 3 else "document 沿用主文档要求。" if capture_document else "document 必须为 null，不采集主文档。")

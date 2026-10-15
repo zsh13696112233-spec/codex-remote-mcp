@@ -20,6 +20,62 @@ import tools.jackson.databind.node.ObjectNode;
 /** 统一入口不依赖群绑定；回答与每次提问关联。 */
 class DingTalkBotCoordinatorTest {
   @Test
+  void hiddenDiscussionProgressAdvancesCursorWithoutSuppressingAnswer() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    var page = json.createObjectNode().put("nextCursor", 2);
+    var events = page.putArray("events");
+    events
+        .addObject()
+        .put("sequence", 1)
+        .put("type", "chat.assistant.progress")
+        .putObject("payload")
+        .put("messageId", "q")
+        .put("text", "正在读取配置");
+    events
+        .addObject()
+        .put("sequence", 2)
+        .put("type", "chat.assistant.completed")
+        .putObject("payload")
+        .put("messageId", "q")
+        .put("text", "正式回答");
+    when(runStore.dingtalkShowExecutionDetails(ID)).thenReturn(false);
+    when(gateway.get("/workflows/" + ID + "/events/history?after=0&limit=200&view=bot"))
+        .thenReturn(page);
+    ReflectionTestUtils.invokeMethod(bot, "pollBinding", binding);
+    verify(store).recordEvent("app", ID, 1L, "hidden-execution:1", null, null, null, false);
+    verify(store).completeReply(ID, "q", 2L, "正式回答", null);
+    verify(store, never())
+        .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean());
+  }
+
+  @Test
+  void lifecycleUsesDependenciesAndEventAttemptInsteadOfArrayOrder() {
+    var snapshot = json.createObjectNode().put("advanceMode", "automatic");
+    var nodes = snapshot.putArray("nodes");
+    nodes.addObject().put("id", "b").put("displayName", "审核").putArray("dependsOn").add("a");
+    var first =
+        nodes
+            .addObject()
+            .put("id", "a")
+            .put("displayName", "分析")
+            .put("response", "静态检查完成，界面尚未验证")
+            .put("attemptCount", 1);
+    first.putArray("dependsOn");
+    var event = json.createObjectNode().put("type", "node.started").put("nodeId", "a");
+    event.putObject("payload").put("attemptNumber", 0);
+    assertThat(DingTalkBotCoordinator.silentInitialStart(event, snapshot)).isTrue();
+    ((ObjectNode) event.path("payload")).put("attemptNumber", 1);
+    assertThat(DingTalkBotCoordinator.silentInitialStart(event, snapshot)).isFalse();
+    event.put("nodeId", "b");
+    assertThat(DingTalkBotCoordinator.stepStartedNotice(event, snapshot))
+        .contains("界面尚未验证", "审核", "已开始执行");
+    snapshot.put("advanceMode", "semi_automatic");
+    assertThat(DingTalkBotCoordinator.stepStartedNotice(event, snapshot))
+        .contains("审核")
+        .doesNotContain("界面尚未验证");
+  }
+
+  @Test
   void terminalDocumentsReplaceTextAndUseFrozenCardWithoutWaitingRequests() {
     var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
     var snapshot =
@@ -460,25 +516,25 @@ class DingTalkBotCoordinatorTest {
     verify(store).recordWaitingCard(ID, 1L, snapshot, true);
     verify(store, never())
         .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean());
-    // Automatic/final completion and a completion from another gate keep the ordinary notice.
+    // Ordinary completion is merged into the next start or the terminal notice.
     event.put("nodeId", "other");
     ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 2L);
-    verify(store).recordProcess(eq(ID), isNull(), eq(2L), contains("已完成"), eq(false), eq(false));
+    verify(store).recordEvent("app", ID, 2L, "merged-progress:" + 2, null, null, null, false);
     snapshot.remove("pendingAdvance");
     event.put("nodeId", "first");
     ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 3L);
-    verify(store).recordProcess(eq(ID), isNull(), eq(3L), contains("已完成"), eq(false), eq(false));
+    verify(store).recordEvent("app", ID, 3L, "merged-progress:" + 3, null, null, null, false);
   }
 
   @Test
-  void continueAcknowledgementIsRetainedUntilNextStepHasStarted() {
+  void continueAcknowledgementUpdatesCardWithoutAnotherMessage() {
     var payload = json.createObjectNode().put("nextNodeId", "second");
     var snapshot = json.createObjectNode();
     var node = snapshot.putArray("nodes").addObject().put("id", "second").put("status", "pending");
     assertThat(
             DingTalkBotCoordinator.redundantAdvanceNotice(
                 "step.advance.confirmed", payload, snapshot))
-        .isFalse();
+        .isTrue();
     node.put("startedAt", "2026-09-10T07:00:00Z");
     assertThat(
             DingTalkBotCoordinator.redundantAdvanceNotice(
@@ -814,7 +870,7 @@ class DingTalkBotCoordinatorTest {
     var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
     var event = json.createObjectNode().put("type", "node.completed");
     ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 1L);
-    verify(store).recordProcess(eq(ID), isNull(), eq(1L), contains("已完成"), eq(false), eq(false));
+    verify(store).recordEvent("app", ID, 1L, "merged-progress:1", null, null, null, false);
     verify(store, never()).enqueueCard(any(), any(), any());
   }
 
@@ -898,19 +954,13 @@ class DingTalkBotCoordinatorTest {
     when(gateway.get("/workflows/" + ID + "/events/history?after=0&limit=200&view=bot"))
         .thenReturn(page);
     ReflectionTestUtils.invokeMethod(bot, "pollBinding", binding);
-    for (long hidden = 1; hidden <= 6; hidden++) {
+    for (long hidden = 1; hidden <= 7; hidden++) {
       verify(store)
           .recordEvent("app", ID, hidden, "hidden-execution:" + hidden, null, null, null, false);
     }
-    var progressBody = ArgumentCaptor.forClass(String.class);
-    verify(store)
-        .recordProcess(eq(ID), isNull(), eq(7L), progressBody.capture(), eq(false), eq(false));
-    assertThat(progressBody.getValue())
-        .contains("进度说明：\n正在检查")
-        .doesNotContain("blocked", "jiraComment", "尚未完成配置检查");
     verify(store).recordProcess(eq(ID), isNull(), eq(8L), contains("已开始执行"), eq(false), eq(false));
     verify(store).completeReply(ID, "question-id", 9L, "正式回答", null);
-    verify(store, times(2))
+    verify(store, times(1))
         .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean());
     verify(store, never())
         .recordProcess(any(), any(), anyLong(), any(), anyBoolean(), anyBoolean(), any());

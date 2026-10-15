@@ -64,7 +64,7 @@ public class WorkflowController {
     if (limit < 1 || limit > 1000) {
       throw new IllegalArgumentException("limit 必须在 1 到 1000 之间。");
     }
-    if (!java.util.Set.of("all", "monitor").contains(view)
+    if (!java.util.Set.of("all", "monitor", "monitor_details").contains(view)
         || (before != null && before <= 0)
         || ((before != null || tail) && after != 0)) {
       throw new IllegalArgumentException("事件查询参数无效。");

@@ -705,7 +705,9 @@ class DingTalkBotCoordinator implements SmartLifecycle {
             return true;
           }
         }
-        if (redundantAdvanceNotice(type, payload, snapshot)) {
+        if ("node.completed".equals(type)
+            || silentInitialStart(event, snapshot)
+            || redundantAdvanceNotice(type, payload, snapshot)) {
           store.recordEvent(
               properties.getClientId(),
               binding.workflowId(),
@@ -739,19 +741,9 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           return true;
         }
         String notice =
-            DingTalkExecutionNotice.stepLabel(event, snapshot) + "：" + eventNotice(type);
-        if (!payload.path("kind").asText("legacy").equals("legacy")
-            && type.startsWith("step.advance.")) {
-          String kind = payload.path("kind").asText();
-          notice =
-              "step.advance.timed_out".equals(type)
-                  ? "blocked".equals(kind)
-                      ? "等待到期无人回复，正在按阻断原因结束。"
-                      : "finish".equals(kind) ? "结果确认等待已到期，正在结束任务。" : "确认等待已到期，准备进入下一步。"
-                  : "retry".equals(payload.path("action").asText())
-                      ? "已接受重新执行请求，正在处理当前步骤。"
-                      : "finish".equals(kind) ? "已确认最终结果，正在结束任务。" : "已确认，准备进入下一步。";
-        }
+            "node.started".equals(type)
+                ? stepStartedNotice(event, snapshot)
+                : DingTalkExecutionNotice.stepLabel(event, snapshot) + "：" + eventNotice(type);
         store.refreshWaitingCards(binding.workflowId(), snapshot);
         if (TERMINAL_EVENTS.contains(type) && snapshot.path("termination").isObject())
           notice =
@@ -856,14 +848,46 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   }
 
   static boolean redundantAdvanceNotice(String type, JsonNode payload, JsonNode snapshot) {
-    if ("step.advance.resumed".equals(type)) return true;
-    if (!"step.advance.confirmed".equals(type)) return false;
-    String nextId = payload.path("nextNodeId").asText();
-    for (JsonNode node : snapshot.path("nodes"))
-      if (!nextId.isBlank()
-          && nextId.equals(node.path("id").asText())
-          && !node.path("startedAt").asText().isBlank()) return true;
+    return Set.of("step.advance.resumed", "step.advance.confirmed", "step.advance.timed_out")
+        .contains(type);
+  }
+
+  static boolean silentInitialStart(JsonNode event, JsonNode snapshot) {
+    if (!"node.started".equals(event.path("type").asText())) return false;
+    String nodeId = event.path("nodeId").asText(event.path("payload").path("nodeId").asText());
+    for (JsonNode node : snapshot.path("nodes")) {
+      if (nodeId.equals(node.path("id").asText())) {
+        // 重试仍需通知；只合并首次执行的起始步骤。
+        return node.path("dependsOn").isArray()
+            && node.path("dependsOn").isEmpty()
+            && event.path("payload").path("attemptNumber").asInt(node.path("attemptCount").asInt())
+                == 0;
+      }
+    }
     return false;
+  }
+
+  static String stepStartedNotice(JsonNode event, JsonNode snapshot) {
+    String notice = DingTalkExecutionNotice.stepLabel(event, snapshot) + "：已开始执行。";
+    if (!"automatic".equals(snapshot.path("advanceMode").asText())) return notice;
+    String nodeId = event.path("nodeId").asText(event.path("payload").path("nodeId").asText());
+    StringBuilder summary = new StringBuilder();
+    for (JsonNode current : snapshot.path("nodes")) {
+      if (!nodeId.equals(current.path("id").asText())) continue;
+      for (JsonNode dependency : current.path("dependsOn")) {
+        for (JsonNode previous : snapshot.path("nodes")) {
+          if (!dependency.asText().equals(previous.path("id").asText())) continue;
+          String result =
+              DingTalkExecutionNotice.safe(
+                  DingTalkResultText.display(previous.path("response").asText()));
+          if (!result.isBlank()) {
+            if (result.length() > 300) result = result.substring(0, 300) + "…（完整结果见任务详情）";
+            summary.append("上一步结果：").append(result).append("\n");
+          }
+        }
+      }
+    }
+    return summary + notice;
   }
 
   private void enqueueCurrentProgress(String workflowId, String notice, String dedupKey) {
@@ -1134,7 +1158,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       case "step.advance.held" -> "已保持等待，可与本步骤执行者讨论；完成后点击继续按钮。";
       case "step.advance.confirmed", "step.advance.resumed" -> "已确认继续，等待下一步启动。";
       case "step.advance.timed_out" -> "两分钟等待已结束，任务已自动继续。";
-      case "workflow.completed" -> "任务已完成。";
+      case "workflow.completed" -> "本轮流程已结束。";
       case "workflow.failed" -> "任务执行失败。";
       case "workflow.cancelled" -> "任务已停止。";
       default -> "任务进度已更新。";

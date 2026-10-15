@@ -7,6 +7,7 @@ const ACTIVE = new Set(["queued", "running", "cancelling"]);
 const FAILED = new Set(["failed", "cancelled", "interrupted"]);
 const state = {
   workflowId: new URLSearchParams(location.search).get("workflowId")?.trim() || "",
+  showDetails: false, eventGeneration: 0, fetchingGeneration: null,
   cursor: 0, timer: null, durationTimer: null, messages: [], snapshot: null,
   refreshError: null, refreshRetrying: false, refreshing: false, sending: false,
   advanceAction: null, revision: null, eventsLoaded: false, oldestCursor: null,
@@ -128,35 +129,74 @@ async function refresh() {
   }
 }
 
-async function events() {
-  let changed = false;
-  // 每轮只处理一页，历史按需回看，持续输出不能独占刷新循环。
-  if (!state.eventsLoaded || Number(state.snapshot?.lastEventSequence || 0) > state.cursor) {
-    const batch = await api(`/api/workflows/${encodeURIComponent(state.workflowId)}/events?view=monitor&limit=200&${state.eventsLoaded ? `after=${state.cursor}` : "tail=true"}`);
-    const list = batch.events || [];
-    changed = list.length > 0;
-    list.forEach(event => {
-      if (!state.historyEvents.has(event.sequence)) consume(event);
-      state.historyEvents.set(event.sequence, event);
-    });
-    if (!state.eventsLoaded) {
-      state.oldestCursor = batch.oldestCursor;
-      $("#olderMessages").hidden = !batch.hasOlder;
-    }
-    state.eventsLoaded = true;
-    state.cursor = Number(batch.nextCursor ?? (list.at(-1)?.sequence || state.cursor));
-    // 保持长期打开页面的内存有界；较早事件仍可从数据库重新加载。
-    if (state.historyEvents.size > 2000 && !state.loadingOlder) {
-      const entries = [...state.historyEvents.entries()].sort((a, b) => a[0] - b[0]);
-      entries.slice(0, entries.length - 1000).forEach(([id]) => state.historyEvents.delete(id));
-      state.oldestCursor = entries[entries.length - 1000][0];
-      $("#olderMessages").hidden = false;
-      rebuildMessages();
+function eventView() { return state.showDetails ? "monitor_details" : "monitor"; }
+
+async function setExecutionDetails(enabled) {
+  state.showDetails = enabled;
+  state.eventGeneration++;
+  state.eventsLoaded = false;
+  state.cursor = 0;
+  state.oldestCursor = null;
+  state.loadingOlder = false;
+  // 两个视图共享正式消息；切换只重载详情，失败时也不抹去已读对话。
+  for (const [sequence, event] of state.historyEvents) {
+    if (event.type === "monitor.execution.detail" || event.type === "chat.assistant.progress") {
+      state.historyEvents.delete(sequence);
     }
   }
-  if (changed || !state.messages.length || state.renderedMessageStatus !== state.snapshot?.status) {
-    renderMessages();
-    state.renderedMessageStatus = state.snapshot?.status;
+  rebuildMessages();
+  $("#olderMessages").hidden = true;
+  $("#olderMessages").disabled = false;
+  renderMessages();
+  try { localStorage.setItem("monitor.executionDetails", String(enabled)); }
+  catch { /* 浏览器禁用存储时仍可在当前页面切换。 */ }
+  if (state.workflowId) {
+    try { await events(); }
+    catch { toast("执行详情加载失败，请稍后重试"); }
+  }
+}
+
+async function events() {
+  const generation = state.eventGeneration;
+  if (state.fetchingGeneration === generation) return;
+  state.fetchingGeneration = generation;
+  try {
+    let changed = false;
+    // 每轮只处理一页，历史按需回看，持续输出不能独占刷新循环。
+    if (!state.eventsLoaded || Number(state.snapshot?.lastEventSequence || 0) > state.cursor) {
+      const batch = await api(`/api/workflows/${encodeURIComponent(state.workflowId)}/events?view=${eventView()}&limit=200&${state.eventsLoaded ? `after=${state.cursor}` : "tail=true"}`);
+      if (generation !== state.eventGeneration) return;
+      const list = batch.events || [];
+      changed = list.length > 0;
+      const initialPage = !state.eventsLoaded;
+      list.forEach(event => {
+        if (!initialPage && !state.historyEvents.has(event.sequence)) consume(event);
+        state.historyEvents.set(event.sequence, event);
+      });
+      if (initialPage) {
+        rebuildMessages();
+        state.oldestCursor = batch.oldestCursor;
+        $("#olderMessages").hidden = !batch.hasOlder;
+      }
+      state.eventsLoaded = true;
+      state.cursor = Number(batch.nextCursor ?? (list.at(-1)?.sequence || state.cursor));
+      // 保持长期打开页面的内存有界；较早事件仍可从数据库重新加载。
+      if (state.historyEvents.size > 2000 && !state.loadingOlder) {
+        const entries = [...state.historyEvents.entries()].sort((a, b) => a[0] - b[0]);
+        entries.slice(0, entries.length - 1000).forEach(([id]) => state.historyEvents.delete(id));
+        state.oldestCursor = entries[entries.length - 1000][0];
+        $("#olderMessages").hidden = false;
+        rebuildMessages();
+      }
+    }
+    if (changed || !state.messages.length || state.renderedMessageStatus !== state.snapshot?.status) {
+      renderMessages();
+      state.renderedMessageStatus = state.snapshot?.status;
+    }
+  } catch (error) {
+    if (generation === state.eventGeneration) throw error;
+  } finally {
+    if (state.fetchingGeneration === generation) state.fetchingGeneration = null;
   }
 }
 
@@ -171,10 +211,12 @@ function rebuildMessages() {
 async function loadOlderMessages() {
   if (state.loadingOlder || !state.oldestCursor) return;
   state.loadingOlder = true;
+  const generation = state.eventGeneration;
   const button = $("#olderMessages");
   button.disabled = true;
   try {
-    const batch = await api(`/api/workflows/${encodeURIComponent(state.workflowId)}/events?view=monitor&limit=200&before=${state.oldestCursor}`);
+    const batch = await api(`/api/workflows/${encodeURIComponent(state.workflowId)}/events?view=${eventView()}&limit=200&before=${state.oldestCursor}`);
+    if (generation !== state.eventGeneration) return;
     (batch.events || []).forEach(event => state.historyEvents.set(event.sequence, event));
     state.oldestCursor = batch.oldestCursor;
     button.hidden = !batch.hasOlder;
@@ -182,8 +224,8 @@ async function loadOlderMessages() {
     rebuildMessages();
     renderMessages();
     box.scrollTop = previousTop + box.scrollHeight - previousHeight;
-  } catch (error) { toast(error.message); }
-  finally { state.loadingOlder = false; button.disabled = false; }
+  } catch (error) { if (generation === state.eventGeneration) toast(error.message); }
+  finally { if (generation === state.eventGeneration) { state.loadingOlder = false; button.disabled = false; } }
 }
 
 function placeRow(parent, row, index) {
@@ -192,14 +234,21 @@ function placeRow(parent, row, index) {
 
 function consume(event) {
   const payload = event.payload || {};
+  if (event.type === "monitor.execution.detail") {
+    if (!state.showDetails) return;
+    const id = "detail-" + payload.key;
+    if (findMessage(id)?.completed && !payload.completed) return;
+    upsertMessage({id, role: "detail", time: event.createdAt, nodeId: event.nodeId,
+      title: payload.title, text: payload.text + (payload.truncated ? "\n【原记录已截断】" : ""),
+      completed: payload.completed});
+    return;
+  }
   if (event.type === "chat.assistant.progress") {
     const user = findMessage(payload.messageId);
+    if (state.showDetails && payload.text) upsertMessage({id: "discussion-detail-" + event.sequence,
+      role: "detail", title: "讨论过程", text: payload.text, time: event.createdAt, nodeId: event.nodeId});
     if (user && (user.status === "completed" || user.status === "failed")) return;
     if (user && user.status !== "completed" && user.status !== "failed") user.status = "processing";
-    upsertMessage({id: "consult-progress-" + payload.messageId, replyTo: payload.messageId,
-      role: "assistant", time: event.createdAt, text: text(payload.text),
-      stepNumber: payload.stepNumber,
-      status: "processing", streaming: false});
     return;
   }
   if (event.type === "chat.user.accepted") {
@@ -250,33 +299,41 @@ function consume(event) {
       .forEach(item => { item.streaming = false; item.status = "failed"; item.error = text(payload.error); });
     return;
   }
-  if (event.source !== "supervisor") return;
-  const message = payload.message;
-  const method = message?.method;
-  const params = message?.params || {};
-  if (method === "item/agentMessage/delta" && typeof params.delta === "string") {
-    let draft = state.messages.at(-1);
-    if (!draft || draft.role !== "progress" || !draft.streaming) {
-      draft = {id: `progress-${event.sequence}`, role: "progress", time: event.createdAt, text: "", streaming: true};
-      state.messages.push(draft);
+  const lifecycle = {
+    "workflow.created": "任务已受理，正在准备执行。",
+    "workflow.completed": "本轮流程已结束，请查看步骤结果和产出文档确认业务结论。",
+    "workflow.failed": "本轮流程未能完成，请查看步骤结果。",
+    "workflow.cancelled": "本轮流程已终止，已完成步骤的结果仍保留。",
+    "node.failed": "步骤未能完成，请查看步骤结果。",
+    "node.timed_out": "步骤执行超时，请查看步骤结果。",
+    "node.cancelled": "步骤已停止。",
+  };
+  let notice = lifecycle[event.type];
+  const node = state.snapshot?.nodes?.find(value => value.id === (event.nodeId || payload.nodeId));
+  if (event.type === "node.started") {
+    if (node?.dependsOn?.length === 0 && !(payload.attemptNumber ?? node.attemptCount)) return;
+    notice = `步骤「${node?.displayName || "当前步骤"}」已开始执行。`;
+    if (state.snapshot?.advanceMode === "automatic") {
+      const previous = (node?.dependsOn || []).map(id => state.snapshot.nodes.find(value => value.id === id));
+      const summaries = previous.filter(value => value?.response).map(value => {
+        const result = text(value.response);
+        return "上一步结果：" + (result.length > 300 ? result.slice(0, 300) + "…（完整结果见步骤详情）" : result);
+      });
+      notice = [...summaries, notice].join("\n");
     }
-    draft.text += params.delta;
-    return;
   }
-  if (method === "item/completed" && params.item?.type === "agentMessage" && params.item.text) {
-    const value = text(params.item.text);
-    const draft = state.messages.at(-1);
-    if (draft?.role === "progress" && draft.streaming) {
-      draft.text = value;
-      draft.streaming = false;
-    } else if (state.messages.at(-1)?.text !== value) {
-      state.messages.push({id: `progress-${event.sequence}`, role: "progress", time: event.createdAt, text: value, streaming: false});
-    }
-    return;
+  if (event.type === "workflow.completed" || event.type === "workflow.failed") {
+    const terminalStatus = event.type.slice("workflow.".length);
+    const snapshot = state.snapshot?.status === terminalStatus ? state.snapshot : null;
+    const termination = payload.termination || snapshot?.termination;
+    if (termination?.outcome === "blocked") notice = "本轮流程因阻断结束。";
+    if (termination?.outcome === "no_task") notice = "无待处理任务，本轮流程已结束。";
+    const result = payload.response || snapshot?.response;
+    if (result) notice += "\n" + text(result);
   }
-  if (typeof event.payload?.message === "string") {
-    state.messages.push({id: `progress-${event.sequence}`, role: "progress", time: event.createdAt, text: event.payload.message, streaming: false});
-  }
+  // 等待内容与操作统一在当前等待卡片展示，不再追加聊天消息。
+  if (notice) upsertMessage({id: `progress-${event.sequence}`, role: "progress",
+    time: event.createdAt, text: notice, streaming: false, terminal: ["workflow.completed", "workflow.failed", "workflow.cancelled"].includes(event.type)});
 }
 
 function findMessage(id) { return state.messages.find(item => item.id === id); }
@@ -318,11 +375,18 @@ function renderMessages() {
     const avatar = make("div", "avatar", isUser ? "我" : "AI");
     const content = make("div", "chat-content");
     const meta = make("div", "chat-meta");
-    const isFinal = message.role === "progress" && index === state.messages.length - 1 && TERMINAL.has(state.snapshot?.status);
-    const sourceLabel = message.role === "progress" ? (isFinal ? "任务结果" : "任务进度") : (message.stepNumber ? `第${message.stepNumber}步执行者` : "任务助手");
+    const isFinal = message.terminal;
+    const detailNode = state.snapshot?.nodes?.find(node => node.id === message.nodeId);
+    const sourceLabel = message.role === "detail" ? (detailNode?.displayName || (message.title === "讨论过程" ? "任务助手" : "执行详情")) : message.role === "progress" ? (isFinal ? "任务结果" : "任务进度") : (message.stepNumber ? `第${message.stepNumber}步执行者` : "任务助手");
     meta.append(make("strong", "", isUser ? "我" : sourceLabel), make("time", "", fmt(message.time)));
     const bubble = make("div", "bubble");
-    bubble.append(make("p", "", message.text));
+    if (message.role === "detail") {
+      const disclosure = make("details", "execution-detail");
+      disclosure.open = cached?.row.querySelector("details")?.open || false;
+      const summary = make("summary", "", message.title);
+      disclosure.append(summary, make("p", "", message.text));
+      bubble.append(disclosure);
+    } else bubble.append(make("p", "", message.text));
     for (const imageId of message.imageIds || []) {
       const link = make("a", "");
       link.href = `/api/workflows/${encodeURIComponent(state.workflowId)}/input-images/${encodeURIComponent(imageId)}`;
@@ -503,7 +567,7 @@ function renderSteps(nodes, initializing = false) {
         make("strong", "", policy ? (blocked ? "当前步骤遇到阻碍，等待人工处理" : finalWait ? "最终结果等待确认" : "等待进入下一步") : held
           ? `保持等待：暂不进入${next?.displayName || "下一步骤"}`
           : `等待进入下一步：${next?.displayName || "下一步骤"}`),
-        make("span", "", policy ? (held ? "已取消倒计时，讨论后请通过按钮操作。" : `无人回复将在 ${new Date(advance.expiresAt).toLocaleString()} 自动${blocked?"阻断结束":finalWait?"正常结束":"进入下一步"}。回复后取消倒计时。`) + (blocked ? "请通过钉钉卡片“重新执行”处理本步骤，或在配置中心终止任务。" : "") : held
+        make("span", "", policy ? (advance.state === "busy" ? "正在处理，请等待处理结果。" : held ? "等待人工处理，不会自动流转或结束，请通过按钮操作。" : `无人回复将在 ${new Date(advance.expiresAt).toLocaleString()} 自动${blocked?"阻断结束":finalWait?"正常结束":"进入下一步"}。回复后取消倒计时。`) + (blocked ? "请通过钉钉卡片“重新执行”处理本步骤，或在配置中心终止任务。" : "") : held
           ? "正在与本步骤执行者讨论。明确提出修改或采纳后更新交接总结，完成后请点击继续。"
           : "两分钟内未回复将自动继续。收到讨论消息后保持等待，点击继续交接最新版总结。")
       );
@@ -756,6 +820,10 @@ $("#chatForm").onsubmit = event => {
 };
 $("#chatInput").addEventListener("input", renderComposer);
 $("#olderMessages").onclick = loadOlderMessages;
+try { state.showDetails = localStorage.getItem("monitor.executionDetails") === "true"; }
+catch { /* 无本地存储时默认精简。 */ }
+$("#executionDetails").checked = state.showDetails;
+$("#executionDetails").onchange = event => setExecutionDetails(event.target.checked);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && state.workflowId) refresh();
 });

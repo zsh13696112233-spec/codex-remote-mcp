@@ -284,14 +284,9 @@ public class WorkflowRunStore {
     root.put("failurePolicy", "stop");
     root.put("handoffMode", task.sop.handoffMode);
     root.put("supervisorTimeoutSec", task.sop.supervisorTimeoutSec);
-    root.put("maxRetryCount", task.sop.maxRetryCount);
     root.put("advanceMode", task.sop.advanceMode);
-    if ("semi_automatic".equals(task.sop.advanceMode)
-        && "legacy_text".equals(task.sop.handoffMode)) {
-      root.putObject("waitPolicy")
-          .put("version", 1)
-          .put("confirmationMinutes", task.sop.confirmationMinutes)
-          .put("blockedMinutes", task.sop.blockedMinutes);
+    if ("semi_automatic".equals(task.sop.advanceMode)) {
+      root.putObject("waitPolicy").put("version", 2);
     }
     var nodes = root.putArray("nodes");
     String previous = null;

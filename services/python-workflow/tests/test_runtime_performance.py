@@ -161,7 +161,7 @@ class RuntimePerformanceTests(unittest.TestCase):
         reopened_store = WorkflowStore(self.path)
         with self.assertRaisesRegex(ValueError, "其他运行"):
             reopened_store.create_workflow(spec("third", "task"))
-        self.assertEqual(reopened_store.get_workflow("old")["retryPolicy"]["usedRetries"], 0)
+        self.assertNotIn("retryPolicy", reopened_store.get_workflow("old"))
         self.assertEqual(reopened_store.get_workflow("old")["status"], "cancelled")
         self.store.cancel_workflow("new")
         self.store.create_workflow(spec("replacement", "task"))
@@ -227,7 +227,7 @@ class RuntimePerformanceTests(unittest.TestCase):
                          [sequences[300], sequences[9990]])
         self.assertTrue(latest["hasOlder"])
         older = self.store.event_page("one", view="monitor", before=latest["oldestCursor"], limit=2)
-        self.assertEqual([event["sequence"] for event in older["events"]], [sequences[5]])
+        self.assertEqual([event["sequence"] for event in older["events"]], [1, sequences[5]])
         self.assertFalse(older["hasOlder"])
         first = self.store.event_page("one", view="bot", limit=2)
         second = self.store.event_page("one", view="bot", after=first["nextCursor"], limit=2)
@@ -264,6 +264,21 @@ class RuntimePerformanceTests(unittest.TestCase):
         self.assertTrue(current["unchanged"])
         self.assertEqual(current["lastEventSequence"], sequence)
 
+    def test_monitor_lifecycle_survives_reopen_without_supervisor_chatter(self):
+        self.store.create_workflow(spec("one"))
+        noise = self.store.add_event("one", node_id=None, source="supervisor",
+                                     event_type="appserver.item/completed",
+                                     payload={"message": {"params": {"item": {"type": "agentMessage", "text": "继续等待"}}}})
+        started = self.store.add_event("one", node_id="a", source="worker",
+                                       event_type="node.started", payload={"nodeId": "a", "attemptNumber": 0})
+        reopened = WorkflowStore(self.path)
+        page = reopened.event_page("one", view="monitor", limit=1)
+        self.assertEqual(page["events"][0]["type"], "workflow.created")
+        next_page = reopened.event_page("one", view="monitor", after=page["nextCursor"], limit=1)
+        self.assertEqual([e["sequence"] for e in next_page["events"]], [started])
+        self.assertNotIn(noise, [e["sequence"] for e in next_page["events"]])
+        self.assertIn(noise, [e["sequence"] for e in reopened.list_events("one")])
+
     def test_invalid_paging_and_batch_inputs_are_rejected(self):
         self.store.create_workflow(spec("one"))
         for kwargs in ({"view": "invalid"}, {"after": -1}, {"limit": 0},
@@ -295,7 +310,7 @@ class RuntimePerformanceTests(unittest.TestCase):
         compressed = self.store.compact_terminal_events("2100-01-01T00:00:00+00:00")
         self.assertEqual(compressed["compacted"], 1)
         self.assertGreater(compressed["savedBytes"], 1000)
-        event = self.store.event_page("one", view="monitor")["events"][0]
+        event = next(e for e in self.store.event_page("one", view="monitor")["events"] if e["sequence"] == sequence)
         self.assertEqual(event["sequence"], sequence)
         self.assertEqual(event["payload"], payload)
 
@@ -309,7 +324,7 @@ class RuntimePerformanceTests(unittest.TestCase):
         self.assertTrue(same.json()["unchanged"])
         self.assertEqual(client.get("/workflows/one?knownResults=bad-json").status_code, 400)
         events = client.get("/workflows/one/events/history?view=monitor&tail=true").json()
-        self.assertEqual(events["events"], [])
+        self.assertEqual([e["type"] for e in events["events"]], ["workflow.created"])
         self.assertGreater(events["nextCursor"], 0)
         response = client.post("/workflow-task-bindings", json={"taskDefinitionId": "task", "workflowIds": ["one"]})
         self.assertEqual(response.status_code, 200)

@@ -21,10 +21,11 @@ class WaitTests(unittest.TestCase):
         self.store = WorkflowStore(Path(self.temp.name) / "state.db")
         seed_agents(self.store, {"local": {"capabilities": ["supervisor", "executor"]}})
 
-    def start(self, single=False):
+    def start(self, single=False, manual=False, handoff_mode="legacy_text"):
         spec = serial_workflow()
         spec["advanceMode"] = "semi_automatic"
-        spec["waitPolicy"] = {"version": 1, "confirmationMinutes": 2, "blockedMinutes": 30}
+        spec["waitPolicy"] = {"version": 2} if manual else {"version": 1, "confirmationMinutes": 2, "blockedMinutes": 30}
+        spec["handoffMode"] = handoff_mode
         if single:
             spec["nodes"] = spec["nodes"][:1]
         self.store.create_workflow(spec)
@@ -186,7 +187,144 @@ class WaitTests(unittest.TestCase):
             self.store.cancel_workflow("serial-demo")
 
 
+class ManualWaitTests(unittest.TestCase):
+    setUp = WaitTests.setUp
+    start = WaitTests.start
+    sync = WaitTests.sync
+    expire = WaitTests.expire
+
+    def manual_wait(self, outcome="success", single=False):
+        self.start(single=single, manual=True)
+        gate = self.sync(result(outcome))
+        self.assertEqual(gate["state"], "held")
+        self.expire(gate)
+        self.assertEqual(self.store.due_policy_waits(), [])
+        action = "timeout" if outcome == "blocked" else "confirm"
+        with self.assertRaises(RuntimeError):
+            self.store.claim_policy_wait("serial-demo", gate["gateId"], action, timed_out=True)
+        self.assertFalse(self.store.release_timed_out_advance("serial-demo", gate["gateId"]))
+        self.assertEqual(WorkflowStore(self.store.path).get_workflow("serial-demo")["pendingAdvance"]["state"], "held")
+        return gate
+
+    def test_intermediate_requires_explicit_confirmation(self):
+        gate = self.manual_wait()
+        with self.assertRaises(RuntimeError):
+            self.store.prepare_node_dispatch("serial-demo", "b")
+        self.assertFalse(self.store.mark_advance_notified("serial-demo", gate["gateId"], utc_now())["updated"])
+        self.store.confirm_advance("serial-demo", gate["gateId"])
+        self.assertTrue(self.store.confirm_advance("serial-demo", gate["gateId"])["duplicate"])
+        self.assertFalse(self.store.prepare_node_dispatch("serial-demo", "b")["alreadyDispatched"])
+
+    def test_final_requires_explicit_confirmation(self):
+        gate = self.manual_wait(single=True)
+        self.store.finish_workflow("serial-demo", supervisor_status="completed", response="old", error=None)
+        self.assertEqual(self.store.get_workflow("serial-demo")["status"], "running")
+        self.assertTrue(self.store.has_supervisor_lease("serial-demo"))
+        self.store.confirm_advance("serial-demo", gate["gateId"])
+        self.store.complete_final_wait("serial-demo", gate["gateId"])
+        self.assertEqual(self.store.get_workflow("serial-demo")["status"], "completed")
+        self.assertFalse(self.store.has_supervisor_lease("serial-demo"))
+
+    def test_blocked_requires_retry_and_repeated_block_stays_held(self):
+        gate = self.manual_wait("blocked")
+        self.assertIsNone(self.store.get_workflow("serial-demo")["termination"])
+        with self.assertRaises(RuntimeError):
+            self.store.confirm_advance("serial-demo", gate["gateId"])
+        self.store.claim_policy_wait("serial-demo", gate["gateId"], "retry")
+        self.store.prepare_wait_execution("serial-demo", gate["gateId"])
+        self.store.attach_node_job("serial-demo", "a", {"job_id": "retry-a", "thread_id": "thread-a", "status": "running"})
+        self.store.sync_node_job("serial-demo", "a", {"job_id": "retry-a", "thread_id": "thread-a", "status": "completed", "businessResult": result("blocked")})
+        current = self.store.get_workflow("serial-demo")["pendingAdvance"]
+        self.assertEqual(current["state"], "held")
+        self.assertNotEqual(current["gateId"], gate["gateId"])
+        self.assertEqual(self.store.due_policy_waits(), [])
+        with self.assertRaises(RuntimeError):
+            self.store.cancel_workflow("serial-demo", gate_id=gate["gateId"])
+        self.store.cancel_workflow("serial-demo", gate_id=current["gateId"])
+        self.assertEqual(self.store.get_workflow("serial-demo")["status"], "cancelled")
+
+    def test_input_in_progress_still_blocks_confirmation(self):
+        gate = self.manual_wait()
+        self.store.observe_input("serial-demo", str(uuid.uuid4()), receiving=True)
+        with self.assertRaises(RuntimeError):
+            self.store.confirm_advance("serial-demo", gate["gateId"])
+
+    def test_cumulative_handoff_also_requires_confirmation(self):
+        self.start(single=True, manual=True, handoff_mode="cumulative_files")
+        gate = self.sync(result("success"))
+        self.assertEqual((gate["kind"], gate["state"]), ("finish", "held"))
+
+    def test_policy_rejects_timer_fields_and_invalid_versions(self):
+        spec = serial_workflow()
+        spec["advanceMode"] = "semi_automatic"
+        for policy in ({"version": 2, "confirmationMinutes": 2}, {"version": True}, {"version": 3}):
+            spec["waitPolicy"] = policy
+            with self.assertRaises(ValueError):
+                self.store.normalize_spec(spec)
+
+
 class WaitExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_cumulative_retry_stages_inputs_and_saves_output(self):
+        from codex_orchestrator_mcp import Orchestrator, AgentConfig
+        from workflow_wait_service import WaitService
+        from workflow_event_batcher import AsyncEventBatcher
+        from tests.mock_app_server import MockAppServer
+        fixture = ManualWaitTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.start(manual=True, handoff_mode="cumulative_files")
+        fixture.store.save_artifact_bytes("serial-demo", "a", "input", "plan.txt", b"plan")
+        first = fixture.sync(result("success"))
+        fixture.store.confirm_advance("serial-demo", first["gateId"])
+        fixture.store.prepare_node_dispatch("serial-demo", "b")
+        fixture.store.attach_node_job("serial-demo", "b", {"job_id": "job-b", "thread_id": "thread-b", "status": "running"})
+        fixture.store.sync_node_job("serial-demo", "b", {"job_id": "job-b", "thread_id": "thread-b", "status": "completed", "businessResult": result("blocked")})
+        gate = fixture.store.get_workflow("serial-demo")["pendingAdvance"]
+        fixture.store.claim_policy_wait("serial-demo", gate["gateId"], "retry")
+        target = fixture.store.prepare_wait_execution("serial-demo", gate["gateId"])
+        async with MockAppServer(structured_reply=json.dumps(result("success")), resume_thread_id="thread-b") as server:
+            orchestrator = Orchestrator()
+            orchestrator.agent_provider = lambda: {"local": AgentConfig.from_dict("local", {
+                "url": server.url, "cwd": str(Path.cwd()), "allow_write": True,
+                "artifact_root": str(Path(fixture.temp.name) / "artifacts")})}
+            capture = orchestrator._capture_artifacts
+            attempt_dirs = []
+            async def publish(job):
+                attempt_dirs.append(Path(job.managed_attempt_dir))
+                self.assertEqual(Path(job.managed_attempt_dir, "inputs", "step-01", "plan.txt").read_bytes(), b"plan")
+                Path(job.managed_output_dir, "result.txt").write_bytes(b"retry result")
+                await capture(job)
+            orchestrator._capture_artifacts = publish
+            batcher = AsyncEventBatcher(fixture.store)
+            gateway = SimpleNamespace(store=fixture.store, assistant_orchestrator=orchestrator,
+                event_batcher=batcher, flush_events=batcher.flush, _schedule_pending=AsyncMock())
+            await WaitService(gateway).execute("serial-demo", gate["gateId"], target)
+            state = fixture.store.get_workflow("serial-demo")
+            self.assertEqual(state["pendingAdvance"]["state"], "held")
+            self.assertEqual(state["pendingAdvance"]["completedNodeId"], "b")
+            files = fixture.store.get_cumulative_artifact_inputs("serial-demo", "c")[1]["artifacts"]
+            self.assertEqual([(f["filename"], f["content"]) for f in files], [("result.txt", b"retry result")])
+            self.assertEqual(len(attempt_dirs), 1)
+            self.assertFalse(attempt_dirs[0].exists())
+
+    async def test_scheduler_does_not_advance_manual_final_wait(self):
+        from workflow_wait_service import WaitService
+        fixture = ManualWaitTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        gate = fixture.manual_wait(single=True)
+        gateway = SimpleNamespace(store=fixture.store, _control_locks={},
+            _pause_supervisor=AsyncMock(), _schedule_pending=AsyncMock(), _resume_supervisor_if_needed=AsyncMock())
+        service = WaitService(gateway)
+        await service.tick()
+        self.assertEqual(service.tasks, {})
+        self.assertEqual(fixture.store.get_workflow("serial-demo")["status"], "running")
+        gateway._pause_supervisor.assert_awaited_once_with("serial-demo")
+        fixture.store.confirm_advance("serial-demo", gate["gateId"])
+        await service.tick()
+        await asyncio.gather(*list(service.tasks.values()))
+        self.assertEqual(fixture.store.get_workflow("serial-demo")["status"], "completed")
+
     async def test_scheduler_pauses_and_finalizes_expired_final_wait_once(self):
         from workflow_wait_service import WaitService
         fixture = WaitTests()

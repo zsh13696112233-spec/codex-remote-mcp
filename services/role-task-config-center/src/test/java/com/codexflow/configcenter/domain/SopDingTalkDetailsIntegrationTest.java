@@ -41,7 +41,6 @@ class SopDingTalkDetailsIntegrationTest extends GroupedFixtureSupport {
         7200,
         null,
         true,
-        10,
         "automatic",
         "legacy_text",
         null,

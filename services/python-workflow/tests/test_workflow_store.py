@@ -178,7 +178,7 @@ class WorkflowStoreTests(unittest.TestCase):
                 self.store.sync_node_job(mode, "a", {"status": "completed", "finished_at": utc_now()})
                 self.store.accept_chat_message(mode, message, "退回第一步")
                 self.assertIsNone(self.store.discussion_target(mode, message))
-                self.assertEqual(self.store.get_workflow(mode)["retryPolicy"]["usedRetries"], 0)
+                self.assertNotIn("retryPolicy", self.store.get_workflow(mode))
 
     def test_legacy_message_retry_cannot_capture_current_wait(self) -> None:
         gate = self.waiting_gate()
@@ -213,6 +213,21 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertIsNone(current["notifiedAt"])
         self.assertEqual(current["expiresAt"], gate["expiresAt"])
 
+    def test_legacy_retry_limit_is_ignored_and_existing_columns_are_preserved(self) -> None:
+        value = serial_workflow()
+        value["maxRetryCount"] = 0
+        snapshot = self.store.create_workflow(value)
+        self.assertNotIn("retryPolicy", snapshot)
+        self.assertNotIn("maxRetryCount", self.store.normalize_spec(value))
+        # Existing database values are historical data, not an active quota.
+        with self.store._connect() as connection:
+            connection.execute("UPDATE workflows SET max_retry_count=7, used_retry_count=4 WHERE workflow_id='serial-demo'")
+        reopened = WorkflowStore(self.store.path)
+        self.assertNotIn("retryPolicy", reopened.get_workflow("serial-demo"))
+        with reopened._connect() as connection:
+            row = connection.execute("SELECT max_retry_count,used_retry_count FROM workflows WHERE workflow_id='serial-demo'").fetchone()
+            self.assertEqual(tuple(row), (7, 4))
+
     def test_create_returns_monitorable_snapshot(self) -> None:
         snapshot = self.store.create_workflow(serial_workflow())
 
@@ -224,9 +239,7 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["currentNodes"], [])
         self.assertEqual(snapshot["progress"], {"completed": 0, "total": 3})
         self.assertEqual([node["status"] for node in snapshot["nodes"]], ["pending"] * 3)
-        self.assertEqual(snapshot["retryPolicy"], {
-            "maxRetries": 10, "usedRetries": 0, "remainingRetries": 10,
-        })
+        self.assertNotIn("retryPolicy", snapshot)
         events = self.store.list_events("serial-demo")
         self.assertEqual(events[0]["type"], "workflow.created")
 
@@ -316,9 +329,7 @@ class WorkflowStoreTests(unittest.TestCase):
 
         upgraded = WorkflowStore(legacy_path).get_workflow("legacy")
 
-        self.assertEqual(upgraded["retryPolicy"], {
-            "maxRetries": 10, "usedRetries": 0, "remainingRetries": 10,
-        })
+        self.assertNotIn("retryPolicy", upgraded)
         self.assertEqual(upgraded["assistant"]["status"], "idle")
         with WorkflowStore(legacy_path)._connect() as connection:
             control_columns = {
@@ -792,12 +803,12 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertIn("已跳过", next_step["prompt"])
         snapshot = self.store.get_workflow("serial-demo")
         self.assertEqual(snapshot["nodes"][0]["status"], "skipped")
-        self.assertEqual(snapshot["retryPolicy"]["usedRetries"], 0)
+        self.assertNotIn("retryPolicy", snapshot)
         with self.assertRaisesRegex(RuntimeError, "执行期间"):
             self.store.cancel_workflow("serial-demo")
         self.store.sync_node_job("serial-demo", "b", {"status": "completed", "finished_at": utc_now()})
         stopped = self.store.cancel_workflow("serial-demo")
-        self.assertEqual(stopped["retryPolicy"]["usedRetries"], 0)
+        self.assertNotIn("retryPolicy", stopped)
 
 
 

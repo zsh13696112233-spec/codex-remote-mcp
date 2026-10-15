@@ -311,11 +311,6 @@ public class ConfigService {
     sop.failurePolicy = "stop";
     sop.supervisorTimeoutSec =
         integerInRange(body.supervisorTimeoutSec(), "supervisorTimeoutSec", 7200, 10, 43200);
-    sop.maxRetryCount = integerInRange(body.maxRetryCount(), "maxRetryCount", 10, 0, 100);
-    sop.confirmationMinutes =
-        integerInRange(body.confirmationMinutes(), "正常确认时长", sop.confirmationMinutes, 1, 720);
-    sop.blockedMinutes =
-        integerInRange(body.blockedMinutes(), "遇阻等待时长", sop.blockedMinutes, 1, 720);
     sop.advanceMode = normalizeNullable(body.advanceMode());
     if (sop.advanceMode == null) sop.advanceMode = "automatic";
     if (!ADVANCE_MODES.contains(sop.advanceMode)) {

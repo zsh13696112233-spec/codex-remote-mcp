@@ -76,7 +76,7 @@ class DingTalkResultTextTest {
       var item =
           event.putObject("payload").putObject("message").putObject("params").putObject("item");
       item.put("type", "agentMessage").put("phase", "commentary").put("text", result());
-      if (source.equals("assistant")) {
+      if (!source.equals("worker")) {
         assertThat(DingTalkExecutionNotice.execution(event)).isEmpty();
       } else {
         assertThat(DingTalkExecutionNotice.execution(event)).isEqualTo("进度说明：\n已核对工单\n请确认方案");
@@ -85,7 +85,7 @@ class DingTalkResultTextTest {
       assertThat(DingTalkExecutionNotice.execution(event)).isEmpty();
       item.remove("phase");
       assertThat(DingTalkExecutionNotice.execution(event)).isEmpty();
-      if (!source.equals("assistant")) {
+      if (source.equals("worker")) {
         item.put("phase", "commentary").put("text", "正在核对需求");
         assertThat(DingTalkExecutionNotice.execution(event)).contains("正在核对需求");
       }

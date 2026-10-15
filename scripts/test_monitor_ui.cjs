@@ -14,6 +14,7 @@ class Element {
   }
   remove() { if (this.parentNode) { const p = this.parentNode; p.children.splice(p.children.indexOf(this), 1); this.parentNode = null; } }
   replaceChildren(...children) { [...this.children].forEach(child => child.remove()); this.append(...children); }
+  querySelector(tag) { return this.children.find(child => child.tagName === tag) || this.children.map(child => child.querySelector(tag)).find(Boolean); }
   get lastElementChild() { return this.children.at(-1); }
 }
 
@@ -23,7 +24,7 @@ function load() {
   const context = vm.createContext({URLSearchParams, location:{search:'?workflowId=one'},
     crypto:{getRandomValues: array => webcrypto.getRandomValues(array)}, Uint8Array,
     setTimeout:(fn, delay) => {timers.push({fn, delay}); return timers.length;}, clearTimeout:()=>{},
-    document:{hidden:false, createElement:()=>new Element(), querySelector:selector=>{
+    document:{hidden:false, createElement:tag=>Object.assign(new Element(), {tagName:tag}), querySelector:selector=>{
       if (!elements.has(selector)) elements.set(selector, new Element()); return elements.get(selector);
     }}});
   const source = fs.readFileSync('services/workflow-console/src/main/resources/static/app.js', 'utf8');
@@ -103,4 +104,21 @@ test('all step documents are displayed and unavailable bodies have no links', ()
   assert.equal(all.filter(element => element.href?.startsWith('document.html')).length, 8);
   assert.equal(all.find(element => element.textContent === '缺失文件（未同步）').href, undefined);
   assert.ok(all.find(element => element.textContent?.includes('查看上次成功版本')));
+});
+
+
+test('execution details render as plain text, retain disclosure and leave final labels intact', () => {
+  const app = load();
+  app.run(`state.showDetails=true; state.snapshot={status:'completed',nodes:[{id:'a',displayName:'核查'}]};
+    consume({sequence:1,type:'monitor.execution.detail',nodeId:'a',payload:{key:'tool',title:'执行命令',text:'<img src=x onerror=alert(1)>',completed:false}});
+    consume({sequence:2,type:'workflow.completed'}); renderMessages();`);
+  const box = app.elements.get('#messages');
+  const disclosure = box.children[0].querySelector('details');
+  assert.equal(disclosure.open, false);
+  assert.equal(disclosure.querySelector('p').textContent, '<img src=x onerror=alert(1)>');
+  assert.equal(disclosure.querySelector('img'), undefined);
+  disclosure.open = true;
+  app.run(`consume({sequence:3,type:'monitor.execution.detail',nodeId:'a',payload:{key:'tool',title:'执行命令 · 已完成',text:'已完成',completed:true}}); renderMessages();`);
+  assert.equal(box.children[0].querySelector('details').open, true);
+  assert.equal(box.children[1].querySelector('strong').textContent, '任务结果');
 });

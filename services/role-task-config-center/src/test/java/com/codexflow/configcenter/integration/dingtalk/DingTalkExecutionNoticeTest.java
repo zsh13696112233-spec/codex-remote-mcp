@@ -43,10 +43,10 @@ class DingTalkExecutionNoticeTest {
   }
 
   @Test
-  void retainsSupervisorProgressAndActionsAndNamedWorkerFileChanges() {
+  void hidesSupervisorProgressButRetainsActionsAndWorkerDetails() {
     var event = event("item/completed", "agentMessage").put("source", "supervisor");
     item(event).put("phase", "commentary").put("text", "策划已完成，开始开发");
-    assertThat(DingTalkExecutionNotice.execution(event)).contains("策划已完成，开始开发");
+    assertThat(DingTalkExecutionNotice.execution(event)).isEmpty();
     for (String tool : new String[] {"cancel_node"}) {
       event = event("item/started", "mcpToolCall").put("source", "supervisor");
       item(event).put("tool", tool);
@@ -105,7 +105,7 @@ class DingTalkExecutionNoticeTest {
     item(event).put("phase", "commentary").put("text", "开始开发");
     assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEmpty();
     event.put("createdAt", "2026-09-09T06:35:00Z");
-    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).contains("开始开发");
+    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEmpty();
     for (String state : new String[] {"countdown", "held"}) {
       snapshot.putObject("pendingAdvance").put("gateId", "gate").put("state", state);
       assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEmpty();
@@ -118,7 +118,7 @@ class DingTalkExecutionNoticeTest {
     snapshot.remove("pendingAdvance");
     snapshot.put("advanceMode", "automatic");
     event.put("createdAt", "2026-09-09T06:33:10Z");
-    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).contains("开始开发");
+    assertThat(DingTalkExecutionNotice.execution(event, snapshot)).isEmpty();
   }
 
   @Test
@@ -206,7 +206,15 @@ class DingTalkExecutionNoticeTest {
     }
     var progress = event("item/completed", "agentMessage");
     item(progress).put("text", "思考摘要：工具调用：这是正式进度");
-    assertThat(DingTalkExecutionNotice.isExecutionDetail(progress)).isFalse();
+    assertThat(DingTalkExecutionNotice.isExecutionDetail(progress)).isTrue();
+    assertThat(
+            DingTalkExecutionNotice.isExecutionDetail(
+                json.createObjectNode().put("type", "chat.assistant.progress")))
+        .isTrue();
+    assertThat(
+            DingTalkExecutionNotice.isExecutionDetail(
+                json.createObjectNode().put("type", "chat.assistant.completed")))
+        .isFalse();
     assertThat(DingTalkExecutionNotice.isExecutionDetail(event("node.completed", "reasoning")))
         .isFalse();
   }

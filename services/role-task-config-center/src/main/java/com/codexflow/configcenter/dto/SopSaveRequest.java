@@ -1,5 +1,6 @@
 package com.codexflow.configcenter.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
@@ -15,13 +16,13 @@ import java.util.List;
  * @param supervisorTimeoutSec 主监督超时秒数
  * @param defaultStepModel 默认步骤模型
  * @param enabled 是否启用
- * @param maxRetryCount 单次运行允许的人工重跑总次数
  * @param advanceMode 步骤成功后的流转方式
  * @param handoffMode 步骤之间的结果交接方式
  * @param dingtalkTargetId V1 兼容字段，当前忽略；通知对象由任务定义维护
  * @param dingtalkShowExecutionDetails 是否向钉钉展示思考摘要和工具调用
  * @param steps 按执行顺序排列的步骤列表
  */
+@JsonIgnoreProperties({"maxRetryCount", "confirmationMinutes", "blockedMinutes"})
 public record SopSaveRequest(
     @NotBlank @Size(max = 160) String name,
     @Size(max = 2000) String description,
@@ -29,16 +30,13 @@ public record SopSaveRequest(
     Integer supervisorTimeoutSec,
     @Size(max = 64) String defaultStepModel,
     Boolean enabled,
-    Integer maxRetryCount,
     @Size(max = 32) String advanceMode,
     @Size(max = 32) String handoffMode,
     @Size(max = 36) String dingtalkTargetId,
     @NotEmpty List<@Valid SopStepRequest> steps,
     @NotBlank @Size(max = 36) String groupId,
     Boolean dingtalkShowExecutionDetails,
-    @Size(max = 32) String defaultStepReasoningEffort,
-    Integer confirmationMinutes,
-    Integer blockedMinutes) {
+    @Size(max = 32) String defaultStepReasoningEffort) {
   public SopSaveRequest(
       String name,
       String description,
@@ -46,41 +44,6 @@ public record SopSaveRequest(
       Integer supervisorTimeoutSec,
       String defaultStepModel,
       Boolean enabled,
-      Integer maxRetryCount,
-      String advanceMode,
-      String handoffMode,
-      String dingtalkTargetId,
-      List<SopStepRequest> steps,
-      String groupId,
-      Boolean dingtalkShowExecutionDetails,
-      String defaultStepReasoningEffort) {
-    this(
-        name,
-        description,
-        supervisorAgentId,
-        supervisorTimeoutSec,
-        defaultStepModel,
-        enabled,
-        maxRetryCount,
-        advanceMode,
-        handoffMode,
-        dingtalkTargetId,
-        steps,
-        groupId,
-        dingtalkShowExecutionDetails,
-        defaultStepReasoningEffort,
-        null,
-        null);
-  }
-
-  public SopSaveRequest(
-      String name,
-      String description,
-      String supervisorAgentId,
-      Integer supervisorTimeoutSec,
-      String defaultStepModel,
-      Boolean enabled,
-      Integer maxRetryCount,
       String advanceMode,
       String handoffMode,
       String dingtalkTargetId,
@@ -94,7 +57,6 @@ public record SopSaveRequest(
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
-        maxRetryCount,
         advanceMode,
         handoffMode,
         dingtalkTargetId,
@@ -111,7 +73,6 @@ public record SopSaveRequest(
       Integer supervisorTimeoutSec,
       String defaultStepModel,
       Boolean enabled,
-      Integer maxRetryCount,
       String advanceMode,
       String handoffMode,
       String dingtalkTargetId,
@@ -124,7 +85,6 @@ public record SopSaveRequest(
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
-        maxRetryCount,
         advanceMode,
         handoffMode,
         dingtalkTargetId,
@@ -140,7 +100,6 @@ public record SopSaveRequest(
       Integer supervisorTimeoutSec,
       String defaultStepModel,
       Boolean enabled,
-      Integer maxRetryCount,
       String advanceMode,
       String handoffMode,
       String dingtalkTargetId,
@@ -152,7 +111,6 @@ public record SopSaveRequest(
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
-        maxRetryCount,
         advanceMode,
         handoffMode,
         dingtalkTargetId,
@@ -167,7 +125,6 @@ public record SopSaveRequest(
       Integer supervisorTimeoutSec,
       String defaultStepModel,
       Boolean enabled,
-      Integer maxRetryCount,
       String advanceMode,
       String handoffMode,
       List<SopStepRequest> steps) {
@@ -178,7 +135,6 @@ public record SopSaveRequest(
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
-        maxRetryCount,
         advanceMode,
         handoffMode,
         null,
@@ -202,7 +158,6 @@ public record SopSaveRequest(
         null,
         null,
         null,
-        null,
         steps);
   }
 
@@ -212,29 +167,6 @@ public record SopSaveRequest(
       Integer supervisorTimeoutSec,
       String defaultStepModel,
       Boolean enabled,
-      Integer maxRetryCount,
-      List<SopStepRequest> steps) {
-    this(
-        name,
-        description,
-        "local",
-        supervisorTimeoutSec,
-        defaultStepModel,
-        enabled,
-        maxRetryCount,
-        null,
-        null,
-        null,
-        steps);
-  }
-
-  public SopSaveRequest(
-      String name,
-      String description,
-      Integer supervisorTimeoutSec,
-      String defaultStepModel,
-      Boolean enabled,
-      Integer maxRetryCount,
       String advanceMode,
       List<SopStepRequest> steps) {
     this(
@@ -244,7 +176,6 @@ public record SopSaveRequest(
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
-        maxRetryCount,
         advanceMode,
         null,
         null,
@@ -257,7 +188,6 @@ public record SopSaveRequest(
       Integer supervisorTimeoutSec,
       String defaultStepModel,
       Boolean enabled,
-      Integer maxRetryCount,
       String advanceMode,
       String handoffMode,
       List<SopStepRequest> steps) {
@@ -268,7 +198,6 @@ public record SopSaveRequest(
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
-        maxRetryCount,
         advanceMode,
         handoffMode,
         null,

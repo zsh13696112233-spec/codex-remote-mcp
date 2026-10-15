@@ -1656,7 +1656,6 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
                     null,
                     null,
                     true,
-                    3,
                     "semi_automatic",
                     null,
                     null,

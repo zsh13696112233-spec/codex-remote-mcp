@@ -28,7 +28,6 @@ async def main():
             store.finish_control_execution(action["actionId"])
         images = store.node_input_images("serial-demo", "a")
         print("已接受两轮各 11 MB 图片返工；步骤累计字节：", sum(len(x["content"]) for x in images))
-        print("已扣返工额度：", store.get_workflow("serial-demo")["retryPolicy"]["usedRetries"])
         orchestrator = Orchestrator(Path(directory) / "unused.json")
         agent = AgentConfig.from_dict("local", {"url": "ws://127.0.0.1:1", "cwd": directory, "artifact_root": directory, "allow_write": True})
         orchestrator.load_agents = lambda: {"local": agent}

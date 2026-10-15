@@ -251,7 +251,7 @@ class SidecarInternalApiTests(unittest.TestCase):
         from tests.test_workflow_outcomes import result
         spec = remote_workflow("wait-remote")
         spec["advanceMode"] = "semi_automatic"
-        spec["waitPolicy"] = {"version": 1, "confirmationMinutes": 2, "blockedMinutes": 30}
+        spec["waitPolicy"] = {"version": 2}
         lease = self._claim("wait-remote", "supervisor-a", "token-a", spec)
         headers = self._auth("token-a", lease)
         path = "/internal/v1/workflows/wait-remote/nodes/a"
@@ -263,6 +263,8 @@ class SidecarInternalApiTests(unittest.TestCase):
         view = self.client.get("/internal/v1/workflows/wait-remote", headers=headers).json()
         self.assertEqual(view["nodes"][0]["status"], "waiting")
         self.assertEqual(view["pendingAdvance"]["kind"], "blocked")
+        self.assertEqual(view["pendingAdvance"]["state"], "held")
+        self.assertEqual(self.store.due_policy_waits(), [])
         self.assertIsNone(view["termination"])
         self.assertTrue(self.store.has_supervisor_lease("wait-remote"))
 
@@ -303,6 +305,8 @@ class SidecarInternalApiTests(unittest.TestCase):
         self.assertIsNone(view["termination"])
         self.assertEqual(view["nodes"][0]["status"], "completed")
         self.assertEqual(view["nodes"][0]["response"], value["summary"])
+        public_view = self.client.get("/workflows/empty-developer").json()
+        self.assertEqual(public_view["jiraContext"], {"issueKey": "TEST-1", "developerStatus": "not_applicable", "developerName": ""})
 
     def test_automatic_document_list_uses_authenticated_central_storage(self):
         from tests.test_automatic_documents import outcome, captured
@@ -322,6 +326,9 @@ class SidecarInternalApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn('初版', response.text)
         self.assertEqual(len(self.store.get_workflow('automatic-docs')['documents']), 7)
+        public_view = self.client.get('/workflows/automatic-docs').json()
+        self.assertEqual(public_view['jiraContext'],
+                         {'issueKey': 'TEST-1', 'developerStatus': 'resolved', 'developerName': '开发人'})
         self.assertEqual(self.client.post(path + '/state', headers=headers, json=body).status_code, 200)
         self.assertEqual(self.store.documents('automatic-docs', 'a')[0]['revision'], 1)
 

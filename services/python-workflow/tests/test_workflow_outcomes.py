@@ -41,6 +41,59 @@ class OutcomeStoreTests(unittest.TestCase):
         self.store.sync_node_job("serial-demo", node, {
             "status": "completed", "finished_at": utc_now(), "businessResult": value or result()})
 
+    def test_success_jira_context_survives_restart_and_late_results(self):
+        self.start("automatic")
+        self.sync(value=result("success", "not_applicable"))
+        expected = {"issueKey": "TEST-1", "developerStatus": "resolved", "developerName": "开发人"}
+        self.assertEqual(WorkflowStore(self.store.path).get_workflow("serial-demo")["jiraContext"], expected)
+        late = result("success", "not_applicable")
+        late["jiraComment"]["issueKey"] = "WRONG-2"
+        self.sync(value=late)
+        self.assertEqual(self.store.get_workflow("serial-demo")["jiraContext"], expected)
+        self.store.prepare_node_dispatch("serial-demo", "b")
+        followup = result("success", "not_applicable")
+        followup["jiraDeveloper"].update(status="not_applicable", accountType="", accountId="", displayName="")
+        self.sync("b", followup)
+        self.assertEqual(self.store.get_workflow("serial-demo")["jiraContext"], expected)
+        self.store.prepare_node_dispatch("serial-demo", "c")
+        followup["jiraDeveloper"].update(status="resolved", accountType="key", accountId="dev-2", displayName="新开发人")
+        self.sync("c", followup)
+        self.store.finish_workflow("serial-demo", supervisor_status="completed", response="已结束", error=None)
+        final = self.store.get_workflow("serial-demo")
+        self.assertEqual(final["jiraContext"]["developerName"], "新开发人")
+        self.assertEqual(final["status"], "completed")
+        self.assertIsNone(final["termination"])
+
+    def test_changed_issue_does_not_inherit_developer(self):
+        self.start("automatic")
+        self.sync(value=result("success", "not_applicable"))
+        self.store.prepare_node_dispatch("serial-demo", "b")
+        value = result("success", "not_applicable")
+        value["jiraComment"]["issueKey"] = "TEST-2"
+        value["jiraDeveloper"].update(status="unavailable", accountType="", accountId="", displayName="")
+        self.sync("b", value)
+        self.assertEqual(self.store.get_workflow("serial-demo")["jiraContext"],
+                         {"issueKey": "TEST-2", "developerStatus": "unavailable", "developerName": ""})
+
+    def test_existing_database_migrates_without_inventing_historical_jira(self):
+        self.start("automatic")
+        with self.store._connect() as db:
+            db.execute("ALTER TABLE workflows DROP COLUMN jira_context_json")
+        reopened = WorkflowStore(self.store.path)
+        self.assertIsNone(reopened.get_workflow("serial-demo")["jiraContext"])
+        self.assertEqual(reopened.get_workflow("serial-demo")["status"], "running")
+        self.sync(value=result("success", "not_applicable"))
+        self.assertEqual(reopened.get_workflow("serial-demo")["jiraContext"]["issueKey"], "TEST-1")
+
+    def test_no_jira_result_does_not_invent_context(self):
+        self.start("automatic")
+        value = result("success", "not_applicable")
+        value["jiraComment"]["issueKey"] = ""
+        value["jiraDeveloper"].update(status="not_applicable", accountType="", accountId="", displayName="")
+        self.sync(value=value)
+        self.assertIsNone(self.store.get_workflow("serial-demo")["jiraContext"])
+        self.assertIsNone(self.store.get_workflow("serial-demo")["termination"])
+
     def test_blocked_stops_before_wait_and_preserves_lease_until_finalized(self):
         self.start()
         self.sync()

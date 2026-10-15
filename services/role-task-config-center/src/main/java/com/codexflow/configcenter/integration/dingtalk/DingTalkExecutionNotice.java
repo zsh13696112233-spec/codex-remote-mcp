@@ -15,6 +15,7 @@ final class DingTalkExecutionNotice {
 
   static boolean isExecutionDetail(JsonNode event) {
     String eventType = event.path("type").asText();
+    if ("chat.assistant.progress".equals(eventType)) return true;
     if (!"appserver.item/started".equals(eventType)
         && !"appserver.item/completed".equals(eventType)) return false;
     return switch (event
@@ -24,7 +25,8 @@ final class DingTalkExecutionNotice {
         .path("item")
         .path("type")
         .asText()) {
-      case "reasoning",
+      case "agentMessage",
+              "reasoning",
               "commandExecution",
               "fileChange",
               "webSearch",
@@ -50,6 +52,8 @@ final class DingTalkExecutionNotice {
     if (!started && !completed) return "";
     JsonNode item = event.path("payload").path("message").path("params").path("item");
     String type = item.path("type").asText();
+    if ("supervisor".equals(event.path("source").asText()) && "agentMessage".equals(type))
+      return "";
     // 隐藏主监督轮询和派发请求；业务步骤及任务助手的同名工具仍正常展示。
     if ("supervisor".equals(event.path("source").asText())
         && ("mcpToolCall".equals(type) || "dynamicToolCall".equals(type))

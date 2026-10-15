@@ -435,7 +435,6 @@ class TaskScheduleIntegrationTest extends com.codexflow.configcenter.GroupedFixt
                     null,
                     null,
                     true,
-                    3,
                     "automatic",
                     null,
                     null,

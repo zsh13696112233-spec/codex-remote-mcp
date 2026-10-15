@@ -30,9 +30,12 @@ class DingTalkWaitingCardTest {
           .isEqualTo(kind.equals("blocked") ? "advance_retry" : "advance_confirm");
       assertThat(data.get("showStop")).isEqualTo("true");
       assertThat(data.get("notice").toString()).contains("北京时间").contains("无人回复");
-      gate.put("state", "held");
+      gate.put("state", "held").put("expiresAt", "2000-01-01T00:00:00Z");
+      assertThat(DingTalkWaitingCard.render("workflow", payload, snapshot).get("confirmStatus"))
+          .isEqualTo("normal");
       assertThat(DingTalkWaitingCard.render("workflow", payload, snapshot).get("notice").toString())
-          .contains("已取消倒计时");
+          .contains("等待人工处理", "不会自动流转或结束")
+          .doesNotContain("倒计时");
       gate.put("state", "busy");
       var busy = DingTalkWaitingCard.render("workflow", payload, snapshot);
       assertThat(busy.get("confirmStatus")).isEqualTo("disabled");

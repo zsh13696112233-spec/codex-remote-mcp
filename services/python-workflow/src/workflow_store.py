@@ -1,4 +1,5 @@
 from reasoning_effort import normalize_effort
+from workflow_monitor import monitor_event
 
 import base64
 import binascii
@@ -36,9 +37,10 @@ LEGACY_IMAGE_LINK_PATTERN = re.compile(
     r"\[[^\]]*\]\((?P<path>[^)]+\.(?:png|jpe?g|gif|webp))\)", re.IGNORECASE
 )
 PERMISSION_PROFILES = {"read_only", "workspace_write", "auto_review", "full_access"}
-MONITOR_EVENTS_SQL = """(source = 'chat' OR (source = 'supervisor' AND
-    (event_type IN ('appserver.item/agentMessage/delta', 'appserver.item/completed')
-     OR event_type NOT LIKE 'appserver.%')))"""
+MONITOR_EVENTS_SQL = """(source = 'chat' OR event_type IN (
+    'workflow.created', 'workflow.completed', 'workflow.failed', 'workflow.cancelled',
+    'node.started', 'node.failed', 'node.cancelled', 'node.timed_out',
+    'step.advance.waiting', 'step.advance.held'))"""
 BOT_EVENTS_SQL = """event_type IN (
     'appserver.item/started', 'appserver.item/completed',
     'chat.assistant.completed', 'chat.assistant.progress', 'chat.message.failed',
@@ -346,7 +348,8 @@ class WorkflowStore(InputImageStore, WaitStore):
             connection.execute("CREATE INDEX IF NOT EXISTS workflow_task_binding_lookup "
                                "ON workflow_task_bindings(task_definition_id, workflow_id)")
             for view, predicate in (("monitor", MONITOR_EVENTS_SQL), ("bot", BOT_EVENTS_SQL)):
-                connection.execute(f"CREATE INDEX IF NOT EXISTS workflow_events_{view} "
+                index_name = "monitor_lifecycle" if view == "monitor" else view
+                connection.execute(f"CREATE INDEX IF NOT EXISTS workflow_events_{index_name} "
                                    f"ON workflow_events(workflow_id, sequence) WHERE {predicate}")
             connection.execute("CREATE TABLE IF NOT EXISTS workflow_revisions ("
                                "workflow_id TEXT PRIMARY KEY REFERENCES workflows(workflow_id) "
@@ -431,6 +434,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                 "used_retry_count": "INTEGER NOT NULL DEFAULT 0",
                 "handoff_mode": "TEXT NOT NULL DEFAULT 'legacy_text'",
                 "termination_json": "TEXT",
+                "jira_context_json": "TEXT",
                 "result_protocol_version": "INTEGER NOT NULL DEFAULT 0",
                 "wait_policy_json": "TEXT",
             }.items():
@@ -669,9 +673,6 @@ class WorkflowStore(InputImageStore, WaitStore):
         supervisor_timeout_sec = int(value.get("supervisorTimeoutSec", 7200))
         if not 10 <= supervisor_timeout_sec <= MAX_SUPERVISOR_TIMEOUT_SEC:
             raise ValueError(f"supervisorTimeoutSec 必须在 10 到 {MAX_SUPERVISOR_TIMEOUT_SEC} 之间。")
-        max_retry_count = int(value.get("maxRetryCount", 10))
-        if not 0 <= max_retry_count <= 100:
-            raise ValueError("maxRetryCount 必须在 0 到 100 之间。")
         advance_mode = str(value.get("advanceMode") or "automatic").strip().lower()
         if advance_mode not in {"automatic", "semi_automatic"}:
             raise ValueError("advanceMode 只能是 automatic 或 semi_automatic。")
@@ -685,8 +686,10 @@ class WorkflowStore(InputImageStore, WaitStore):
             raise ValueError("handoffMode 只能是 legacy_text 或 cumulative_files。")
 
         policy = normalize_policy(value.get("waitPolicy"))
-        if policy and (advance_mode != "semi_automatic" or handoff_mode != "legacy_text"):
-            raise ValueError("等待策略仅支持半自动文字交接流程。")
+        if policy and advance_mode != "semi_automatic":
+            raise ValueError("等待策略仅支持半自动流程。")
+        if policy and policy["version"] == 1 and handoff_mode != "legacy_text":
+            raise ValueError("旧版等待策略仅支持半自动文字交接流程。")
         return {
             **({"waitPolicy": policy} if policy else {}),
             "workflowId": workflow_id,
@@ -700,7 +703,6 @@ class WorkflowStore(InputImageStore, WaitStore):
             "supervisorWrite": bool(value.get("supervisorWrite", False)),
             "supervisorModel": value.get("supervisorModel"),
             "supervisorTimeoutSec": supervisor_timeout_sec,
-            "maxRetryCount": max_retry_count,
             "advanceMode": advance_mode,
             "handoffMode": handoff_mode,
             "nodes": nodes,
@@ -763,9 +765,9 @@ class WorkflowStore(InputImageStore, WaitStore):
                     INSERT INTO workflows (
                         workflow_id, name, status, failure_policy,
                         supervisor_agent_id, supervisor_status, created_at,
-                        advance_mode, max_retry_count, handoff_mode,
+                        advance_mode, handoff_mode,
                         spec_json, spec_zlib
-                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?, ?, ?)
                     """,
                     (
                         spec["workflowId"],
@@ -774,7 +776,6 @@ class WorkflowStore(InputImageStore, WaitStore):
                         spec["supervisorAgentId"],
                         timestamp,
                         spec["advanceMode"],
-                        spec["maxRetryCount"],
                         spec["handoffMode"],
                         compact_spec,
                         compressed_spec,
@@ -1422,7 +1423,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                        response, error, created_at, started_at, finished_at,
                        state_version, assistant_job_id, assistant_thread_id,
                        assistant_turn_id, assistant_status, advance_mode,
-                       max_retry_count, used_retry_count, handoff_mode, termination_json, result_protocol_version
+                       handoff_mode, termination_json, result_protocol_version, jira_context_json
                 FROM workflows WHERE workflow_id = ?
                 """,
                 (workflow_id,),
@@ -1535,6 +1536,7 @@ class WorkflowStore(InputImageStore, WaitStore):
             "name": workflow["name"],
             "status": workflow["status"],
             "termination": json.loads(workflow["termination_json"]) if workflow["termination_json"] else None,
+            "jiraContext": json.loads(workflow["jira_context_json"]) if workflow["jira_context_json"] else None,
             "failurePolicy": workflow["failure_policy"],
             "advanceMode": workflow["advance_mode"],
             "handoffMode": workflow["handoff_mode"],
@@ -1554,15 +1556,6 @@ class WorkflowStore(InputImageStore, WaitStore):
                 "threadId": workflow["assistant_thread_id"],
                 "turnId": workflow["assistant_turn_id"],
                 "status": workflow["assistant_status"],
-            },
-            "retryPolicy": {
-                "maxRetries": int(workflow["max_retry_count"] or 0),
-                "usedRetries": int(workflow["used_retry_count"] or 0),
-                "remainingRetries": max(
-                    0,
-                    int(workflow["max_retry_count"] or 0)
-                    - int(workflow["used_retry_count"] or 0),
-                ),
             },
             "response": workflow["response"],
             "error": workflow["error"],
@@ -3161,7 +3154,11 @@ class WorkflowStore(InputImageStore, WaitStore):
                 node_id,
                 "worker",
                 "node.started",
-                {"nodeId": node_id, "jobId": snapshot.get("job_id")},
+                {"nodeId": node_id, "jobId": snapshot.get("job_id"),
+                 "attemptNumber": connection.execute(
+                     "SELECT attempt_count FROM workflow_nodes WHERE workflow_id=? AND node_id=?",
+                     (workflow_id, node_id),
+                 ).fetchone()["attempt_count"]},
                 timestamp,
             )
 
@@ -3225,6 +3222,26 @@ class WorkflowStore(InputImageStore, WaitStore):
                     if outcome["outcome"] == "blocked":
                         status = "failed"
                         snapshot["error"] = outcome["reason"]
+            if outcome is not None and outcome["jiraComment"]["issueKey"].strip():
+                # 与正式结果同一事务保存展示信息；不从总结猜测，也不改变流程决定。
+                issue_key = outcome["jiraComment"]["issueKey"].strip()
+                developer = outcome.get("jiraDeveloper", {})
+                previous = connection.execute(
+                    "SELECT jira_context_json FROM workflows WHERE workflow_id=?", (workflow_id,)
+                ).fetchone()[0]
+                previous = json.loads(previous) if previous else None
+                if not (previous and previous["issueKey"] == issue_key
+                        and developer.get("status", "not_applicable") == "not_applicable"):
+                    context = {
+                        "issueKey": issue_key,
+                        "developerStatus": developer.get("status", "not_applicable"),
+                        "developerName": developer.get("displayName", "")
+                        if developer.get("status") in ("resolved", "multiple") else "",
+                    }
+                    connection.execute(
+                        "UPDATE workflows SET jira_context_json=? WHERE workflow_id=?",
+                        (json.dumps(context, ensure_ascii=False), workflow_id),
+                    )
             if outcome is not None and workflow["result_protocol_version"] == 3:
                 from workflow_documents import save_many
                 if outcome['documents'] and not snapshot.get('documents'):
@@ -3753,6 +3770,9 @@ class WorkflowStore(InputImageStore, WaitStore):
                             break
                     kept["summary"] = summary
                 compact["message"] = {"params": {"item": kept}}
+                if isinstance(params.get("turnId"), str):
+                    # 大结果截断不能丢失轮次，否则详情中的开始/完成无法归为同一条。
+                    compact["message"]["params"]["turnId"] = params["turnId"][:512]
                 if isinstance(payload.get("messageId"), str):
                     compact["messageId"] = payload["messageId"][:512]
             else:
@@ -3793,13 +3813,14 @@ class WorkflowStore(InputImageStore, WaitStore):
         self, workflow_id: str, *, after: int = 0, limit: int = 200,
         view: str = "all", before: int | None = None, tail: bool = False,
     ) -> dict[str, Any]:
-        if view not in {"all", "monitor", "bot"}:
+        if view not in {"all", "monitor", "monitor_details", "bot"}:
             raise ValueError("事件视图无效。")
         if after < 0 or not 1 <= limit <= 1000 or (before is not None and before <= 0):
             raise ValueError("事件游标或分页大小无效。")
         if (tail or before is not None) and after:
             raise ValueError("向前和向后游标不能同时使用。")
-        predicate = {"all": "1 = 1", "monitor": MONITOR_EVENTS_SQL, "bot": BOT_EVENTS_SQL}[view]
+        predicate = {"all": "1 = 1", "monitor": MONITOR_EVENTS_SQL, "bot": BOT_EVENTS_SQL,
+                     "monitor_details": f"({MONITOR_EVENTS_SQL} OR event_type IN ('appserver.item/started', 'appserver.item/completed'))"}[view]
         descending = tail or before is not None
         with self._connect() as connection:
             connection.execute("BEGIN")
@@ -3820,6 +3841,8 @@ class WorkflowStore(InputImageStore, WaitStore):
         if descending:
             rows.reverse()
         events = [self._event_snapshot(row) for row in rows]
+        if view == "monitor_details":
+            events = [visible for event in events if (visible := monitor_event(event)) is not None]
         next_cursor = (rows[-1]["sequence"] if more and not descending and rows else watermark)
         return {"events": events, "nextCursor": next_cursor,
                 "hasMore": more if not descending else False,

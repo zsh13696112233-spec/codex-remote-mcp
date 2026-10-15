@@ -51,6 +51,55 @@ class DingTalkDocumentSummaryCardTest {
   }
 
   @Test
+  void jiraIsTheFirstBodyLineWithoutChangingSummaryTitleOrControls() {
+    var snapshot = json.createObjectNode().put("name", "zjbug").put("status", "completed");
+    var context = snapshot.putObject("jiraContext");
+    context
+        .put("issueKey", "ZJSG-10782")
+        .put("developerStatus", "resolved")
+        .put("developerName", "曾文瀚");
+    var data =
+        DingTalkDocumentSummaryCard.render(
+            "wf", snapshot, "审核未通过，需要返工", "https://monitor.example", "template");
+    assertThat(data)
+        .containsEntry("title", "zjbug · 结束结果")
+        .containsEntry("statusText", "**Jira：ZJSG-10782 ｜ 开发人：曾文瀚**\n\n已完成")
+        .containsEntry("summary", "审核未通过，需要返工")
+        .containsEntry("showConfirm", "false")
+        .containsEntry("showStop", "false");
+    for (String status : List.of("empty", "multiple", "unavailable", "not_applicable")) {
+      context.put("developerStatus", status).put("developerName", "");
+      String expected =
+          switch (status) {
+            case "empty" -> "未填写";
+            case "multiple" -> "多人（未提供姓名）";
+            case "unavailable" -> "获取失败";
+            default -> "未获取";
+          };
+      assertThat(
+              DingTalkDocumentSummaryCard.render(
+                      "wf", snapshot, "结果", "https://monitor.example", "template")
+                  .get("statusText"))
+          .isEqualTo("**Jira：ZJSG-10782 ｜ 开发人：" + expected + "**\n\n已完成");
+    }
+    context.put("developerStatus", "multiple").put("developerName", "张三、李四");
+    assertThat(
+            DingTalkDocumentSummaryCard.render(
+                    "wf", snapshot, "结果", "https://monitor.example", "template")
+                .get("statusText"))
+        .isEqualTo("**Jira：ZJSG-10782 ｜ 开发人：张三、李四（多人）**\n\n已完成");
+    context
+        .put("developerStatus", "resolved")
+        .put("developerName", "姓名\n[链接](https://example.com)");
+    assertThat(
+            DingTalkDocumentSummaryCard.render(
+                    "wf", snapshot, "结果", "https://monitor.example", "template")
+                .get("statusText")
+                .toString())
+        .doesNotContain("姓名\n", "[链接](");
+  }
+
+  @Test
   void allTerminalStatesAndEmptyDocumentsRespectEligibility() {
     var snapshot = json.createObjectNode().put("advanceMode", "automatic");
     snapshot.putArray("documents");

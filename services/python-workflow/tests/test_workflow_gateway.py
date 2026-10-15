@@ -44,9 +44,10 @@ class SupervisorPromptTests(unittest.TestCase):
 
         self.assertIn("完全不懂技术的普通用户", prompt)
         self.assertIn("对外把 node 称为“步骤”", prompt)
-        self.assertIn("现在开始第1步", prompt)
+        self.assertIn("等待工具返回超时时静默继续等待", prompt)
         self.assertIn("不要直接抛出内部错误信息", prompt)
-        self.assertIn("任务已全部完成", prompt)
+        self.assertIn("本轮流程已结束", prompt)
+        self.assertIn("步骤执行完成不代表修复成功或审核通过", prompt)
         self.assertIn("timeout_sec 使用 10 秒", prompt)
         self.assertIn("节点派发后必须调用 wait_node", prompt)
         self.assertIn("用户也可以选择保持等待", prompt)

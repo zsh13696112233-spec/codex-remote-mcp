@@ -43,7 +43,7 @@ final class DingTalkWaitingCard {
     String status =
         switch (state) {
           case "busy" -> "正在处理";
-          case "held" -> "已保持等待";
+          case "held" -> "等待人工处理";
           case "countdown" -> "等待确认";
           default -> "本轮等待已结束";
         };
@@ -67,7 +67,7 @@ final class DingTalkWaitingCard {
           switch (state) {
             case "countdown" ->
                 "无人回复将在 " + deadline(gate) + " 自动" + dueAction + "。回复此卡片可讨论，消息送达后取消倒计时。";
-            case "held" -> "已取消倒计时；讨论完成后请点击“" + label + "”，也可终止任务。";
+            case "held" -> "等待人工处理，不会自动流转或结束。请点击“" + label + "”，也可终止任务；如需讨论可回复此卡片。";
             case "busy" -> "正在处理，请等待处理结果。";
             default -> "本轮等待已结束，请查看最新状态。";
           };

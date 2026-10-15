@@ -12,10 +12,16 @@ UTC = timezone.utc
 def normalize_policy(value: Any) -> dict[str, int] | None:
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != {"version", "confirmationMinutes", "blockedMinutes"}:
+    if not isinstance(value, dict) or type(value.get("version")) is not int:
         raise ValueError("等待策略字段无效。")
-    if type(value["version"]) is not int or value["version"] != 1:
+    if value["version"] == 2:
+        if set(value) != {"version"}:
+            raise ValueError("人工确认策略不支持等待时长。")
+        return dict(value)
+    if value["version"] != 1:
         raise ValueError("等待策略版本无效。")
+    if set(value) != {"version", "confirmationMinutes", "blockedMinutes"}:
+        raise ValueError("等待策略字段无效。")
     for key in ("confirmationMinutes", "blockedMinutes"):
         if type(value[key]) is not int or not 1 <= value[key] <= 720:
             raise ValueError("等待时长必须是 1 到 720 分钟的整数。")
@@ -39,19 +45,23 @@ class WaitStore:
         ).fetchone()
         kind = "blocked" if outcome else ("advance" if next_node else "finish")
         now = datetime.now(UTC)
-        minutes = policy["blockedMinutes" if outcome else "confirmationMinutes"]
+        manual = policy["version"] == 2
+        # 历史表的截止时间不可空；held 状态不参与到期处理。
+        expires_at = (now if manual else now + timedelta(
+            minutes=policy["blockedMinutes" if outcome else "confirmationMinutes"])).isoformat()
         gate_id = uuid.uuid4().hex
         self._supersede_pending_advances(connection, workflow_id, "new_gate", now.isoformat())
         connection.execute(
             "INSERT INTO workflow_advance_gates(gate_id,workflow_id,completed_node_id,next_node_id,"
-            "status,expires_at,created_at,updated_at,kind,business_result_json) VALUES(?,?,?,?,'pending',?,?,?,?,?)",
+            "status,expires_at,held_at,created_at,updated_at,kind,business_result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (gate_id, workflow_id, node_id, next_node[0] if next_node else "",
-             (now + timedelta(minutes=minutes)).isoformat(), now.isoformat(), now.isoformat(), kind,
+             "held" if manual else "pending", expires_at, now.isoformat() if manual else None,
+             now.isoformat(), now.isoformat(), kind,
              json.dumps(outcome, ensure_ascii=False) if outcome else None),
         )
         self._add_event_with_connection(connection, workflow_id, node_id, "gateway", "step.advance.waiting",
             {"gateId": gate_id, "completedNodeId": node_id, "nextNodeId": next_node[0] if next_node else None,
-             "kind": kind, "expiresAt": (now + timedelta(minutes=minutes)).isoformat()}, now.isoformat())
+             "kind": kind, "state": "held" if manual else "countdown", "expiresAt": expires_at}, now.isoformat())
         return True
 
     def policy_wait(self, workflow_id: str, gate_id: str) -> dict[str, Any] | None:
@@ -172,7 +182,7 @@ class WaitStore:
             gate = connection.execute("SELECT * FROM workflow_advance_gates WHERE workflow_id=? AND gate_id=?", (workflow_id, gate_id)).fetchone()
             if not gate or gate["status"] not in {"executing", "closing"} or gate["execution_started"]:
                 return None
-            workflow = connection.execute("SELECT status FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            workflow = connection.execute("SELECT status, handoff_mode FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if not workflow or workflow[0] != "running":
                 return None
             node = connection.execute("SELECT * FROM workflow_nodes WHERE workflow_id=? AND node_id=?", (workflow_id, gate["completed_node_id"])).fetchone()
@@ -180,7 +190,7 @@ class WaitStore:
             runtime = connection.execute("SELECT cwd,model FROM workflow_node_runtime WHERE workflow_id=? AND node_id=? AND attempt_number=?", (workflow_id, node["node_id"], node["attempt_count"])).fetchone()
             if runtime:
                 target.update(cwd=runtime["cwd"] or target["cwd"], model=runtime["model"] or target["model"])
-            target.update(summary=node["response"] or "", gate=dict(gate))
+            target.update(summary=node["response"] or "", gate=dict(gate), handoffMode=workflow["handoff_mode"])
             connection.execute("UPDATE workflow_advance_gates SET execution_started=1 WHERE gate_id=?", (gate_id,))
             if gate["status"] == "executing":
                 columns = "workflow_id,node_id,status,dispatch_token,job_id,thread_id,turn_id,response,error,actual_prompt,started_at,finished_at"

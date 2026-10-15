@@ -115,7 +115,8 @@ class ConsultationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn["sandboxPolicy"], {"type": "readOnly", "networkAccess": False})
         after = self.store.get_workflow("serial-demo")
         self.assertEqual(before["nodes"], after["nodes"])
-        self.assertEqual(before["retryPolicy"], after["retryPolicy"])
+        self.assertNotIn("retryPolicy", before)
+        self.assertNotIn("retryPolicy", after)
 
     async def test_followup_reuses_consultation_not_original(self):
         await self.call()

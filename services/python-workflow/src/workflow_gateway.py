@@ -801,11 +801,13 @@ class WorkflowGateway:
             "agent、executor、job、queued、completed、failed 等技术词或英文状态码。\n"
             "不要讲内部如何调度，只告诉用户：正在进行第几步、这一步是否完成、"
             "得到什么结果、接下来做什么。\n"
-            "推荐的进度表达是：“现在开始第1步。”“第1步已完成，结果是……"
-            "接下来开始第2步。”\n"
+            "平台根据实际状态发送开始、步骤切换、等待卡片和结束通知，不要重复播报。\n"
+            "等待工具返回超时时静默继续等待，不要周期性发送仍在处理、继续等待等消息，"
+            "不要推测正常推进、正在收尾或没有异常。\n"
             "如果失败，要用日常语言说明“第几步没有完成”和可理解的原因，"
             "不要直接抛出内部错误信息。\n"
-            "全部步骤完成后，用“任务已全部完成”开头，按步骤汇总结果，"
+            "全部步骤完成后，用“本轮流程已结束”开头，按步骤汇总已确认的业务结果；"
+            "步骤执行完成不代表修复成功或审核通过，审核未通过、返工和未验证项必须明确说明。"
             "不要展示内部编号、会话编号或调用记录。\n\n"
             f"工作流定义：\n{json.dumps(workflow_view, ensure_ascii=False, indent=2)}"
         )
@@ -1158,7 +1160,6 @@ class WorkflowGateway:
             "stateVersionAtAcceptance": message.get("stateVersionAtAcceptance"),
             "currentStatus": snapshot["status"],
             "stateVersion": snapshot["stateVersion"],
-            "retryPolicy": snapshot.get("retryPolicy"),
             "pendingControl": snapshot.get("pendingControl"),
             "advanceMode": snapshot.get("advanceMode"),
             "pendingAdvance": snapshot.get("pendingAdvance"),
@@ -1723,7 +1724,6 @@ def _sidecar_workflow_view(snapshot: dict[str, Any]) -> dict[str, Any]:
         "pendingAdvance",
         "currentNodes",
         "progress",
-        "retryPolicy",
         "response",
         "error",
         "createdAt",

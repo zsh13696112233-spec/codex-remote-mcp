@@ -46,7 +46,6 @@ class BlockedNotificationSnapshotTest extends com.codexflow.configcenter.Grouped
                         null,
                         null,
                         true,
-                        3,
                         "automatic",
                         null,
                         null,

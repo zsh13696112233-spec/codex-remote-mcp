@@ -98,7 +98,6 @@ class SharedGroupsIntegrationTest {
             60,
             null,
             true,
-            10,
             "automatic",
             "legacy_text",
             null,
