@@ -60,7 +60,7 @@ class SopEntity extends Timestamped {
 
   /** 步骤未单独指定模型时使用的默认模型。 */
   @Column(name = "default_step_model", nullable = false)
-  String defaultStepModel = "gpt-5.6-sol";
+  String defaultStepModel = "gpt-6.1-sol";
 
   @Column(name = "default_step_reasoning_effort", length = 32)
   String defaultStepReasoningEffort;

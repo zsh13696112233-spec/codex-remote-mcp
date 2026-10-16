@@ -21,7 +21,7 @@ class Handler(SimpleHTTPRequestHandler):
 def main():
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    sop = dict(id='sop', name='测试流程', groupId=GROUP, supervisorAgentId='local', defaultStepModel='gpt-5.6-sol', steps=[
+    sop = dict(id='sop', name='测试流程', groupId=GROUP, supervisorAgentId='local', defaultStepModel='gpt-6.1-sol', steps=[
         dict(id='first', roleId='role', displayName='分析需求', instruction='原执行要求', agentId='local')])
     errors, saves = [], []
     fail = [True]
@@ -32,7 +32,7 @@ def main():
         if path == '/api/agents/local/models':
             if fail[0]:
                 return route.fulfill(status=503, json={'error': '暂不可用'})
-            body = {'models': [{'model': 'gpt-5.6-sol', 'supportedReasoningEfforts': ['medium', 'high']}]}
+            body = {'models': [{'model': 'gpt-6.1-sol', 'supportedReasoningEfforts': ['medium', 'high']}]}
         elif path == '/api/agents':
             body = {'agents': [dict(agentId='local', groupId=GROUP, enabled=True, capabilities=['supervisor', 'executor'], permissionProfiles=['read_only'])]}
         elif path == '/api/groups':
@@ -63,7 +63,7 @@ def main():
             page.locator('[data-effort-control]').get_by_text('思考强度加载失败，请刷新页面重试。').wait_for()
             fail[0] = False
             assert page.locator('[data-effort-refresh]').count() == 0
-            page.reload()
+            page.locator("#refresh").click()
             default = page.locator('[data-sop-field=defaultStepReasoningEffort]')
             default.locator('option[value=high]').wait_for(state='attached')
             assert page.get_by_text('强度越高通常耗时越长；保存时会检查每个步骤是否支持。', exact=True).count() == 0

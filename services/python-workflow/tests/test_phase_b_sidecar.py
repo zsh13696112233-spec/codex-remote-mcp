@@ -537,6 +537,36 @@ class SidecarInternalApiTests(unittest.TestCase):
 
 
 class InternalApiClientTests(unittest.TestCase):
+    def test_lease_conflict_requires_authoritative_heartbeat(self):
+        from workflow_runtime_client import InternalApiConflict, WorkflowLeaseUnavailable
+        for next_lease, expected in [
+            (None, WorkflowLeaseUnavailable),
+            ({"workflowId": "next", "leaseToken": "next-token"}, WorkflowLeaseUnavailable),
+            ({"workflowId": "old", "leaseToken": "current-token"}, InternalApiConflict),
+        ]:
+            with self.subTest(next_lease=next_lease):
+                client = InternalApiClient("http://127.0.0.1:8080", "supervisor-a",
+                    started_at=utc_now(), token_env="TEST_UNUSED_TOKEN")
+                client.current_lease = {"workflowId": "old", "leaseToken": "old-token"}
+                with patch.object(client, "_request", side_effect=[
+                    InternalApiConflict("conflict"), {"lease": next_lease}
+                ]) as request:
+                    with self.assertRaises(expected):
+                        client._lease_request("POST", "old", "/test", {})
+                    self.assertEqual(request.call_count, 2)
+
+    def test_missing_lease_and_heartbeat_failure_are_distinct(self):
+        from workflow_runtime_client import WorkflowLeaseUnavailable
+        client = InternalApiClient("http://127.0.0.1:8080", "supervisor-a",
+            started_at=utc_now(), token_env="TEST_UNUSED_TOKEN")
+        with patch.object(client, "_request", return_value={"lease": None}):
+            with self.assertRaises(WorkflowLeaseUnavailable):
+                client._lease_request("POST", "old", "/test", {})
+        with patch.object(client, "_request", side_effect=RuntimeError("network unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "network unavailable") as raised:
+                client._lease_request("POST", "old", "/test", {})
+            self.assertNotIsInstance(raised.exception, WorkflowLeaseUnavailable)
+
     def test_expired_wait_release_uses_dispatch_node_without_public_pending_gate(self) -> None:
         client = InternalApiClient("http://127.0.0.1:8080", "supervisor-a",
             started_at=utc_now(), token_env="TEST_UNUSED_TOKEN")

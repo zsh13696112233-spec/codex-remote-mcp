@@ -499,7 +499,7 @@ class AppServerClient:
         self._socket: ClientConnection | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._pending: dict[int, asyncio.Future[Any]] = {}
-        self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._notifications: asyncio.Queue[tuple[dict[str, Any], str]] = asyncio.Queue()
         self._next_request_id = 1
         self._send_lock = asyncio.Lock()
         self._closed = asyncio.Event()
@@ -571,6 +571,10 @@ class AppServerClient:
             self._reader_task.cancel()
             await asyncio.gather(self._reader_task, return_exceptions=True)
             self._reader_task = None
+        # 连接停止接收后补齐未消费的监控事件，包括启动失败或主动取消时的事件。
+        # 不在协议读取循环等待监控 I/O，否则输出洪峰会连同 Pong 一起阻塞。
+        while not self._notifications.empty():
+            await self._record_message(*self._notifications.get_nowait())
         if self._disconnect_error is None:
             self._disconnect_error = AppServerDisconnected(
                 code=close_code,
@@ -636,6 +640,19 @@ class AppServerClient:
         await self._send({"method": method, "params": params or {}})
 
     async def next_notification(self, timeout_sec: float) -> dict[str, Any]:
+        message, received_at = await self._next_notification(timeout_sec)
+        await self._record_message(message, received_at)
+        return message
+
+    async def _record_message(self, message: dict[str, Any], received_at: str) -> None:
+        if self._on_message is not None:
+            result = self._on_message(message, received_at)
+            if inspect.isawaitable(result):
+                await result
+
+    async def _next_notification(
+        self, timeout_sec: float
+    ) -> tuple[dict[str, Any], str]:
         if not self._notifications.empty():
             return self._notifications.get_nowait()
         if self._closed.is_set():
@@ -693,11 +710,8 @@ class AppServerClient:
                     received_at = utc_now()
                     if self._on_notification is not None:
                         self._on_notification(method, received_at)
-                    if self._on_message is not None:
-                        result = self._on_message(message, received_at)
-                        if inspect.isawaitable(result):
-                            await result
-                    await self._notifications.put(message)
+                    # 复用通知队列按接收顺序处理监控回调；RPC 和心跳读取不等落库。
+                    self._notifications.put_nowait((message, received_at))
         except asyncio.CancelledError:
             raise
         except ConnectionClosed as error:

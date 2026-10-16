@@ -16,6 +16,14 @@ from urllib.request import Request, urlopen
 MAX_TOKEN_FILE_BYTES = 8 * 1024
 
 
+class WorkflowLeaseUnavailable(RuntimeError):
+    """中央心跳已确认当前实例不再持有该工作流租约。"""
+
+
+class InternalApiConflict(RuntimeError):
+    """内部 API 冲突；单独的 409 尚不能证明工作流租约已失效。"""
+
+
 def resolve_token(
     *, token_env: str | None, token_file: str | None, label: str = "Sidecar"
 ) -> str:
@@ -263,13 +271,24 @@ class InternalApiClient:
             with self._state_lock:
                 lease = self.current_lease
         if not isinstance(lease, dict) or lease.get("workflowId") != workflow_id:
-            raise RuntimeError("中央网关没有为当前 Sidecar 分配该工作流租约。")
-        return self._request(
-            method,
-            path,
-            payload,
-            headers={"X-Workflow-Lease": str(lease.get("leaseToken") or "")},
-        )
+            raise WorkflowLeaseUnavailable("中央网关没有为当前 Sidecar 分配该工作流租约。")
+        try:
+            return self._request(
+                method,
+                path,
+                payload,
+                headers={"X-Workflow-Lease": str(lease.get("leaseToken") or "")},
+            )
+        except InternalApiConflict:
+            # 409 也可能来自业务冲突，只有成功心跳确认不再持有租约才停止重试。
+            self.heartbeat()
+            with self._state_lock:
+                current = self.current_lease
+            if not isinstance(current, dict) or current.get("workflowId") != workflow_id:
+                raise WorkflowLeaseUnavailable(
+                    "中央网关没有为当前 Sidecar 分配该工作流租约。"
+                ) from None
+            raise
 
     def _request(
         self,
@@ -320,7 +339,7 @@ class InternalApiClient:
             if error.code == 409:
                 with self._state_lock:
                     self.current_lease = None
-                raise RuntimeError(message) from error
+                raise InternalApiConflict(message) from error
             raise ValueError(message) from error
         except URLError as error:
             raise RuntimeError("无法连接中央工作流 API。") from error

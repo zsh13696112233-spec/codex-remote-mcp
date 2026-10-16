@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from workflow_runtime_client import WorkflowLeaseUnavailable
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +38,8 @@ class AsyncEventBatcher:
         self._timer_handle: asyncio.TimerHandle | None = None
         self._flush_task: asyncio.Task[None] | None = None
         self._closed = False
+        # 工作流 ID 不复用；失去授权的旧运行不再占据发送队列。
+        self.rejected_event_counts: dict[str, int] = {}
 
     async def add(
         self,
@@ -49,10 +53,16 @@ class AsyncEventBatcher:
     ) -> None:
         if self._closed:
             raise RuntimeError("事件批量写入器已经关闭。")
+        if workflow_id in self.rejected_event_counts:
+            self.rejected_event_counts[workflow_id] += 1
+            return
         while len(self._pending) >= self.max_pending:
             await self.flush()
             if self._closed:
                 raise RuntimeError("事件批量写入器已经关闭。")
+            if workflow_id in self.rejected_event_counts:
+                self.rejected_event_counts[workflow_id] += 1
+                return
         self._pending.append(
             {
                 "workflow_id": workflow_id,
@@ -146,6 +156,10 @@ class AsyncEventBatcher:
                 ):
                     size += 1
                 batch, self._pending = self._pending[:size], self._pending[size:]
+                if workflow_id in self.rejected_event_counts:
+                    self.rejected_event_counts[workflow_id] += size
+                    remaining -= size
+                    continue
                 write = asyncio.create_task(asyncio.to_thread(self.store.add_events, batch))
                 cancelled = False
                 # 取消等待不能停止线程；保留写锁直到结果确定，成功不回队。
@@ -158,6 +172,13 @@ class AsyncEventBatcher:
                         break
                 try:
                     write.result()
+                except WorkflowLeaseUnavailable:
+                    self.rejected_event_counts[workflow_id] = size
+                    LOGGER.warning(
+                        "中央已确认工作流租约不可用，停止该运行的事件上报；"
+                        "首批未送达事件数=%s，后续未送达数量累计在 rejected_event_counts；"
+                        "不影响其他运行。workflow_id=%s", size, workflow_id,
+                    )
                 except BaseException:
                     self._pending = batch + self._pending
                     raise

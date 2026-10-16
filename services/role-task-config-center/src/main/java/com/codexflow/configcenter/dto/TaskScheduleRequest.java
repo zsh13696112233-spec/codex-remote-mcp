@@ -1,5 +1,6 @@
 package com.codexflow.configcenter.dto;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 
 public record TaskScheduleRequest(
@@ -10,7 +11,20 @@ public record TaskScheduleRequest(
     @Pattern(regexp = "([01]\\d|2[0-3]):[0-5]\\d") String dailyTime,
     @Min(5) @Max(1440) Integer intervalMinutes,
     @NotNull Boolean enabled,
-    @NotBlank @Size(max = 36) String groupId) {
+    @NotBlank @Size(max = 36) String groupId,
+    @Valid ScheduleCheckRequest preCheck) {
+  public TaskScheduleRequest(
+      String name,
+      String sopId,
+      String taskDefinitionId,
+      String mode,
+      String dailyTime,
+      Integer intervalMinutes,
+      Boolean enabled,
+      String groupId) {
+    this(name, sopId, taskDefinitionId, mode, dailyTime, intervalMinutes, enabled, groupId, null);
+  }
+
   public TaskScheduleRequest(
       String name,
       String sopId,

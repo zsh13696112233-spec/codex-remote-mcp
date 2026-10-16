@@ -1591,6 +1591,14 @@ async def agent_models(request: Request) -> Response:
         return _error_response(error, 503)
 
 
+async def schedule_check(request: Request) -> Response:
+    from schedule_check import execute_check
+    try:
+        return JSONResponse(await execute_check(request.app.state.gateway, await request.json()))
+    except ValueError as error:
+        return _error_response(error, 400)
+
+
 async def manage_machines(request: Request) -> Response:
     gateway = request.app.state.gateway
     registry = gateway.registry
@@ -2124,6 +2132,7 @@ def create_app(
             Route("/agents", manage_machines, methods=["POST"]),
             Route("/agents/validate", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}/models", agent_models, methods=["GET"]),
+            Route("/schedule-checks", schedule_check, methods=["POST"]),
             Route("/agents/{agent_id}/test", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}/remark", manage_machines, methods=["PUT"]),
             Route("/agents/{agent_id}", manage_machines, methods=["PUT", "DELETE"]),

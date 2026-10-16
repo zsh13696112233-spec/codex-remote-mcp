@@ -33,7 +33,7 @@ class SopReasoningEffortTest extends GroupedFixtureSupport {
             .put("groupId", GROUP)
             .put("supervisorAgentId", "local")
             .put("enabled", true)
-            .put("defaultStepModel", "gpt-5.6-sol")
+            .put("defaultStepModel", "gpt-6.1-sol")
             .put("defaultStepReasoningEffort", defaultEffort);
     body.putArray("steps")
         .addObject()
@@ -50,11 +50,35 @@ class SopReasoningEffortTest extends GroupedFixtureSupport {
     response
         .putArray("models")
         .addObject()
-        .put("model", "gpt-5.6-sol")
+        .put("model", "gpt-6.1-sol")
         .putArray("supportedReasoningEfforts")
         .add("high")
         .add("medium");
     when(groupGateway.get("/agents/local/models")).thenReturn(response);
+  }
+
+  @Test
+  void defaultsToSolAndAcceptsOnlyCurrentModels() {
+    tools.jackson.databind.node.ObjectNode body = json.valueToTree(request(null, null));
+    body.remove("defaultStepModel");
+    String id = config.createSop(json.treeToValue(body, SopSaveRequest.class)).path("id").asText();
+    assertThat(config.getSop(id).path("defaultStepModel").asText()).isEqualTo("gpt-6.1-sol");
+    body.put("defaultStepModel", "gpt-6-astra");
+    ((tools.jackson.databind.node.ObjectNode) body.path("steps").get(0))
+        .put("modelOverride", "gpt-6.1-sol");
+    config.updateSop(id, json.treeToValue(body, SopSaveRequest.class));
+    assertThat(config.getSop(id).path("defaultStepModel").asText()).isEqualTo("gpt-6-astra");
+    for (String model :
+        java.util.List.of("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-sol")) {
+      body.put("defaultStepModel", model);
+      assertThatThrownBy(() -> config.updateSop(id, json.treeToValue(body, SopSaveRequest.class)))
+          .hasMessageContaining("不支持的模型");
+      body.put("defaultStepModel", "gpt-6.1-sol");
+      ((tools.jackson.databind.node.ObjectNode) body.path("steps").get(0))
+          .put("modelOverride", model);
+      assertThatThrownBy(() -> config.updateSop(id, json.treeToValue(body, SopSaveRequest.class)))
+          .hasMessageContaining("不支持的模型");
+    }
   }
 
   @Test

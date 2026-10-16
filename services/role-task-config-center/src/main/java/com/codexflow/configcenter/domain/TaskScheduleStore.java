@@ -1,5 +1,6 @@
 package com.codexflow.configcenter.domain;
 
+import com.codexflow.configcenter.dto.ScheduleCheckRequest;
 import com.codexflow.configcenter.dto.TaskScheduleRequest;
 import java.sql.Timestamp;
 import java.time.Duration;
@@ -40,7 +41,13 @@ public class TaskScheduleStore {
       String time,
       Integer minutes,
       boolean enabled,
-      Instant next) {}
+      Instant next,
+      ScheduleCheckRequest check,
+      String token,
+      Instant expires,
+      Instant checkedAt,
+      String checkStatus,
+      String checkReason) {}
 
   private List<Rule> rules(String suffix, Object... args) {
     return jdbc.query(
@@ -54,7 +61,18 @@ public class TaskScheduleStore {
                 rs.getString("daily_time"),
                 (Integer) rs.getObject("interval_minutes"),
                 rs.getBoolean("enabled"),
-                rs.getTimestamp("next_at") == null ? null : rs.getTimestamp("next_at").toInstant()),
+                rs.getTimestamp("next_at") == null ? null : rs.getTimestamp("next_at").toInstant(),
+                new ScheduleCheckRequest(
+                    rs.getBoolean("check_enabled"),
+                    rs.getString("check_agent_id"),
+                    rs.getString("check_script_path"),
+                    rs.getString("check_arguments"),
+                    rs.getInt("check_timeout_seconds")),
+                rs.getString("dispatch_token"),
+                instant(rs.getTimestamp("dispatch_expires_at")),
+                instant(rs.getTimestamp("last_check_at")),
+                rs.getString("last_check_status"),
+                rs.getString("last_check_reason")),
         args);
   }
 
@@ -93,6 +111,10 @@ public class TaskScheduleStore {
             && !task.sop.deleted
             && task.sop.enabled;
     Map<String, Object> v = new LinkedHashMap<>();
+    v.put("preCheck", r.check());
+    v.put("lastCheckAt", r.checkedAt() == null ? null : r.checkedAt().toString());
+    v.put("lastCheckStatus", r.checkStatus());
+    v.put("lastCheckReason", r.checkReason());
     v.put("id", r.id());
     v.put("groupId", task.groupId);
     v.put("name", r.name());
@@ -128,6 +150,11 @@ public class TaskScheduleStore {
     if (b.enabled() && (!task.enabled || task.sop.deleted || !task.sop.enabled))
       throw new ConflictFailure("任务定义或 SOP 已停用。");
     Rule old = id == null ? null : required(id);
+    ScheduleCheckRequest check =
+        (b.preCheck() != null
+                ? b.preCheck()
+                : old != null ? old.check() : new ScheduleCheckRequest(false, null, null, null, 60))
+            .normalized();
     if (old != null && !old.taskId().equals(task.id))
       throw new ConflictFailure("已有定时配置不能更换任务，请删除后重新创建。");
     if (old == null && !rules("WHERE task_definition_id = ?", task.id).isEmpty())
@@ -173,8 +200,18 @@ public class TaskScheduleStore {
           b.enabled(),
           stamp(next),
           key);
-    if (changed)
-      jdbc.update("UPDATE codex_task_schedules SET dispatch_pending=FALSE WHERE id=?", key);
+    jdbc.update(
+        "UPDATE codex_task_schedules SET check_enabled=?,check_agent_id=?,check_script_path=?,check_arguments=?,check_timeout_seconds=? WHERE id=?",
+        check.enabled(),
+        check.agentId(),
+        check.scriptPath(),
+        check.arguments(),
+        check.timeoutSeconds(),
+        key);
+    if (changed || old != null && !check.equals(old.check()))
+      jdbc.update(
+          "UPDATE codex_task_schedules SET dispatch_pending=FALSE,dispatch_token=NULL,dispatch_expires_at=NULL,last_check_reason=CASE WHEN last_check_status IN ('pending','checking') THEN '定时配置已变更，本次检查已失效。' ELSE last_check_reason END,last_check_status=CASE WHEN last_check_status IN ('pending','checking') THEN 'failed' ELSE last_check_status END WHERE id=?",
+          key);
     return view(required(key));
   }
 
@@ -197,7 +234,7 @@ public class TaskScheduleStore {
   @Transactional
   public void disableTask(String taskId) {
     jdbc.update(
-        "UPDATE codex_task_schedules SET enabled=FALSE,next_at=NULL,dispatch_pending=FALSE WHERE task_definition_id=?",
+        "UPDATE codex_task_schedules SET enabled=FALSE,next_at=NULL,dispatch_pending=FALSE,dispatch_token=NULL,last_check_reason=CASE WHEN last_check_status IN ('pending','checking') THEN '关联任务已删除，本次检查已失效。' ELSE last_check_reason END,last_check_status=CASE WHEN last_check_status IN ('pending','checking') THEN 'failed' ELSE last_check_status END WHERE task_definition_id=?",
         taskId);
   }
 
@@ -211,13 +248,74 @@ public class TaskScheduleStore {
   }
 
   public void requireEnabled(String taskId) {
-    if (rules(
-            "WHERE task_definition_id=? AND enabled=TRUE AND dispatch_pending=TRUE FOR UPDATE",
-            taskId)
-        .isEmpty()) throw new ConflictFailure("定时配置已变更或本次触发已失效，不再启动。");
+    requireEnabled(taskId, null);
+  }
+
+  public void requireEnabled(String taskId, String token) {
+    Rule rule =
+        rules(
+                "WHERE task_definition_id=? AND enabled=TRUE AND dispatch_pending=TRUE FOR UPDATE",
+                taskId)
+            .stream()
+            .findFirst()
+            .orElseThrow(() -> new ConflictFailure("定时配置已变更或本次触发已失效，不再启动。"));
+    if (token != null && !token.equals(rule.token())
+        || rule.check().enabled()
+            && (token == null
+                || !"passed".equals(rule.checkStatus())
+                || rule.expires() == null
+                || rule.expires().isBefore(Instant.now())))
+      throw new ConflictFailure("本次定时检查尚未通过或已失效，不再启动。");
     jdbc.update(
-        "UPDATE codex_task_schedules SET dispatch_pending=FALSE WHERE task_definition_id=?",
-        taskId);
+        "UPDATE codex_task_schedules SET dispatch_pending=FALSE,dispatch_token=NULL,dispatch_expires_at=NULL WHERE id=?",
+        rule.id());
+  }
+
+  public record Dispatch(String taskId, String token, String groupId, ScheduleCheckRequest check) {}
+
+  @Transactional
+  public boolean startCheck(Dispatch dispatch) {
+    return jdbc.update(
+            "UPDATE codex_task_schedules SET last_check_at=?,last_check_status='checking',last_check_reason='正在执行检查。' WHERE last_check_status='pending' AND task_definition_id=? AND dispatch_token=? AND dispatch_pending=TRUE AND enabled=TRUE AND dispatch_expires_at>?",
+            stamp(Instant.now()),
+            dispatch.taskId(),
+            dispatch.token(),
+            stamp(Instant.now()))
+        == 1;
+  }
+
+  @Transactional
+  public boolean finishCheck(Dispatch dispatch, String status, String reason) {
+    if (!java.util.Set.of("passed", "skipped", "failed").contains(status))
+      throw new IllegalArgumentException("检查结果无效。");
+    return jdbc.update(
+            "UPDATE codex_task_schedules SET last_check_status=?,last_check_reason=?,dispatch_pending=? WHERE last_check_status='checking' AND task_definition_id=? AND dispatch_token=? AND dispatch_pending=TRUE AND enabled=TRUE AND dispatch_expires_at>?",
+            status,
+            reason,
+            "passed".equals(status),
+            dispatch.taskId(),
+            dispatch.token(),
+            stamp(Instant.now()))
+        == 1;
+  }
+
+  @Transactional
+  public void expireChecks() {
+    jdbc.update(
+        "UPDATE codex_task_schedules SET last_check_reason='检查或启动过程已中断，本次不再执行。',last_check_status='failed',dispatch_pending=FALSE,dispatch_token=NULL WHERE check_enabled=TRUE AND dispatch_pending=TRUE AND dispatch_expires_at<=?",
+        stamp(Instant.now()));
+  }
+
+  @Transactional
+  public void abandonDispatch(Dispatch dispatch) {
+    jdbc.update(
+        "UPDATE codex_task_schedules SET last_check_reason=CASE WHEN last_check_status IN ('pending','checking') THEN '检查过程已中断，本次不再执行。' WHEN last_check_status='passed' THEN '检查通过，但本次任务未启动，请核对任务占用及关联配置。' ELSE last_check_reason END,last_check_status=CASE WHEN last_check_status IN ('pending','checking') THEN 'failed' ELSE last_check_status END,dispatch_pending=FALSE,dispatch_token=NULL WHERE task_definition_id=? AND dispatch_token=? AND dispatch_pending=TRUE",
+        dispatch.taskId(),
+        dispatch.token());
+  }
+
+  private static Instant instant(Timestamp value) {
+    return value == null ? null : value.toInstant();
   }
 
   private static Timestamp stamp(Instant value) {
@@ -244,7 +342,12 @@ public class TaskScheduleStore {
 
   @Transactional
   public List<String> claim(ZonedDateTime now, int limit) {
-    List<String> claimed = new ArrayList<>();
+    return claimDispatches(now, limit).stream().map(Dispatch::taskId).toList();
+  }
+
+  @Transactional
+  public List<Dispatch> claimDispatches(ZonedDateTime now, int limit) {
+    List<Dispatch> claimed = new ArrayList<>();
     if (limit <= 0) return claimed;
     for (Rule r :
         rules(
@@ -266,12 +369,20 @@ public class TaskScheduleStore {
               && !task.sop.deleted
               && task.sop.enabled
               && Duration.between(r.next(), now.toInstant()).compareTo(Duration.ofMinutes(1)) <= 0;
+      String token = ready ? UUID.randomUUID().toString() : null;
       jdbc.update(
-          "UPDATE codex_task_schedules SET next_at=?,dispatch_pending=? WHERE id=?",
+          "UPDATE codex_task_schedules SET next_at=?,dispatch_pending=?,dispatch_token=?,dispatch_expires_at=? WHERE id=?",
           stamp(future),
           ready,
+          token,
+          ready ? stamp(Instant.now().plusSeconds(150)) : null,
           r.id());
-      if (ready) claimed.add(r.taskId());
+      if (ready && r.check().enabled())
+        jdbc.update(
+            "UPDATE codex_task_schedules SET last_check_at=?,last_check_status='pending',last_check_reason='等待执行检查。' WHERE id=?",
+            stamp(Instant.now()),
+            r.id());
+      if (ready) claimed.add(new Dispatch(r.taskId(), token, task.groupId, r.check()));
     }
     return claimed;
   }

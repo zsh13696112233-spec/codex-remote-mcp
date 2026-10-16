@@ -1,0 +1,10 @@
+ALTER TABLE codex_task_schedules ADD COLUMN check_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE codex_task_schedules ADD COLUMN check_agent_id VARCHAR(128);
+ALTER TABLE codex_task_schedules ADD COLUMN check_script_path VARCHAR(1024);
+ALTER TABLE codex_task_schedules ADD COLUMN check_arguments VARCHAR(2048);
+ALTER TABLE codex_task_schedules ADD COLUMN check_timeout_seconds INT NOT NULL DEFAULT 60;
+ALTER TABLE codex_task_schedules ADD COLUMN dispatch_token VARCHAR(36);
+ALTER TABLE codex_task_schedules ADD COLUMN dispatch_expires_at TIMESTAMP(6) NULL;
+ALTER TABLE codex_task_schedules ADD COLUMN last_check_at TIMESTAMP(6) NULL;
+ALTER TABLE codex_task_schedules ADD COLUMN last_check_status VARCHAR(16);
+ALTER TABLE codex_task_schedules ADD COLUMN last_check_reason VARCHAR(512);

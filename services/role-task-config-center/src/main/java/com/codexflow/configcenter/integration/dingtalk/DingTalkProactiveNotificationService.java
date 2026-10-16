@@ -56,15 +56,21 @@ public class DingTalkProactiveNotificationService {
       store.markSubmitted(workflowId);
       JsonNode snapshot = gateway.get("/workflows/" + workflowId);
       DingTalkModels.Binding binding = store.binding(workflowId).orElseThrow();
+      String text =
+          "工作流编号："
+              + workflowId
+              + "\n"
+              + DingTalkExecutionNotice.safe(snapshot.path("name").asText() + "：" + notice);
+      if ("schedule".equals(binding.triggerSource())) {
+        store.enqueueScheduledStart(workflowId, text);
+        return;
+      }
       store.enqueueText(
           "proactive-start:" + workflowId,
           workflowId,
           binding.conversationId(),
           binding.rootMessageId(),
-          "工作流编号："
-              + workflowId
-              + "\n"
-              + DingTalkExecutionNotice.safe(snapshot.path("name").asText() + "：" + notice));
+          text);
     } catch (RuntimeException error) {
       LOGGER.warn("钉钉主动任务已提交，但首条进度消息暂未生成，workflowId={}。", workflowId, error);
     }

@@ -31,6 +31,11 @@ interface DingTalkTransport {
 
   DingTalkModels.SendResult sendText(String conversationId, String replyToMessageId, String text);
 
+  default DingTalkModels.SendResult sendMonitorCard(
+      String target, String targetType, tools.jackson.databind.JsonNode payload) {
+    throw new UnsupportedOperationException("当前钉钉通道不支持监控按钮通知。");
+  }
+
   DingTalkModels.SendResult sendMarkdown(
       String conversationId, String replyToMessageId, String title, String markdown);
 

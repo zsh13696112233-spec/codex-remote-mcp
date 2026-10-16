@@ -4,9 +4,62 @@ import unittest
 from unittest.mock import Mock
 
 from workflow_event_batcher import AsyncEventBatcher
+from workflow_runtime_client import WorkflowLeaseUnavailable
 
 
 class AsyncEventBatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retired_workflow_does_not_block_new_workflow_or_retry(self):
+        def write(events):
+            if events[0]["workflow_id"] == "old":
+                raise WorkflowLeaseUnavailable("lease gone")
+            return []
+
+        self.store.add_events.side_effect = write
+        for index, workflow in enumerate(["old", "new", "old", "new"]):
+            await self.add(index, workflow)
+        with self.assertLogs("workflow_event_batcher", level="WARNING") as logs:
+            await self.batcher.flush()
+        await self.add(4, "old")
+        await self.add(5, "new")
+        await self.batcher.close()
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(self.written_indices(), [0, 1, 3, 5])
+        self.assertEqual(self.batcher.rejected_event_counts, {"old": 3})
+
+    async def test_unconfirmed_failure_keeps_events_for_retry(self):
+        self.store.add_events.side_effect = [RuntimeError("heartbeat unavailable"), []]
+        await self.add(0, "old")
+        with self.assertRaisesRegex(RuntimeError, "heartbeat unavailable"):
+            await self.batcher.flush()
+        self.assertEqual(self.batcher.rejected_event_counts, {})
+        await self.batcher.flush()
+        self.assertEqual(self.written_indices(), [0, 0])
+
+    async def test_lease_loss_during_write_preserves_other_queued_events(self):
+        entered, release = self.block_first_write()
+        original_write = self.store.add_events.side_effect
+
+        def write(events):
+            original_write(events)
+            if events[0]["workflow_id"] == "old":
+                raise WorkflowLeaseUnavailable("lease gone")
+            return []
+
+        self.store.add_events.side_effect = write
+        await self.add(0, "old")
+        with self.assertLogs("workflow_event_batcher", level="WARNING"):
+            flushing = asyncio.create_task(self.batcher.flush())
+            await asyncio.wait_for(entered.wait(), 1)
+            try:
+                await self.add(1, "new")
+                await self.add(2, "old")
+            finally:
+                release.set()
+            await flushing
+        await self.batcher.close()
+        self.assertEqual(self.written_indices(), [0, 1])
+        self.assertEqual(self.batcher.rejected_event_counts, {"old": 2})
+
     def setUp(self) -> None:
         self.store = Mock()
         self.store.add_events.return_value = []

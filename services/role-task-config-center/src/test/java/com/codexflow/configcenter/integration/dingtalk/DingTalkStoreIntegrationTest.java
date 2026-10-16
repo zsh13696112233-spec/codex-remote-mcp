@@ -35,6 +35,200 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
 
   private String lastTaskName;
 
+  @Test
+  void monitorStartKeepsQuotesAndEnqueuesGroupMentionOnlyAfterDelivery() {
+    String client = "monitor-" + UUID.randomUUID();
+    createTask(client);
+    var start =
+        new DingTalkModels.Message(
+            "start-" + client,
+            "monitor-group-" + client,
+            "2",
+            "asker",
+            lastTaskName,
+            true,
+            false,
+            null,
+            "群",
+            List.of(),
+            "https://oapi.dingtalk.com/robot/sendBySession?test",
+            null);
+    String workflow = store.reserveStart(client, start).workflowId();
+    String key = "reply:" + start.messageId();
+    store.enqueueStartReply(key, workflow, start, "任务已启动");
+    store.enqueueStartReply(key, workflow, start, "任务已启动");
+    var outgoing =
+        claimDueNow().stream()
+            .filter(row -> workflow.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(outgoing.messageKind()).isEqualTo("monitor_reply");
+    assertThat(outgoing.replyToMessageId()).isEqualTo(start.messageId());
+    assertThat(outgoing.payload().path("text").asText()).startsWith("工作流编号：" + workflow);
+    assertThat(outgoing.payload().path("monitorUrl").asText()).endsWith("workflowId=" + workflow);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id=?",
+                Integer.class,
+                workflow))
+        .isEqualTo(1);
+    var quote =
+        new DingTalkModels.Message(
+            "quote",
+            start.conversationId(),
+            "2",
+            "asker",
+            "进度？",
+            true,
+            false,
+            null,
+            "群",
+            List.of(),
+            null,
+            "任务通知\n" + outgoing.payload().path("text").asText() + "\n查看监控",
+            List.of(),
+            true);
+    assertThat(store.conversation(client, quote)).isEmpty();
+    store.markOutboxSent(outgoing.id(), "monitor-message-" + client);
+    store.markOutboxSent(outgoing.id(), "monitor-message-" + client);
+    assertThat(store.conversation(client, quote).orElseThrow().workflowId()).isEqualTo(workflow);
+    assertThat(
+            store
+                .conversation(client, quote.withReference("monitor-message-" + client))
+                .orElseThrow()
+                .workflowId())
+        .isEqualTo(workflow);
+    var unrelated =
+        new DingTalkModels.Message(
+            "other",
+            "other-group",
+            "2",
+            "asker",
+            "进度？",
+            true,
+            false,
+            null,
+            "群",
+            List.of(),
+            null,
+            quote.quotedText(),
+            List.of(),
+            true);
+    assertThat(store.conversation(client, unrelated)).isEmpty();
+    var mentions = claimDueNow().stream().filter(row -> workflow.equals(row.workflowId())).toList();
+    assertThat(mentions).hasSize(1);
+    assertThat(mentions.get(0).messageKind()).isEqualTo("reply");
+    assertThat(mentions.get(0).payload().path("text").asText()).isEqualTo("@asker");
+    assertThat(mentions.get(0).payload().path("atUserId").asText()).isEqualTo("asker");
+    assertThat(mentions.get(0).payload().has("monitorUrl")).isFalse();
+  }
+
+  @Test
+  void failureMonitorCardRetainsExistingAttentionAndCursorDeduplication() {
+    String client = "failure-monitor-" + UUID.randomUUID();
+    createTask(client);
+    var start =
+        new DingTalkModels.Message(
+            "start-" + client,
+            "failure-group-" + client,
+            "2",
+            "asker",
+            lastTaskName,
+            true,
+            false,
+            null,
+            "群",
+            List.of(),
+            "https://oapi.dingtalk.com/robot/sendBySession?test",
+            null);
+    String workflow = store.reserveStart(client, start).workflowId();
+    store.recordStepFailure(workflow, 1, "第2步「Bug-ReviewAgent」：执行失败，请查看监控页。");
+    store.recordStepFailure(workflow, 1, "重复失败");
+    var card =
+        claimDueNow().stream()
+            .filter(row -> workflow.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(card.messageKind()).isEqualTo("monitor_card");
+    assertThat(card.payload().path("text").asText()).contains(workflow, "Bug-ReviewAgent");
+    assertThat(card.payload().path("monitorUrl").asText()).endsWith("workflowId=" + workflow);
+    assertThat(store.binding(workflow).orElseThrow().eventCursor()).isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
+                "select count(*) from codex_sop_dingtalk_outbox where workflow_id=?",
+                Integer.class,
+                workflow))
+        .isEqualTo(2);
+    store.markOutboxSent(card.id(), "failed-message");
+    var mention =
+        claimDueNow().stream()
+            .filter(row -> workflow.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(mention.messageKind()).isEqualTo("reply");
+    assertThat(mention.payload().path("atUserId").asText()).isEqualTo("asker");
+  }
+
+  @Test
+  void scheduledMonitorStartUsesFrozenTargetAndSingleChatHasNoExtraMention() {
+    String client = "schedule-monitor-" + UUID.randomUUID();
+    String task = createTask(client);
+    var run = taskLaunches.reserveLatest(task).prepared().workflowId();
+    store.reserveProactive(client, task, run, "schedule");
+    store.enqueueScheduledStart(run, "工作流编号：" + run + "\n定时任务已启动。");
+    store.enqueueScheduledStart(run, "重复");
+    var card =
+        claimDueNow().stream()
+            .filter(row -> run.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(card.messageKind()).isEqualTo("monitor_card");
+    assertThat(card.targetExternalId()).isEqualTo("chat-1");
+    assertThat(card.replyToMessageId()).isNull();
+    assertThat(card.payload().path("text").asText()).contains(run, "定时任务已启动");
+    store.markOutboxSent(card.id(), "scheduled-message");
+    assertThat(claimDueNow()).noneMatch(row -> run.equals(row.workflowId()));
+
+    var privateMessage =
+        new DingTalkModels.Message(
+            "private-" + client,
+            "private-chat",
+            "1",
+            "asker",
+            "任务",
+            false,
+            false,
+            null,
+            null,
+            List.of(),
+            "https://oapi.dingtalk.com/robot/sendBySession?test",
+            null);
+    store.enqueueStartReply("private-reply-" + client, run, privateMessage, "任务已启动");
+    var reply =
+        claimDueNow().stream()
+            .filter(row -> run.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(reply.targetType()).isEqualTo("PERSON");
+    assertThat(reply.targetExternalId()).isEqualTo("asker");
+    store.markOutboxSent(reply.id(), "private-message");
+    assertThat(claimDueNow()).noneMatch(row -> run.equals(row.workflowId()));
+    store.enqueueStartReply("failed-private-" + client, run, privateMessage, "任务已启动");
+    var failed =
+        claimDueNow().stream()
+            .filter(row -> run.equals(row.workflowId()))
+            .findFirst()
+            .orElseThrow();
+    store.markOutboxFailed(failed.id(), new IllegalStateException("会话已过期"));
+    assertThat(
+            jdbc.queryForObject(
+                "select status from codex_sop_dingtalk_outbox where id=?",
+                String.class,
+                failed.id()))
+        .isEqualTo("abandoned");
+    assertThat(claimDueNow()).noneMatch(row -> run.equals(row.workflowId()));
+  }
+
   @BeforeEach
   void isolateOutboxBatch() {
     // 测试使用共享 H2 上下文，前例遗留发送队列不能占用本例的领取批次。

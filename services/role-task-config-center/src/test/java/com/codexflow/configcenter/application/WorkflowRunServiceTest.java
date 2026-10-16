@@ -33,6 +33,30 @@ class WorkflowRunServiceTest {
   private PreparedRun prepared;
 
   @Test
+  void historyRefreshesActiveRecordsBeforeReturningFilteredCount() {
+    ObjectNode before = objectMapper.createObjectNode().put("total", 0);
+    before.putArray("items");
+    ObjectNode after = objectMapper.createObjectNode().put("total", 1);
+    after.putArray("items").addObject().put("workflowId", WORKFLOW_ID).put("status", "completed");
+    when(store.runHistory("task", "completed", 0, 20)).thenReturn(before, after, after);
+    when(store.activeHistory("task"))
+        .thenReturn(List.of(objectMapper.createObjectNode().put("workflowId", WORKFLOW_ID)));
+    ObjectNode batch = objectMapper.createObjectNode();
+    batch.putObject("statuses").put(WORKFLOW_ID, "completed");
+    when(gateway.post(
+            org.mockito.ArgumentMatchers.eq("/workflow-statuses"),
+            org.mockito.ArgumentMatchers.any()))
+        .thenReturn(batch);
+    assertThat(service.runHistory("task", "completed", 0, 20).path("total").asInt()).isEqualTo(1);
+    var order = org.mockito.Mockito.inOrder(store);
+    order.verify(store).runHistory("task", "completed", 0, 20);
+    order.verify(store).activeHistory("task");
+    order.verify(store).recordTerminations(org.mockito.ArgumentMatchers.any());
+    order.verify(store).recordSummaryStatuses(batch.path("statuses"));
+    order.verify(store).runHistory("task", "completed", 0, 20);
+  }
+
+  @Test
   void summaryIncludesAndPersistsBusinessTermination() {
     ObjectNode row =
         objectMapper.createObjectNode().put("workflowId", WORKFLOW_ID).put("status", "running");

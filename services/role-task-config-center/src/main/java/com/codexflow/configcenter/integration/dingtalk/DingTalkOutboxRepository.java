@@ -11,7 +11,8 @@ interface DingTalkOutboxRepository extends JpaRepository<DingTalkOutboxEntity, S
 
   @Query(
       "select count(o) from DingTalkOutboxEntity o where o.workflowId = :workflowId "
-          + "and o.messageKind = 'waiting_card' and o.deliveredAt is not null "
+          + "and ((o.messageKind = 'waiting_card' and o.deliveredAt is not null) "
+          + "or (o.messageKind in ('monitor_card', 'monitor_reply') and o.status = 'sent')) "
           + "and ((o.targetType = 'GROUP' and :conversationType = '2' and o.conversationId = :conversationId) "
           + "or (o.targetType = 'PERSON' and :conversationType = '1' and o.targetExternalId = :senderId))")
   long countDeliveredQuotedCards(

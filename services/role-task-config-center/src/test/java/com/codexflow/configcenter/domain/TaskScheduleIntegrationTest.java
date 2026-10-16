@@ -27,6 +27,50 @@ class TaskScheduleIntegrationTest extends com.codexflow.configcenter.GroupedFixt
   @Autowired ConfigService config;
 
   @Test
+  void runHistoryFiltersAllStatusesAndClampsPagesWithoutSnapshots() {
+    String id = createTask(false, null, false).path("id").asText();
+    var statuses =
+        List.of(
+            "submitting",
+            "queued",
+            "running",
+            "cancelling",
+            "completed",
+            "failed",
+            "cancelled",
+            "submit_failed");
+    for (String status : statuses) {
+      for (int i = 0; i < 3; i++) {
+        String workflowId = workflowRuns.prepareLatest(id).workflowId();
+        jdbc.update(
+            "update codex_sop_task_runs set status = ? where workflow_id = ?", status, workflowId);
+      }
+    }
+    assertThat(workflowRuns.runHistory(id, "", 0, 20).path("total").asInt()).isEqualTo(24);
+    assertThat(workflowRuns.activeHistory(id)).hasSize(12);
+    for (String status : statuses) {
+      var first = workflowRuns.runHistory(id, status, 0, 2);
+      var last = workflowRuns.runHistory(id, status, 99, 2);
+      assertThat(first.path("total").asInt()).isEqualTo(3);
+      assertThat(first.path("items").size()).isEqualTo(2);
+      assertThat(last.path("page").asInt()).isEqualTo(1);
+      assertThat(last.path("items").size()).isEqualTo(1);
+      for (var item : first.path("items")) {
+        assertThat(item.path("status").asText()).isEqualTo(status);
+        assertThat(item.has("snapshot")).isFalse();
+        assertThat(item.path("workflowId").asText())
+            .isNotEqualTo(last.path("items").get(0).path("workflowId").asText());
+      }
+    }
+    String emptyId = createTask(false, null, false).path("id").asText();
+    assertThat(workflowRuns.runHistory(emptyId, "failed", 2, 20).path("page").asInt()).isZero();
+    assertThatThrownBy(() -> workflowRuns.runHistory(id, "invalid", 0, 20))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> workflowRuns.runHistory(id, "", -1, 20))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void catalogFiltersFrozenNameSourcesAndBeijingDates() {
     ObjectNode task = createTask(false, null, false);
     String id = task.path("id").asText(), name = task.path("name").asText();
@@ -398,6 +442,301 @@ class TaskScheduleIntegrationTest extends com.codexflow.configcenter.GroupedFixt
     schedules.delete(id);
     assertThat(workflowRuns.runDetail(run.prepared().workflowId()).toString()).contains("最新任务");
     launches.release(run.prepared().workflowId());
+  }
+
+  @Test
+  void precheckResultsArePersistedAndOnlyCurrentPassedTriggerCanLaunch() {
+    var task = createTask(false, null, false);
+    String taskId = task.path("id").asText();
+    var check =
+        new com.codexflow.configcenter.dto.ScheduleCheckRequest(
+            true, "local", "E:/Agent Bug/check.bat", "-user PlanAgent", 60);
+    var request =
+        new com.codexflow.configcenter.dto.TaskScheduleRequest(
+            "检查规则", task.path("sopId").asText(), taskId, "interval", null, 5, true, GROUP, check);
+    var saved = schedules.save(null, request);
+    String id = (String) saved.get("id");
+    jdbc.update("UPDATE codex_task_schedules SET enabled=FALSE WHERE id<>?", id);
+    var due = ZonedDateTime.now(ZoneId.of("Asia/Shanghai")).withNano(0);
+    jdbc.update("UPDATE codex_task_schedules SET next_at=? WHERE id=?", due.toInstant(), id);
+    var first = schedules.claimDispatches(due, 1).get(0);
+    assertThat(schedules.startCheck(first)).isTrue();
+    assertThatThrownBy(() -> launches.reserveLatest(taskId, "schedule", first.token()))
+        .isInstanceOf(ConflictFailure.class);
+    assertThat(schedules.finishCheck(first, "skipped", "条件不满足")).isTrue();
+    assertThat(
+            schedules.list("检查规则").stream()
+                .filter(x -> id.equals(x.get("id")))
+                .findFirst()
+                .orElseThrow()
+                .get("lastCheckStatus"))
+        .isEqualTo("skipped");
+    assertThat(workflowRuns.listRuns(taskId)).isEmpty();
+    assertThatThrownBy(() -> launches.reserveLatest(taskId, "schedule", first.token()))
+        .isInstanceOf(ConflictFailure.class);
+    jdbc.update("UPDATE codex_task_schedules SET next_at=? WHERE id=?", due.toInstant(), id);
+    var second = schedules.claimDispatches(due, 1).get(0);
+    assertThat(schedules.finishCheck(first, "passed", "旧结果")).isFalse();
+    assertThat(schedules.startCheck(second)).isTrue();
+    assertThat(schedules.finishCheck(second, "passed", "检查通过")).isTrue();
+    assertThatThrownBy(() -> launches.reserveLatest(taskId, "schedule"))
+        .isInstanceOf(ConflictFailure.class);
+    var run = launches.reserveLatest(taskId, "schedule", second.token());
+    assertThat(workflowRuns.listRuns(taskId)).hasSize(1);
+    assertThat(schedules.finishCheck(second, "failed", "迟到结果")).isFalse();
+    launches.release(run.prepared().workflowId());
+    schedules.delete(id);
+  }
+
+  @Test
+  void changingPrecheckInvalidatesInFlightResultWithoutResettingNextTime() {
+    var task = createTask(false, null, false);
+    String taskId = task.path("id").asText();
+    var check =
+        new com.codexflow.configcenter.dto.ScheduleCheckRequest(
+            true, "local", "E:/check.cmd", "", 60);
+    var request =
+        new com.codexflow.configcenter.dto.TaskScheduleRequest(
+            "检查变更", task.path("sopId").asText(), taskId, "interval", null, 5, true, GROUP, check);
+    String id = (String) schedules.save(null, request).get("id");
+    jdbc.update("UPDATE codex_task_schedules SET enabled=FALSE WHERE id<>?", id);
+    var due = ZonedDateTime.now(ZoneId.of("Asia/Shanghai")).withNano(0);
+    jdbc.update("UPDATE codex_task_schedules SET next_at=? WHERE id=?", due.toInstant(), id);
+    var dispatch = schedules.claimDispatches(due, 1).get(0);
+    schedules.startCheck(dispatch);
+    var next = schedules.list("检查变更").get(0).get("nextScheduleAt");
+    var changed =
+        schedules.save(
+            id,
+            new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                "检查变更",
+                task.path("sopId").asText(),
+                taskId,
+                "interval",
+                null,
+                5,
+                true,
+                GROUP,
+                new com.codexflow.configcenter.dto.ScheduleCheckRequest(
+                    false, null, null, null, 60)));
+    assertThat(changed.get("nextScheduleAt")).isEqualTo(next);
+    assertThat(changed.get("lastCheckStatus")).isEqualTo("failed");
+    assertThat(schedules.finishCheck(dispatch, "passed", "旧检查通过")).isFalse();
+    assertThatThrownBy(() -> launches.reserveLatest(taskId, "schedule", dispatch.token()))
+        .isInstanceOf(ConflictFailure.class);
+    schedules.delete(id);
+  }
+
+  @Test
+  void expiredCheckDoesNotRetryOrLaunchAndNextTriggerRemains() {
+    var task = createTask(false, null, false);
+    String taskId = task.path("id").asText();
+    var request =
+        new com.codexflow.configcenter.dto.TaskScheduleRequest(
+            "检查超时",
+            task.path("sopId").asText(),
+            taskId,
+            "interval",
+            null,
+            5,
+            true,
+            GROUP,
+            new com.codexflow.configcenter.dto.ScheduleCheckRequest(
+                true, "local", "E:/check.cmd", "", 60));
+    String id = (String) schedules.save(null, request).get("id");
+    jdbc.update("UPDATE codex_task_schedules SET enabled=FALSE WHERE id<>?", id);
+    var due = ZonedDateTime.now(ZoneId.of("Asia/Shanghai")).withNano(0);
+    jdbc.update("UPDATE codex_task_schedules SET next_at=? WHERE id=?", due.toInstant(), id);
+    var dispatch = schedules.claimDispatches(due, 1).get(0);
+    schedules.startCheck(dispatch);
+    jdbc.update(
+        "UPDATE codex_task_schedules SET dispatch_expires_at=? WHERE id=?",
+        Instant.now().minusSeconds(1),
+        id);
+    schedules.expireChecks();
+    var row = schedules.list("检查超时").get(0);
+    assertThat(row.get("lastCheckStatus")).isEqualTo("failed");
+    assertThat(row.get("nextScheduleAt")).isNotNull();
+    assertThat(schedules.finishCheck(dispatch, "passed", "迟到结果")).isFalse();
+    assertThat(workflowRuns.listRuns(taskId)).isEmpty();
+    jdbc.update("UPDATE codex_task_schedules SET next_at=? WHERE id=?", due.toInstant(), id);
+    var nextDispatch = schedules.claimDispatches(due, 1).get(0);
+    schedules.startCheck(nextDispatch);
+    schedules.disableTask(taskId);
+    assertThat(schedules.list("检查超时").get(0).get("lastCheckStatus")).isEqualTo("failed");
+    assertThat(schedules.finishCheck(nextDispatch, "passed", "删除后的结果")).isFalse();
+    schedules.delete(id);
+  }
+
+  private record CheckFixture(
+      String id,
+      String taskId,
+      com.codexflow.configcenter.dto.TaskScheduleRequest request,
+      TaskScheduleStore.Dispatch dispatch) {}
+
+  private CheckFixture checkFixture() {
+    var task = createTask(false, null, false);
+    String taskId = task.path("id").asText();
+    var request =
+        new com.codexflow.configcenter.dto.TaskScheduleRequest(
+            "并发检查",
+            task.path("sopId").asText(),
+            taskId,
+            "interval",
+            null,
+            5,
+            true,
+            GROUP,
+            new com.codexflow.configcenter.dto.ScheduleCheckRequest(
+                true, "local", "E:/check.cmd", "", 60));
+    String id = (String) schedules.save(null, request).get("id");
+    jdbc.update("UPDATE codex_task_schedules SET enabled=FALSE WHERE id<>?", id);
+    var due = ZonedDateTime.of(2031, 1, 1, 9, 0, 0, 0, ZoneId.of("Asia/Shanghai"));
+    jdbc.update("UPDATE codex_task_schedules SET next_at=? WHERE id=?", due.toInstant(), id);
+    return new CheckFixture(id, taskId, request, schedules.claimDispatches(due, 1).get(0));
+  }
+
+  private static <T> List<T> race(
+      java.util.concurrent.Callable<T> first, java.util.concurrent.Callable<T> second)
+      throws Exception {
+    var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+    var start = new java.util.concurrent.CountDownLatch(1);
+    try {
+      var a =
+          pool.submit(
+              () -> {
+                start.await();
+                return first.call();
+              });
+      var b =
+          pool.submit(
+              () -> {
+                start.await();
+                return second.call();
+              });
+      start.countDown();
+      return List.of(
+          a.get(10, java.util.concurrent.TimeUnit.SECONDS),
+          b.get(10, java.util.concurrent.TimeUnit.SECONDS));
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
+  void concurrentCheckStartsAndManualVersusScheduledLaunchHaveOnlyOneWinner() throws Exception {
+    var f = checkFixture();
+    assertThat(
+            race(
+                () -> schedules.startCheck(f.dispatch()), () -> schedules.startCheck(f.dispatch())))
+        .containsExactlyInAnyOrder(true, false);
+    assertThat(schedules.finishCheck(f.dispatch(), "passed", "通过")).isTrue();
+    assertThat(schedules.finishCheck(f.dispatch(), "failed", "重复结果")).isFalse();
+    java.util.function.Function<String, String> reserve =
+        source -> {
+          try {
+            return launches
+                .reserveLatest(
+                    f.taskId(), source, "schedule".equals(source) ? f.dispatch().token() : null)
+                .prepared()
+                .workflowId();
+          } catch (ConflictFailure error) {
+            return "busy";
+          }
+        };
+    var outcomes = race(() -> reserve.apply("schedule"), () -> reserve.apply("web"));
+    assertThat(outcomes.stream().filter(x -> !x.equals("busy"))).hasSize(1);
+    assertThat(workflowRuns.listRuns(f.taskId())).hasSize(1);
+    outcomes.stream().filter(x -> !x.equals("busy")).forEach(launches::release);
+    schedules.delete(f.id());
+  }
+
+  @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
+
+  @Test
+  void committedConfigChangeWinsAgainstAlreadyPassedCheckWaitingToReserve() throws Exception {
+    for (String change : List.of("script", "disable", "delete")) {
+      var f = checkFixture();
+      schedules.startCheck(f.dispatch());
+      schedules.finishCheck(f.dispatch(), "passed", "通过");
+      var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+      var changed = new java.util.concurrent.CountDownLatch(1);
+      var release = new java.util.concurrent.CountDownLatch(1);
+      var launching = new java.util.concurrent.CountDownLatch(1);
+      try {
+        var edit =
+            pool.submit(
+                () ->
+                    new org.springframework.transaction.support.TransactionTemplate(
+                            transactionManager)
+                        .executeWithoutResult(
+                            tx -> {
+                              if (change.equals("delete")) schedules.delete(f.id());
+                              else
+                                schedules.save(
+                                    f.id(),
+                                    new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                                        "并发检查",
+                                        f.request().sopId(),
+                                        f.taskId(),
+                                        "interval",
+                                        null,
+                                        5,
+                                        !change.equals("disable"),
+                                        GROUP,
+                                        new com.codexflow.configcenter.dto.ScheduleCheckRequest(
+                                            true,
+                                            "local",
+                                            change.equals("script") ? "E:/new.cmd" : "E:/check.cmd",
+                                            "",
+                                            60)));
+                              changed.countDown();
+                              try {
+                                if (!release.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                                  throw new AssertionError("未释放编辑事务");
+                              } catch (InterruptedException error) {
+                                Thread.currentThread().interrupt();
+                                throw new AssertionError(error);
+                              }
+                            }));
+        assertThat(changed.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        var launch =
+            pool.submit(
+                () -> {
+                  launching.countDown();
+                  try {
+                    launches.reserveLatest(f.taskId(), "schedule", f.dispatch().token());
+                    return true;
+                  } catch (ConflictFailure error) {
+                    return false;
+                  }
+                });
+        assertThat(launching.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        release.countDown();
+        edit.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        assertThat(launch.get(10, java.util.concurrent.TimeUnit.SECONDS)).isFalse();
+        assertThat(workflowRuns.listRuns(f.taskId())).isEmpty();
+      } finally {
+        release.countDown();
+        pool.shutdownNow();
+        if (!change.equals("delete")) schedules.delete(f.id());
+      }
+    }
+  }
+
+  @Test
+  void passedCheckExpiringBeforeReservationCannotLaunchWithoutExpiryScan() {
+    var f = checkFixture();
+    schedules.startCheck(f.dispatch());
+    schedules.finishCheck(f.dispatch(), "passed", "通过");
+    jdbc.update(
+        "UPDATE codex_task_schedules SET dispatch_expires_at=? WHERE id=?",
+        Instant.now().minusSeconds(1),
+        f.id());
+    assertThatThrownBy(() -> launches.reserveLatest(f.taskId(), "schedule", f.dispatch().token()))
+        .isInstanceOf(ConflictFailure.class);
+    assertThat(workflowRuns.listRuns(f.taskId())).isEmpty();
+    schedules.delete(f.id());
   }
 
   private ObjectNode createTask(

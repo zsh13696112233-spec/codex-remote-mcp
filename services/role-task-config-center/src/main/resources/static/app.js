@@ -3,7 +3,12 @@ const $=s=>document.querySelector(s);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uid=()=>`node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
 const DEFAULT_EXPECTED_OUTPUT="完成本步骤，并返回清晰、完整且可验证的结果。";
-const MODELS=["gpt-6-astra","gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"];
+const MODELS=["gpt-6.1-sol","gpt-6-astra"];
+const MODEL_LABELS={"gpt-6-astra":"GPT-6 Astra","gpt-6.1-sol":"GPT-6.1 Sol"};
+function modelOptionsHtml(value) {
+  const previous=value&&!MODELS.includes(value)?`<option value="${esc(value)}" selected disabled>${esc(value)}（已停用，请重新选择）</option>`:'';
+  return previous+MODELS.map(m=>`<option value="${m}" ${value===m?'selected':''}>${MODEL_LABELS[m]}</option>`).join('');
+}
 const PERMISSION_LABELS={read_only:"只读",workspace_write:"工作区写入",auto_review:"自动审核",full_access:"完全访问"};
 
 function blockedGroupOptions(selected) {
@@ -232,7 +237,7 @@ function taskRequirements(x={}){return[x.objective||"",x.additionalNotes?`补充
 function syncTaskDingTalkTargetFields(f=$("#taskForm"),selectedId=""){const type=f.querySelector('[name="dingtalkTargetType"]:checked')?.value||"NONE",field=f.querySelector("[data-task-target-select]"),select=f.dingtalkTargetId;if(type==="NONE"){field.classList.add("hidden");select.required=false;select.innerHTML='<option value="">不配置主动通知</option>';return}const typeLabel=type==="PERSON"?"人员":"群聊",used=new Set(state.tasks.filter(t=>t.id!==f.id.value&&t.dingtalkTargetId).map(t=>t.dingtalkTargetId)),targets=state.dingtalkTargets.filter(t=>t.targetType===type&&((t.enabled&&t.available&&true)||t.id===selectedId));field.querySelector("[data-task-target-label]").textContent=`选择${typeLabel}`;field.classList.remove("hidden");select.required=true;select.innerHTML=`<option value="">${targets.length?`请选择${typeLabel}`:`暂无可选${typeLabel}`}</option>${targets.map(t=>`<option value="${t.id}" ${t.id===selectedId?"selected":""}>${esc(t.displayName)}${!t.enabled||!t.available?"（已不可用）":""}</option>`).join("")}`;select.value=selectedId||""}
 function openTask(x={enabled:true}){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=taskRequirements(x);f.additionalNotes.value="";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");const selectedTarget=x.dingtalkTarget||state.dingtalkTargets.find(t=>t.id===x.dingtalkTargetId),selectedType=selectedTarget?.targetType||"NONE",typeInput=f.querySelector(`[name="dingtalkTargetType"][value="${selectedType}"]`);if(typeInput)typeInput.checked=true;syncTaskDingTalkTargetFields(f,x.dingtalkTargetId||"");f.blockedNotificationGroupId.innerHTML=blockedGroupOptions(x.blockedNotificationGroupId);f.blockedNotificationGroupId.value=x.blockedNotificationGroupId||"";f.notifyDingTalk.checked=x.notifyDingTalk===true;f.enabled.checked=x.enabled!==false;bindGroupForm(f,x,id=>{const old=f.sopId.value;f.sopId.innerHTML='<option value="">请选择同组 SOP</option>'+state.sops.filter(s=>s.groupId===id&&(s.enabled||s.id===x.sopId)).map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");f.sopId.value=[...f.sopId.options].some(o=>o.value===old)?old:""});$("#taskDialog").showModal()}
 
-function blankSop(){return{groupId:concreteGroup(),id:"",name:"",description:"",supervisorAgentId:(suggestedAgents("supervisor")[0]?.agentId||""),supervisorTimeoutSec:7200,advanceMode:"automatic",handoffMode:"legacy_text",dingtalkShowExecutionDetails:false,defaultStepModel:"gpt-5.6-sol",defaultStepReasoningEffort:null,enabled:true,steps:[]}}
+function blankSop(){return{groupId:concreteGroup(),id:"",name:"",description:"",supervisorAgentId:(suggestedAgents("supervisor")[0]?.agentId||""),supervisorTimeoutSec:7200,advanceMode:"automatic",handoffMode:"legacy_text",dingtalkShowExecutionDetails:false,defaultStepModel:"gpt-6.1-sol",defaultStepReasoningEffort:null,enabled:true,steps:[]}}
 function normalizeStep(s){const permissionProfile=s.permissionProfile||(s.writeEnabled===true?"workspace_write":"read_only");return{...s,_clientId:s._clientId||uid(),displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",permissionProfile,writeEnabled:permissionProfile!=="read_only",modelOverride:s.modelOverride||null,reasoningEffortOverride:s.reasoningEffortOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
 function setDraft(sop){
   const copy={...blankSop(),...sop,steps:(sop.steps||[]).map(normalizeStep)};
@@ -305,7 +310,7 @@ function nodeHtml(s,index){
   return `<article class="flow-node ${state.sop.selectedNodeId===s._clientId?"selected":""}" draggable="true" data-node-id="${s._clientId}">
     <div class="node-order"><span>${index+1}</span><i></i></div>
     <div class="node-body"><div class="node-top"><div class="node-role"><i>${esc(role.name.slice(0,1))}</i><div><strong>${esc(s.displayName||role.name)}</strong><small>${esc(role.name)}${role.enabled===false?" · 已停用":""}</small></div></div><div class="node-buttons"><button data-node-shift="-1" data-node-shift-id="${s._clientId}" title="上移节点" ${index===0?"disabled":""}>↑</button><button data-node-shift="1" data-node-shift-id="${s._clientId}" title="下移节点" ${index===state.sop.draft.steps.length-1?"disabled":""}>↓</button><button data-node-remove="${s._clientId}" title="移除节点">×</button><span class="node-drag" title="按住拖动排序">⠿</span></div></div>
-    <p>${esc(s.instruction||"尚未填写执行说明")}</p><div class="node-meta"><span>${esc(s.modelOverride||`继承 ${state.sop.draft.defaultStepModel}`)}</span><span>${esc(s.agentId||"未选择执行机")}</span><span>${s.timeoutSec||1800} 秒</span></div></div>
+    <p>${esc(s.instruction||roleById(s.roleId)?.duty||"暂无角色提示词")}</p><div class="node-meta"><span>${esc(s.modelOverride?(MODEL_LABELS[s.modelOverride]||s.modelOverride):`继承 ${MODEL_LABELS[state.sop.draft.defaultStepModel]||state.sop.draft.defaultStepModel}`)}</span><span>${esc(s.agentId||"未选择执行机")}</span><span>${s.timeoutSec||1800} 秒</span></div></div>
   </article>`;
 }
 function inspectorHtml(){
@@ -318,7 +323,7 @@ function workflowInspectorHtml(){
   return `<div class="inspector-heading"><strong>工作流配置</strong><small>设置工作流的基础运行参数</small></div>
     <label>所属分组 *<select data-sop-field="groupId" required>${groupOptions(d.groupId)}</select></label>
     <label>工作流名称 *<input data-sop-field="name" maxlength="100" value="${esc(d.name)}" placeholder="例如：需求开发与质量验收"></label>
-    <label>步骤默认模型<select data-sop-field="defaultStepModel">${MODELS.map(m=>`<option value="${m}" ${d.defaultStepModel===m?"selected":""}>${m==="gpt-6-astra"?"GPT-6 Astra":m}</option>`).join("")}</select></label>
+    <label>步骤默认模型<select data-sop-field="defaultStepModel">${modelOptionsHtml(d.defaultStepModel)}</select></label>
     <div data-effort-control="workflow">${effortControlHtml()}</div>
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，遇阻先讨论）</option></select></label>
     <label>主监督执行机 *<div class="agent-picker"><input data-agent-display="supervisor" readonly title="${esc(agentSelectionLabel(d.supervisorAgentId))}" value="${esc(agentSelectionLabel(d.supervisorAgentId))}" placeholder="请选择主监督执行机"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部主监督执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("supervisor","supervisor")}</div></div>${supervisorSelectionStatusHtml(d.supervisorAgentId)}</label>
@@ -397,9 +402,9 @@ function nodeInspectorHtml(s){
   return `<div class="inspector-heading"><strong>节点配置</strong><small>步骤由上到下严格串行执行</small></div>
     <div class="selected-role"><i>${esc(role.name.slice(0,1))}</i><div><strong>${esc(role.name)}</strong><small>${esc(role.duty||"暂无职责说明")}</small></div>${role.enabled===false?'<b>已停用</b>':""}</div>
     <label>显示名称 *<input data-node-field="displayName" value="${esc(s.displayName)}"></label>
-    <div class="instruction-field"><span class="field-title">步骤执行要求 * <em class="field-scope current-step">当前步骤</em></span><button type="button" data-instruction-edit aria-haspopup="dialog" aria-controls="instructionDialog">编辑</button><small class="field-help">说明具体动作、使用哪些输入以及处理范围，仅用于当前步骤。</small></div>
+    <div class="instruction-field"><span class="field-title">步骤执行要求 <em class="instruction-source ${s.instruction.trim()?"custom":"inherited"}">${s.instruction.trim()?"自定义":"继承角色"}</em></span><button type="button" data-instruction-edit aria-haspopup="dialog" aria-controls="instructionDialog">编辑</button></div>
     <label>执行机 *<div class="agent-picker"><input data-agent-display="executor" readonly title="${esc(agentSelectionLabel(s.agentId))}" value="${esc(agentSelectionLabel(s.agentId))}" placeholder="请选择执行机"><button type="button" class="agent-picker-toggle" data-agent-menu-toggle aria-label="查看全部步骤执行机" aria-expanded="false">▼</button><div class="agent-picker-menu" hidden>${agentChoiceButtons("executor","executor")}</div></div></label>
-    <label>模型<select data-node-field="modelOverride"><option value="">继承工作流默认模型</option>${MODELS.map(m=>`<option value="${m}" ${s.modelOverride===m?"selected":""}>${m==="gpt-6-astra"?"GPT-6 Astra":m}</option>`).join("")}</select></label>
+    <label>模型<select data-node-field="modelOverride"><option value="">继承工作流默认模型</option>${modelOptionsHtml(s.modelOverride)}</select></label>
     <div data-effort-control="node">${effortControlHtml(s)}</div>
     <div class="inspector-grid"><label>超时（秒）<input data-node-field="timeoutSec" type="number" min="10" max="7200" value="${s.timeoutSec}"></label><label>工作目录<input data-node-field="workingDirectory" value="${esc(s.workingDirectory)}" placeholder="可选"></label></div>
     <label>权限档位<select data-node-field="permissionProfile">${permissionOptions(s)}</select></label>
@@ -411,7 +416,7 @@ function nodeInspectorHtml(s){
 
 function addRoleNode(roleId,index){
   const role=roleById(roleId);if(!role||!role.enabled)return;
-  const suggested=suggestedAgents("executor")[0];const node=normalizeStep({roleId:role.id,roleName:role.name,roleDuty:role.duty,displayName:role.name,instruction:role.duty,agentId:suggested?.agentId||""});
+  const suggested=suggestedAgents("executor")[0];const node=normalizeStep({roleId:role.id,roleName:role.name,roleDuty:role.duty,displayName:role.name,instruction:"",agentId:suggested?.agentId||""});
   state.sop.draft.steps.splice(index,0,node);state.sop.selectedNodeId=node._clientId;state.sop.tab="node";renderSopWorkspace();
 }
 function moveNode(nodeId,index){
@@ -442,7 +447,6 @@ function validateSop(){
   if(d.supervisorTimeoutSec<10||d.supervisorTimeoutSec>43200)return"主监督最长时间必须在 10 到 43200 秒（12 小时）之间。";
   for(let i=0;i<d.steps.length;i++){
     const s=d.steps[i];if(!s.displayName.trim())return`请填写第 ${i+1} 个节点的显示名称。`;
-    if(!s.instruction.trim())return`请填写第 ${i+1} 个节点的执行说明。`;
     if(!(s.agentId||"").trim())return`请输入第 ${i+1} 个节点的执行机 ID。`;
     if(s.timeoutSec<10||s.timeoutSec>7200)return`第 ${i+1} 个节点的超时必须在 10 到 7200 秒之间。`;
   }
@@ -601,19 +605,24 @@ $("#content").addEventListener("pointerup",e=>{
 });
 $("#content").addEventListener("pointercancel",()=>{pointerDrag=null;document.querySelectorAll(".dragging,.drag-over,.drop-before,.drop-after").forEach(x=>x.classList.remove("dragging","drag-over","drop-before","drop-after"))});
 
-const runHistory = {id: null, name: "", page: 0, request: 0};
-async function showRuns(id, name, page = 0) {
+const runHistory = {id: null, name: "", page: 0, status: "", request: 0};
+async function showRuns(id, name, page = 0, status = "") {
   const request = ++runHistory.request;
-  Object.assign(runHistory, {id, name, page});
+  Object.assign(runHistory, {id, name, page, status});
+  $("#runHistoryStatus").value = status;
   $("#runsTitle").textContent = `${name} · 运行记录`;
   $("#runList").innerHTML = '<div class="empty">正在加载…</div>';
   if (!$("#runsDialog").open) $("#runsDialog").showModal();
   try {
-    const list = await api(`/api/task-definitions/${encodeURIComponent(id)}/runs?summary=true&page=${page}&size=20`);
+    const result = await api(`/api/task-definitions/${encodeURIComponent(id)}/run-history?status=${encodeURIComponent(status)}&page=${page}&size=20`);
+    const list = result.items;
+    const totalPages = Math.max(1, Math.ceil(result.total / result.size));
     if (request !== runHistory.request) return;
+    page = result.page;
+    runHistory.page = page;
     const labels = {submitting:"正在提交",queued:"等待开始",running:"正在进行",cancelling:"正在停止",completed:"已完成",failed:"未完成",cancelled:"已停止",submit_failed:"提交失败"};
-    $("#runList").innerHTML = (list.length ? list.map(r => `<div class="run"><b>${esc(r.workflowId)}</b> <span class="badge">${esc((r.termination ? (["completed","failed","cancelled"].includes(r.status) ? (r.termination.outcome === "blocked" ? "因阻断结束" : "无待处理任务，已结束") : "正在结束") : labels[r.status]) || "状态未知")}</span><p class="meta">${time(r.submittedAt)}${r.sourceWorkflowId ? ` · 重试自 ${esc(r.sourceWorkflowId)}` : ""}</p><div class="actions"><button data-monitor="${esc(r.monitorUrl)}">查看监控</button><button type="button" data-blocked-status="${esc(r.workflowId)}">阻断通知详情</button><button ${!r.groupId?'disabled title="旧运行请使用最新配置重新运行"':''} data-retry="${esc(r.workflowId)}">按原快照重试</button>${["queued","running","submitting"].includes(r.status) ? `<button data-cancel="${esc(r.workflowId)}" title="当前步骤执行中不支持取消，请在步骤结束后操作">取消</button>` : ""}</div></div>`).join("") : '<div class="empty">暂无运行记录</div>')
-      + `<div class="actions"><button data-history-page="${page - 1}" ${page === 0 ? "disabled" : ""}>上一页</button><span>第 ${page + 1} 页</span><button data-history-page="${page + 1}" ${list.length < 20 ? "disabled" : ""}>下一页</button></div>`;
+    $("#runList").innerHTML = (list.length ? list.map(r => `<div class="run"><div class="run-history-heading"><b>${esc(r.workflowId)}</b> <span class="badge" data-status="${esc(r.status)}">${esc((r.termination ? (["completed","failed","cancelled"].includes(r.status) ? (r.termination.outcome === "blocked" ? "因阻断结束" : "无待处理任务，已结束") : "正在结束") : labels[r.status]) || "状态未知")}</span></div><p class="meta">启动时间：${time(r.submittedAt)}${r.sourceWorkflowId ? ` · 重试自 ${esc(r.sourceWorkflowId)}` : ""}</p><div class="actions"><a class="run-monitor" href="${esc(r.monitorUrl)}" target="_blank" rel="noopener">查看监控 ↗</a><button type="button" data-blocked-status="${esc(r.workflowId)}">阻断通知详情</button><button ${!r.groupId?'disabled title="旧运行请使用最新配置重新运行"':''} data-retry="${esc(r.workflowId)}">按原快照重试</button>${["queued","running","submitting"].includes(r.status) ? `<button data-cancel="${esc(r.workflowId)}" title="当前步骤执行中不支持取消，请在步骤结束后操作">取消</button>` : ""}</div></div>`).join("") : `<div class="empty">${status ? '暂无符合该状态的运行记录' : '暂无运行记录'}</div>`)
+      + `<div class="run-history-pagination"><span>共 ${result.total} 条 · 第 ${page + 1} / ${totalPages} 页</span><div class="actions"><button type="button" data-history-page="${page - 1}" ${page === 0 ? "disabled" : ""}>上一页</button><label>跳至 <input id="runHistoryPage" required type="number" min="1" max="${Math.min(totalPages,100001)}" value="${page + 1}" aria-label="跳转页码"> 页</label><button type="button" data-history-jump>跳转</button><button type="button" data-history-page="${page + 1}" ${page + 1 >= totalPages ? "disabled" : ""}>下一页</button></div></div>`;
   } catch (error) {
     if (request === runHistory.request) $("#runList").innerHTML = `<div class="empty">${esc(error.message)} <button data-history-page="${page}">重新加载</button></div>`;
   }
@@ -623,22 +632,36 @@ $("#runList").onclick = async event => {
   if (!button || button.disabled) return;
   button.disabled = true;
   try {
-    if (button.dataset.historyPage != null) await showRuns(runHistory.id, runHistory.name, Number(button.dataset.historyPage));
-    if (button.dataset.monitor) window.open(button.dataset.monitor, "_blank", "noopener");
+    if (button.dataset.historyPage != null) await showRuns(runHistory.id, runHistory.name, Number(button.dataset.historyPage), runHistory.status);
+    if (button.hasAttribute("data-history-jump")) {
+      const input = $("#runHistoryPage");
+      if (!input.reportValidity()) return;
+      await showRuns(runHistory.id, runHistory.name, Number(input.value) - 1, runHistory.status);
+    }
     if (button.dataset.retry) {
       const result = await api(`/api/task-runs/${encodeURIComponent(button.dataset.retry)}/retry`, {method:"POST"});
       window.open(result.monitorUrl, "_blank", "noopener");
       toast("已按原快照重试");
-      await showRuns(runHistory.id, runHistory.name);
+      await showRuns(runHistory.id, runHistory.name, 0, runHistory.status);
     }
     if (button.dataset.cancel) {
       await api(`/api/task-runs/${encodeURIComponent(button.dataset.cancel)}/cancel`, {method:"POST"});
       toast("已请求取消");
-      await showRuns(runHistory.id, runHistory.name, runHistory.page);
+      await showRuns(runHistory.id, runHistory.name, runHistory.page, runHistory.status);
     }
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
 };
+
+$("#runHistoryStatus").onchange = event => showRuns(runHistory.id, runHistory.name, 0, event.target.value);
+$("#runHistoryRefresh").onclick = () => showRuns(runHistory.id, runHistory.name, runHistory.page, runHistory.status);
+$("#runsDialog").addEventListener("close", () => { runHistory.request++; });
+$("#runList").addEventListener("keydown", event => {
+  if (event.key === "Enter" && event.target.id === "runHistoryPage") {
+    event.preventDefault();
+    $("[data-history-jump]").click();
+  }
+});
 
 document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   if(b.dataset.page===state.page)return;
@@ -654,7 +677,7 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   try{await render()}catch(e){toast(e.message)}
 });
 $("#create").onclick=()=>state.page==="groups"?editGroup():state.page==="roles"?openRole():state.page==="sops"?startNewSop():state.page==="tasks"?openTask():state.page==="schedules"?openSchedule().catch(e=>toast(e.message)):null;
-$("#refresh").onclick=async()=>{if(state.page==="sops"&&!confirmDiscard())return;try{if(state.page==="sops"){const id=state.sop.draft?.id;await loadGroups();renderGroupFilter();await loadBase();if(id&&state.sops.some(s=>s.id===id))setDraft(await api(`/api/sops/${id}`));else if(visibleSops().length)setDraft(visibleSops()[0]);else state.sop.draft=null;renderSopWorkspace()}else await render()}catch(e){toast(e.message)}};
+$("#refresh").onclick=async()=>{if(state.page==="sops"&&!confirmDiscard())return;try{if(state.page==="sops"){effortCatalogs.clear();const id=state.sop.draft?.id;await loadGroups();renderGroupFilter();await loadBase();if(id&&state.sops.some(s=>s.id===id))setDraft(await api(`/api/sops/${id}`));else if(visibleSops().length)setDraft(visibleSops()[0]);else state.sop.draft=null;renderSopWorkspace()}else await render()}catch(e){toast(e.message)}};
 window.addEventListener("beforeunload",e=>{if(isSopDirty()){e.preventDefault();e.returnValue=""}});
 setInterval(refreshAgentRuntimeStatuses,10000);
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)refreshAgentRuntimeStatuses()});
@@ -665,7 +688,7 @@ if(initialButton&&initialPage!=="roles")initialButton.click();else render().catc
 
 // 模型能力只保存在页面内，保存和执行时仍由服务端重新校验。
 const effortCatalogs = new Map();
-const EFFORT_LABELS = {none:"无",minimal:"最低",low:"低",medium:"中",high:"高",xhigh:"很高",max:"极高",ultra:"最高"};
+const EFFORT_LABELS = {none:"无",minimal:"最低",low:"轻度",medium:"标准",high:"高",xhigh:"很高",max:"极高",ultra:"最高"};
 function effortOptionsFor(step) {
   const model=step.modelOverride||state.sop.draft.defaultStepModel;
   return effortCatalogs.get(step.agentId)?.models?.find(x=>x.model===model)?.supportedReasoningEfforts||[];
@@ -679,8 +702,13 @@ function effortControlHtml(step=null) {
   const errors=steps.some(x=>effortCatalogs.get(x.agentId)?.error);
   const options=Object.keys(EFFORT_LABELS).filter(x=>values.has(x));
   let help=!steps.length?'添加步骤后可选择具体强度。':missing?'请先选择步骤执行机。':loading?'正在读取支持的思考强度…':errors?'思考强度加载失败，请刷新页面重试。':'';
+  if(steps.length&&!missing&&!loading&&!errors) {
+    const unavailable=steps.some(s=>!effortCatalogs.get(s.agentId)?.models?.some(m=>m.model===(s.modelOverride||d.defaultStepModel)));
+    if(unavailable)help='执行机未提供所选模型的能力信息，请检查执行服务版本及模型目录，更新后点击页面“刷新”。';
+    else if(!options.length)help='所选模型未提供可选思考强度，可使用执行服务默认值。';
+  }
   const effective=step?(value||d.defaultStepReasoningEffort):null;
-  if(step&&effective&&!loading&&!errors&&!missing&&!values.has(effective))help='当前模型不支持所选或继承的强度，请重新选择。';
+  if(step&&effective&&!help&&!values.has(effective))help='当前模型不支持所选或继承的强度，请重新选择。';
   return `<label>${step?'思考强度':'步骤默认思考强度'}<select ${step?'data-node-field="reasoningEffortOverride"':'data-sop-field="defaultStepReasoningEffort"'}><option value="">${step?'继承流程设置':'使用执行服务默认值'}</option>${value&&!values.has(value)?`<option value="${esc(value)}" selected>${esc(EFFORT_LABELS[value]||value)}（待验证）</option>`:''}${options.map(x=>`<option value="${x}" ${x===value?'selected':''}>${EFFORT_LABELS[x]}</option>`).join('')}</select>${help?`<small>${help}</small>`:''}</label>`;
 }
 async function refreshEffortControls() {
@@ -705,12 +733,33 @@ async function refreshEffortControls() {
   paint();await Promise.all(requests);paint();
 }
 let instructionEdit = null;
+function updateInstructionSource() {
+  if(!instructionEdit)return;
+  const step=instructionEdit.draft.steps.find(x=>x._clientId===instructionEdit.nodeId);
+  if(!step)return;
+  const dialog=document.querySelector('#instructionDialog');
+  const value=dialog.querySelector('textarea').value.trim();
+  const custom=!!value&&value!==(roleById(step.roleId)?.duty||'').trim();
+  const label=dialog.querySelector('[data-instruction-source]');
+  label.textContent=custom?'自定义':'继承角色';
+  label.className=`instruction-source ${custom?'custom':'inherited'}`;
+  dialog.querySelector('[data-instruction-reset]').hidden=!custom;
+}
+document.querySelector('#instructionText').addEventListener('input',updateInstructionSource);
+document.querySelector('[data-instruction-reset]').addEventListener('click',()=>{
+  if(!instructionEdit)return;
+  const step=instructionEdit.draft.steps.find(x=>x._clientId===instructionEdit.nodeId);
+  if(!step)return;
+  document.querySelector('#instructionText').value=roleById(step.roleId)?.duty||'';
+  updateInstructionSource();
+});
 function openInstructionEditor() {
   const step=selectedStep();if(!step)return;
   const dialog=document.querySelector('#instructionDialog');
   instructionEdit={draft:state.sop.draft,nodeId:step._clientId};
   dialog.querySelector('[data-instruction-step]').textContent=step.displayName||'当前步骤';
-  dialog.querySelector('textarea').value=step.instruction||'';
+  dialog.querySelector('textarea').value=step.instruction||roleById(step.roleId)?.duty||'';
+  updateInstructionSource();
   dialog.showModal();dialog.querySelector('textarea').focus();
 }
 document.addEventListener('click',e=>{
@@ -719,10 +768,9 @@ document.addEventListener('click',e=>{
 document.querySelector('#instructionForm').addEventListener('submit',e=>{
   e.preventDefault();
   const value=e.currentTarget.querySelector('textarea').value;
-  if(!value.trim()){toast('请填写步骤执行要求。');return}
   const step=state.sop.draft===instructionEdit?.draft?state.sop.draft.steps.find(x=>x._clientId===instructionEdit.nodeId):null;
   if(!step){toast('当前步骤已变化，请重新打开编辑。');return}
-  step.instruction=value;
+  step.instruction=value.trim()===(roleById(step.roleId)?.duty||"").trim()?"":value.trim();
   document.querySelector('#instructionDialog').close();
   renderSopWorkspace();syncDirtyUi();
   document.querySelector('[data-instruction-edit]')?.focus();

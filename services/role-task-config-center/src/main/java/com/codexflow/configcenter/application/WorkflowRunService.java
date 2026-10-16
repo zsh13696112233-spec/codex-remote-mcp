@@ -52,6 +52,10 @@ public class WorkflowRunService {
     return launchLatest(taskId, "schedule", "定时任务已启动。");
   }
 
+  public ObjectNode runScheduled(String taskId, String token) {
+    return launchLatest(taskId, "schedule", "定时任务已启动。", token);
+  }
+
   /** 使用历史运行的冻结快照创建并提交一次重试。 */
   public ObjectNode retry(String workflowId) {
     String taskId = store.taskDefinitionId(workflowId);
@@ -103,7 +107,26 @@ public class WorkflowRunService {
 
   public List<ObjectNode> listRunSummaries(String taskId, int page, int size) {
     List<ObjectNode> values = store.listRunSummaries(taskId, page, size);
-    if (values.isEmpty()) return values;
+    refreshSummaries(values);
+    return values;
+  }
+
+  public ObjectNode runHistory(String taskId, String status, int page, int size) {
+    ObjectNode result = store.runHistory(taskId, status, page, size);
+    var active = store.activeHistory(taskId);
+    for (int offset = 0; offset < active.size(); offset += 100) {
+      refreshSummaries(active.subList(offset, Math.min(offset + 100, active.size())));
+    }
+    result = store.runHistory(taskId, status, page, size);
+    List<ObjectNode> values = new ArrayList<>();
+    result.path("items").forEach(value -> values.add((ObjectNode) value));
+    refreshSummaries(values);
+    // 状态刷新后重新筛选和计数，避免返回不符合条件的记录。
+    return store.runHistory(taskId, status, page, size);
+  }
+
+  private void refreshSummaries(List<ObjectNode> values) {
+    if (values.isEmpty()) return;
     try {
       ObjectNode request = values.get(0).objectNode();
       var ids = request.putArray("workflowIds");
@@ -128,9 +151,8 @@ public class WorkflowRunService {
             if (status != null && status.isTextual()) value.put("status", status.asText());
           });
     } catch (RuntimeException ignored) {
-      // 列表只执行一次批量查询；离线时继续展示持久化状态。
+      // 本批查询失败时继续展示持久化状态，不阻断历史列表。
     }
-    return values;
   }
 
   public ObjectNode runDetail(String workflowId) {
@@ -226,10 +248,17 @@ public class WorkflowRunService {
   }
 
   private ObjectNode launchLatest(String taskId, String source, String notice) {
+    return launchLatest(taskId, source, notice, null);
+  }
+
+  private ObjectNode launchLatest(String taskId, String source, String notice, String token) {
     boolean notifyDingTalk = store.notifyDingTalk(taskId);
     if (notifyDingTalk) dingtalkNotifications.validate(taskId);
     releaseTerminalOccupant(taskId);
-    TaskLaunchStore.LaunchReservation reservation = launches.reserveLatest(taskId, source);
+    TaskLaunchStore.LaunchReservation reservation =
+        token == null
+            ? launches.reserveLatest(taskId, source)
+            : launches.reserveLatest(taskId, source, token);
     PreparedRun prepared = reservation.prepared();
     boolean notificationReserved = false;
     boolean submissionStarted = false;

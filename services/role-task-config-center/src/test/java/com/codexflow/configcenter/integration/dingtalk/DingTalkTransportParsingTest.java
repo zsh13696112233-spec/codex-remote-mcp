@@ -12,6 +12,28 @@ import tools.jackson.databind.node.ObjectNode;
 class DingTalkTransportParsingTest {
 
   @Test
+  void monitorReplyHasOneButtonAndLeavesMentionToSeparateText() throws Exception {
+    var payload =
+        objectMapper
+            .createObjectNode()
+            .put("text", "工作流编号：run\n任务已启动")
+            .put("monitorUrl", "http://monitor/?workflowId=run")
+            .put("atUserId", "asker");
+    var reply = transport.replyBody("GROUP", payload);
+    assertThat(reply.path("msgtype").asText()).isEqualTo("actionCard");
+    assertThat(reply.has("at")).isFalse();
+    var card = reply.path("actionCard");
+    assertThat(card.path("text").asText()).isEqualTo(payload.path("text").asText());
+    assertThat(card.path("singleTitle").asText()).isEqualTo("查看监控");
+    assertThat(card.path("singleURL").asText()).isEqualTo("http://monitor/?workflowId=run");
+    assertThat(transport.replyBody("PERSON", payload)).isEqualTo(reply);
+    var group =
+        transport.groupMessageBody("group", "sampleActionCard", transport.monitorCardBody(payload));
+    assertThat(group.path("msgKey").asText()).isEqualTo("sampleActionCard");
+    assertThat(objectMapper.readTree(group.path("msgParam").asText())).isEqualTo(card);
+  }
+
+  @Test
   void mentionOnlyReplyIncludesTextAndActualAtParameter() {
     var payload =
         new ObjectMapper().createObjectNode().put("text", "@asker").put("atUserId", "asker");

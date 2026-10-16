@@ -124,23 +124,66 @@ public class WorkflowRunStore {
     }
     findTask(taskId, true);
     return runs.summaries(taskId, PageRequest.of(page, size)).stream()
-        .map(
-            row -> {
-              ObjectNode value = json.newObject();
-              value.put("workflowId", row.getWorkflowId());
-              value.put("groupId", row.getGroupId());
-              value.put("groupName", row.getGroupName());
-              value.put("taskDefinitionId", taskId);
-              value.put("monitorUrl", monitorUrl(row.getWorkflowId()));
-              value.put("sourceWorkflowId", row.getSourceWorkflowId());
-              value.put("status", row.getStatus());
-              if (row.getTerminationJson() != null)
-                value.set("termination", json.read(row.getTerminationJson()));
-              value.put("submittedAt", row.getSubmittedAt().toString());
-              value.put("updatedAt", row.getUpdatedAt().toString());
-              return value;
-            })
+        .map(row -> summary(taskId, row))
         .toList();
+  }
+
+  private ObjectNode summary(String taskId, TaskRunRepository.Summary row) {
+    ObjectNode value = json.newObject();
+    value.put("workflowId", row.getWorkflowId());
+    value.put("groupId", row.getGroupId());
+    value.put("groupName", row.getGroupName());
+    value.put("taskDefinitionId", taskId);
+    value.put("monitorUrl", monitorUrl(row.getWorkflowId()));
+    value.put("sourceWorkflowId", row.getSourceWorkflowId());
+    value.put("status", row.getStatus());
+    if (row.getTerminationJson() != null)
+      value.set("termination", json.read(row.getTerminationJson()));
+    value.put("submittedAt", row.getSubmittedAt().toString());
+    value.put("updatedAt", row.getUpdatedAt().toString());
+    return value;
+  }
+
+  @Transactional(readOnly = true)
+  public List<ObjectNode> activeHistory(String taskId) {
+    return runs.activeHistoryIds(taskId).stream()
+        .map(id -> json.newObject().put("workflowId", id))
+        .toList();
+  }
+
+  @Transactional(readOnly = true)
+  public ObjectNode runHistory(String taskId, String status, int page, int size) {
+    if (page < 0 || page > 100000 || size < 1 || size > 100) {
+      throw new IllegalArgumentException("运行历史页码或每页数量无效。");
+    }
+    if (!java.util.Set.of(
+            "",
+            "submitting",
+            "queued",
+            "running",
+            "cancelling",
+            "completed",
+            "failed",
+            "cancelled",
+            "submit_failed")
+        .contains(status)) {
+      throw new IllegalArgumentException("运行状态无效。");
+    }
+    findTask(taskId, true);
+    var result = runs.history(taskId, status, PageRequest.of(page, size));
+    int lastPage = Math.max(0, result.getTotalPages() - 1);
+    if (page > lastPage) {
+      page = lastPage;
+      result = runs.history(taskId, status, PageRequest.of(page, size));
+    }
+    ObjectNode value =
+        json.newObject()
+            .put("total", result.getTotalElements())
+            .put("page", page)
+            .put("size", size);
+    var items = value.putArray("items");
+    result.forEach(row -> items.add(summary(taskId, row)));
+    return value;
   }
 
   @Transactional(readOnly = true)
@@ -319,7 +362,7 @@ public class WorkflowRunStore {
     return root;
   }
 
-  /** 根据任务目标、角色职责和步骤要求生成单步骤提示词。 */
+  /** 根据任务目标和步骤有效提示词生成单步骤提示词；空步骤要求继承角色职责。 */
   private String basePrompt(TaskDefinitionEntity task, SopStepEntity step, int stepNumber) {
     String objective =
         task.objective + (task.additionalNotes == null ? "" : "\n\n补充说明：\n" + task.additionalNotes);
@@ -333,10 +376,8 @@ public class WorkflowRunStore {
         + step.displayName
         + "\n\n你的角色：\n"
         + step.role.name
-        + "\n\n你的职责：\n"
-        + step.role.duty
         + "\n\n本步骤执行要求：\n"
-        + step.instruction
+        + (step.instruction.isBlank() ? step.role.duty : step.instruction)
         + "\n\n期望输出：\n"
         + step.expectedOutput
         + "\n\n请只完成当前步骤，不要代替其他步骤执行。\n请使用普通用户容易理解的语言返回结果。";

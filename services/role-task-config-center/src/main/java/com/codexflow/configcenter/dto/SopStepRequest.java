@@ -24,7 +24,7 @@ import java.util.Set;
 public record SopStepRequest(
     @NotBlank @Size(max = 160) String displayName,
     @NotBlank String roleId,
-    @NotBlank String instruction,
+    String instruction,
     String expectedOutput,
     String executorType,
     @NotBlank @Size(max = 128) String agentId,

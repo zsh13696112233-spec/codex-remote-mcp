@@ -20,6 +20,32 @@ import tools.jackson.databind.node.ObjectNode;
 /** 统一入口不依赖群绑定；回答与每次提问关联。 */
 class DingTalkBotCoordinatorTest {
   @Test
+  void failedStepUsesMonitorNoticeAndDeliveryKeepsMessageReference() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    ReflectionTestUtils.invokeMethod(
+        bot, "consumeEvent", binding, json.createObjectNode().put("type", "node.failed"), 3L);
+    verify(store).recordStepFailure(eq(ID), eq(3L), contains("执行失败"));
+    var payload =
+        json.createObjectNode()
+            .put("text", "失败")
+            .put("monitorUrl", "http://monitor/?workflowId=" + ID);
+    when(transport.sendMonitorCard("group", "GROUP", payload))
+        .thenReturn(new DingTalkModels.SendResult("card-message"));
+    bot.deliver(new DingTalkModels.Outbox("failed", ID, "group", "root", "monitor_card", payload));
+    verify(store).markOutboxSent("failed", "card-message");
+    when(transport.sendReply("group", "GROUP", payload))
+        .thenReturn(new DingTalkModels.SendResult("reply-message"));
+    bot.deliver(
+        new DingTalkModels.Outbox("started", ID, "group", "root", "monitor_reply", payload));
+    verify(store).markOutboxSent("started", "reply-message");
+    when(transport.sendReply("group", "GROUP", payload))
+        .thenThrow(new IllegalStateException("发送失败"));
+    bot.deliver(new DingTalkModels.Outbox("unsent", ID, "group", "root", "monitor_reply", payload));
+    verify(store, never()).markOutboxSent(eq("unsent"), any());
+    verify(store).markOutboxFailed(eq("unsent"), any());
+  }
+
+  @Test
   void hiddenDiscussionProgressAdvancesCursorWithoutSuppressingAnswer() {
     var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
     var page = json.createObjectNode().put("nextCursor", 2);
@@ -588,7 +614,7 @@ class DingTalkBotCoordinatorTest {
         .thenReturn(new DingTalkModels.StartReservation("started", ID, json.createObjectNode()));
     bot.safelyHandleMessage(message("销售日报"));
     verify(runs).submitPrepared(any());
-    verify(store).enqueueReply(anyString(), eq(ID), any(), contains("任务已启动"));
+    verify(store).enqueueStartReply(anyString(), eq(ID), any(), contains("任务已启动"));
     verify(store, never()).enqueueCard(any(), any(), any());
     verify(store, never()).enqueueProgressMarkdown(any(), any(), any(), any());
   }
@@ -1126,5 +1152,7 @@ class DingTalkBotCoordinatorTest {
     bot.safelyHandleMessage(
         new DingTalkModels.Message("id", "private", "1", "user", "销售日报", false, false, null));
     verify(runs).submitPrepared(any());
+    verify(store)
+        .enqueueStartReply(eq("reply:id"), eq(ID), any(), eq("任务已启动：销售日报。后续请发送工作流编号加问题，或引用本消息。"));
   }
 }

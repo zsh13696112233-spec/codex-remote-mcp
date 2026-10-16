@@ -33,10 +33,16 @@ public class TaskLaunchStore {
 
   @Transactional
   public LaunchReservation reserveLatest(String taskId, String triggerSource) {
+    return reserveLatest(taskId, triggerSource, null);
+  }
+
+  @Transactional
+  public LaunchReservation reserveLatest(
+      String taskId, String triggerSource, String dispatchToken) {
     TaskDefinitionEntity task = requiredTaskForUpdate(taskId);
     validateStartable(task);
     requireIdle(task);
-    if ("schedule".equals(triggerSource)) schedules.requireEnabled(taskId);
+    if ("schedule".equals(triggerSource)) schedules.requireEnabled(taskId, dispatchToken);
     PreparedRun prepared = workflowRuns.prepareLatest(taskId, triggerSource);
     task.activeWorkflowId = prepared.workflowId();
     tasks.saveAndFlush(task);

@@ -148,6 +148,11 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   }
 
   ObjectNode replyBody(String targetType, JsonNode payload) {
+    if (payload.hasNonNull("monitorUrl")) {
+      var body = objectMapper.createObjectNode().put("msgtype", "actionCard");
+      body.set("actionCard", monitorCardBody(payload));
+      return body;
+    }
     ObjectNode body = objectMapper.createObjectNode().put("msgtype", "text");
     body.putObject("text").put("content", payload.path("text").asText());
     if ("GROUP".equals(targetType) && !payload.path("atUserId").asText("").isBlank()) {
@@ -157,6 +162,24 @@ class OfficialDingTalkTransport implements DingTalkTransport {
           .add(payload.path("atUserId").asText());
     }
     return body;
+  }
+
+  ObjectNode monitorCardBody(JsonNode payload) {
+    return objectMapper
+        .createObjectNode()
+        .put("title", "任务通知")
+        .put("text", payload.path("text").asText())
+        .put("singleTitle", "查看监控")
+        .put("singleURL", payload.path("monitorUrl").asText());
+  }
+
+  @Override
+  public DingTalkModels.SendResult sendMonitorCard(
+      String target, String targetType, JsonNode payload) {
+    ObjectNode card = monitorCardBody(payload);
+    return "PERSON".equals(targetType)
+        ? sendPersonMessage(target, "sampleActionCard", card)
+        : sendGroupMessage(target, "sampleActionCard", card, "无法生成钉钉监控按钮通知。");
   }
 
   @Override

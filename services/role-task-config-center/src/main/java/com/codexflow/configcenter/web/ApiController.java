@@ -158,6 +158,16 @@ public class ApiController {
     return summary ? workflowRuns.listRunSummaries(id, page, size) : workflowRuns.listRuns(id);
   }
 
+  /** 按状态分页查询运行摘要及总数。 */
+  @GetMapping("/task-definitions/{id}/run-history")
+  public ObjectNode runHistory(
+      @PathVariable String id,
+      @RequestParam(defaultValue = "") String status,
+      @RequestParam(defaultValue = "0") int page,
+      @RequestParam(defaultValue = "20") int size) {
+    return workflowRuns.runHistory(id, status, page, size);
+  }
+
   /** 按需读取运行的完整不可变快照。 */
   @GetMapping("/task-runs/{workflowId}")
   public ObjectNode runDetail(@PathVariable String workflowId) {

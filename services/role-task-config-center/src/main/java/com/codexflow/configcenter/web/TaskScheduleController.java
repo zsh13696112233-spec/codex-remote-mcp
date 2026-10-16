@@ -1,5 +1,6 @@
 package com.codexflow.configcenter.web;
 
+import com.codexflow.configcenter.client.GatewayClient;
 import com.codexflow.configcenter.domain.TaskScheduleStore;
 import com.codexflow.configcenter.dto.TaskScheduleRequest;
 import jakarta.validation.Valid;
@@ -12,9 +13,11 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/api/task-schedules")
 public class TaskScheduleController {
   private final TaskScheduleStore schedules;
+  private final GatewayClient gateway;
 
-  public TaskScheduleController(TaskScheduleStore schedules) {
+  public TaskScheduleController(TaskScheduleStore schedules, GatewayClient gateway) {
     this.schedules = schedules;
+    this.gateway = gateway;
   }
 
   @GetMapping
@@ -26,13 +29,30 @@ public class TaskScheduleController {
   @PostMapping
   @ResponseStatus(HttpStatus.CREATED)
   public Map<String, Object> create(@Valid @RequestBody TaskScheduleRequest body) {
+    validateCheck(body);
     return schedules.save(null, body);
   }
 
   @PutMapping("/{id}")
   public Map<String, Object> update(
       @PathVariable String id, @Valid @RequestBody TaskScheduleRequest body) {
+    validateCheck(body);
     return schedules.save(id, body);
+  }
+
+  private void validateCheck(TaskScheduleRequest body) {
+    if (!Boolean.TRUE.equals(body.enabled())
+        || body.preCheck() == null
+        || !body.preCheck().enabled()) return;
+    var check = body.preCheck().normalized();
+    for (var agent : gateway.get("/agents").path("agents")) {
+      if (!check.agentId().equals(agent.path("agentId").asText())
+          || !body.groupId().equals(agent.path("groupId").asText())) continue;
+      for (var capability : agent.path("capabilities")) {
+        if ("executor".equals(capability.asText())) return;
+      }
+    }
+    throw new IllegalArgumentException("请选择同组已登记且具备执行能力的检查执行机。");
   }
 
   @DeleteMapping("/{id}")

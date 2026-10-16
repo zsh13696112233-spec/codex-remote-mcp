@@ -17,8 +17,7 @@ import tools.jackson.databind.node.ObjectNode;
 @Service
 public class ConfigService {
 
-  private static final Set<String> SUPPORTED_MODELS =
-      Set.of("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna");
+  private static final Set<String> SUPPORTED_MODELS = Set.of("gpt-6-astra", "gpt-6.1-sol");
   private static final Set<String> EXECUTOR_TYPES = Set.of("local", "remote");
   private static final Set<String> ADVANCE_MODES = Set.of("automatic", "semi_automatic");
   private static final Set<String> HANDOFF_MODES = Set.of("legacy_text", "cumulative_files");
@@ -47,7 +46,7 @@ public class ConfigService {
       DomainJsonMapper json,
       DingTalkTargetDirectory dingtalkTargets,
       TaskScheduleStore schedules,
-      @Value("${codex.default-step-model:gpt-5.6-sol}") String defaultModel) {
+      @Value("${codex.default-step-model:gpt-6.1-sol}") String defaultModel) {
     this.roles = roles;
     this.groups = groups;
     this.sops = sops;
@@ -356,7 +355,8 @@ public class ConfigService {
     step.displayName = body.displayName().trim();
     step.role = findRole(body.roleId().trim());
     GroupService.same(sop.groupId, step.role.groupId);
-    step.instruction = body.instruction().trim();
+    step.instruction = body.instruction() == null ? "" : body.instruction().trim();
+    if (step.instruction.equals(step.role.duty.trim())) step.instruction = "";
     step.expectedOutput = normalizeNullable(body.expectedOutput());
     if (step.expectedOutput == null) step.expectedOutput = DEFAULT_EXPECTED_OUTPUT;
     step.executorType = normalizeNullable(body.executorType());

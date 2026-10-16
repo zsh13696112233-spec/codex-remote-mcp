@@ -302,16 +302,11 @@ class DingTalkBotCoordinator implements SmartLifecycle {
     try {
       workflowRunService.submitPrepared(new PreparedRun(workflowId, reservation.payload()));
       store.markSubmitted(workflowId);
-      reply(
-          message,
+      store.enqueueStartReply(
+          "reply:" + message.messageId(),
           workflowId,
-          "任务已启动："
-              + message.content()
-              + "。后续请发送工作流编号加问题，或引用本消息。\n查看任务："
-              + monitorUrl
-              + (monitorUrl.contains("?") ? "&" : "?")
-              + "workflowId="
-              + workflowId);
+          message,
+          "任务已启动：" + message.content() + "。后续请发送工作流编号加问题，或引用本消息。");
     } catch (RuntimeException error) {
       reply(message, workflowId, "任务暂未成功启动，请在运行记录中查看状态。");
     }
@@ -766,6 +761,13 @@ class DingTalkBotCoordinator implements SmartLifecycle {
                       binding.workflowId(), sequence, finalNotice, snapshot, monitorUrl));
           return true;
         }
+        if ("node.failed".equals(type)) {
+          String failureNotice = notice;
+          DingTalkDatabaseRetry.run(
+              "失败通知入队",
+              () -> store.recordStepFailure(binding.workflowId(), sequence, failureNotice));
+          return true;
+        }
         recordProcessWithRetry(
             binding.workflowId(),
             null,
@@ -958,8 +960,11 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         }
       }
       DingTalkModels.SendResult result;
-      if ("reply".equals(item.messageKind())) {
+      if ("reply".equals(item.messageKind()) || "monitor_reply".equals(item.messageKind())) {
         result = transport.sendReply(item.targetExternalId(), item.targetType(), item.payload());
+      } else if ("monitor_card".equals(item.messageKind())) {
+        result =
+            transport.sendMonitorCard(item.targetExternalId(), item.targetType(), item.payload());
       } else if ("text".equals(item.messageKind())) {
         result =
             "PERSON".equals(item.targetType())

@@ -46,6 +46,22 @@ interface TaskRunRepository extends JpaRepository<TaskRunEntity, String> {
 
   @Query(
       "SELECT r.workflowId FROM TaskRunEntity r WHERE r.taskDefinition.id = :taskId "
+          + "AND r.status IN ('submitting', 'queued', 'running', 'cancelling')")
+  List<String> activeHistoryIds(@Param("taskId") String taskId);
+
+  @Query(
+      value =
+          "SELECT r.workflowId AS workflowId, r.sourceWorkflowId AS sourceWorkflowId, "
+              + "r.groupId AS groupId, r.groupName AS groupName, r.status AS status, r.terminationJson AS terminationJson, r.submittedAt AS submittedAt, r.updatedAt AS updatedAt "
+              + "FROM TaskRunEntity r WHERE r.taskDefinition.id = :taskId AND (:status = '' OR r.status = :status) "
+              + "ORDER BY r.submittedAt DESC, r.workflowId DESC",
+      countQuery =
+          "SELECT count(r) FROM TaskRunEntity r WHERE r.taskDefinition.id = :taskId AND (:status = '' OR r.status = :status)")
+  org.springframework.data.domain.Page<Summary> history(
+      @Param("taskId") String taskId, @Param("status") String status, Pageable pageable);
+
+  @Query(
+      "SELECT r.workflowId FROM TaskRunEntity r WHERE r.taskDefinition.id = :taskId "
           + "AND r.runtimeScopeRegistered = false ORDER BY r.workflowId")
   List<String> pendingScopes(@Param("taskId") String taskId, Pageable pageable);
 

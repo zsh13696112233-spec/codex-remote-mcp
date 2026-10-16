@@ -34,6 +34,21 @@ class DingTalkStore {
       "${DINGTALK_DOCUMENT_CARD_TEMPLATE_ID:" + DEFAULT_DOCUMENT_CARD_TEMPLATE_ID + "}")
   private String documentCardTemplateId = DEFAULT_DOCUMENT_CARD_TEMPLATE_ID;
 
+  @org.springframework.beans.factory.annotation.Value(
+      "${codex.monitor.base-url:http://127.0.0.1:8090}")
+  private String monitorBaseUrl = "http://127.0.0.1:8090";
+
+  private void addMonitorButton(tools.jackson.databind.node.ObjectNode payload, String workflowId) {
+    // ActionCard 正文按 Markdown 渲染，用段落保留编号与通知内容的边界。
+    payload.put("text", payload.path("text").asText().replace("\n", "\n\n"));
+    payload.put(
+        "monitorUrl",
+        org.springframework.web.util.UriComponentsBuilder.fromUriString(monitorBaseUrl)
+            .replaceQueryParam("workflowId", workflowId)
+            .build()
+            .toUriString());
+  }
+
   DingTalkStore(
       DingTalkWorkflowBindingRepository bindings,
       DingTalkInboundMessageRepository inboundMessages,
@@ -164,12 +179,28 @@ class DingTalkStore {
   @Transactional
   public void enqueueReply(
       String dedupKey, String workflowId, DingTalkModels.Message message, String text) {
+    enqueueReply(dedupKey, workflowId, message, text, false);
+  }
+
+  @Transactional
+  public void enqueueStartReply(
+      String dedupKey, String workflowId, DingTalkModels.Message message, String text) {
+    enqueueReply(dedupKey, workflowId, message, text, true);
+  }
+
+  private void enqueueReply(
+      String dedupKey,
+      String workflowId,
+      DingTalkModels.Message message,
+      String text,
+      boolean monitor) {
     var payload =
         objectMapper
             .createObjectNode()
             .put("text", (workflowId == null ? "" : "工作流编号：" + workflowId + "\n") + text)
             .put("atUserId", message.senderUserId())
             .put("sessionWebhook", message.sessionWebhook());
+    if (monitor) addMonitorButton(payload, workflowId);
     enqueue(
         dedupKey,
         workflowId,
@@ -177,7 +208,7 @@ class DingTalkStore {
         incomingTargetType(message),
         incomingTargetId(message),
         message.messageId(),
-        "reply",
+        monitor ? "monitor_reply" : "reply",
         payload);
   }
 
@@ -268,7 +299,20 @@ class DingTalkStore {
       boolean attention,
       JsonNode executionEvent) {
     recordProcess(
-        workflowId, workflowMessageId, sequence, text, terminal, attention, executionEvent, null);
+        workflowId,
+        workflowMessageId,
+        sequence,
+        text,
+        terminal,
+        attention,
+        executionEvent,
+        null,
+        false);
+  }
+
+  @Transactional
+  public void recordStepFailure(String workflowId, long sequence, String text) {
+    recordProcess(workflowId, null, sequence, text, false, true, null, null, true);
   }
 
   @Transactional
@@ -278,7 +322,7 @@ class DingTalkStore {
         objectMapper.valueToTree(
             DingTalkDocumentSummaryCard.render(
                 workflowId, snapshot, text, monitorUrl, documentCardTemplateId));
-    recordProcess(workflowId, null, sequence, text, true, true, null, card);
+    recordProcess(workflowId, null, sequence, text, true, true, null, card, false);
   }
 
   private void recordProcess(
@@ -289,7 +333,8 @@ class DingTalkStore {
       boolean terminal,
       boolean attention,
       JsonNode executionEvent,
-      JsonNode summaryCard) {
+      JsonNode summaryCard,
+      boolean monitor) {
     DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
     if (sequence <= binding.eventCursor) return;
     String key =
@@ -318,6 +363,7 @@ class DingTalkStore {
     } else if (!"chat".equals(binding.triggerSource)) {
       var payload =
           objectMapper.createObjectNode().put("text", "工作流编号：" + workflowId + "\n" + text);
+      if (monitor) addMonitorButton(payload, workflowId);
       if (executionEvent != null) {
         payload
             .putObject("executionEvent")
@@ -331,7 +377,7 @@ class DingTalkStore {
           binding.targetType,
           binding.targetExternalId,
           binding.rootMessageId,
-          summaryCard == null ? "text" : "document_summary_card",
+          summaryCard != null ? "document_summary_card" : monitor ? "monitor_card" : "text",
           summaryCard == null ? payload : objectMapper.createObjectNode().set("card", summaryCard));
       if (attention
           && "dingtalk".equals(binding.triggerSource)
@@ -983,6 +1029,22 @@ class DingTalkStore {
   }
 
   @Transactional
+  public void enqueueScheduledStart(String workflowId, String text) {
+    DingTalkWorkflowBindingEntity binding = requiredBinding(workflowId);
+    var payload = objectMapper.createObjectNode().put("text", text);
+    addMonitorButton(payload, workflowId);
+    enqueue(
+        "proactive-start:" + workflowId,
+        workflowId,
+        binding.conversationId,
+        binding.targetType,
+        binding.targetExternalId,
+        binding.rootMessageId,
+        "monitor_card",
+        payload);
+  }
+
+  @Transactional
   public void enqueueTargetText(
       String dedupKey,
       String workflowId,
@@ -1069,10 +1131,13 @@ class DingTalkStore {
     // 与发送状态一起提交；恢复已投递卡片时也经过此处，避免漏建或重复提醒。
     JsonNode payload = toOutbox(item).payload();
     if (!alreadySent
-        && "waiting_card".equals(item.messageKind)
         && "GROUP".equals(item.targetType)
-        && payload.path("answer").asBoolean()
-        && payload.path("answerMention").asBoolean()) {
+        && (("waiting_card".equals(item.messageKind)
+                && payload.path("answer").asBoolean()
+                && payload.path("answerMention").asBoolean())
+            || ("monitor_reply".equals(item.messageKind)
+                && hasTextValue(payload.path("atUserId").asText())
+                && hasTextValue(payload.path("sessionWebhook").asText())))) {
       enqueue(
           item.dedupKey + ":mention",
           item.workflowId,
@@ -1140,7 +1205,7 @@ class DingTalkStore {
       return;
     }
     item.status =
-        "reply".equals(item.messageKind)
+        ("reply".equals(item.messageKind) || "monitor_reply".equals(item.messageKind))
                 && item.advanceGateId == null
                 && (!toOutbox(item).payload().path("answerMention").asBoolean()
                     || item.attemptCount >= 3)

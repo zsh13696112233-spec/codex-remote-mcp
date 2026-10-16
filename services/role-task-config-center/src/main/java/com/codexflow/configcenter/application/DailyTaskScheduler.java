@@ -17,21 +17,27 @@ class DailyTaskScheduler {
 
   private final TaskScheduleStore schedules;
   private final WorkflowRunService workflowRuns;
+  private final ScheduleCheckService checks;
   private final BoundedWork launches = new BoundedWork("scheduled-task", 4, 16);
   private final BoundedWork reconciliation = new BoundedWork("workflow-reconciliation", 1, 1);
   private final BoundedWork scopeSync = new BoundedWork("workflow-scope-upgrade", 1, 1);
 
-  DailyTaskScheduler(TaskScheduleStore schedules, WorkflowRunService workflowRuns) {
+  DailyTaskScheduler(
+      TaskScheduleStore schedules, WorkflowRunService workflowRuns, ScheduleCheckService checks) {
+    this.checks = checks;
     this.schedules = schedules;
     this.workflowRuns = workflowRuns;
   }
 
   @Scheduled(fixedDelay = 30_000)
   void tick() {
+    schedules.expireChecks();
     int available = launches.available();
     if (available == 0) return;
-    for (String taskId : schedules.claim(ZonedDateTime.now(ZONE), available)) {
-      launches.submit(taskId, () -> launch(taskId));
+    for (var dispatch : schedules.claimDispatches(ZonedDateTime.now(ZONE), available)) {
+      if (!launches.submit(dispatch.taskId(), () -> launch(dispatch))) {
+        schedules.abandonDispatch(dispatch);
+      }
     }
   }
 
@@ -52,10 +58,13 @@ class DailyTaskScheduler {
     scopeSync.submit("scope-upgrade", workflowRuns::synchronizeRuntimeScopes);
   }
 
-  private void launch(String taskId) {
+  private void launch(TaskScheduleStore.Dispatch dispatch) {
+    String taskId = dispatch.taskId();
     try {
-      workflowRuns.runScheduled(taskId);
+      if (!checks.passes(dispatch)) return;
+      workflowRuns.runScheduled(taskId, dispatch.token());
     } catch (RuntimeException error) {
+      schedules.abandonDispatch(dispatch);
       LOGGER.warn("定时任务本次未启动，taskDefinitionId={}，原因={}。", taskId, error.getMessage());
     }
   }

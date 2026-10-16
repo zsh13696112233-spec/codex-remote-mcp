@@ -15,10 +15,59 @@ import tools.jackson.databind.ObjectMapper;
 
 class TaskScheduleControllerTest {
   @Test
+  void validatesCheckMachineAndStillAllowsDisablingWhenGatewayIsUnavailable() throws Exception {
+    var store = mock(TaskScheduleStore.class);
+    var gateway = mock(com.codexflow.configcenter.client.GatewayClient.class);
+    var mvc =
+        MockMvcBuilders.standaloneSetup(new TaskScheduleController(store, gateway))
+            .setControllerAdvice(new ApiExceptionHandler(new ObjectMapper()))
+            .build();
+    var agents = tools.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+    agents
+        .putArray("agents")
+        .addObject()
+        .put("agentId", "machine")
+        .put("groupId", "group")
+        .putArray("capabilities")
+        .add("executor");
+    when(gateway.get("/agents")).thenReturn(agents);
+    String body =
+        """
+        {"groupId":"group","name":"检查","sopId":"sop","taskDefinitionId":"task","mode":"interval","intervalMinutes":5,"enabled":true,"preCheck":{"enabled":true,"agentId":"machine","scriptPath":"E:/Agent Bug/check.bat","arguments":"-user PlanAgent","timeoutSeconds":60}}
+        """;
+    mvc.perform(post("/api/task-schedules").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated());
+    mvc.perform(
+            post("/api/task-schedules")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body.replace("\"groupId\":\"group\"", "\"groupId\":\"other\"")))
+        .andExpect(status().isBadRequest());
+    mvc.perform(
+            post("/api/task-schedules")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body.replace("-user PlanAgent", "-user PlanAgent & whoami")))
+        .andExpect(status().isBadRequest());
+    mvc.perform(
+            post("/api/task-schedules")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body.replace("check.bat", "check.ps1")))
+        .andExpect(status().isBadRequest());
+    reset(gateway);
+    mvc.perform(
+            put("/api/task-schedules/id")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body.replaceFirst("\"enabled\":true", "\"enabled\":false")))
+        .andExpect(status().isOk());
+    verifyNoInteractions(gateway);
+  }
+
+  @Test
   void validatesWritesAndMapsConflicts() throws Exception {
     var store = mock(TaskScheduleStore.class);
     var mvc =
-        MockMvcBuilders.standaloneSetup(new TaskScheduleController(store))
+        MockMvcBuilders.standaloneSetup(
+                new TaskScheduleController(
+                    store, mock(com.codexflow.configcenter.client.GatewayClient.class)))
             .setControllerAdvice(new ApiExceptionHandler(new ObjectMapper()))
             .build();
     mvc.perform(get("/api/task-schedules").param("q", "日报")).andExpect(status().isOk());

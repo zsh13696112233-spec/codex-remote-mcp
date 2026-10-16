@@ -39,6 +39,14 @@ public class GatewayClient {
     return exchange("POST", path, body);
   }
 
+  public JsonNode checkSchedule(JsonNode body) {
+    return exchange(
+        "POST",
+        "/schedule-checks",
+        body,
+        Duration.ofSeconds(body.path("timeoutSeconds").asInt(60) + 20));
+  }
+
   public JsonNode put(String path, JsonNode body) {
     return exchange("PUT", path, body);
   }
@@ -102,10 +110,14 @@ public class GatewayClient {
 
   /** 构建并执行 HTTP 请求，将成功响应解析为 JSON，并统一转换网络异常。 */
   private JsonNode exchange(String method, String path, JsonNode body) {
+    return exchange(method, path, body, Duration.ofSeconds(30));
+  }
+
+  private JsonNode exchange(String method, String path, JsonNode body, Duration timeout) {
     try {
       HttpRequest.Builder request =
           HttpRequest.newBuilder(gatewayBaseUri.resolve(path))
-              .timeout(Duration.ofSeconds(30))
+              .timeout(timeout)
               .header("Accept", "application/json");
       if (body == null) {
         request.method(method, HttpRequest.BodyPublishers.noBody());
