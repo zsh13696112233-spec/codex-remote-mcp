@@ -53,6 +53,18 @@ class ServiceConfigTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     config.setting('workflow_db')
 
+    def test_artifact_root_uses_executor_path_style(self):
+        for root in (r'C:\codex-workflow-artifacts', 'C:/codex-workflow-artifacts',
+                     r'\\server\share\artifacts', '/Users/worker/artifacts'):
+            with self.subTest(root=root):
+                self.write({'machine_defaults': {'artifact_root': root}})
+                self.assertEqual(config.setting('machine_defaults.artifact_root'), root)
+        for root in ('artifacts', 'C:artifacts'):
+            with self.subTest(root=root):
+                self.write({'machine_defaults': {'artifact_root': root}})
+                with self.assertRaisesRegex(ValueError, '执行机上的绝对路径'):
+                    config.setting('machine_defaults.artifact_root')
+
     def test_malformed_json_does_not_echo_content(self):
         self.path.write_text('{secret-value', encoding='utf-8')
         with self.assertRaises(ValueError) as raised:

@@ -1,6 +1,7 @@
 """读取统一部署配置；机器清单始终由中央登记提供。"""
 
 import json
+import ntpath
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -83,7 +84,9 @@ def _load(path: Path) -> dict[str, Any]:
                 raise ValueError("Sidecar 端口必须为 1–65535 的整数。")
         elif not isinstance(item, str) or not item.strip():
             raise ValueError(f"{key} 必须是非空字符串。")
-        if key in {"token_file", "sidecar_token_template", "artifact_root"} and not Path(item).is_absolute():
+        if key == "artifact_root" and not (item.startswith("/") or ntpath.isabs(item)):
+            raise ValueError("artifact_root 必须是执行机上的绝对路径。")
+        if key in {"token_file", "sidecar_token_template"} and not Path(item).is_absolute():
             raise ValueError(f"{key} 必须是服务所在机器上的绝对路径。")
     if value.get("machine_defaults", {}).get("protocol", "ws") not in {"ws", "wss"}:
         raise ValueError("protocol 只能为 ws 或 wss。")

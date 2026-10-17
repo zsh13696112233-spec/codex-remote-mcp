@@ -157,6 +157,8 @@ SQLite 兼容增加 `workflow_discussions` 保存消息对应的步骤、执行�
 
 ## 启动网关
 
+中央网关可部署在 macOS，主监督和执行机可继续使用 Windows。`workflow_db`、两个包存储 `package_root` 和凭据文件引用使用中央机器路径；`machine_defaults.cwd` 与 `machine_defaults.artifact_root` 使用执行机路径，支持 Windows 盘符、UNC 和 Unix 绝对路径，不应因中央迁移到 macOS 而改成 Mac 路径。
+
 已登记机器修改执行服务凭据引用时，先修改中央 `config/workflow-service.json` 并重启网关，再在机器管理中“编辑 → 保存”。保存同步 `machine_defaults.token_env` / `token_file`，移除旧来源；引用变化时清除检测结果，需要重新检测，机器编号和 SOP 引用保留。Sidecar 身份凭据不随此操作更新；部署步骤见[机器管理部署说明](../../docs/WEBUI_MACHINE_REGISTRATION.zh-CN.md)。
 
 机器“在线”与“检测通过”独立：远程主监督在线表示心跳有效，手动检测还会连接执行服务并完成认证和初始化。检测接口保持返回 `passed` 和 `message`；凭据文件不存在、不可读、为空、格式错误，以及连接超时或心跳缺失会返回具体中文提示。页面和网关日志不输出实际凭据、文件路径或原始异常内容。修复部署问题后须重新点击检测，心跳恢复不会自动改写检测结果。
