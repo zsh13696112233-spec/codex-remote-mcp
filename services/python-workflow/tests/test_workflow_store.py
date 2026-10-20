@@ -234,7 +234,7 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["workflowId"], "serial-demo")
         self.assertEqual(snapshot["status"], "queued")
         self.assertEqual(snapshot["advanceMode"], "automatic")
-        self.assertEqual(snapshot["handoffMode"], "legacy_text")
+        self.assertNotIn("handoffMode", snapshot)
         self.assertIsNone(snapshot["pendingAdvance"])
         self.assertEqual(snapshot["currentNodes"], [])
         self.assertEqual(snapshot["progress"], {"completed": 0, "total": 3})
@@ -811,11 +811,7 @@ class WorkflowStoreTests(unittest.TestCase):
         self.assertNotIn("retryPolicy", stopped)
 
 
-
-
-
-
-    def test_cumulative_files_omits_predecessor_text_and_keeps_revision_local(self) -> None:
+    def test_removed_handoff_field_does_not_disable_text_and_keeps_revision_local(self) -> None:
         value = serial_workflow()
         value["handoffMode"] = "cumulative_files"
         self.store.create_workflow(value)
@@ -831,8 +827,9 @@ class WorkflowStoreTests(unittest.TestCase):
                 ("serial-demo", "b", 1, "只属于第二步的返工要求", utc_now()))
 
         second = self.store.prepare_node_dispatch("serial-demo", "b")
-        self.assertEqual(second["handoffMode"], "cumulative_files")
-        self.assertNotIn("机密的第一步文字", second["prompt"])
+        self.assertNotIn("handoffMode", second)
+        self.assertNotIn("handoffMode", self.store.get_workflow("serial-demo"))
+        self.assertIn("机密的第一步文字", second["prompt"])
         self.assertIn("只属于第二步的返工要求", second["prompt"])
         self.store.sync_node_job(
             "serial-demo",
@@ -840,12 +837,11 @@ class WorkflowStoreTests(unittest.TestCase):
             {"status": "completed", "response": "第二步文字", "finished_at": utc_now()},
         )
         third = self.store.prepare_node_dispatch("serial-demo", "c")
-        self.assertNotIn("第二步文字", third["prompt"])
+        self.assertIn("第二步文字", third["prompt"])
         self.assertNotIn("只属于第二步的返工要求", third["prompt"])
 
-    def test_generic_artifacts_are_cumulative_and_restart_uses_only_current_files(self) -> None:
+    def test_generic_artifacts_deduplicate_and_survive_reopen(self) -> None:
         value = serial_workflow()
-        value["handoffMode"] = "cumulative_files"
         self.store.create_workflow(value)
         first = self.store.save_artifact_bytes(
             "serial-demo", "a", "first", "plane.svg", b"<svg>plane</svg>", "image/svg+xml"
@@ -857,23 +853,9 @@ class WorkflowStoreTests(unittest.TestCase):
             "serial-demo", "b", "other-source", "copy.txt", b"airport", "text/plain"
         )
         self.assertEqual(second["id"], duplicate["id"])
-        inputs = self.store.get_cumulative_artifact_inputs("serial-demo", "c")
-        self.assertEqual([step["stepNumber"] for step in inputs], [1, 2])
-        self.assertEqual(inputs[0]["artifacts"][0]["id"], first["id"])
-        self.assertEqual(inputs[1]["artifacts"][0]["content"], b"airport")
-
-        self.store.prepare_node_dispatch("serial-demo", "a")
-        self.store.sync_node_job(
-            "serial-demo",
-            "a",
-            {"status": "completed", "response": "done", "finished_at": utc_now()},
-        )
-        # 模拟旧运行已归档文件后的当前附件集合。
-        with self.store._connect() as db:
-            db.execute("DELETE FROM workflow_artifacts WHERE workflow_id='serial-demo' AND node_id='b'")
-        restarted = self.store.get_cumulative_artifact_inputs("serial-demo", "c")
-        self.assertEqual(len(restarted[0]["artifacts"]), 1)
-        self.assertEqual(restarted[1]["artifacts"], [])
+        self.assertEqual(self.store.get_artifact("serial-demo", first["id"])["content"], b"<svg>plane</svg>")
+        reopened = WorkflowStore(self.store.path)
+        self.assertEqual(reopened.get_artifact("serial-demo", second["id"])["content"], b"airport")
 
     def test_generic_artifact_rejects_oversized_content(self) -> None:
         self.store.create_workflow(serial_workflow())

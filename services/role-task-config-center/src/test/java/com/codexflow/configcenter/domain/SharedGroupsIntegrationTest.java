@@ -99,7 +99,6 @@ class SharedGroupsIntegrationTest {
             null,
             true,
             "automatic",
-            "legacy_text",
             null,
             List.of(step),
             group));

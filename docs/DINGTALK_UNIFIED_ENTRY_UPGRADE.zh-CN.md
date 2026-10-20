@@ -19,7 +19,7 @@
 
 需要收图的任务助手和步骤执行机必须配置绝对 `artifact_root`，并允许 `allow_write`。这是托管输入文件的写入许可，不改变 Codex 任务本身的只读/写入权限。只读任务仍按原沙箱执行。原图由 Python 经现有 app-server 连接写入目标执行机的 `artifact_root/conversation-inputs/<jobId>/`，随后通过 `turn/start` 的 `localImage` 输入交给 Codex。
 
-目标 app-server 必须支持 `fs/createDirectory`、`fs/writeFile` 和图片输入。缺少能力、没有托管目录或传图失败时请求失败，不把中央机器路径当成远程路径，也不静默退化为纯文字。远程 Sidecar 使用已有机器身份与当前租约从中央读取所属工作流的步骤输入图；不需要开放新的公网端口。这不启用远程 `cumulative_files` 通用产出交接。
+目标 app-server 必须支持 `fs/createDirectory`、`fs/writeFile` 和图片输入。缺少能力、没有托管目录或传图失败时请求失败，不把中央机器路径当成远程路径，也不静默退化为纯文字。远程 Sidecar 使用已有机器身份与当前租约从中央读取所属工作流的步骤输入图；不需要开放新的公网端口。图片传输独立于已移除的累计文件交接模式。
 
 ## 验证
 

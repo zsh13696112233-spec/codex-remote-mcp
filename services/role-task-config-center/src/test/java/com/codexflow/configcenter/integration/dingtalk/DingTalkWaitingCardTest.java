@@ -76,6 +76,50 @@ class DingTalkWaitingCardTest {
   }
 
   @Test
+  void blockedCompletionIncludesPersistedReasonWithoutRepeatingIt() {
+    var snapshot = json.createObjectNode();
+    var gate =
+        snapshot.putObject("pendingAdvance").put("completedNodeId", "plan").put("kind", "blocked");
+    String reason = "FeatureTrace、Bug归属未出现在工单字段中，请核对字段名及账号权限。";
+    var node =
+        snapshot
+            .putArray("nodes")
+            .addObject()
+            .put("id", "plan")
+            .put("response", "已读取工单，尚未开展代码分析。暂时无法继续。")
+            .put("error", reason);
+    assertThat(DingTalkWaitingCard.completion(snapshot))
+        .contains("已读取工单", "阻碍原因：" + reason, "重新执行");
+    node.put("response", "已读取工单。" + reason);
+    assertThat(DingTalkWaitingCard.completion(snapshot)).containsOnlyOnce(reason);
+    node.put("response", " ");
+    assertThat(DingTalkWaitingCard.completion(snapshot)).startsWith("阻碍原因：" + reason);
+    node.putNull("error");
+    assertThat(DingTalkWaitingCard.completion(snapshot)).doesNotContain("阻碍原因", "null");
+    node.put("error", " ");
+    assertThat(DingTalkWaitingCard.completion(snapshot)).doesNotContain("阻碍原因");
+    node.put("error", reason);
+    for (String kind : new String[] {"advance", "finish", "legacy"}) {
+      gate.put("kind", kind);
+      assertThat(DingTalkWaitingCard.completion(snapshot)).doesNotContain(reason);
+    }
+  }
+
+  @Test
+  void blockedCompletionFiltersCredentialsAndInternalLinksInReason() {
+    var snapshot = json.createObjectNode();
+    snapshot.putObject("pendingAdvance").put("completedNodeId", "plan").put("kind", "blocked");
+    snapshot
+        .putArray("nodes")
+        .addObject()
+        .put("id", "plan")
+        .put("error", "无法读取字段 token=test-secret http://127.0.0.1:8080 thread_private");
+    assertThat(DingTalkWaitingCard.completion(snapshot))
+        .contains("阻碍原因：无法读取字段", "重新执行")
+        .doesNotContain("test-secret", "127.0.0.1", "thread_private");
+  }
+
+  @Test
   void completionWithoutDocumentOrResponseStillExplainsReplyAndContinue() {
     var snapshot = json.createObjectNode().put("advanceMode", "semi_automatic");
     snapshot.putObject("pendingAdvance").put("completedNodeId", "plan").put("nextNodeId", "build");

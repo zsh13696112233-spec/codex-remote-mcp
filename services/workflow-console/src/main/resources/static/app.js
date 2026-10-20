@@ -609,6 +609,9 @@ function renderSteps(nodes, initializing = false) {
 
 function render(snapshot) {
   $("#name").textContent = snapshot.name || "未命名任务";
+  const jiraKey = snapshot.jiraContext?.issueKey || "";
+  $("#jiraKey").textContent = jiraKey;
+  $("#jira").hidden = !jiraKey;
   $("#id").textContent = snapshot.workflowId || state.workflowId;
   const status = $("#status");
   status.textContent = snapshot.termination ? (TERMINAL.has(snapshot.status) ? (snapshot.termination.outcome === "blocked" ? "因阻断结束" : "无待处理任务，已结束") : "正在结束") : isInitializing(snapshot) ? "准备中" : zh(snapshot.status);

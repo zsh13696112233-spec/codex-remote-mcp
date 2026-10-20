@@ -1852,7 +1852,6 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
                     true,
                     "semi_automatic",
                     null,
-                    null,
                     List.of(step))));
     return sop.path("id").asText();
   }

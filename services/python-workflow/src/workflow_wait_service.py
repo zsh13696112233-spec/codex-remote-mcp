@@ -90,13 +90,12 @@ class WaitService:
         closing = target["gate"]["status"] == "closing"
         original = json.loads(target["gate"]["business_result_json"])
         job = None
-        artifacts_saved = False
         try:
             if not target["threadId"]:
                 raise RuntimeError("原步骤会话不可恢复。")
             prompt = (
                 "【平台已确认超时阻断】人工等待到期无人回复。停止所有业务执行，仅在原授权内执行阻断收尾："
-                "按职责回查并转交 Jira 处理角色、添加带稳定标记的停止评论、读取开发人。"
+                "先添加带稳定标记的停止评论并回查确认，再按平台规则读取开发人及转交负责人，保持 Jira 状态和处理角色不变。"
                 "不得恢复任务，不得改变原阻断原因；无权限、失败或不确定均如实说明并返回 blocked。"
                 if closing else
                 "【用户点击重新执行】仅重新处理当前遇阻步骤。结合本会话人工讨论与下方最新总结，"
@@ -120,20 +119,11 @@ class WaitService:
                     event_type="appserver." + str(message.get("method") or "unknown"),
                     payload={"receivedAt": received_at, "message": message})
 
-            artifact_handoff = None
-            if not closing and target["handoffMode"] == "cumulative_files":
-                artifact_handoff = {
-                    "workflowId": workflow_id,
-                    "nodeId": target["nodeId"],
-                    "stepNumber": target["stepNumber"],
-                    "steps": await db(gateway.store.get_cumulative_artifact_inputs, workflow_id, target["nodeId"]),
-                }
             job = await gateway.assistant_orchestrator.dispatch(
                 agent_id=target["agentId"], thread_id=target["threadId"], cwd=cwd, model=target["model"],
                 prompt=prompt, write=target["write"], permission_profile=target["permissionProfile"],
                 reasoning_effort=target.get("reasoningEffort"), timeout_sec=target["timeoutSec"],
-                output_schema=schema(target["resultProtocolVersion"]), event_callback=event,
-                artifact_handoff=artifact_handoff)
+                output_schema=schema(target["resultProtocolVersion"]), event_callback=event)
             job.capture_document = target["captureDocument"] and not closing
             await db(gateway.store.set_wait_job, workflow_id, gate_id, job.job_id, job.turn_id)
             if not closing:
@@ -161,14 +151,10 @@ class WaitService:
                 await db(gateway.store.finish_wait_result, workflow_id, gate_id, job.business_result)
                 await db(gateway.store.finish_business_termination, workflow_id)
             else:
-                for captured in job.captured_files:
-                    await db(gateway.store.save_artifact_bytes, workflow_id, target["nodeId"],
-                        str(captured["sourceItemId"]), str(captured["filename"]), captured["content"])
                 snapshot = {**job.snapshot(), "businessResult": job.business_result}
                 if job.document_result is not None:
                     snapshot["document"] = job.document_result
                 await db(gateway.store.sync_node_job, workflow_id, target["nodeId"], snapshot)
-                artifacts_saved = True
                 if await db(gateway.store.has_business_termination, workflow_id):
                     await db(gateway.store.finish_business_termination, workflow_id)
             await gateway._schedule_pending()
@@ -190,9 +176,3 @@ class WaitService:
                 uncertain = not before_start and job.error_kind not in {"turn_failed", "invalid_business_result"}
                 await db(gateway.store.fail_wait_execution, workflow_id, gate_id, uncertain=uncertain, before_start=before_start)
                 await gateway._schedule_pending()
-        finally:
-            if artifacts_saved and job.artifact_contract and job.managed_attempt_dir:
-                try:
-                    await gateway.assistant_orchestrator.cleanup_managed_artifacts(job)
-                except Exception:
-                    LOGGER.warning("清理重新执行的托管目录失败，gate=%s。", gate_id, exc_info=True)

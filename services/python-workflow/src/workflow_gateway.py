@@ -163,11 +163,6 @@ class WorkflowGateway:
             raise PermissionError(
                 f"执行机 {spec['supervisorAgentId']} 不具备主监督能力。"
             )
-        if (
-            supervisor.get("orchestration_mode") == "remote_sidecar"
-            and spec.get("handoffMode") != "legacy_text"
-        ):
-            raise ValueError("远程主监督当前只支持 legacy_text 文字交接。")
         profiles_by_agent = {
             item["agent_id"]: set(item.get("permission_profiles") or ["read_only"])
             for item in agent_values
@@ -1728,7 +1723,6 @@ def _sidecar_workflow_view(snapshot: dict[str, Any]) -> dict[str, Any]:
         "failurePolicy",
         "termination",
         "advanceMode",
-        "handoffMode",
         "pendingAdvance",
         "currentNodes",
         "progress",

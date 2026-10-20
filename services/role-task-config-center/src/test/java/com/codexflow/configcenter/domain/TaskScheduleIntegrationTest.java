@@ -776,7 +776,6 @@ class TaskScheduleIntegrationTest extends com.codexflow.configcenter.GroupedFixt
                     true,
                     "automatic",
                     null,
-                    null,
                     List.of(step))))
         .path("id")
         .asText();

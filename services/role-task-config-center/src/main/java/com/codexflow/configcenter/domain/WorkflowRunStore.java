@@ -325,7 +325,6 @@ public class WorkflowRunStore {
     root.put("name", task.name);
     root.put("supervisorAgentId", task.sop.supervisorAgentId);
     root.put("failurePolicy", "stop");
-    root.put("handoffMode", task.sop.handoffMode);
     root.put("supervisorTimeoutSec", task.sop.supervisorTimeoutSec);
     root.put("advanceMode", task.sop.advanceMode);
     if ("semi_automatic".equals(task.sop.advanceMode)) {

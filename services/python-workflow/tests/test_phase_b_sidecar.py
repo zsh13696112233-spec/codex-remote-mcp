@@ -22,7 +22,6 @@ def remote_workflow(workflow_id: str, supervisor_id: str = "supervisor-a") -> di
         "workflowId": workflow_id,
         "name": workflow_id,
         "supervisorAgentId": supervisor_id,
-        "handoffMode": "legacy_text",
         "nodes": [
             {
                 "id": "a",
@@ -587,30 +586,6 @@ class InternalApiClientTests(unittest.TestCase):
                 "supervisor-a",
                 started_at=datetime.now(UTC).isoformat(),
             )
-
-    def test_remote_workflow_rejects_file_handoff_before_persistence(self) -> None:
-        class RemoteOrchestrator:
-            def list_agents(self):
-                return [
-                    {
-                        "agent_id": "supervisor-a",
-                        "enabled": True,
-                        "capabilities": ["supervisor", "executor"],
-                        "supervisor_capacity": 1,
-                        "orchestration_mode": "remote_sidecar",
-                        "permission_profiles": ["read_only"],
-                    }
-                ]
-
-        with tempfile.TemporaryDirectory() as directory:
-            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
-            gateway = fixture_gateway(store, RemoteOrchestrator())
-            value = remote_workflow("file-handoff")
-            value["handoffMode"] = "cumulative_files"
-            with self.assertRaisesRegex(ValueError, "legacy_text"):
-                asyncio.run(gateway.submit(value))
-            with self.assertRaisesRegex(ValueError, "找不到工作流"):
-                store.get_workflow("file-handoff")
 
 
 class RemoteSidecarSchedulingTests(unittest.IsolatedAsyncioTestCase):

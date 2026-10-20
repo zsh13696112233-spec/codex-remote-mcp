@@ -242,11 +242,6 @@ class InternalApiClient:
             ]
         )[0]
 
-    def get_cumulative_artifact_inputs(
-        self, workflow_id: str, node_id: str
-    ) -> list[dict[str, Any]]:
-        raise RuntimeError("远程 Sidecar 不支持 cumulative_files 文件交接。")
-
     def _update_node(
         self, workflow_id: str, node_id: str, operation: str, **values: Any
     ) -> None:

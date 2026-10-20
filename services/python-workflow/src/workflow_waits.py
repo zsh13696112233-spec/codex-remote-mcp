@@ -182,7 +182,7 @@ class WaitStore:
             gate = connection.execute("SELECT * FROM workflow_advance_gates WHERE workflow_id=? AND gate_id=?", (workflow_id, gate_id)).fetchone()
             if not gate or gate["status"] not in {"executing", "closing"} or gate["execution_started"]:
                 return None
-            workflow = connection.execute("SELECT status, handoff_mode FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            workflow = connection.execute("SELECT status FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if not workflow or workflow[0] != "running":
                 return None
             node = connection.execute("SELECT * FROM workflow_nodes WHERE workflow_id=? AND node_id=?", (workflow_id, gate["completed_node_id"])).fetchone()
@@ -190,7 +190,7 @@ class WaitStore:
             runtime = connection.execute("SELECT cwd,model FROM workflow_node_runtime WHERE workflow_id=? AND node_id=? AND attempt_number=?", (workflow_id, node["node_id"], node["attempt_count"])).fetchone()
             if runtime:
                 target.update(cwd=runtime["cwd"] or target["cwd"], model=runtime["model"] or target["model"])
-            target.update(summary=node["response"] or "", gate=dict(gate), handoffMode=workflow["handoff_mode"])
+            target.update(summary=node["response"] or "", gate=dict(gate))
             connection.execute("UPDATE workflow_advance_gates SET execution_started=1 WHERE gate_id=?", (gate_id,))
             if gate["status"] == "executing":
                 columns = "workflow_id,node_id,status,dispatch_token,job_id,thread_id,turn_id,response,error,actual_prompt,started_at,finished_at"

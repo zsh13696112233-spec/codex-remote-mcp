@@ -6,9 +6,17 @@
 - 远程主监督：复制 [workflow-sidecar.example.json](workflow-sidecar.example.json) 为远程仓库的同名文件，填写中央地址和独立 Sidecar 身份凭据文件路径。
 - 纯执行机：提前部署执行服务；机器信息在 8091 登记，远程主监督按需获取本组清单。
 
-实际 `workflow-service.json` 已被 Git 忽略。不存在机器来源开关，不接受 `agent_source` 或 `agents_file` 字段。实际令牌仍保存在独立文件；两类凭据不能混用。
+实际 `workflow-service.json` 已被 Git 忽略。不存在机器来源开关，不接受 `agent_source` 或 `agents_file` 字段。实际令牌通过独立文件或环境变量提供；两类凭据不能混用。
 
 统一参数、端口、本机执行和首次登记步骤见[机器管理部署说明](../docs/WEBUI_MACHINE_REGISTRATION.zh-CN.md)。
+
+## Windows 永久设置执行服务令牌
+
+本地 `config/set-app-server-token.bat` 已预填执行服务令牌，双击即可将 `CODEX_APP_SERVER_TOKEN` 保存到当前 Windows 用户的环境变量并读回核验，无需输入令牌；已有同名变量会被覆盖，运行时不显示令牌。无需管理员权限，应使用实际启动网关或主监督的账号运行。该文件包含明文凭据，已加入 Git 忽略，不随仓库克隆或拉取同步，需单独复制到目标 Windows 机器。用户环境变量持久化在 Windows 注册表中，不是加密凭据存储。
+
+中央配置的 `machine_defaults` 应设置 `"token_env": "CODEX_APP_SERVER_TOKEN"` 并移除同层 `token_file`。需要连接执行服务的中央网关和远程主监督都须配置该环境变量；本脚本只配置当前 Windows 机器，不配置 Mac，也不修改服务 JSON 或中央机器登记。`sidecar.token_file` / `sidecar_token_file` 属于独立身份凭据，不随此操作修改。
+
+设置完成后注销并重新登录 Windows，再启动网关或主监督，以确保终端、IDE 等启动程序取得新值；已有进程不会自动更新。以其他账号运行的 Windows 服务或计划任务需要单独配置其启动环境。中央切换凭据引用后，重启中央网关，在机器管理对相关机器执行“编辑 → 保存 → 检测”，使登记引用同步更新。
 
 ## 等待互动卡片模板
 

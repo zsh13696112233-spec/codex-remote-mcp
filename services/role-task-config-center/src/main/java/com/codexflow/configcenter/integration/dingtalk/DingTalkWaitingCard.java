@@ -193,6 +193,12 @@ final class DingTalkWaitingCard {
               default -> "请查看" + subject + "，如需调整可回复此卡片，确认后点击「继续执行」。";
             };
         String response = DingTalkResultText.display(node.path("response").asText());
+        if ("blocked".equals(kind)) {
+          // 网关将正式阻断结果的 summary 和 reason 分别保存为 response 和 error。
+          String reason = DingTalkExecutionNotice.safe(node.path("error").asText("").strip());
+          if (!reason.isBlank() && !response.contains(reason))
+            response = (response.isBlank() ? "" : response + "\n\n") + "阻碍原因：" + reason;
+        }
         return response.isBlank()
             ? ("blocked".equals(kind) ? "" : "步骤已完成。") + notice
             : response + "\n\n" + notice;

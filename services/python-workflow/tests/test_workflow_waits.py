@@ -21,11 +21,10 @@ class WaitTests(unittest.TestCase):
         self.store = WorkflowStore(Path(self.temp.name) / "state.db")
         seed_agents(self.store, {"local": {"capabilities": ["supervisor", "executor"]}})
 
-    def start(self, single=False, manual=False, handoff_mode="legacy_text"):
+    def start(self, single=False, manual=False):
         spec = serial_workflow()
         spec["advanceMode"] = "semi_automatic"
         spec["waitPolicy"] = {"version": 2} if manual else {"version": 1, "confirmationMinutes": 2, "blockedMinutes": 30}
-        spec["handoffMode"] = handoff_mode
         if single:
             spec["nodes"] = spec["nodes"][:1]
         self.store.create_workflow(spec)
@@ -249,10 +248,6 @@ class ManualWaitTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.store.confirm_advance("serial-demo", gate["gateId"])
 
-    def test_cumulative_handoff_also_requires_confirmation(self):
-        self.start(single=True, manual=True, handoff_mode="cumulative_files")
-        gate = self.sync(result("success"))
-        self.assertEqual((gate["kind"], gate["state"]), ("finish", "held"))
 
     def test_policy_rejects_timer_fields_and_invalid_versions(self):
         spec = serial_workflow()
@@ -264,7 +259,7 @@ class ManualWaitTests(unittest.TestCase):
 
 
 class WaitExecutionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_manual_cumulative_retry_stages_inputs_and_saves_output(self):
+    async def test_manual_retry_uses_original_workspace_and_returns_to_wait(self):
         from codex_orchestrator_mcp import Orchestrator, AgentConfig
         from workflow_wait_service import WaitService
         from workflow_event_batcher import AsyncEventBatcher
@@ -272,8 +267,7 @@ class WaitExecutionTests(unittest.IsolatedAsyncioTestCase):
         fixture = ManualWaitTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
-        fixture.start(manual=True, handoff_mode="cumulative_files")
-        fixture.store.save_artifact_bytes("serial-demo", "a", "input", "plan.txt", b"plan")
+        fixture.start(manual=True)
         first = fixture.sync(result("success"))
         fixture.store.confirm_advance("serial-demo", first["gateId"])
         fixture.store.prepare_node_dispatch("serial-demo", "b")
@@ -287,14 +281,6 @@ class WaitExecutionTests(unittest.IsolatedAsyncioTestCase):
             orchestrator.agent_provider = lambda: {"local": AgentConfig.from_dict("local", {
                 "url": server.url, "cwd": str(Path.cwd()), "allow_write": True,
                 "artifact_root": str(Path(fixture.temp.name) / "artifacts")})}
-            capture = orchestrator._capture_artifacts
-            attempt_dirs = []
-            async def publish(job):
-                attempt_dirs.append(Path(job.managed_attempt_dir))
-                self.assertEqual(Path(job.managed_attempt_dir, "inputs", "step-01", "plan.txt").read_bytes(), b"plan")
-                Path(job.managed_output_dir, "result.txt").write_bytes(b"retry result")
-                await capture(job)
-            orchestrator._capture_artifacts = publish
             batcher = AsyncEventBatcher(fixture.store)
             gateway = SimpleNamespace(store=fixture.store, assistant_orchestrator=orchestrator,
                 event_batcher=batcher, flush_events=batcher.flush, _schedule_pending=AsyncMock())
@@ -302,10 +288,9 @@ class WaitExecutionTests(unittest.IsolatedAsyncioTestCase):
             state = fixture.store.get_workflow("serial-demo")
             self.assertEqual(state["pendingAdvance"]["state"], "held")
             self.assertEqual(state["pendingAdvance"]["completedNodeId"], "b")
-            files = fixture.store.get_cumulative_artifact_inputs("serial-demo", "c")[1]["artifacts"]
-            self.assertEqual([(f["filename"], f["content"]) for f in files], [("result.txt", b"retry result")])
-            self.assertEqual(len(attempt_dirs), 1)
-            self.assertFalse(attempt_dirs[0].exists())
+            resume = next(r["params"] for r in server.requests if r["method"] == "thread/resume")
+            self.assertEqual(resume["cwd"], str(Path.cwd()))
+            self.assertFalse(Path(fixture.temp.name, "artifacts").exists())
 
     async def test_scheduler_does_not_advance_manual_final_wait(self):
         from workflow_wait_service import WaitService

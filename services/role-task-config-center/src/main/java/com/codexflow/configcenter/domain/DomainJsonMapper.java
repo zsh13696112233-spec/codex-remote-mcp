@@ -61,7 +61,6 @@ class DomainJsonMapper {
     result.put("failurePolicy", sop.failurePolicy);
     result.put("supervisorTimeoutSec", sop.supervisorTimeoutSec);
     result.put("advanceMode", sop.advanceMode);
-    result.put("handoffMode", sop.handoffMode);
     result.put("dingtalkShowExecutionDetails", sop.dingtalkShowExecutionDetails);
     result.put("defaultStepModel", sop.defaultStepModel);
     putNullable(result, "defaultStepReasoningEffort", sop.defaultStepReasoningEffort);

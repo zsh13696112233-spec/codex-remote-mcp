@@ -134,7 +134,7 @@ Sidecar 仍只监听 `127.0.0.1:8082`，主监督执行服务的编排工具地�
 
 执行方式与机器登记来源是两个概念。本机主监督仍可使用 `local_db`：在中央 `machine_defaults` 中设置 `orchestration_mode` 为 `local_db` 后，通过网页登记本机 IP 和执行端口。此配置只决定新登记／新增监督能力时的默认执行方式，不追溯改变已有机器。本机编排进程直接读取同一 SQLite 的登记信息，不需要 Sidecar 身份令牌。
 
-远程主监督使用默认 `remote_sidecar`，不可访问 SQLite。统一部署参数可省略 `orchestration_mode`。本机文件交接需要额外在统一默认值中设置 `artifact_root` 绝对路径，仍只适用于编排进程与执行服务同机的场景。
+远程主监督使用默认 `remote_sidecar`，不可访问 SQLite。统一部署参数可省略 `orchestration_mode`。图片输入需要在统一默认值中设置执行机上的 `artifact_root` 绝对路径；该目录不用于步骤间业务文件搬运。
 
 ## 接口
 

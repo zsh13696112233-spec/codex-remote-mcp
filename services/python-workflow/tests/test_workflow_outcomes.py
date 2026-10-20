@@ -183,6 +183,40 @@ class OutcomeStoreTests(unittest.TestCase):
         self.assertEqual(instruction("w", "n", False), instruction("w", "n", False))
         self.assertNotEqual(instruction("w", "n", False), instruction("w2", "n", False))
 
+    def test_required_summary_documents_preserve_stop_and_wait_boundaries(self):
+        for version in (1, 2, 3):
+            with self.subTest(version=version):
+                prompt = instruction("w", "n", False, version)
+                self.assertIn("原工作目录和写入权限内", prompt)
+                self.assertIn("不改变阻断结论", prompt)
+                self.assertIn("不重发结果不明的写入", prompt)
+                self.assertIn("不再执行下一步", prompt)
+                waiting = instruction("w", "n", False, version, defer_blocked=True)
+                self.assertNotIn("允许的收尾交付", waiting)
+                self.assertIn("禁止执行停止评论", waiting)
+                self.assertIn("等待期间不允许进入后续步骤", waiting)
+        prompt = instruction("w", "n", False, 3)
+        self.assertIn("回读并列入 documents", prompt)
+        self.assertIn("未要求生成总结文件的步骤不额外生成", prompt)
+        self.assertIn("summary 都须保留完整文字总结", prompt)
+
+    def test_blocked_assignment_requires_confirmed_comment_and_preserves_role(self):
+        for version in (1, 2, 3):
+            with self.subTest(version=version):
+                prompt = instruction("w", "n", False, version)
+                self.assertIn("评论未确认成功不得转交", prompt)
+                self.assertIn("读取失败先重试读取一次", prompt)
+                self.assertIn("为空或多人时使用 Public.Jira.Manager", prompt)
+                self.assertIn("转交后回查负责人、状态和处理角色", prompt)
+                self.assertIn("仍不明不得盲目重复操作", prompt)
+                self.assertIn("Jira 状态和处理角色保持不变，不得改为 Natural Person", prompt)
+                self.assertIn("无论转交成功与否最终仍返回 blocked", prompt)
+                self.assertNotIn("不改变状态、负责人", prompt)
+                waiting = instruction("w", "n", False, version, defer_blocked=True)
+                self.assertIn("禁止执行停止评论和负责人转交", waiting)
+                self.assertNotIn("之后必须在原授权内尝试转交负责人", waiting)
+                self.assertNotIn("读取失败先重试读取一次", waiting)
+
     def test_restart_completes_saved_no_task_decision(self):
         self.start()
         self.sync(value=result("no_task", "not_applicable"))

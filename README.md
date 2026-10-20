@@ -27,7 +27,7 @@ Python 工作流网关（8080）── 主监督 App Server（4500）
 
 新提交的半自动 SOP 不设倒计时，每一步成功后必须手动确认进入下一步，最后一步必须确认结束；遇阻一直等待人工重新执行或终止任务。收到任务消息后继续保持等待，由当前步骤原执行者在原会话中回答。用户明确要求修改、采纳方案或整理进结果时，执行者可在原权限内修改工作目录文件，并保存完整最新版交接总结；解释、假设和备选方案不改变总结。
 
-成功步骤点击“进入下一步”后交接最新版结果，最后一步点击“确认结束”；遇阻卡片点击“重新执行”只处理当前步骤。卡片“终止任务”按人工取消处理。所有步骤共享实际工作目录由使用者保证，采用 `legacy_text` 交接，不新增目录校验或文件传输。历史 `cumulative_files` 运行及附件仍保留原行为，不适用于此共享目录讨论方案。
+成功步骤点击“进入下一步”后交接最新版结果，最后一步点击“确认结束”；遇阻卡片点击“重新执行”只处理当前步骤。卡片“终止任务”按人工取消处理。所有步骤共享实际工作目录由使用者保证，通过文字总结交接，不新增目录校验或文件传输。累计文件交接模式已移除，历史附件仍可读取。
 
 聊天不再触发停止、跳过、返工或继续，“确认执行”“确认继续”等文字也不操作流程。停止可通过等待卡片或配置中心取消运行，按原快照重试仍创建新工作流。非等待期间保留独立任务助手的只读查询和咨询。
 
@@ -89,7 +89,7 @@ Copy-Item .\config\workflow-service.example.json .\config\workflow-service.json
 
 本机主监督保留 `local_db` 执行方式：统一配置 `machine_defaults.orchestration_mode=local_db`，本机编排进程运行 `services/python-workflow/src/codex_orchestrator_mcp.py`，与网关读取同一服务配置及同一 SQLite。无需机器清单环境变量。
 
-启动 8091 后，在“机器管理”建立分组、登记 IP／端口／能力并手动检测，随后在 SOP 中选择同组机器。远程只支持 `legacy_text` 交接；`cumulative_files` 仍要求本机执行。
+启动 8091 后，在“机器管理”建立分组、登记 IP／端口／能力并手动检测，随后在 SOP 中选择同组机器。本机与远程均使用文字总结交接，业务文件直接在共用工作目录中读写。
 
 ### 3. 启动两个 Java Web 应用
 
@@ -187,7 +187,7 @@ mvn -f services/workflow-console/pom.xml test
 mvn -f services/role-task-config-center/pom.xml test
 ```
 
-Java 构建会在 `validate` 阶段检查格式。仅格式化实际修改过的 Java 模块；macOS：
+Java 构建会在 `validate` 阶段检查格式。两个模块统一使用 `fmt-maven-plugin 2.29`（内含 `google-java-format 1.28.0`），已验证格式检查可在 JDK 25.0.2 下执行；编译目标仍为 Java 17，无需跳过格式检查。仅格式化实际修改过的 Java 模块；macOS：
 
 ```sh
 mvnd -f services/workflow-console/pom.xml fmt:format

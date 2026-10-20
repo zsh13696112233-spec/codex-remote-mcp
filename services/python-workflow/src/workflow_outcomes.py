@@ -138,11 +138,26 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
         "或 blocked（必要条件不满足，无法继续）。提前结束必须用 reason 说明原因。"
         "自身可纠正的命令错误先修正，保留职责明确规定的非阻断项，不夸大为阻断。"
         "确认阻断后停止业务写入，允许在原授权内向已锁定的唯一 Jira 添加收尾评论；"
-        "职责明确要求时，还允许将该 Jira 的处理角色字段改为 Natural Person，其他业务写入停止。"
-        "处理角色修改前后均须回查，结果不明不盲目重发；失败仍尝试评论并返回 blocked。"
-        "summary 和 jiraComment.detail 披露角色修改结果，jiraComment.status 仅表示评论结果。"
+        "先写入阻断评论并回查确认成功，之后必须在原授权内尝试转交负责人；评论未确认成功不得转交。"
+        "负责人转交是 blocked 分支明确允许的收尾操作，不代表审核通过；其他业务写入停止。"
+        "本阻断收尾规则优先于职责中的旧收尾规则，Jira 状态和处理角色保持不变，不得改为 Natural Person。"
+        "实际读取 Public.Jira.Fields.Developer 指定的字段：唯一开发人作为目标负责人；"
+        "为空或多人时使用 Public.Jira.Manager；读取失败先重试读取一次，仍失败才使用 Manager。"
+        "Manager 未配置、账号无法确认或无转交权限时不得猜测，记录待人工处理事项。"
+        "转交前回查唯一工单的当前负责人、状态和处理角色，已为目标负责人则不重复写入；"
+        "仅更新负责人，转交后回查负责人、状态和处理角色，确认实际结果。"
+        "写入结果不明时先回查，仍不明不得盲目重复操作；发现并发变更时停止覆盖并记录待人工核查。"
+        "职责明确要求的本次总结文档属于允许的收尾交付，可在原工作目录和写入权限内写入、回读并交付；"
+        "不得据此修改业务代码、提交版本、移动业务方案或继续业务流转，不改变阻断结论。"
+        "无法安全写入或回读时，在 summary 中保留完整总结并说明文档未生成或未确认的原因，"
+        "不虚报交付，不重发结果不明的写入。"
+        "summary、jiraComment.detail、原授权内的业务日志和职责要求的总结文档记录转交前负责人、"
+        "目标负责人、转交后实际负责人及成功、失败、结果不明或未执行的原因；无法回查不得虚报。"
+        "日志或总结文档无法写入或回读时在 summary 说明，不掩盖已确认的转交结果。"
+        "无论转交成功与否最终仍返回 blocked，失败或结果不明说明待人工处理事项。"
+        "jiraComment.status 仅表示评论结果，不因转交失败改写已确认成功的评论状态。"
         "评论说明阻断步骤、原因、已完成事项、未执行事项、恢复条件；"
-        "不得泄露凭据、内部会话编号、执行机地址，不改变状态、负责人或创建新任务。"
+        "不得泄露凭据、内部会话编号、执行机地址，不改变 Jira 状态和处理角色或创建新任务。"
         f"评论去重标记为 SOP-STOP-{marker}，先查已有评论，存在该标记则复用；"
         "提交结果不明先回查，无法确认时不要盲目重发。"
         "jiraComment.status 为 succeeded/failed/unknown/not_applicable，issueKey 为锁定编号，"
@@ -162,6 +177,7 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
            "唯一人员使用实际账号字段 accountId、key、name 中可用的最稳定标识，并以 accountType 标明类型，"
            "accountId 填该字段原值，displayName 填显示名，detail 说明读取结果。"
            "多人时 displayName 填实际读取的姓名列表（不超过160字符），不选择其中一人。"
+           "jiraDeveloper 只报告真实开发人读取结果，不得将兜底转交对象 Manager 填为开发人。"
            "缺失、多人或读取失败时账号类型和账号填空字符串并说明原因，不猜测，不使用 assignee 或发起人。"
            "已经因业务必要条件判定 blocked 的，不因开发人读取失败改变该决定；不得选择钉钉群、人员或发送通知。" if version in (2, 3) else "")
         + ("" if version == 3 else "document 沿用主文档要求。" if capture_document else "document 必须为 null，不采集主文档。")
@@ -173,13 +189,15 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
             "无文档返回空数组。只交付 UTF-8 .md/.txt，每份最大512 KiB；不返回正文，"
             "不列入参考资料、日志、代码、敏感配置或凭据。不限制文档数量。"
             "成功、无任务或遇阻均报告已经交付的文档，不为填充清单额外生成文件。"
+            "职责明确要求的总结文档属于正式交付，应按职责要求生成、回读并列入 documents，不属于填充清单；"
+            "未要求生成总结文件的步骤不额外生成。无论是否交付文件，summary 都须保留完整文字总结。"
         )
     if defer_blocked:
         start = result.index("确认阻断后停止业务写入")
         end = result.index("jiraComment.status 为", start)
         result = result[:start] + (
             "本运行采用半自动人工等待。首次或再次发现业务阻碍时返回 blocked，由平台等待人工回复，"
-            "本次不代表正式结束，禁止执行停止评论和转交 Natural Person 等阻断收尾。"
+            "本次不代表正式结束，禁止执行停止评论和负责人转交等阻断收尾，Jira 状态和处理角色保持不变。"
             "本规则优先于历史角色职责中的立即停止收尾要求。jiraComment 使用 not_applicable，说明等待人工处理。"
         ) + result[end:]
         result = result.replace("备注失败或未知仍返回 blocked，由平台结束，不再执行下一步。", "等待期间不允许进入后续步骤；正式超时后平台另行授权阻断收尾。")

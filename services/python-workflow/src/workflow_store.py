@@ -681,15 +681,9 @@ class WorkflowStore(InputImageStore, WaitStore):
                 expected = [] if position == 0 else [nodes[position - 1]["id"]]
                 if node["dependsOn"] != expected:
                     raise ValueError("semi_automatic 只支持严格串行工作流。")
-        handoff_mode = str(value.get("handoffMode") or "legacy_text").strip().lower()
-        if handoff_mode not in {"legacy_text", "cumulative_files"}:
-            raise ValueError("handoffMode 只能是 legacy_text 或 cumulative_files。")
-
         policy = normalize_policy(value.get("waitPolicy"))
         if policy and advance_mode != "semi_automatic":
             raise ValueError("等待策略仅支持半自动流程。")
-        if policy and policy["version"] == 1 and handoff_mode != "legacy_text":
-            raise ValueError("旧版等待策略仅支持半自动文字交接流程。")
         return {
             **({"waitPolicy": policy} if policy else {}),
             "workflowId": workflow_id,
@@ -704,7 +698,6 @@ class WorkflowStore(InputImageStore, WaitStore):
             "supervisorModel": value.get("supervisorModel"),
             "supervisorTimeoutSec": supervisor_timeout_sec,
             "advanceMode": advance_mode,
-            "handoffMode": handoff_mode,
             "nodes": nodes,
         }
 
@@ -765,9 +758,9 @@ class WorkflowStore(InputImageStore, WaitStore):
                     INSERT INTO workflows (
                         workflow_id, name, status, failure_policy,
                         supervisor_agent_id, supervisor_status, created_at,
-                        advance_mode, handoff_mode,
+                        advance_mode,
                         spec_json, spec_zlib
-                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', ?, ?, ?, ?)
                     """,
                     (
                         spec["workflowId"],
@@ -776,7 +769,6 @@ class WorkflowStore(InputImageStore, WaitStore):
                         spec["supervisorAgentId"],
                         timestamp,
                         spec["advanceMode"],
-                        spec["handoffMode"],
                         compact_spec,
                         compressed_spec,
                     ),
@@ -1423,7 +1415,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                        response, error, created_at, started_at, finished_at,
                        state_version, assistant_job_id, assistant_thread_id,
                        assistant_turn_id, assistant_status, advance_mode,
-                       handoff_mode, termination_json, result_protocol_version, jira_context_json
+                       termination_json, result_protocol_version, jira_context_json
                 FROM workflows WHERE workflow_id = ?
                 """,
                 (workflow_id,),
@@ -1539,7 +1531,6 @@ class WorkflowStore(InputImageStore, WaitStore):
             "jiraContext": json.loads(workflow["jira_context_json"]) if workflow["jira_context_json"] else None,
             "failurePolicy": workflow["failure_policy"],
             "advanceMode": workflow["advance_mode"],
-            "handoffMode": workflow["handoff_mode"],
             "pendingAdvance": self._advance_gate_snapshot(pending_advance_row),
             "currentNodes": current_nodes,
             "progress": {"completed": completed_count, "total": len(nodes)},
@@ -1805,59 +1796,6 @@ class WorkflowStore(InputImageStore, WaitStore):
         result["content"] = bytes(row["content"])
         result["nodeId"] = row["node_id"]
         return result
-
-    def get_cumulative_artifact_inputs(
-        self, workflow_id: str, node_id: str
-    ) -> list[dict[str, Any]]:
-        """返回当前步骤之前所有步骤的当前有效文件，包含无文件步骤。"""
-        with self._connect() as connection:
-            target = connection.execute(
-                "SELECT position FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
-                (workflow_id, node_id),
-            ).fetchone()
-            if target is None:
-                raise ValueError(f"找不到步骤：{node_id}")
-            rows = connection.execute(
-                """
-                SELECT n.node_id, n.position, n.display_name, n.status,
-                       a.artifact_id, a.media_type, a.filename, a.content,
-                       a.byte_size, a.sha256, a.created_at
-                FROM workflow_nodes n
-                LEFT JOIN workflow_artifacts a
-                  ON a.workflow_id = n.workflow_id AND a.node_id = n.node_id
-                WHERE n.workflow_id = ? AND n.position < ?
-                ORDER BY n.position, a.created_at, a.artifact_id
-                """,
-                (workflow_id, target["position"]),
-            ).fetchall()
-        steps: list[dict[str, Any]] = []
-        by_node: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            source_node_id = str(row["node_id"])
-            step = by_node.get(source_node_id)
-            if step is None:
-                step = {
-                    "nodeId": source_node_id,
-                    "stepNumber": int(row["position"]) + 1,
-                    "displayName": row["display_name"],
-                    "status": row["status"],
-                    "artifacts": [],
-                }
-                by_node[source_node_id] = step
-                steps.append(step)
-            if row["artifact_id"] is not None:
-                step["artifacts"].append(
-                    {
-                        "id": row["artifact_id"],
-                        "mediaType": row["media_type"],
-                        "filename": row["filename"],
-                        "byteSize": int(row["byte_size"]),
-                        "sha256": row["sha256"],
-                        "createdAt": row["created_at"],
-                        "content": bytes(row["content"]),
-                    }
-                )
-        return steps
 
     def update_node_actual_prompt(
         self,
@@ -2834,7 +2772,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                     require_lease=True,
                 )
             workflow = connection.execute(
-                "SELECT status, handoff_mode, termination_json FROM workflows WHERE workflow_id = ?", (workflow_id,)
+                "SELECT status, termination_json FROM workflows WHERE workflow_id = ?", (workflow_id,)
             ).fetchone()
             if workflow is None:
                 raise ValueError(f"找不到工作流：{workflow_id}")
@@ -2864,7 +2802,6 @@ class WorkflowStore(InputImageStore, WaitStore):
                 result = self._node_dispatch_spec(
                     row, already_dispatched=not same_remote_prepare
                 )
-                result["handoffMode"] = workflow["handoff_mode"]
                 return result
 
             advance_gate = connection.execute(
@@ -2930,7 +2867,6 @@ class WorkflowStore(InputImageStore, WaitStore):
                 dependencies,
                 dependency_rows,
                 revision_rows,
-                str(workflow["handoff_mode"]),
             )
             if row["thread_id"]:
                 prompt_body = actual_prompt
@@ -2984,7 +2920,6 @@ class WorkflowStore(InputImageStore, WaitStore):
                 (workflow_id, node_id),
             ).fetchone()
             result = self._node_dispatch_spec(refreshed, already_dispatched=False)
-            result["handoffMode"] = workflow["handoff_mode"]
             return result
 
     @staticmethod
@@ -2993,13 +2928,8 @@ class WorkflowStore(InputImageStore, WaitStore):
         dependencies: list[str],
         dependency_rows: list[sqlite3.Row],
         revision_rows: list[sqlite3.Row],
-        handoff_mode: str = "legacy_text",
     ) -> str:
-        dependency_suffix = (
-            WorkflowStore._build_dependency_suffix(dependencies, dependency_rows)
-            if handoff_mode == "legacy_text"
-            else ""
-        )
+        dependency_suffix = WorkflowStore._build_dependency_suffix(dependencies, dependency_rows)
         revision_suffix = WorkflowStore._build_revision_suffix(revision_rows)
         suffix = dependency_suffix + revision_suffix
         available = PROMPT_LIMIT - len(suffix)

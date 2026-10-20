@@ -269,6 +269,24 @@ class DingTalkExecutionNoticeTest {
   }
 
   @Test
+  void preservesStepNamesInBlockedNotice() {
+    String text = "第2步「Task-CoderAgent」遇到阻碍：第1步「Task-PlanAgent」尚未完成";
+    assertThat(DingTalkExecutionNotice.safe(text)).isEqualTo(text);
+    var snapshot = new ObjectMapper().createObjectNode();
+    snapshot.putArray("nodes").addObject().put("id", "plan").put("displayName", "Task-PlanAgent");
+    var event = new ObjectMapper().createObjectNode().put("nodeId", "plan");
+    assertThat(DingTalkExecutionNotice.stepLabel(event, snapshot)).isEqualTo("第1步「Task-PlanAgent」");
+  }
+
+  @Test
+  void hidesStandaloneKeysIncludingChineseAndPunctuationBoundaries() {
+    assertThat(DingTalkExecutionNotice.safe("sk-test123 密钥sk-test456，`SK-test789`"))
+        .isEqualTo("[凭据已隐藏] 密钥[凭据已隐藏]，`[凭据已隐藏]`");
+    assertThat(DingTalkExecutionNotice.safe("Bearer sample-token token=sample-secret"))
+        .isEqualTo("[凭据已隐藏] token=[已隐藏]");
+  }
+
+  @Test
   void preservesFilePathsWhileRemovingInternalLinksAndCredentials() {
     String text =
         "正在读取 C:\\private\\input.png https://internal.example/x token=secret sk-abc123 thread_123";

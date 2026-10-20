@@ -17,12 +17,11 @@ import java.util.List;
  * @param defaultStepModel 默认步骤模型
  * @param enabled 是否启用
  * @param advanceMode 步骤成功后的流转方式
- * @param handoffMode 步骤之间的结果交接方式
  * @param dingtalkTargetId V1 兼容字段，当前忽略；通知对象由任务定义维护
  * @param dingtalkShowExecutionDetails 是否向钉钉展示思考摘要和工具调用
  * @param steps 按执行顺序排列的步骤列表
  */
-@JsonIgnoreProperties({"maxRetryCount", "confirmationMinutes", "blockedMinutes"})
+@JsonIgnoreProperties({"maxRetryCount", "confirmationMinutes", "blockedMinutes", "handoffMode"})
 public record SopSaveRequest(
     @NotBlank @Size(max = 160) String name,
     @Size(max = 2000) String description,
@@ -31,7 +30,6 @@ public record SopSaveRequest(
     @Size(max = 64) String defaultStepModel,
     Boolean enabled,
     @Size(max = 32) String advanceMode,
-    @Size(max = 32) String handoffMode,
     @Size(max = 36) String dingtalkTargetId,
     @NotEmpty List<@Valid SopStepRequest> steps,
     @NotBlank @Size(max = 36) String groupId,
@@ -45,7 +43,6 @@ public record SopSaveRequest(
       String defaultStepModel,
       Boolean enabled,
       String advanceMode,
-      String handoffMode,
       String dingtalkTargetId,
       List<SopStepRequest> steps,
       String groupId,
@@ -58,7 +55,6 @@ public record SopSaveRequest(
         defaultStepModel,
         enabled,
         advanceMode,
-        handoffMode,
         dingtalkTargetId,
         steps,
         groupId,
@@ -74,7 +70,6 @@ public record SopSaveRequest(
       String defaultStepModel,
       Boolean enabled,
       String advanceMode,
-      String handoffMode,
       String dingtalkTargetId,
       List<SopStepRequest> steps,
       String groupId) {
@@ -86,7 +81,6 @@ public record SopSaveRequest(
         defaultStepModel,
         enabled,
         advanceMode,
-        handoffMode,
         dingtalkTargetId,
         steps,
         groupId,
@@ -101,7 +95,6 @@ public record SopSaveRequest(
       String defaultStepModel,
       Boolean enabled,
       String advanceMode,
-      String handoffMode,
       String dingtalkTargetId,
       List<SopStepRequest> steps) {
     this(
@@ -112,7 +105,6 @@ public record SopSaveRequest(
         defaultStepModel,
         enabled,
         advanceMode,
-        handoffMode,
         dingtalkTargetId,
         steps,
         null);
@@ -126,7 +118,6 @@ public record SopSaveRequest(
       String defaultStepModel,
       Boolean enabled,
       String advanceMode,
-      String handoffMode,
       List<SopStepRequest> steps) {
     this(
         name,
@@ -136,7 +127,6 @@ public record SopSaveRequest(
         defaultStepModel,
         enabled,
         advanceMode,
-        handoffMode,
         null,
         steps);
   }
@@ -155,7 +145,6 @@ public record SopSaveRequest(
         supervisorTimeoutSec,
         defaultStepModel,
         enabled,
-        null,
         null,
         null,
         steps);
@@ -177,29 +166,6 @@ public record SopSaveRequest(
         defaultStepModel,
         enabled,
         advanceMode,
-        null,
-        null,
-        steps);
-  }
-
-  public SopSaveRequest(
-      String name,
-      String description,
-      Integer supervisorTimeoutSec,
-      String defaultStepModel,
-      Boolean enabled,
-      String advanceMode,
-      String handoffMode,
-      List<SopStepRequest> steps) {
-    this(
-        name,
-        description,
-        "local",
-        supervisorTimeoutSec,
-        defaultStepModel,
-        enabled,
-        advanceMode,
-        handoffMode,
         null,
         steps);
   }

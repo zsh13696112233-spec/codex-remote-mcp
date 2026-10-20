@@ -16,6 +16,45 @@ function app() {
   return context;
 }
 
+test('Jira appears after a result poll and survives unchanged polls and terminal reloads', async () => {
+  const context = app();
+  const elements = new Map();
+  context.document.querySelector = selector => {
+    if (!elements.has(selector)) elements.set(selector, {});
+    return elements.get(selector);
+  };
+  vm.runInContext(`
+    renderDuration = renderSteps = renderAdvanceCountdown = renderComposer = () => {};
+    events = async () => {};
+    scheduleRefresh = () => {};
+    state.workflowId = 'test';
+    api = async () => nextSnapshot;
+  `, context);
+  context.nextSnapshot = {status: 'running', nodes: [], revision: '1'};
+  await vm.runInContext('refresh()', context);
+  assert.equal(elements.get('#jira').hidden, true);
+
+  context.nextSnapshot = {status: 'running', nodes: [], revision: '2', jiraContext: {issueKey: 'TEST-123'}};
+  await vm.runInContext('refresh()', context);
+  assert.equal(elements.get('#jira').hidden, false);
+  assert.equal(elements.get('#jiraKey').textContent, 'TEST-123');
+
+  context.nextSnapshot = {unchanged: true, revision: '2'};
+  await vm.runInContext('refresh()', context);
+  assert.equal(elements.get('#jiraKey').textContent, 'TEST-123');
+  for (const status of ['completed', 'failed', 'cancelled']) {
+    vm.runInContext('state.snapshot = null; state.revision = null', context);
+    context.nextSnapshot = {status, nodes: [], revision: '3', jiraContext: {issueKey: 'TEST-123'}};
+    await vm.runInContext('refresh()', context);
+    assert.equal(elements.get('#jira').hidden, false);
+    assert.equal(elements.get('#jiraKey').textContent, 'TEST-123');
+  }
+  context.nextSnapshot = {status: 'completed', nodes: [], revision: '4', jiraContext: null};
+  await vm.runInContext('refresh()', context);
+  assert.equal(elements.get('#jira').hidden, true);
+  assert.equal(elements.get('#jiraKey').textContent, '');
+});
+
 test('consultation progress stays quiet and final answer remains visible', () => {
   const context = app();
   vm.runInContext(`

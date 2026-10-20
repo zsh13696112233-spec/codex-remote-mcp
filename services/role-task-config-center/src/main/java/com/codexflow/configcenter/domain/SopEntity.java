@@ -50,7 +50,7 @@ class SopEntity extends Timestamped {
   @Column(name = "blocked_minutes", nullable = false)
   int blockedMinutes = 30;
 
-  /** 步骤之间传递文字结果或累计文件的交接方式。 */
+  /** 遗留非空列的持久化映射，新建固定为文字交接，不参与执行逻辑。 */
   @Column(name = "handoff_mode", nullable = false)
   String handoffMode = "legacy_text";
 

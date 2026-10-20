@@ -48,7 +48,6 @@ class BlockedNotificationSnapshotTest extends com.codexflow.configcenter.Grouped
                         true,
                         "automatic",
                         null,
-                        null,
                         List.of(step))))
             .path("id")
             .asText();

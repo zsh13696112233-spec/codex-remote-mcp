@@ -30,6 +30,7 @@ target/
 config/agents.json
 config/agents.sidecar.json
 config/workflow-service.json
+config/set-app-server-token.bat
 *.skills.lock
 skill-packages/
 *.mcp.lock

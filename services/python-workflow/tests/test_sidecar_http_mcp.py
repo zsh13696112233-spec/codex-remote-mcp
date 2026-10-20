@@ -127,7 +127,6 @@ class SidecarHttpMcpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             {
                                 "workflowId": "http-mcp-demo",
                                 "supervisorAgentId": "supervisor-a",
-                                "handoffMode": "legacy_text",
                                 "nodes": [
                                     {
                                         "id": "a",

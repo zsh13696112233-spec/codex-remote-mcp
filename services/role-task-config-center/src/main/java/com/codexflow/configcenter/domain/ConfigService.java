@@ -20,7 +20,6 @@ public class ConfigService {
   private static final Set<String> SUPPORTED_MODELS = Set.of("gpt-6-astra", "gpt-6.1-sol");
   private static final Set<String> EXECUTOR_TYPES = Set.of("local", "remote");
   private static final Set<String> ADVANCE_MODES = Set.of("automatic", "semi_automatic");
-  private static final Set<String> HANDOFF_MODES = Set.of("legacy_text", "cumulative_files");
   private static final Set<String> PERMISSION_PROFILES =
       Set.of("read_only", "workspace_write", "auto_review", "full_access");
 
@@ -314,11 +313,6 @@ public class ConfigService {
     if (sop.advanceMode == null) sop.advanceMode = "automatic";
     if (!ADVANCE_MODES.contains(sop.advanceMode)) {
       throw new IllegalArgumentException("advanceMode 只能是 automatic 或 semi_automatic。");
-    }
-    sop.handoffMode = normalizeNullable(body.handoffMode());
-    if (sop.handoffMode == null) sop.handoffMode = "legacy_text";
-    if (!HANDOFF_MODES.contains(sop.handoffMode)) {
-      throw new IllegalArgumentException("handoffMode 只能是 legacy_text 或 cumulative_files。");
     }
     if (body.dingtalkShowExecutionDetails() != null) {
       sop.dingtalkShowExecutionDetails = body.dingtalkShowExecutionDetails();

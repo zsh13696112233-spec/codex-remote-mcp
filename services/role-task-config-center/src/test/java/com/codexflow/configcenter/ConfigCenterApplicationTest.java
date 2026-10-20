@@ -23,6 +23,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
+import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 /** 验证配置中心的数据库迁移、JPA 关系加载和请求参数校验。 */
@@ -32,6 +33,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
   @Autowired ConfigService service;
   @Autowired WorkflowRunStore runStore;
   @Autowired Validator validator;
+  @Autowired ObjectMapper json;
 
   @Autowired
   @Qualifier("requestMappingHandlerMapping")
@@ -208,21 +210,11 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
   @Test
   void requestValidationRejectsInvalidSupervisorAgentId() {
     SopSaveRequest blank =
-        grouped(
-            new SopSaveRequest(
-                "测试", null, " ", null, null, true, "automatic", "legacy_text", List.of()));
+        grouped(new SopSaveRequest("测试", null, " ", null, null, true, "automatic", List.of()));
     SopSaveRequest tooLong =
         grouped(
             new SopSaveRequest(
-                "测试",
-                null,
-                "s".repeat(129),
-                null,
-                null,
-                true,
-                "automatic",
-                "legacy_text",
-                List.of()));
+                "测试", null, "s".repeat(129), null, null, true, "automatic", List.of()));
 
     assertThat(validator.validate(blank))
         .extracting(violation -> violation.getPropertyPath().toString())
@@ -264,7 +256,6 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
                 null,
                 true,
                 "automatic",
-                "cumulative_files",
                 List.of(step)));
     ObjectNode sop = service.createSop(firstBody);
     ObjectNode task =
@@ -284,7 +275,6 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
                 null,
                 true,
                 "automatic",
-                "cumulative_files",
                 List.of(step)));
     ObjectNode updated = service.updateSop(sop.path("id").asText(), updatedBody);
     PreparedRun latest = runStore.prepareLatest(task.path("id").asText());
@@ -414,9 +404,9 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
     assertThat(first.payload().has("maxRetryCount")).isFalse();
     assertThat(retried.payload().has("maxRetryCount")).isFalse();
     assertThat(first.payload().path("advanceMode").asText()).isEqualTo("automatic");
-    assertThat(createdSop.path("handoffMode").asText()).isEqualTo("legacy_text");
-    assertThat(first.payload().path("handoffMode").asText()).isEqualTo("legacy_text");
-    assertThat(retried.payload().path("handoffMode").asText()).isEqualTo("legacy_text");
+    assertThat(createdSop.has("handoffMode")).isFalse();
+    assertThat(first.payload().has("handoffMode")).isFalse();
+    assertThat(retried.payload().has("handoffMode")).isFalse();
     assertThat(retried.workflowId()).isNotEqualTo(first.workflowId());
     assertThat(retried.payload().has("usedRetryCount")).isFalse();
     ObjectNode legacyPayload = first.payload().deepCopy();
@@ -480,9 +470,10 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
         .hasMessageContaining("advanceMode");
   }
 
-  /** 确认 SOP 可选择文字或文件交接，并将选择冻结到新运行和原快照重试。 */
+  /** 确认旧交接字段被忽略，SOP 和新运行不再暴露模式选择。 */
   @Test
-  void handoffModeIsValidatedAndFrozen() {
+  @Transactional
+  void retiredHandoffModeIsIgnoredAndAbsentFromNewSnapshots() {
     String roleId =
         jdbc.queryForObject(
             "select id from codex_sop_roles order by created_at limit 1", String.class);
@@ -490,11 +481,12 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
         new SopStepRequest(
             "执行步骤", roleId, "完成测试步骤", null, null, "local", null, null, null, null, null, Set.of(),
             Set.of());
-    ObjectNode sop =
-        service.createSop(
+    ObjectNode body =
+        json.valueToTree(
             grouped(
-                new SopSaveRequest(
-                    "文字交接快照", null, null, null, true, "automatic", "legacy_text", List.of(step))));
+                new SopSaveRequest("文字交接快照", null, null, null, true, "automatic", List.of(step))));
+    body.put("handoffMode", "cumulative_files");
+    ObjectNode sop = service.createSop(json.treeToValue(body, SopSaveRequest.class));
     ObjectNode task =
         service.createTask(
             grouped(
@@ -503,23 +495,15 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
 
     PreparedRun first = runStore.prepareLatest(task.path("id").asText());
     PreparedRun retried = runStore.prepareRetry(first.workflowId());
-    assertThat(sop.path("handoffMode").asText()).isEqualTo("legacy_text");
-    assertThat(first.payload().path("handoffMode").asText()).isEqualTo("legacy_text");
-    assertThat(retried.payload().path("handoffMode").asText()).isEqualTo("legacy_text");
-    assertThatThrownBy(
-            () ->
-                service.createSop(
-                    grouped(
-                        new SopSaveRequest(
-                            "非法交接模式",
-                            null,
-                            null,
-                            null,
-                            true,
-                            "automatic",
-                            "unsupported",
-                            List.of(step)))))
-        .hasMessageContaining("handoffMode");
+    assertThat(sop.has("handoffMode")).isFalse();
+    assertThat(first.payload().has("handoffMode")).isFalse();
+    assertThat(retried.payload().has("handoffMode")).isFalse();
+    assertThat(
+            jdbc.queryForObject(
+                "select handoff_mode from codex_sop_sops where id=?",
+                String.class,
+                sop.path("id").asText()))
+        .isEqualTo("legacy_text");
   }
 
   private static String readClasspath(String path) throws IOException {

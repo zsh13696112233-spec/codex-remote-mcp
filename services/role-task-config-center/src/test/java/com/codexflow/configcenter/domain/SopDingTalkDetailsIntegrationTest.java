@@ -35,18 +35,7 @@ class SopDingTalkDetailsIntegrationTest extends GroupedFixtureSupport {
             "执行步骤", role, "执行", null, "local", "local", null, false, null, null, 1800, Set.of(),
             Set.of());
     return new SopSaveRequest(
-        "展示开关测试",
-        null,
-        "local",
-        7200,
-        null,
-        true,
-        "automatic",
-        "legacy_text",
-        null,
-        List.of(step),
-        GROUP,
-        show);
+        "展示开关测试", null, "local", 7200, null, true, "automatic", null, List.of(step), GROUP, show);
   }
 
   @Test
