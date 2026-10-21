@@ -1,3 +1,4 @@
+const CODEX_FAILURE = "Codex 上游模型服务过载";
 const STATUS = {
   pending: "未开始", queued: "进行中", running: "进行中", cancelling: "进行中",
   waiting: "等待人工处理", completed: "已完成", skipped: "未执行", failed: "未完成", cancelled: "未完成", interrupted: "未完成"
@@ -330,9 +331,11 @@ function consume(event) {
     const termination = payload.termination || snapshot?.termination;
     if (termination?.outcome === "blocked") notice = "本轮流程因阻断结束。";
     if (termination?.outcome === "no_task") notice = "无待处理任务，本轮流程已结束。";
+    if (!termination && (payload.error === CODEX_FAILURE || snapshot?.error === CODEX_FAILURE)) notice = CODEX_FAILURE;
     const result = payload.response || snapshot?.response;
     if (result) notice += "\n" + text(result);
   }
+  if (event.type === "node.failed" && payload.error === CODEX_FAILURE) notice = CODEX_FAILURE;
   // 等待内容与操作统一在当前等待卡片展示，不再追加聊天消息。
   if (notice) upsertMessage({id: `progress-${event.sequence}`, role: "progress",
     time: event.createdAt, text: notice, streaming: false, terminal: ["workflow.completed", "workflow.failed", "workflow.cancelled"].includes(event.type)});
@@ -628,7 +631,9 @@ function render(snapshot) {
   const allStepsFinished = nodes.length > 0
     && nodes.every(node => node.status === "completed" || node.status === "skipped");
   const allStepsPending = nodes.length === 0 || nodes.every(node => node.status === "pending");
-  $("#current").textContent = snapshot.termination ? snapshot.response : initializing
+  $("#current").textContent = snapshot.termination ? snapshot.response
+    : snapshot.error === CODEX_FAILURE || nodes.some(node => node.status === "failed" && node.error === CODEX_FAILURE)
+    ? CODEX_FAILURE : initializing
     ? initializationMessage(snapshot)
     : snapshot.pendingAdvance?.state === "busy"
     ? "正在处理步骤操作，请稍候"

@@ -92,8 +92,13 @@ class DingTalkProgressCard {
             .append(plain(abbreviate(latest.path("response").asText().trim(), 240)));
       }
     }
-    if (!snapshot.path("error").asText().isBlank()) {
-      value.append("\n\n任务执行未完成，请在监控中心查看详情。");
+    if (DingTalkResultText.codexFailure(snapshot) || !snapshot.path("error").asText().isBlank()) {
+      value
+          .append("\n\n")
+          .append(
+              DingTalkResultText.codexFailure(snapshot)
+                  ? DingTalkResultText.CODEX_FAILURE
+                  : "任务执行未完成，请在监控中心查看详情。");
     }
     return value.toString();
   }
@@ -178,11 +183,13 @@ class DingTalkProgressCard {
 
   private static String styledResult(JsonNode snapshot) {
     String status = snapshot.path("status").asText();
+    if (DingTalkResultText.codexFailure(snapshot))
+      return "> **" + DingTalkResultText.CODEX_FAILURE + "**";
     String result = snapshot.path("response").asText();
     if (!result.isBlank() && isTerminal(status)) {
       return "### 🟢 最终结果\n\n" + plain(abbreviate(result.trim(), 1200));
     }
-    if (!snapshot.path("error").asText().isBlank()) {
+    if (DingTalkResultText.codexFailure(snapshot) || !snapshot.path("error").asText().isBlank()) {
       return "> **任务执行未完成**\n>\n> 请在监控中心查看详细信息。";
     }
     return "";
@@ -277,8 +284,13 @@ class DingTalkProgressCard {
           .append(markdown ? "\n\n**最终结果**\n" : "\n最终结果\n")
           .append(plain(abbreviate(result, 1600)));
     }
-    if (!snapshot.path("error").asText().isBlank()) {
-      value.append(markdown ? "\n\n**说明：** 任务执行未完成，请在监控中心查看详细信息。" : "\n说明：任务执行未完成，请在监控中心查看详细信息。");
+    if (DingTalkResultText.codexFailure(snapshot) || !snapshot.path("error").asText().isBlank()) {
+      value
+          .append(markdown ? "\n\n**说明：** " : "\n说明：")
+          .append(
+              DingTalkResultText.codexFailure(snapshot)
+                  ? DingTalkResultText.CODEX_FAILURE
+                  : "任务执行未完成，请在监控中心查看详细信息。");
     }
     if (notice != null && !notice.isBlank()) {
       value.append(markdown ? "\n\n---\n" : "\n").append(plain(notice));

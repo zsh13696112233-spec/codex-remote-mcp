@@ -9,6 +9,13 @@ UTC = timezone.utc
 
 
 
+def execution_wait_view(gate: dict[str, Any] | None) -> dict[str, Any] | None:
+    """通知路由仅供 Java 消费，不进入执行者和任务助手上下文。"""
+    if gate is None:
+        return None
+    return {key: value for key, value in gate.items() if key != "notificationContextId"}
+
+
 def normalize_policy(value: Any) -> dict[str, int] | None:
     if value is None:
         return None
@@ -29,6 +36,21 @@ def normalize_policy(value: Any) -> dict[str, int] | None:
 
 
 class WaitStore:
+    @staticmethod
+    def _bind_wait_notification(connection: sqlite3.Connection, workflow_id: str, gate_id: str,
+                                node_id: str, context_id: str | None) -> None:
+        # 与首次领取同事务保存；重复请求不能更换真正生效的操作归属。
+        connection.execute("UPDATE workflow_advance_gates SET notification_context_id=? WHERE workflow_id=? AND gate_id=?",
+                           (context_id, workflow_id, gate_id))
+        connection.execute("UPDATE workflow_nodes SET notification_context_id=? WHERE workflow_id=? AND node_id=?",
+                           (context_id, workflow_id, node_id))
+
+    @staticmethod
+    def _inherit_wait_notification(connection: sqlite3.Connection, workflow_id: str, node_id: str, gate_id: str) -> None:
+        connection.execute("UPDATE workflow_advance_gates SET result_notification_context_id="
+                           "(SELECT notification_context_id FROM workflow_nodes WHERE workflow_id=? AND node_id=?) "
+                           "WHERE gate_id=?", (workflow_id, node_id, gate_id))
+
     @staticmethod
     def _wait_policy(connection: sqlite3.Connection, workflow_id: str) -> dict[str, int] | None:
         row = connection.execute("SELECT wait_policy_json FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
@@ -59,6 +81,7 @@ class WaitStore:
              now.isoformat(), now.isoformat(), kind,
              json.dumps(outcome, ensure_ascii=False) if outcome else None),
         )
+        self._inherit_wait_notification(connection, workflow_id, node_id, gate_id)
         self._add_event_with_connection(connection, workflow_id, node_id, "gateway", "step.advance.waiting",
             {"gateId": gate_id, "completedNodeId": node_id, "nextNodeId": next_node[0] if next_node else None,
              "kind": kind, "state": "held" if manual else "countdown", "expiresAt": expires_at}, now.isoformat())
@@ -88,14 +111,14 @@ class WaitStore:
             raise RuntimeError("等待时间已到，系统正在处理。")
         return row
 
-    def claim_policy_wait(self, workflow_id: str, gate_id: str, action: str, *, timed_out: bool = False) -> dict[str, Any]:
+    def claim_policy_wait(self, workflow_id: str, gate_id: str, action: str, *, timed_out: bool = False, notification_context_id: str | None = None) -> dict[str, Any]:
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             old = connection.execute("SELECT * FROM workflow_advance_gates WHERE workflow_id=? AND gate_id=?", (workflow_id, gate_id)).fetchone()
             expected = {"confirm": "finishing" if old and old["kind"] == "finish" else "confirmed", "retry": "executing", "timeout": "closing"}
             if not timed_out and old and old["kind"] != "legacy" and (old["status"] == expected.get(action) or (action == "confirm" and old["kind"] == "finish" and old["status"] == "confirmed")):
-                return {"gateId": gate_id, "status": old["status"], "duplicate": True}
+                return {"gateId": gate_id, "status": old["status"], "duplicate": True, "notificationContextId": old["notification_context_id"]}
             row = self._check_policy_wait(connection, workflow_id, gate_id, allow_expired=timed_out)
             self._require_discussion_idle(connection, workflow_id)
             if timed_out and (row["status"] != "pending" or row["expires_at"] > now):
@@ -112,11 +135,14 @@ class WaitStore:
                 if action != "confirm":
                     raise RuntimeError("当前等待不支持此操作。")
                 status = "finishing" if row["kind"] == "finish" else "confirmed"
+            if not timed_out:
+                target_node = row["completed_node_id"] if action == "retry" else row["next_node_id"]
+                self._bind_wait_notification(connection, workflow_id, gate_id, target_node, notification_context_id)
             connection.execute("UPDATE workflow_advance_gates SET status=?,confirmed_at=?,updated_at=? WHERE gate_id=?", (status, now, now, gate_id))
             self._add_event_with_connection(connection, workflow_id, row["completed_node_id"], "gateway",
                 "step.advance.timed_out" if timed_out else "step.advance.confirmed",
                 {"gateId": gate_id, "kind": row["kind"], "action": action, "nextNodeId": row["next_node_id"] or None}, now)
-            return {"gateId": gate_id, "status": status, "resumedFromHold": row["status"] == "held"}
+            return {"gateId": gate_id, "status": status, "resumedFromHold": row["status"] == "held", "notificationContextId": notification_context_id}
 
     def hold_policy_wait(self, workflow_id: str, gate_id: str) -> dict[str, Any]:
         now = datetime.now(UTC).isoformat()

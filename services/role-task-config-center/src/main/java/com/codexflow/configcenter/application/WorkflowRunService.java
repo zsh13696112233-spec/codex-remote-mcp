@@ -73,6 +73,11 @@ public class WorkflowRunService {
 
   /** 等待卡片的控制操作由中央原子校验等待编号与步骤版本。 */
   public JsonNode waitingAction(String workflowId, String gateId, String action) {
+    return waitingAction(workflowId, gateId, action, null);
+  }
+
+  public JsonNode waitingAction(
+      String workflowId, String gateId, String action, String notificationContextId) {
     if (!java.util.UUID.fromString(workflowId).toString().equalsIgnoreCase(workflowId)) {
       throw new IllegalArgumentException("任务编号无效。");
     }
@@ -80,7 +85,13 @@ public class WorkflowRunService {
       throw new IllegalArgumentException("等待操作无效。");
     }
     JsonNode response =
-        gateway.post("/workflows/" + workflowId + "/advance/" + gateId + "/" + action, null);
+        gateway.post(
+            "/workflows/" + workflowId + "/advance/" + gateId + "/" + action,
+            notificationContextId == null
+                ? null
+                : tools.jackson.databind.node.JsonNodeFactory.instance
+                    .objectNode()
+                    .put("notificationContextId", notificationContextId));
     if ("stop".equals(action)) {
       store.recordGatewayStatus(workflowId, response, "cancelled");
       if (isTerminal(response.path("status").asText())) launches.release(workflowId);

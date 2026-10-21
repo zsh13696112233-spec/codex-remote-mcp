@@ -10,6 +10,18 @@ class DingTalkDocumentSummaryCardTest {
   private final ObjectMapper json = new ObjectMapper();
 
   @Test
+  void everyTerminalResultHasMonitorLinkWithoutDependingOnDocuments() {
+    for (String state : List.of("completed", "failed", "cancelled")) {
+      var snapshot = json.createObjectNode().put("status", state);
+      var data =
+          DingTalkDocumentSummaryCard.render(
+              "flow", snapshot, "结果", "http://192.0.2.1:8090/", "template");
+      assertThat(data.get("notice").toString())
+          .containsOnlyOnce("[查看监控](http://192.0.2.1:8090/?workflowId=flow)");
+    }
+  }
+
+  @Test
   void allDocumentsAreVisibleWithoutControlButtonsOrInvalidLinks() {
     var snapshot =
         json.createObjectNode()

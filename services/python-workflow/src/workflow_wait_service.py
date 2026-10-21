@@ -133,6 +133,7 @@ class WaitService:
                 reasoning_effort=target.get("reasoningEffort"), timeout_sec=target["timeoutSec"],
                 output_schema=schema(target["resultProtocolVersion"]), event_callback=event)
             job.capture_document = target["captureDocument"] and not closing
+            job.result_protocol_version = target["resultProtocolVersion"]
             await db(gateway.store.set_wait_job, workflow_id, gate_id, job.job_id, job.turn_id)
             if not closing:
                 await db(gateway.store.update_node_actual_prompt, workflow_id, target["nodeId"], job.prompt)

@@ -23,6 +23,7 @@ class DingTalkStore {
   private final DingTalkWorkflowBindingRepository bindings;
   private final DingTalkInboundMessageRepository inboundMessages;
   private final DingTalkOutboxRepository outbox;
+  private final DingTalkActionContextRepository actionContexts;
   private final DingTalkTaskBindingDirectory taskBindings;
   private final DingTalkTargetDirectory targetDirectory;
   private final ObjectMapper objectMapper;
@@ -53,12 +54,14 @@ class DingTalkStore {
       DingTalkWorkflowBindingRepository bindings,
       DingTalkInboundMessageRepository inboundMessages,
       DingTalkOutboxRepository outbox,
+      DingTalkActionContextRepository actionContexts,
       DingTalkTaskBindingDirectory taskBindings,
       DingTalkTargetDirectory targetDirectory,
       ObjectMapper objectMapper) {
     this.bindings = bindings;
     this.inboundMessages = inboundMessages;
     this.outbox = outbox;
+    this.actionContexts = actionContexts;
     this.taskBindings = taskBindings;
     this.targetDirectory = targetDirectory;
     this.objectMapper = objectMapper;
@@ -257,11 +260,16 @@ class DingTalkStore {
                         .put("answer", true)
                         .put("atUserId", inbound.senderUserId)
                         .put("actionId", actionId);
-                if (group
-                    && hasTextValue(inbound.senderUserId)
-                    && hasTextValue(inbound.sessionWebhook)) {
-                  payload.put("answerMention", true).put("sessionWebhook", inbound.sessionWebhook);
-                }
+                payload
+                    .put("cardMention", true)
+                    .put("mentionGroup", group)
+                    .put(
+                        "atDisplayName",
+                        inbound.senderDisplayName == null ? "提问人" : inbound.senderDisplayName)
+                    .put("question", questionPreview(inbound.questionText))
+                    .put(
+                        "questionHasImages",
+                        inbound.imageIdsJson != null && !inbound.imageIdsJson.equals("[]"));
               }
               enqueue(
                   "assistant:" + workflowMessageId,
@@ -468,7 +476,21 @@ class DingTalkStore {
       var payload =
           waitingPayload(workflowId, snapshot, body, invitation)
               .put("atUserId", binding.initiatorUserId);
-      if (invitation) payload.put("retainResult", true);
+      if (invitation) {
+        payload.put("retainResult", true);
+        String contextId = snapshot.path("pendingAdvance").path("notificationContextId").asText();
+        actionContexts
+            .findById(contextId)
+            .filter(context -> workflowId.equals(context.workflowId))
+            .ifPresent(
+                context ->
+                    payload
+                        .put("cardMention", true)
+                        .put("mentionGroup", "GROUP".equals(binding.targetType))
+                        .put("atUserId", context.operatorUserId)
+                        .put("atDisplayName", context.operatorDisplayName)
+                        .put("resultAction", context.action));
+      }
       enqueue(
           "waiting:" + workflowId + ":" + gateId + ":" + (invitation ? "invitation" : "held"),
           workflowId,
@@ -483,12 +505,51 @@ class DingTalkStore {
     binding.updatedAt = Instant.now();
   }
 
+  @Transactional
+  public String registerActionContext(
+      String workflowId, String gateId, String action, String operatorUserId) {
+    var binding = requiredBindingForUpdate(workflowId);
+    String id =
+        deterministicUuid(
+            binding.clientId, workflowId, gateId + ":" + action + ":" + operatorUserId);
+    if (!actionContexts.existsById(id)) {
+      var context = new DingTalkActionContextEntity();
+      context.id = id;
+      context.workflowId = workflowId;
+      context.gateId = gateId;
+      context.action = action;
+      context.operatorUserId = operatorUserId;
+      context.operatorDisplayName = displayName(binding.clientId, operatorUserId, null, "操作人");
+      context.createdAt = Instant.now();
+      actionContexts.saveAndFlush(context);
+    }
+    return id;
+  }
+
+  private String displayName(String clientId, String userId, String supplied, String fallback) {
+    String name =
+        hasTextValue(supplied) ? supplied : targetDirectory.personDisplayName(clientId, userId);
+    if (!hasTextValue(name)) return fallback;
+    return name.substring(0, Math.min(name.length(), 160));
+  }
+
+  private static String questionPreview(String question) {
+    if (question == null) return "";
+    String text = DingTalkExecutionNotice.safe(question);
+    int length = text.codePointCount(0, text.length());
+    return length <= 500
+        ? text
+        : text.substring(0, text.offsetByCodePoints(0, 500)) + "\n（问题较长，已截断，请查看原消息）";
+  }
+
   private tools.jackson.databind.node.ObjectNode waitingPayload(
       String workflowId, JsonNode snapshot, String text, boolean invitation) {
     return objectMapper
         .createObjectNode()
         .put("gateId", snapshot.path("pendingAdvance").path("gateId").asText())
         .put("waitKind", snapshot.path("pendingAdvance").path("kind").asText("legacy"))
+        .put("actionFirst", true)
+        .put("blockedReason", DingTalkWaitingCard.blockedReason(snapshot))
         .put("documentTemplateId", documentCardTemplateId)
         .put("documentNodeId", snapshot.path("pendingAdvance").path("completedNodeId").asText())
         .put("invitation", invitation)
@@ -894,6 +955,9 @@ class DingTalkStore {
     entity.workflowId = binding.workflowId();
     entity.workflowMessageId = workflowMessageId;
     entity.senderUserId = message.senderUserId();
+    entity.questionText = message.content();
+    entity.senderDisplayName =
+        displayName(clientId, message.senderUserId(), message.senderDisplayName(), "提问人");
     entity.conversationId = message.conversationId();
     entity.conversationType = message.conversationType();
     entity.sessionWebhook = message.sessionWebhook();

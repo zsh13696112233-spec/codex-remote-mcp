@@ -397,6 +397,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                 "reasoning_effort": "TEXT",
                 "permission_profile": "TEXT NOT NULL DEFAULT 'read_only'",
                 "dispatch_token": "TEXT",
+                "notification_context_id": "TEXT",
             }.items():
                 if name not in columns:
                     connection.execute(
@@ -449,7 +450,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                 if name not in workflow_columns:
                     connection.execute(f"ALTER TABLE workflows ADD COLUMN {name} {definition}")
             wait_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflow_advance_gates)")}
-            for name, definition in {"kind": "TEXT NOT NULL DEFAULT 'legacy'", "business_result_json": "TEXT", "execution_started": "INTEGER NOT NULL DEFAULT 0", "execution_job_id": "TEXT", "execution_turn_id": "TEXT"}.items():
+            for name, definition in {"notification_context_id": "TEXT", "result_notification_context_id": "TEXT", "kind": "TEXT NOT NULL DEFAULT 'legacy'", "business_result_json": "TEXT", "execution_started": "INTEGER NOT NULL DEFAULT 0", "execution_job_id": "TEXT", "execution_turn_id": "TEXT"}.items():
                 if name not in wait_columns:
                     connection.execute(f"ALTER TABLE workflow_advance_gates ADD COLUMN {name} {definition}")
             connection.execute("CREATE INDEX IF NOT EXISTS workflow_wait_due ON workflow_advance_gates(status,expires_at)")
@@ -728,12 +729,12 @@ class WorkflowStore(InputImageStore, WaitStore):
     def create_workflow(self, value: dict[str, Any]) -> dict[str, Any]:
         spec = self.normalize_spec(value)
         version = value.get("resultProtocolVersion", 2)
-        if type(version) is not int or version not in (1, 2, 3, 4):
+        if type(version) is not int or version not in (1, 2, 3, 4, 5):
             raise ValueError("步骤结果协议版本无效。")
         if version == 3 and spec["advanceMode"] != "automatic":
             raise ValueError("版本3仅适用于全自动运行。")
-        if version == 4 and spec["advanceMode"] != "semi_automatic":
-            raise ValueError("版本4仅适用于半自动运行。")
+        if version in (4, 5) and spec["advanceMode"] != "semi_automatic":
+            raise ValueError(f"版本{version}仅适用于半自动运行。")
         spec["resultProtocolVersion"] = version
         timestamp = utc_now()
         encoded_spec = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
@@ -1473,14 +1474,15 @@ class WorkflowStore(InputImageStore, WaitStore):
             if workflow["advance_mode"] == "automatic" and workflow["result_protocol_version"] == 3:
                 from workflow_documents import automatic_views
                 document_views, document_summary = automatic_views(connection, workflow_id, node_rows)
-            if workflow["advance_mode"] == "semi_automatic" and len(node_rows) > 1:
-                first_node = node_rows[0]["node_id"]
-                rows = connection.execute(
-                    f"SELECT {METADATA_COLUMNS} FROM workflow_documents WHERE workflow_id=? AND node_id=? AND removed=0 "
-                    "ORDER BY CASE WHEN source_key='@main' THEN 0 ELSE 1 END, rowid"
-                    + ("" if workflow["result_protocol_version"] == 4 else " LIMIT 1"),
-                    (workflow_id, first_node)).fetchall()
-                document_views[first_node] = [document_view(row) for row in rows]
+            if workflow["advance_mode"] == "semi_automatic":
+                document_nodes = node_rows if workflow["result_protocol_version"] == 5 else node_rows[:1] if len(node_rows) > 1 else []
+                for document_node in document_nodes:
+                    rows = connection.execute(
+                        f"SELECT {METADATA_COLUMNS} FROM workflow_documents WHERE workflow_id=? AND node_id=? AND removed=0 "
+                        "ORDER BY CASE WHEN source_key='@main' THEN 0 ELSE 1 END, rowid"
+                        + ("" if workflow["result_protocol_version"] in (4, 5) else " LIMIT 1"),
+                        (workflow_id, document_node["node_id"])).fetchall()
+                    document_views[document_node["node_id"]] = [document_view(row) for row in rows]
             last_sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) FROM workflow_events WHERE workflow_id = ?",
                 (workflow_id,),
@@ -1504,7 +1506,7 @@ class WorkflowStore(InputImageStore, WaitStore):
             pending_advance_row = connection.execute(
                 """
                 SELECT gate_id, completed_node_id, next_node_id, status,
-                       expires_at, held_at, confirmed_at, notified_at, kind
+                       expires_at, held_at, confirmed_at, notified_at, kind, result_notification_context_id
                 FROM workflow_advance_gates
                 WHERE workflow_id = ?
                   AND ((status = 'pending' AND (expires_at > ? OR kind != 'legacy')) OR status IN ('held','executing','closing','finishing'))
@@ -2346,6 +2348,7 @@ class WorkflowStore(InputImageStore, WaitStore):
             "expiresAt": row["expires_at"],
             "heldAt": row["held_at"],
             "notifiedAt": row["notified_at"],
+            "notificationContextId": row["result_notification_context_id"],
         }
 
     @staticmethod
@@ -2458,7 +2461,7 @@ class WorkflowStore(InputImageStore, WaitStore):
             row = connection.execute(
                 """
                 SELECT gate_id, completed_node_id, next_node_id, status,
-                       expires_at, held_at, confirmed_at, notified_at, kind
+                       expires_at, held_at, confirmed_at, notified_at, kind, result_notification_context_id
                 FROM workflow_advance_gates
                 WHERE workflow_id = ? AND next_node_id = ?
                   AND status IN ('pending', 'held')
@@ -2557,9 +2560,9 @@ class WorkflowStore(InputImageStore, WaitStore):
         assert result is not None
         return result
 
-    def confirm_advance(self, workflow_id: str, gate_id: str) -> dict[str, Any]:
+    def confirm_advance(self, workflow_id: str, gate_id: str, notification_context_id: str | None = None) -> dict[str, Any]:
         if self.policy_wait(workflow_id, gate_id):
-            return self.claim_policy_wait(workflow_id, gate_id, "confirm")
+            return self.claim_policy_wait(workflow_id, gate_id, "confirm", notification_context_id=notification_context_id)
         now = utc_now()
         expired = False
         stale = False
@@ -2579,6 +2582,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                     "gateId": gate_id,
                     "status": "confirmed",
                     "confirmedAt": row["confirmed_at"],
+                    "notificationContextId": row["notification_context_id"],
                     "resumedFromHold": row["held_at"] is not None,
                 }
             if row["status"] not in {"pending", "held"}:
@@ -2625,6 +2629,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                 )
                 expired = True
             else:
+                self._bind_wait_notification(connection, workflow_id, gate_id, row["next_node_id"], notification_context_id)
                 connection.execute(
                     "UPDATE workflow_advance_gates SET status = 'confirmed', confirmed_at = ?, "
                     "updated_at = ? WHERE gate_id = ?",
@@ -2658,6 +2663,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                     "status": "confirmed",
                     "confirmedAt": now,
                     "resumedFromHold": was_held,
+                    "notificationContextId": notification_context_id,
                 }
         if stale:
             raise RuntimeError("任务状态已经变化，请刷新页面。")
@@ -3144,16 +3150,16 @@ class WorkflowStore(InputImageStore, WaitStore):
             workflow = connection.execute("SELECT status, termination_json, result_protocol_version FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if workflow["status"] in {"completed", "failed", "cancelled"}:
                 return
-            if workflow["result_protocol_version"] in (1, 2, 3, 4) and old["status"] in TERMINAL_NODE_STATUSES | {"waiting"}:
+            if workflow["result_protocol_version"] in (1, 2, 3, 4, 5) and old["status"] in TERMINAL_NODE_STATUSES | {"waiting"}:
                 return
-            if workflow["result_protocol_version"] in (1, 2, 3, 4) and status == "completed":
+            if workflow["result_protocol_version"] in (1, 2, 3, 4, 5) and status == "completed":
                 if old["job_id"] and snapshot.get("job_id") != old["job_id"]:
                     raise RuntimeError("步骤执行版本缺失或已变化。")
                 for key in ("thread_id", "turn_id"):
                     if old[key] and snapshot.get(key) and old[key] != snapshot[key]:
                         raise RuntimeError("步骤执行版本已变化。")
             outcome = None
-            if status == "completed" and workflow["result_protocol_version"] in (1, 2, 3, 4):
+            if status == "completed" and workflow["result_protocol_version"] in (1, 2, 3, 4, 5):
                 from workflow_outcomes import validate
                 try:
                     outcome = validate(snapshot.get("businessResult"), workflow["result_protocol_version"])
@@ -3165,7 +3171,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                     if outcome["outcome"] == "blocked":
                         status = "failed"
                         snapshot["error"] = outcome["reason"]
-            if outcome is not None and workflow["result_protocol_version"] == 4 and outcome["documents"] and not self.document_enabled(workflow_id, node_id):
+            if outcome is not None and workflow["result_protocol_version"] in (4, 5) and outcome["documents"] and not self.document_enabled(workflow_id, node_id):
                 raise ValueError("当前步骤不采集文档。")
             if outcome is not None and outcome["jiraComment"]["issueKey"].strip():
                 # 与正式结果同一事务保存展示信息；不从总结猜测，也不改变流程决定。
@@ -3188,11 +3194,11 @@ class WorkflowStore(InputImageStore, WaitStore):
                         (json.dumps(context, ensure_ascii=False), workflow_id),
                     )
             if outcome is not None and (workflow["result_protocol_version"] == 3 or
-                    (workflow["result_protocol_version"] == 4 and self.document_enabled(workflow_id, node_id))):
+                    (workflow["result_protocol_version"] in (4, 5) and self.document_enabled(workflow_id, node_id))):
                 from workflow_documents import save_many
                 if outcome['documents'] and not snapshot.get('documents'):
                     raise ValueError('步骤已交付文档，但缺少文档采集结果。')
-                if workflow["result_protocol_version"] == 4:
+                if workflow["result_protocol_version"] in (4, 5):
                     items = snapshot.get("documents", [])
                     if sorted((d["name"], d["primary"]) for d in outcome["documents"]) != sorted((d.get("name", ""), d.get("primary", False)) for d in items):
                         raise ValueError("文档采集结果与交付清单不一致。")
@@ -3340,6 +3346,7 @@ class WorkflowStore(InputImageStore, WaitStore):
             """,
             (gate_id, workflow_id, node_id, next_node["node_id"], expires_at, now, now),
         )
+        self._inherit_wait_notification(connection, workflow_id, node_id, gate_id)
         self._add_event_with_connection(
             connection,
             workflow_id,

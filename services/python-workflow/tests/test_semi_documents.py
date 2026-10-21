@@ -26,13 +26,15 @@ def snapshot(primary=True, content='# 初稿', key='plan'):
 
 
 class SemiDocumentsTests(unittest.IsolatedAsyncioTestCase):
+    version = 4
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = WorkflowStore(Path(self.temp.name) / 'state.db')
         seed_agents(self.store, {'local': {'capabilities': ['supervisor', 'executor'], 'allow_write': True}})
         spec = serial_workflow()
-        spec.update(advanceMode='semi_automatic', resultProtocolVersion=4, waitPolicy={'version': 2})
+        spec.update(advanceMode='semi_automatic', resultProtocolVersion=self.version, waitPolicy={'version': 2})
         self.store.create_workflow(spec)
 
     def complete_first(self, status='success'):
@@ -68,7 +70,7 @@ class SemiDocumentsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current[0]['error'], ERROR)
         self.assertEqual(WorkflowStore(self.store.path).get_workflow('serial-demo')['nodes'][0]['documents'], current)
 
-    def test_blocked_collects_documents_and_later_steps_cannot_collect(self):
+    def test_blocked_documents_and_capture_scope(self):
         self.complete_first('blocked')
         view = self.store.get_workflow('serial-demo')
         self.assertEqual(len(view['nodes'][0]['documents']), 2)
@@ -176,3 +178,111 @@ class SemiDocumentsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(job.document_results, [snapshot()])
             self.assertIsNone(job.document_result)
             self.assertTrue(collector.call_args.kwargs['semi'])
+
+
+class EveryStepDocumentsTests(SemiDocumentsTests):
+    version = 5
+
+    def test_blocked_documents_and_capture_scope(self):
+        self.complete_first('blocked')
+        view = self.store.get_workflow('serial-demo')
+        self.assertEqual(len(view['nodes'][0]['documents']), 2)
+        self.assertEqual(view['pendingAdvance']['kind'], 'blocked')
+        self.assertTrue(self.store.document_enabled('serial-demo', 'b'))
+
+    def test_every_step_and_final_confirmation(self):
+        self.complete_first()
+        for node_id in ('b', 'c'):
+            gate = self.store.get_workflow('serial-demo')['pendingAdvance']
+            self.store.confirm_advance('serial-demo', gate['gateId'])
+            prepared = self.store.prepare_node_dispatch('serial-demo', node_id)
+            self.assertEqual(prepared['resultProtocolVersion'], 5)
+            self.assertTrue(prepared['captureDocument'])
+            self.store.sync_node_job('serial-demo', node_id, _sidecar_job_snapshot({
+                'status': 'completed', 'job_id': node_id,
+                'thread_id': 'original-thread', 'turn_id': 'original-turn', 'cwd': '/work',
+                'businessResult': outcome([manifest(False, 'summary.md')]),
+                'documents': [snapshot(False, node_id, 'summary')]}))
+        view = self.store.get_workflow('serial-demo')
+        self.assertEqual([len(n['documents']) for n in view['nodes']], [2, 1, 1])
+        self.assertEqual(view['pendingAdvance']['completedNodeId'], 'c')
+        self.assertEqual(self.store.documents('serial-demo', document_id=view['nodes'][1]['documents'][0]['id'])['content'], 'b')
+        self.assertEqual(self.store.documents('serial-demo', document_id=view['nodes'][2]['documents'][0]['id'])['content'], 'c')
+
+    def test_primary_failure_never_uses_another_step(self):
+        self.complete_first()
+        failed = {'name': '正式方案', 'primary': True, 'sourceKey': snapshot()['sourceKey'], 'error': ERROR}
+        with self.store._connect() as db:
+            save_many(db, 'serial-demo', 'b', 'failed', [failed], utc_now())
+        doc = self.store.documents('serial-demo', 'b')[0]
+        self.assertFalse(doc['available'])
+        with self.store._connect() as db:
+            save_many(db, 'serial-demo', 'b', 'success', [snapshot(content='第二步正文')], utc_now())
+            save_many(db, 'serial-demo', 'b', 'failed-again', [failed], utc_now())
+        doc = self.store.documents('serial-demo', 'b')[0]
+        self.assertEqual(self.store.documents('serial-demo', document_id=doc['id'])['content'], '第二步正文')
+        self.assertEqual(doc['error'], ERROR)
+
+    def test_single_step_and_empty_manifest(self):
+        for has_documents in (False, True):
+            spec = serial_workflow()
+            spec.update(workflowId=str(uuid.uuid4()), advanceMode='semi_automatic', resultProtocolVersion=5, waitPolicy={'version': 2})
+            spec['nodes'] = spec['nodes'][:1]
+            wid = spec['workflowId']
+            self.store.create_workflow(spec)
+            self.assertTrue(self.store.prepare_node_dispatch(wid, 'a')['captureDocument'])
+            self.store.sync_node_job(wid, 'a', {'status': 'completed', 'job_id': wid,
+                'businessResult': outcome([manifest()] if has_documents else []),
+                'documents': [snapshot()] if has_documents else []})
+            self.assertEqual(len(self.store.get_workflow(wid)['nodes'][0]['documents']), int(has_documents))
+
+    def test_v5_requires_semi_automatic_and_uses_multi_document_contract(self):
+        spec = serial_workflow()
+        spec.update(workflowId='invalid-auto', resultProtocolVersion=5)
+        with self.assertRaises(ValueError):
+            self.store.create_workflow(spec)
+        self.assertEqual(validate(outcome([manifest(False)]), 5)['documents'], [manifest(False)])
+        self.assertIn('独立总结', instruction('w', 'b', True, 5))
+        self.assertNotIn('必须为空数组', instruction('w', 'b', True, 5))
+
+    async def test_last_step_discussion_updates_its_documents_only(self):
+        self.test_every_step_and_final_confirmation()
+        before = self.store.get_workflow('serial-demo')['nodes'][0]['documents']
+        reply = {'text': '已修改总结', 'summary': '末步新版总结', 'documents': [manifest(False, 'summary.md')]}
+        async with MockAppServer(structured_reply=json.dumps(reply)) as server:
+            seed_agents(self.store, {'local': {'url': server.url, 'cwd': '/work', 'capabilities': ['supervisor', 'executor'], 'allow_write': True}})
+            gateway = fixture_gateway(self.store, Orchestrator())
+            try:
+                self.store.accept_chat_message('serial-demo', str(uuid.uuid4()), '修改最后一步总结')
+                message = self.store.claim_next_chat_message('serial-demo')
+                with patch('workflow_documents.collect_many', AsyncMock(return_value=[snapshot(False, '末步修订正文', 'summary')])) as collector:
+                    await gateway._process_chat_message('serial-demo', message)
+                collector.assert_awaited_once()
+                view = self.store.get_workflow('serial-demo')
+                self.assertEqual(view['nodes'][0]['documents'], before)
+                doc = view['nodes'][2]['documents'][0]
+                self.assertEqual(self.store.documents('serial-demo', document_id=doc['id'])['content'], '末步修订正文')
+            finally:
+                await gateway.event_batcher.close()
+
+    async def test_executor_collects_v5_documents(self):
+        async with MockAppServer(structured_reply=json.dumps(outcome([manifest(False)]))) as server:
+            registry = seed_agents(self.store, {'local': {'url': server.url, 'cwd': '/work', 'capabilities': ['supervisor', 'executor']}})
+            orchestrator = Orchestrator()
+            orchestrator.agent_provider = registry.configs
+            with patch('workflow_documents.collect_many', AsyncMock(return_value=[snapshot(False)])) as collector:
+                job = await orchestrator.dispatch(agent_id='local', prompt=instruction('w', 'b', True, 5),
+                    output_schema=schema(5), timeout_sec=10, thread_id=None, cwd=None, write=False, model=None)
+                job.capture_document = True
+                job.result_protocol_version = 5
+                await job.completed.wait()
+            self.assertEqual(job.status, 'completed', job.error)
+            self.assertEqual(job.document_results, [snapshot(False)])
+            collector.assert_awaited_once()
+            self.assertTrue(collector.call_args.kwargs['semi'])
+
+    def test_no_task_keeps_delivered_documents(self):
+        self.complete_first('no_task')
+        view = self.store.get_workflow('serial-demo')
+        self.assertEqual(len(view['nodes'][0]['documents']), 2)
+        self.assertTrue(all(doc['available'] for doc in view['nodes'][0]['documents']))

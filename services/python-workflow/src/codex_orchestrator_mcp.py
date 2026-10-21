@@ -26,9 +26,10 @@ warnings.filterwarnings(
 
 from mcp.server.fastmcp import FastMCP
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from workflow_event_batcher import AsyncEventBatcher
+from workflow_waits import execution_wait_view
 from workflow_store import MAX_SUPERVISOR_TIMEOUT_SEC, WorkflowStore
 from workflow_runtime_client import InternalApiClient
 
@@ -42,6 +43,7 @@ FINAL_ANSWER_COMPLETION_GRACE_SEC = 5.0
 TURN_RECONCILIATION_FAILURE_LIMIT = 3
 INTERRUPT_TIMEOUT_SEC = 10.0
 LOGGER = logging.getLogger(__name__)
+CODEX_FAILURE_MESSAGE = "Codex 上游模型服务过载"
 FULL_ACCESS_PERMISSION_PROFILE = "full_access"
 PERMISSION_PROFILES = (
     "read_only",
@@ -354,6 +356,7 @@ class Job:
     document_results: list[dict[str, Any]] | None = field(default=None, repr=False)
     business_result: dict[str, Any] | None = field(default=None, repr=False)
     capture_document: bool = field(default=False, repr=False)
+    result_protocol_version: int | None = field(default=None, repr=False)
     input_images: list[dict[str, Any]] = field(default_factory=list, repr=False)
     input_image_paths: list[str] = field(default_factory=list, repr=False)
 
@@ -379,6 +382,14 @@ class Job:
         self.ws_close_code = code
         self.ws_close_reason = reason
 
+    def public_error(self) -> str | None:
+        if self.status == "failed" and self.error_kind in {
+            "turn_failed", "rpc_error", "rpc_timeout", "network_disconnect",
+            "job_timeout", "completion_unconfirmed",
+        } and self.error_stage not in {"configuration", "image/stage", "result/validate"}:
+            return CODEX_FAILURE_MESSAGE
+        return self.error
+
     def snapshot(self, *, include_prompt: bool = False) -> dict[str, Any]:
         result: dict[str, Any] = {
             "job_id": self.job_id,
@@ -394,7 +405,7 @@ class Job:
             "permission_profile": self.permission_profile,
             "model": self.model,
             "response": self.response,
-            "error": self.error,
+            "error": self.public_error(),
             "diff": self.diff,
             "events_seen": self.events_seen,
             "last_event_method": self.last_event_method,
@@ -1255,7 +1266,7 @@ class Orchestrator:
                         from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4, parse as parse_outcome
                         if job.status == "completed" and job.output_schema in (OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4):
                             try:
-                                value = parse_outcome(job.response or "", 1 if job.output_schema == SCHEMA_V1 else 4 if job.output_schema == SCHEMA_V4 else 3 if job.output_schema == SCHEMA_V3 else 2)
+                                value = parse_outcome(job.response or "", job.result_protocol_version or (1 if job.output_schema == SCHEMA_V1 else 4 if job.output_schema == SCHEMA_V4 else 3 if job.output_schema == SCHEMA_V3 else 2))
                                 job.business_result = value
                                 job.response = value["summary"]
                             except (ValueError, KeyError, TypeError) as error:
@@ -1336,7 +1347,13 @@ class Orchestrator:
                 "close_reason": error.reason,
                 "detail": error.detail,
             }
-        except (ConnectionError, OSError) as error:
+        except PermissionError as error:
+            job.status = "failed"
+            job.error = str(error)
+            job.error_kind = "configuration_error"
+            job.error_stage = stage
+            job.error_details = {"detail": str(error)}
+        except (ConnectionError, OSError, InvalidHandshake) as error:
             job.status = "failed"
             job.error = str(error)
             job.error_kind = "network_disconnect"
@@ -1359,6 +1376,11 @@ class Orchestrator:
             job.error_stage = stage
             job.error_details = {"detail": str(error)}
         finally:
+            if job.public_error() == CODEX_FAILURE_MESSAGE:
+                # 产品统一文案，不代表已经判定真实根因为过载。诊断保留原错误。
+                job.error_details = {**(job.error_details or {}), "original_error": job.error}
+                LOGGER.warning("Codex 调用失败 [%s/%s]: %s", job.error_kind, job.error_stage, job.error)
+                job.error = CODEX_FAILURE_MESSAGE
             job.client = None
             job.finished_at = utc_now()
             job.completed.set()
@@ -1895,10 +1917,10 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             "必要的阻断原因、未验证项和实际业务结论必须在正式结果中完整保留。\n"
         )
         document_options = {}
-        if node.get("captureDocument") and node.get("resultProtocolVersion") != 4:
+        if node.get("captureDocument") and node.get("resultProtocolVersion") not in (4, 5):
             node["prompt"] += DOCUMENT_INSTRUCTION
             document_options["output_schema"] = DOCUMENT_SCHEMA
-        if node.get("resultProtocolVersion") in (1, 2, 3, 4):
+        if node.get("resultProtocolVersion") in (1, 2, 3, 4, 5):
             from workflow_outcomes import schema, instruction
             node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"), node["resultProtocolVersion"], defer_blocked=bool(node.get("waitPolicy")))
             document_options["output_schema"] = schema(node["resultProtocolVersion"])
@@ -1917,6 +1939,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             input_images=store.node_input_images(workflow_id, node_id),
         )
         job.capture_document = bool(node.get("captureDocument"))
+        job.result_protocol_version = node.get("resultProtocolVersion")
     except Exception as error:
         store.sync_node_job(
             workflow_id,
@@ -1991,7 +2014,7 @@ def workflow_status(workflow_id: str) -> dict[str, Any]:
         "stateVersion": snapshot["stateVersion"],
         "progress": snapshot["progress"],
         "advanceMode": snapshot["advanceMode"],
-        "pendingAdvance": snapshot["pendingAdvance"],
+        "pendingAdvance": execution_wait_view(snapshot["pendingAdvance"]),
         "termination": snapshot.get("termination"),
         "currentSteps": snapshot["currentNodes"],
         "steps": [

@@ -13,6 +13,18 @@ final class DingTalkResultText {
   private static final Pattern OUTCOME_KEY = Pattern.compile("\\\"(?:outcome|summary)\\\"\\s*:");
   private static final String INVALID = "步骤结果暂时无法展示，请查看任务详情。";
 
+  static final String CODEX_FAILURE = "Codex 上游模型服务过载";
+
+  static boolean codexFailure(JsonNode snapshot) {
+    if (snapshot.path("termination").isObject()) return false;
+    if (CODEX_FAILURE.equals(snapshot.path("error").asText())) return true;
+    for (JsonNode node : snapshot.path("nodes")) {
+      if ("failed".equals(node.path("status").asText())
+          && CODEX_FAILURE.equals(node.path("error").asText())) return true;
+    }
+    return false;
+  }
+
   private DingTalkResultText() {}
 
   // null 表示普通文字；非 null 表示已识别的平台结果（含损坏的结果）。

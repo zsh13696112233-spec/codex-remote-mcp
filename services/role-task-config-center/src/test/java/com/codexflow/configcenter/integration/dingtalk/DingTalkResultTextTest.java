@@ -22,6 +22,23 @@ class DingTalkResultTextTest {
   }
 
   @Test
+  void recognizesOnlyNormalizedCodexFailuresAndKeepsBusinessTerminationSeparate() {
+    var snapshot = json.createObjectNode().put("error", "平台配置错误");
+    assertThat(DingTalkResultText.codexFailure(snapshot)).isFalse();
+    snapshot.put("error", DingTalkResultText.CODEX_FAILURE);
+    assertThat(DingTalkResultText.codexFailure(snapshot)).isTrue();
+    snapshot.remove("error");
+    snapshot
+        .putArray("nodes")
+        .addObject()
+        .put("status", "failed")
+        .put("error", DingTalkResultText.CODEX_FAILURE);
+    assertThat(DingTalkResultText.codexFailure(snapshot)).isTrue();
+    snapshot.putObject("termination").put("outcome", "blocked");
+    assertThat(DingTalkResultText.codexFailure(snapshot)).isFalse();
+  }
+
+  @Test
   void rendersWholeFencedAndEscapedResultsButPreservesBusinessJson() {
     String raw = result();
     for (String text :
@@ -109,7 +126,7 @@ class DingTalkResultTextTest {
     snapshot.putObject("pendingAdvance").put("completedNodeId", "a").put("gateId", "gate");
     snapshot.putArray("nodes").addObject().put("id", "a").put("response", result());
     assertThat(DingTalkWaitingCard.completion(snapshot))
-        .contains("已核对工单\n请确认方案", "继续执行")
+        .contains("已核对工单\n请确认方案")
         .doesNotContain("jiraDeveloper");
     assertThat(snapshot.path("pendingAdvance").path("gateId").asText()).isEqualTo("gate");
     assertThat(snapshot.path("nodes").get(0).path("response").asText()).isEqualTo(result());

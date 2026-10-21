@@ -12,6 +12,18 @@ import tools.jackson.databind.node.ObjectNode;
 class DingTalkTransportParsingTest {
 
   @Test
+  void senderNameSurvivesRoutingAndReferenceNormalization() {
+    var message =
+        transport.toMessage(
+            """
+        {"msgId":"question", "conversationType":"2", "senderStaffId":"asker", "senderNick":"夜雨",
+         "msgtype":"text", "text":{"content":"原问题"}}
+        """);
+    assertThat(message.senderDisplayName()).isEqualTo("夜雨");
+    assertThat(message.withContent("问题").withReference("card").senderDisplayName()).isEqualTo("夜雨");
+  }
+
+  @Test
   void monitorReplyHasOneButtonAndLeavesMentionToSeparateText() throws Exception {
     var payload =
         objectMapper

@@ -72,6 +72,30 @@ final class DingTalkWaitingCard {
             default -> "本轮等待已结束，请查看最新状态。";
           };
     }
+    boolean actionFirst = payload.path("actionFirst").asBoolean();
+    String text = payload.path("text").asText();
+    if (actionFirst) {
+      if ("held".equals(state)) {
+        rule =
+            switch (kind) {
+              case "blocked" -> "当前步骤无法继续。请回复此卡片讨论或补充信息，处理后点击「重新执行」。当前仍在等待，不代表开发完成或审核通过。";
+              case "finish" -> "请查看最终结果，如需调整可回复此卡片，确认后点击「确认结束」。";
+              case "advance" -> "请查看本步骤结果及交付文档，如需调整可回复此卡片，确认后点击「进入下一步」。";
+              default -> rule;
+            };
+      }
+      String reason = payload.path("blockedReason").asText();
+      String focus = reason.isBlank() ? "" : "**阻碍原因：**" + reason + "\n\n";
+      // 原因与回答随卡片冻结，操作指引按当前状态生成，不写入不可变正文。
+      text =
+          focus
+              + "**当前操作：**"
+              + rule
+              + "\n\n**"
+              + (payload.path("answer").asBoolean() ? "本次回答" : "本步执行详情")
+              + "**\n\n"
+              + text;
+    }
     Map<String, Object> values = new LinkedHashMap<>();
     values.put("confirmLabel", label);
     values.put("confirmAction", "blocked".equals(kind) ? "advance_retry" : "advance_confirm");
@@ -94,9 +118,8 @@ final class DingTalkWaitingCard {
             + "**\n\n"
             + payload.path("steps").asText()
             + "\n\n"
-            + payload.path("text").asText()
-            + "\n\n"
-            + rule);
+            + text
+            + (actionFirst ? "" : "\n\n" + rule));
     values.put("workflowId", workflowId);
     values.put("gateId", gateId);
     values.put("confirmStatus", List.of("closed", "busy").contains(state) ? "disabled" : "normal");
@@ -132,16 +155,64 @@ final class DingTalkWaitingCard {
       }
     }
     values.put("statusText", status);
-    values.put("summary", payload.path("text").asText());
+    values.put("summary", text);
     values.put("steps", payload.path("steps").asText());
-    values.put("notice", rule);
+    values.put("notice", actionFirst ? "" : rule);
     values.put("documents", documents.toString());
     values.put("hasDocuments", documents.length() > 0 ? "true" : "false");
     if (!payload.path("documentTemplateId").asText().isBlank())
       values.put("_templateId", payload.path("documentTemplateId").asText());
     else if (documents.length() > 0)
       values.put("markdown", values.get("markdown") + "\n\n**交付文档**\n\n" + documents);
+    String context = mentionContext(payload);
+    if (!context.isEmpty()) {
+      values.put("markdown", context + "\n\n" + values.get("markdown"));
+      values.put("statusText", context + "\n\n" + values.get("statusText"));
+      if (payload.path("mentionGroup").asBoolean()) {
+        values.put("_cardAtUserId", payload.path("atUserId").asText());
+        values.put("_cardAtDisplayName", payload.path("atDisplayName").asText());
+      }
+    }
+    String monitorLink = DingTalkMonitorLink.markdown(monitorUrl, workflowId);
+    values.put("markdown", values.get("markdown") + "\n\n" + monitorLink);
+    values.put("notice", values.get("notice") + "\n\n" + monitorLink);
     return values;
+  }
+
+  private static String mentionContext(JsonNode payload) {
+    if (!payload.path("cardMention").asBoolean() || payload.path("atUserId").asText().isBlank())
+      return "";
+    String name = payload.path("atDisplayName").asText("提问人");
+    String person =
+        payload.path("mentionGroup").asBoolean()
+            ? "<a atId=\""
+                + org.springframework.web.util.HtmlUtils.htmlEscape(
+                    payload.path("atUserId").asText())
+                + "\">"
+                + org.springframework.web.util.HtmlUtils.htmlEscape(name)
+                + "</a>"
+            : plainMarkdown(name);
+    if (payload.path("answer").asBoolean()) {
+      String question = payload.path("question").asText();
+      return "**回复 "
+          + person
+          + "**"
+          + (question.isBlank() ? "" : "\n\n**你的问题：**\n" + plainMarkdown(question))
+          + (payload.path("questionHasImages").asBoolean() ? "\n\n（附图片）" : "");
+    }
+    return person
+        + ("advance_retry".equals(payload.path("resultAction").asText())
+            ? "，本步骤重新执行已有结果。"
+            : "，你确认执行的步骤已有结果。");
+  }
+
+  private static String plainMarkdown(String text) {
+    String escaped = text;
+    for (String token :
+        List.of("\\", "`", "*", "_", "{", "}", "[", "]", "(", ")", "#", "+", "-", ".", "!", "|")) {
+      escaped = escaped.replace(token, "\\" + token);
+    }
+    return org.springframework.web.util.HtmlUtils.htmlEscape(escaped);
   }
 
   private static String deadline(JsonNode gate) {
@@ -176,40 +247,24 @@ final class DingTalkWaitingCard {
 
   static String completion(JsonNode snapshot) {
     String completed = snapshot.path("pendingAdvance").path("completedNodeId").asText();
-    for (JsonNode node : snapshot.path("nodes"))
+    for (JsonNode node : snapshot.path("nodes")) {
       if (!completed.isBlank() && completed.equals(node.path("id").asText())) {
-        String subject = "本步骤结果";
-        if ("semi_automatic".equals(snapshot.path("advanceMode").asText())
-            && node.path("dependsOn").isEmpty()
-            && !snapshot.path("pendingAdvance").path("nextNodeId").asText().isBlank()) {
-          for (JsonNode document : node.path("documents")) {
-            if (document.path("removed").asBoolean()) continue;
-            if (document.path("primary").asBoolean(!document.has("primary"))
-                && document.path("available").asBoolean(true)
-                && !document.path("id").asText().isBlank()
-                && !document.path("error").isTextual()) subject = "计划文档";
-            break;
-          }
-        }
-        String kind = snapshot.path("pendingAdvance").path("kind").asText("legacy");
-        String notice =
-            switch (kind) {
-              case "blocked" -> "当前步骤无法继续。请回复此卡片讨论或补充信息，再点击「重新执行」处理本步骤。";
-              case "finish" -> "请查看最终结果，如需调整可回复此卡片，确认后点击「确认结束」。";
-              case "advance" -> "请查看" + subject + "，如需调整可回复此卡片，确认后点击「进入下一步」。";
-              default -> "请查看" + subject + "，如需调整可回复此卡片，确认后点击「继续执行」。";
-            };
         String response = DingTalkResultText.display(node.path("response").asText());
-        if ("blocked".equals(kind)) {
-          // 网关将正式阻断结果的 summary 和 reason 分别保存为 response 和 error。
-          String reason = DingTalkExecutionNotice.safe(node.path("error").asText("").strip());
-          if (!reason.isBlank() && !response.contains(reason))
-            response = (response.isBlank() ? "" : response + "\n\n") + "阻碍原因：" + reason;
-        }
-        return response.isBlank()
-            ? ("blocked".equals(kind) ? "" : "步骤已完成。") + notice
-            : response + "\n\n" + notice;
+        if (!response.isBlank()) return response;
       }
-    return "步骤已完成。请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。";
+    }
+    return "blocked".equals(snapshot.path("pendingAdvance").path("kind").asText())
+        ? "当前步骤尚未完成。"
+        : "步骤已完成。";
+  }
+
+  static String blockedReason(JsonNode snapshot) {
+    JsonNode gate = snapshot.path("pendingAdvance");
+    if (!"blocked".equals(gate.path("kind").asText())) return "";
+    for (JsonNode node : snapshot.path("nodes")) {
+      if (node.path("id").asText().equals(gate.path("completedNodeId").asText()))
+        return DingTalkExecutionNotice.safe(node.path("error").asText("").strip());
+    }
+    return "";
   }
 }

@@ -26,6 +26,7 @@ from codex_orchestrator_mcp import (
 )
 from workflow_event_batcher import AsyncEventBatcher
 from workflow_database import database_call as _database_call
+from workflow_waits import execution_wait_view
 from workflow_store import (
     REVISION_INSTRUCTION_LIMIT,
     WorkflowStore,
@@ -830,13 +831,13 @@ class WorkflowGateway:
                     await self._pause_supervisor(workflow_id)
             return observed
 
-    async def confirm_advance(self, workflow_id: str, gate_id: str) -> dict[str, Any]:
+    async def confirm_advance(self, workflow_id: str, gate_id: str, notification_context_id: str | None = None) -> dict[str, Any]:
         if not gate_id or len(gate_id) > 128:
             raise ValueError("gateId 必须是 1 到 128 个字符。")
         lock = self._control_locks.setdefault(workflow_id, asyncio.Lock())
         async with lock:
             result = await _database_call(
-                self.store.confirm_advance, workflow_id, gate_id
+                self.store.confirm_advance, workflow_id, gate_id, notification_context_id
             )
             if result.get("resumedFromHold") and result.get("status") != "finishing":
                 await self._resume_supervisor_if_needed(workflow_id)
@@ -1157,7 +1158,7 @@ class WorkflowGateway:
             "stateVersion": snapshot["stateVersion"],
             "pendingControl": snapshot.get("pendingControl"),
             "advanceMode": snapshot.get("advanceMode"),
-            "pendingAdvance": snapshot.get("pendingAdvance"),
+            "pendingAdvance": execution_wait_view(snapshot.get("pendingAdvance")),
             "steps": steps,
         }
         return (
@@ -1263,6 +1264,24 @@ def _error_response(error: Exception, status_code: int = 400) -> JSONResponse:
     )
 
 
+async def _notification_context(request: Request) -> str | None:
+    raw = await request.body()
+    payload = json.loads(raw) if raw else {}
+    if not isinstance(payload, dict):
+        raise ValueError("步骤操作参数必须为对象。")
+    value = payload.get("notificationContextId")
+    if value is not None:
+        if not isinstance(value, str):
+            raise ValueError("通知关联标识无效。")
+        try:
+            parsed = uuid.UUID(value)
+        except ValueError as error:
+            raise ValueError("通知关联标识无效。") from error
+        if str(parsed) != value:
+            raise ValueError("通知关联标识无效。")
+    return value
+
+
 async def act_workflow_wait(request: Request) -> Response:
     gateway = request.app.state.gateway
     workflow_id, gate_id = request.path_params["workflow_id"], request.path_params["gate_id"]
@@ -1273,9 +1292,11 @@ async def act_workflow_wait(request: Request) -> Response:
             return JSONResponse(await gateway.cancel(workflow_id, gate_id))
         if request.path_params["action"] != "retry":
             raise ValueError("等待操作无效。")
+        context_id = await _notification_context(request)
         lock = gateway._control_locks.setdefault(workflow_id, asyncio.Lock())
         async with lock:
-            result = await _database_call(gateway.store.claim_policy_wait, workflow_id, gate_id, "retry")
+            result = await _database_call(gateway.store.claim_policy_wait, workflow_id, gate_id, "retry",
+                                          notification_context_id=context_id)
         return JSONResponse(result)
     except (ValueError, TypeError) as error:
         return _error_response(error)
@@ -1435,7 +1456,7 @@ async def confirm_workflow_advance(request: Request) -> Response:
     gateway: WorkflowGateway = request.app.state.gateway
     try:
         result = await gateway.confirm_advance(
-            request.path_params["workflow_id"], request.path_params["gate_id"]
+            request.path_params["workflow_id"], request.path_params["gate_id"], await _notification_context(request)
         )
         return JSONResponse(result)
     except LookupError as error:
@@ -1735,6 +1756,7 @@ def _sidecar_workflow_view(snapshot: dict[str, Any]) -> dict[str, Any]:
         "nodes",
     }
     value = {key: snapshot[key] for key in keys if key in snapshot}
+    value["pendingAdvance"] = execution_wait_view(snapshot.get("pendingAdvance"))
     value["nodes"] = [
         _sidecar_node_view(node) for node in snapshot.get("nodes", [])
     ]
@@ -1806,7 +1828,7 @@ def _sidecar_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             if "documents" in value:
                 items = value["documents"]
                 version = 4 if isinstance(items, list) and any(isinstance(item, dict) and "primary" in item for item in items) else 3
-        # 空文档清单的 v3/v4 结构相同；存储层仍以运行冻结版本校验。
+        # v4/v5 字段相同，空文档清单的 v3/v4/v5 结构相同；存储层仍以运行冻结版本校验。
         result["businessResult"] = validate(value, version)
     return result
 

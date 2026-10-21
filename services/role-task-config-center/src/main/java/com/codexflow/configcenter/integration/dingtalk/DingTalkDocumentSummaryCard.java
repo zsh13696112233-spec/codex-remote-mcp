@@ -59,7 +59,10 @@ final class DingTalkDocumentSummaryCard {
     data.put("documents", documents.toString());
     data.put("hasDocuments", "true");
     data.put("steps", "");
-    data.put("notice", "文档为本次运行交付时保存的正文；同一文档仅列出最后交付版本。");
+    data.put(
+        "notice",
+        "文档为本次运行交付时保存的正文；同一文档仅列出最后交付版本。\n\n"
+            + DingTalkMonitorLink.markdown(monitorUrl, workflowId));
     data.put("showConfirm", "false");
     data.put("showStop", "false");
     data.put("workflowId", workflowId);

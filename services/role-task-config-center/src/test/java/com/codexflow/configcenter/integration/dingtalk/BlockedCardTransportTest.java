@@ -41,6 +41,26 @@ class BlockedCardTransportTest {
   }
 
   @Test
+  void waitingCardIncludesMentionMetadataOnlyForGroupDelivery() {
+    var data =
+        Map.<String, Object>of(
+            "_cardAtUserId",
+            "asker",
+            "_cardAtDisplayName",
+            "夜雨",
+            "markdown",
+            "回复 <a atId=\"asker\">夜雨</a>");
+    var body = transport().waitingCardBody("card", "GROUP", "group", "asker", data);
+    assertThat(body.path("cardAtUserIds").get(0).asText()).isEqualTo("asker");
+    assertThat(body.path("imGroupOpenDeliverModel").path("atUserIds").path("asker").asText())
+        .isEqualTo("夜雨");
+    assertThat(body.path("cardData").path("cardParamMap").has("_cardAtUserId")).isFalse();
+    var single = transport().waitingCardBody("card", "PERSON", "asker", "asker", data);
+    assertThat(single.has("cardAtUserIds")).isFalse();
+    assertThat(single.has("imGroupOpenDeliverModel")).isFalse();
+  }
+
+  @Test
   void blockedCardContainsPlatformMentionAndMatchingRecipient() {
     var body =
         transport()

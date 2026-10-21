@@ -24,6 +24,12 @@ class DingTalkInboundMessageEntity {
   @Column(name = "sender_user_id", nullable = false, length = 256)
   String senderUserId;
 
+  @Column(name = "question_text", columnDefinition = "LONGTEXT")
+  String questionText;
+
+  @Column(name = "sender_display_name", length = 160)
+  String senderDisplayName;
+
   @Column(name = "conversation_id", length = 256)
   String conversationId;
 

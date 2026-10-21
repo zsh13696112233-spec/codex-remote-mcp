@@ -70,8 +70,9 @@ def validate_descriptors(documents: Any) -> None:
 
 def enabled(connection: sqlite3.Connection, workflow_id: str, node_id: str) -> bool:
     return connection.execute("""SELECT 1 FROM workflow_nodes n JOIN workflows w USING(workflow_id)
-        WHERE n.workflow_id=? AND n.node_id=? AND n.position=0 AND w.advance_mode='semi_automatic'
-        AND EXISTS (SELECT 1 FROM workflow_nodes next WHERE next.workflow_id=n.workflow_id AND next.position=1)""",
+        WHERE n.workflow_id=? AND n.node_id=? AND w.advance_mode='semi_automatic'
+        AND (w.result_protocol_version=5 OR (n.position=0
+        AND EXISTS (SELECT 1 FROM workflow_nodes next WHERE next.workflow_id=n.workflow_id AND next.position=1)))""",
         (workflow_id, node_id)).fetchone() is not None
 
 
@@ -266,12 +267,12 @@ def save_many(connection: sqlite3.Connection, workflow_id: str, node_id: str, so
               items: list[dict[str, Any]], now: str) -> None:
     node = connection.execute("""SELECT n.agent_id,w.result_protocol_version FROM workflow_nodes n JOIN workflows w USING(workflow_id)
         WHERE n.workflow_id=? AND n.node_id=? AND ((w.advance_mode='automatic' AND w.result_protocol_version=3) OR
-        (w.advance_mode='semi_automatic' AND w.result_protocol_version=4 AND n.position=0
-         AND EXISTS (SELECT 1 FROM workflow_nodes next WHERE next.workflow_id=n.workflow_id AND next.position=1)))""",
+        (w.advance_mode='semi_automatic' AND (w.result_protocol_version=5 OR (w.result_protocol_version=4 AND n.position=0
+         AND EXISTS (SELECT 1 FROM workflow_nodes next WHERE next.workflow_id=n.workflow_id AND next.position=1)))))""",
         (workflow_id, node_id)).fetchone()
     if node is None:
         raise ValueError('当前步骤不支持保存文档清单。')
-    semi = node["result_protocol_version"] == 4
+    semi = node["result_protocol_version"] in (4, 5)
     validate_many(items, semi=semi)
     if connection.execute('SELECT 1 FROM workflow_document_batches WHERE workflow_id=? AND node_id=? AND source_id=?',
                           (workflow_id, node_id, source_id)).fetchone():
@@ -280,8 +281,9 @@ def save_many(connection: sqlite3.Connection, workflow_id: str, node_id: str, so
         key = '@main' if semi and item['primary'] else hashlib.sha256((node['agent_id'] + '/' + item['sourceKey']).encode()).hexdigest()
         document_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f'{workflow_id}/{node_id}/{key}'))
         previous = connection.execute("""SELECT content,format,revision FROM workflow_documents
-            WHERE workflow_id=? AND source_key=? AND content IS NOT NULL ORDER BY updated_at DESC,rowid DESC LIMIT 1""",
-            (workflow_id, key)).fetchone()
+            WHERE workflow_id=? AND source_key=? AND (? IS NULL OR node_id=?)
+            AND content IS NOT NULL ORDER BY updated_at DESC,rowid DESC LIMIT 1""",
+            (workflow_id, key, node_id if semi else None, node_id if semi else None)).fetchone()
         content = item.get('content', previous['content'] if previous else None)
         fmt = item.get('format', previous['format'] if previous else None)
         checksum = hashlib.sha256(content.encode()).hexdigest() if content is not None else None

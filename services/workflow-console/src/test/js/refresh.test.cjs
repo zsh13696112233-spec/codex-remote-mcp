@@ -71,3 +71,24 @@ test('transient failures keep automatic retry and recover without erasing loaded
   assert.equal(run('state.refreshRetrying'), true);
   assert.equal(timers.size, 1);
 });
+
+test('Codex failure is visible for supervisor and step failures without overriding business reasons', () => {
+  const {elements, run} = app();
+  run('renderDuration = renderSteps = renderAdvanceCountdown = renderComposer = () => {};');
+  run('render({status: "failed", error: "Codex 上游模型服务过载", nodes: [{status:"skipped"}]})');
+  assert.equal(elements.get('#current').textContent, 'Codex 上游模型服务过载');
+  run('render({status: "failed", nodes: [{status:"failed", error:"Codex 上游模型服务过载"}]})');
+  assert.equal(elements.get('#current').textContent, 'Codex 上游模型服务过载');
+  run('render({status: "failed", termination:{outcome:"blocked"}, response:"缺少业务数据", nodes:[]})');
+  assert.equal(elements.get('#current').textContent, '缺少业务数据');
+});
+
+test('Codex lifecycle failures show the same message on event replay', () => {
+  const {run} = app();
+  run('renderMessages = () => {};');
+  for (const type of ['node.failed', 'workflow.failed']) {
+    run(`consume({type:${JSON.stringify(type)},sequence:${type === 'node.failed' ? 1 : 2},payload:{error:"Codex 上游模型服务过载"}})`);
+  }
+  assert.equal(run('state.messages.length'), 2);
+  assert.equal(run('state.messages.every(message => message.text.includes("Codex 上游模型服务过载"))'), true);
+});

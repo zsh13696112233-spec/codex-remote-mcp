@@ -41,6 +41,76 @@ class WaitTests(unittest.TestCase):
         with self.store._connect() as connection:
             connection.execute("UPDATE workflow_advance_gates SET expires_at='2000-01-01T00:00:00+00:00' WHERE gate_id=?", (gate["gateId"],))
 
+    def test_notification_context_is_excluded_from_execution_views(self):
+        from workflow_waits import execution_wait_view
+        from workflow_gateway import _sidecar_workflow_view
+        gate = {"gateId": "gate", "notificationContextId": str(uuid.uuid4()), "state": "held"}
+        self.assertEqual(execution_wait_view(gate), {"gateId": "gate", "state": "held"})
+        self.assertIsNone(execution_wait_view(None))
+        self.assertNotIn("notificationContextId", _sidecar_workflow_view({"pendingAdvance": gate})["pendingAdvance"])
+        self.assertIn("notificationContextId", gate)
+
+    def test_concurrent_clicks_keep_one_winning_context(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.start(manual=True)
+        gate = self.sync(result("success"))
+        contexts = [str(uuid.uuid4()), str(uuid.uuid4())]
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            replies = list(executor.map(lambda context: self.store.confirm_advance("serial-demo", gate["gateId"], context), contexts))
+        self.assertEqual(replies[0]["notificationContextId"], replies[1]["notificationContextId"])
+        self.assertEqual(sum(bool(reply.get("duplicate")) for reply in replies), 1)
+
+    def test_existing_database_adds_nullable_notification_columns(self):
+        self.start(manual=True)
+        gate = self.sync(result("success"))
+        with self.store._connect() as connection:
+            connection.execute("ALTER TABLE workflow_nodes DROP COLUMN notification_context_id")
+            connection.execute("ALTER TABLE workflow_advance_gates DROP COLUMN notification_context_id")
+            connection.execute("ALTER TABLE workflow_advance_gates DROP COLUMN result_notification_context_id")
+        self.store = WorkflowStore(Path(self.temp.name) / "state.db")
+        restored = self.store.get_workflow("serial-demo")["pendingAdvance"]
+        self.assertEqual(restored["gateId"], gate["gateId"])
+        self.assertIsNone(restored["notificationContextId"])
+        self.store.confirm_advance("serial-demo", gate["gateId"])
+
+    def test_notification_context_tracks_winning_confirm_and_survives_restart(self):
+        self.start(manual=True)
+        gate = self.sync(result("success"))
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        self.assertEqual(self.store.confirm_advance("serial-demo", gate["gateId"], first)["notificationContextId"], first)
+        self.assertEqual(self.store.confirm_advance("serial-demo", gate["gateId"], second)["notificationContextId"], first)
+        self.store = WorkflowStore(Path(self.temp.name) / "state.db")
+        self.store.prepare_node_dispatch("serial-demo", "b")
+        self.store.attach_node_job("serial-demo", "b", {"job_id": "job-b", "thread_id": "thread-b", "status": "running"})
+        self.store.sync_node_job("serial-demo", "b", {"job_id": "job-b", "thread_id": "thread-b", "status": "completed", "businessResult": result("success")})
+        next_gate = self.store.get_workflow("serial-demo")["pendingAdvance"]
+        self.assertEqual(next_gate["notificationContextId"], first)
+        self.assertNotEqual(next_gate["gateId"], gate["gateId"])
+
+    def test_web_confirm_cannot_be_claimed_by_late_dingtalk_click(self):
+        self.start(manual=True)
+        gate = self.sync(result("success"))
+        self.store.confirm_advance("serial-demo", gate["gateId"])
+        duplicate = self.store.confirm_advance("serial-demo", gate["gateId"], str(uuid.uuid4()))
+        self.assertTrue(duplicate["duplicate"])
+        self.assertIsNone(duplicate["notificationContextId"])
+
+    def test_retry_context_changes_only_for_next_real_execution(self):
+        self.start(manual=True)
+        gate = self.sync(result("blocked"))
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        self.store.claim_policy_wait("serial-demo", gate["gateId"], "retry", notification_context_id=first)
+        duplicate = self.store.claim_policy_wait("serial-demo", gate["gateId"], "retry", notification_context_id=second)
+        self.assertEqual(duplicate["notificationContextId"], first)
+        self.store.prepare_wait_execution("serial-demo", gate["gateId"])
+        self.store.attach_node_job("serial-demo", "a", {"job_id": "job-a", "thread_id": "thread-a", "status": "running"})
+        new_gate = self.sync(result("blocked"))
+        self.assertEqual(new_gate["notificationContextId"], first)
+        self.store.claim_policy_wait("serial-demo", new_gate["gateId"], "retry", notification_context_id=second)
+        self.store.prepare_wait_execution("serial-demo", new_gate["gateId"])
+        self.store.attach_node_job("serial-demo", "a", {"job_id": "job-a", "thread_id": "thread-a", "status": "running"})
+        self.assertEqual(self.sync(result("success"))["notificationContextId"], second)
+
     def test_success_uses_central_timer_and_never_dispatches_early(self):
         self.start()
         gate = self.sync(result("success"))

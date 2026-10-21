@@ -910,6 +910,8 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(final.error_stage, "turn/completed")
                 self.assertEqual(final.error_details["turn_status"], "failed")
                 self.assertEqual(final.error_details["turn_error"], remote_error)
+                self.assertEqual(final.error_details["original_error"], "remote turn failed")
+                self.assertEqual(final.error, "Codex 上游模型服务过载")
 
     async def test_total_timeout_attempts_interrupt_without_losing_primary_error(self) -> None:
         async with MockAppServer(
@@ -1024,3 +1026,26 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CodexFailureDisplayTests(unittest.TestCase):
+    def test_call_failures_are_normalized_but_platform_errors_are_not(self):
+        from codex_orchestrator_mcp import Job, CODEX_FAILURE_MESSAGE
+        job = Job(job_id='test', agent_id='local', prompt='', requested_thread_id=None,
+                  cwd='/work', write=False, permission_profile=None, model=None, timeout_sec=10)
+        job.status = 'failed'
+        job.error = 'original diagnostic'
+        job.error_stage = 'turn/completed'
+        for kind in ('turn_failed', 'rpc_error', 'rpc_timeout', 'network_disconnect', 'job_timeout', 'completion_unconfirmed'):
+            job.error_kind = kind
+            self.assertEqual(job.snapshot()['error'], CODEX_FAILURE_MESSAGE)
+            self.assertEqual(job.error, 'original diagnostic')
+        for kind in ('configuration_error', 'internal_error', 'invalid_business_result', 'cancelled'):
+            job.error_kind = kind
+            self.assertEqual(job.snapshot()['error'], 'original diagnostic')
+        job.error_kind = 'network_disconnect'
+        job.error_stage = 'configuration'
+        self.assertEqual(job.snapshot()['error'], 'original diagnostic')
+        job.status = 'completed'
+        job.error_stage = 'turn/completed'
+        self.assertEqual(job.snapshot()['error'], 'original diagnostic')

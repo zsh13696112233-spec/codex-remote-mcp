@@ -308,7 +308,102 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
   }
 
   @Test
-  void answerMentionFollowsSuccessfulCardAndSurvivesRecoveryWithoutDuplicates() {
+  void newAnswersFreezeQuestionAndMentionInsideCardWithoutSeparateReminder() {
+    String client = "inside-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("inside-start")).workflowId();
+    var snapshot = objectMapper.createObjectNode();
+    snapshot.putObject("pendingAdvance").put("gateId", "inside-gate").put("state", "held");
+    for (int i = 0; i < 3; i++) {
+      var question =
+          new DingTalkModels.Message(
+              "inside-question-" + i,
+              "question-group",
+              i == 2 ? "1" : "2",
+              "asker-" + i,
+              "问".repeat(501),
+              true,
+              false,
+              null,
+              "群",
+              List.of(),
+              null,
+              null,
+              List.of(),
+              false,
+              "夜雨");
+      var inbound = store.registerInbound(client, store.binding(workflow).orElseThrow(), question);
+      store.recordInputGate(question.messageId(), "inside-gate");
+      if (i == 1) store.saveMessageImages(question.messageId(), List.of("image-id"), false);
+      store.completeReply(workflow, inbound.workflowMessageId(), i + 1, "答案", null, snapshot);
+      String key = "assistant:" + inbound.workflowMessageId();
+      var payload =
+          objectMapper.readTree(
+              jdbc.queryForObject(
+                  "select payload_json from codex_sop_dingtalk_outbox where dedup_key=?",
+                  String.class,
+                  key));
+      assertThat(payload.path("atUserId").asText()).isEqualTo("asker-" + i);
+      assertThat(payload.path("atDisplayName").asText()).isEqualTo("夜雨");
+      assertThat(payload.path("question").asText())
+          .isEqualTo("问".repeat(500) + "\n（问题较长，已截断，请查看原消息）");
+      assertThat(payload.path("questionHasImages").asBoolean()).isEqualTo(i == 1);
+      assertThat(payload.path("mentionGroup").asBoolean()).isEqualTo(i != 2);
+      assertThat(payload.path("cardMention").asBoolean()).isTrue();
+      assertThat(payload.has("answerMention")).isFalse();
+      String card =
+          jdbc.queryForObject(
+              "select id from codex_sop_dingtalk_outbox where dedup_key=?", String.class, key);
+      store.markOutboxSent(card, "carrier");
+      store.markOutboxSent(card, "carrier");
+      assertThat(
+              jdbc.queryForObject(
+                  "select count(*) from codex_sop_dingtalk_outbox where dedup_key=?",
+                  Integer.class,
+                  key + ":mention"))
+          .isZero();
+    }
+  }
+
+  @Test
+  void resultCardUsesAcceptedContextNotLastClickAndKeepsOriginalConversation() {
+    String client = "action-" + UUID.randomUUID();
+    createTask(client);
+    String workflow = store.reserveStart(client, message("action-start")).workflowId();
+    String first = store.registerActionContext(workflow, "old-gate", "advance_retry", "first");
+    assertThat(store.registerActionContext(workflow, "old-gate", "advance_retry", "first"))
+        .isEqualTo(first);
+    String second = store.registerActionContext(workflow, "old-gate", "advance_retry", "second");
+    assertThat(second).isNotEqualTo(first);
+    var snapshot = objectMapper.createObjectNode();
+    snapshot
+        .putObject("pendingAdvance")
+        .put("gateId", "new-gate")
+        .put("state", "held")
+        .put("kind", "blocked")
+        .put("notificationContextId", first);
+    store.recordWaitingCard(workflow, 1, snapshot, true);
+    store.recordWaitingCard(workflow, 1, snapshot, true);
+    var rows =
+        jdbc.queryForList(
+            "select payload_json from codex_sop_dingtalk_outbox where workflow_id=? and message_kind='waiting_card'",
+            String.class,
+            workflow);
+    assertThat(rows).hasSize(1);
+    var payload = objectMapper.readTree(rows.get(0));
+    assertThat(payload.path("atUserId").asText()).isEqualTo("first");
+    assertThat(payload.path("resultAction").asText()).isEqualTo("advance_retry");
+    assertThat(payload.path("cardMention").asBoolean()).isTrue();
+    assertThat(
+            jdbc.queryForObject(
+                "select conversation_id from codex_sop_dingtalk_outbox where workflow_id=? and message_kind='waiting_card'",
+                String.class,
+                workflow))
+        .isEqualTo(store.binding(workflow).orElseThrow().conversationId());
+  }
+
+  @Test
+  void legacyAnswerMentionSurvivesRecoveryWithoutDuplicates() {
     String client = "answer-mention-" + UUID.randomUUID();
     createTask(client);
     String workflow = store.reserveStart(client, message("mention-start")).workflowId();
@@ -339,6 +434,20 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
       String card =
           jdbc.queryForObject(
               "select id from codex_sop_dingtalk_outbox where dedup_key = ?", String.class, key);
+      // 升级前已入队的数据仍按原语义补齐独立提醒。
+      var legacyPayload =
+          (tools.jackson.databind.node.ObjectNode)
+              objectMapper.readTree(
+                  jdbc.queryForObject(
+                      "select payload_json from codex_sop_dingtalk_outbox where id=?",
+                      String.class,
+                      card));
+      legacyPayload.remove("cardMention");
+      if (i < 2) legacyPayload.put("answerMention", true).put("sessionWebhook", webhook);
+      jdbc.update(
+          "update codex_sop_dingtalk_outbox set payload_json=? where id=?",
+          legacyPayload.toString(),
+          card);
       assertThat(
               jdbc.queryForObject(
                   "select count(*) from codex_sop_dingtalk_outbox where dedup_key = ?",

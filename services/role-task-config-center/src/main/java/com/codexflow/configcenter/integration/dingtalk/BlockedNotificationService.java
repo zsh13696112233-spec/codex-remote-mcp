@@ -151,7 +151,7 @@ public class BlockedNotificationService {
                           + commentLabel
                           + "。"
                           + comment.path("detail").asText()))
-              .put("detailLink", "[查看运行详情](" + runs.monitorUrl(notice.workflowId()) + ")");
+              .put("detailLink", "[查看监控](" + runs.monitorUrl(notice.workflowId()) + ")");
       store.prepare(notice.id(), person, payload);
     } catch (IllegalArgumentException error) {
       store.finish(notice.id(), "watching", "unavailable", safe(error.getMessage()));

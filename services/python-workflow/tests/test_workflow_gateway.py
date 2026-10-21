@@ -666,9 +666,19 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                     store.get_workflow("advance-demo")["pendingAdvance"]["state"],
                     "held",
                 )
+                for invalid_context in ["bad", 42, "", [], {}]:
+                    invalid = client.post(f"/workflows/advance-demo/advance/{gate['gateId']}/confirm",
+                                          json={"notificationContextId": invalid_context})
+                    self.assertEqual(invalid.status_code, 400)
+                    invalid_retry = client.post(f"/workflows/advance-demo/advance/{gate['gateId']}/retry",
+                                                json={"notificationContextId": invalid_context})
+                    self.assertEqual(invalid_retry.status_code, 400)
+                notification_context = str(uuid.uuid4())
                 response = client.post(
-                    f"/workflows/advance-demo/advance/{gate['gateId']}/confirm"
+                    f"/workflows/advance-demo/advance/{gate['gateId']}/confirm",
+                    json={"notificationContextId": notification_context},
                 )
+                self.assertEqual(response.json()["notificationContextId"], notification_context)
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()["status"], "confirmed")
                 self.assertTrue(response.json()["resumedFromHold"])
@@ -676,6 +686,7 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
                     f"/workflows/advance-demo/advance/{gate['gateId']}/confirm"
                 )
                 self.assertEqual(repeated.status_code, 200)
+                self.assertEqual(repeated.json()["notificationContextId"], notification_context)
                 store.prepare_node_dispatch("advance-demo", "b")
                 cancelled = client.post("/workflows/advance-demo/cancel")
                 self.assertEqual(cancelled.status_code, 409)
@@ -696,7 +707,7 @@ class AdvanceControlConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             def hold_advance(_workflow_id: str, _gate_id: str) -> dict:
                 return {"gateId": "gate-1", "status": "held"}
 
-            def confirm_advance(self, _workflow_id: str, _gate_id: str) -> dict:
+            def confirm_advance(self, _workflow_id: str, _gate_id: str, notification_context_id=None) -> dict:
                 self.confirm_calls += 1
                 return {
                     "gateId": "gate-1",

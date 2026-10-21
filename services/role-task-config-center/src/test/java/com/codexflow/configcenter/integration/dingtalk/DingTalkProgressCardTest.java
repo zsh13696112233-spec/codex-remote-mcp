@@ -13,6 +13,20 @@ class DingTalkProgressCardTest {
   private final DingTalkProgressCard progress = new DingTalkProgressCard();
 
   @Test
+  void codexFailureAppearsInAllCardRepresentations() {
+    var snapshot =
+        objectMapper
+            .createObjectNode()
+            .put("status", "failed")
+            .put("error", DingTalkResultText.CODEX_FAILURE)
+            .put("response", "此前进度");
+    snapshot.putArray("nodes");
+    var card = progress.render(snapshot, "任务执行失败。");
+    for (String key : new String[] {"result", "cardBody", "markdown"})
+      assertThat(card.get(key).toString()).contains(DingTalkResultText.CODEX_FAILURE);
+  }
+
+  @Test
   void businessTerminationDoesNotClaimAllWorkCompleted() {
     for (String outcome : java.util.List.of("blocked", "no_task")) {
       ObjectNode snapshot = objectMapper.createObjectNode();

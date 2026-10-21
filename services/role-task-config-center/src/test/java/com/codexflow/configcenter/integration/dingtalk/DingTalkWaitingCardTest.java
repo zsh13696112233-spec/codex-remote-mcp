@@ -12,6 +12,105 @@ class DingTalkWaitingCardTest {
   private final ObjectMapper json = new ObjectMapper();
 
   @Test
+  void monitorLinkSurvivesAllWaitStatesAndBothTemplates() {
+    for (String kind : new String[] {"advance", "blocked", "finish"}) {
+      for (boolean answer : new boolean[] {false, true}) {
+        for (String template : new String[] {"", "wide-template"}) {
+          for (String state : new String[] {"held", "busy", "closed"}) {
+            var payload =
+                json.createObjectNode()
+                    .put("gateId", "gate")
+                    .put("waitKind", kind)
+                    .put("actionFirst", true)
+                    .put("answer", answer)
+                    .put("documentTemplateId", template)
+                    .put("text", "步骤结果");
+            var snapshot = json.createObjectNode();
+            snapshot
+                .putObject("pendingAdvance")
+                .put("gateId", "gate")
+                .put("kind", kind)
+                .put("state", state);
+            var data =
+                DingTalkWaitingCard.render("flow", payload, snapshot, "http://192.0.2.1:8090/");
+            for (String field : new String[] {"markdown", "notice"}) {
+              assertThat(data.get(field).toString())
+                  .containsOnlyOnce("[查看监控](http://192.0.2.1:8090/?workflowId=flow)");
+            }
+            snapshot
+                .putArray("nodes")
+                .addObject()
+                .put("id", "step")
+                .putArray("documents")
+                .addObject()
+                .put("id", "doc")
+                .put("available", true);
+            payload.put("documentNodeId", "step");
+            var refreshed =
+                DingTalkWaitingCard.render("flow", payload, snapshot, "http://192.0.2.1:8090/");
+            assertThat(refreshed.get("notice").toString()).containsOnlyOnce("[查看监控]");
+            assertThat(refreshed.get("documents").toString()).contains("查看文档");
+          }
+        }
+      }
+    }
+  }
+
+  @Test
+  void questionContextIsFirstEscapedAndRetainedWhenClosed() {
+    var payload =
+        json.createObjectNode()
+            .put("gateId", "gate")
+            .put("answer", true)
+            .put("cardMention", true)
+            .put("mentionGroup", true)
+            .put("atUserId", "asker")
+            .put("atDisplayName", "夜雨")
+            .put("question", "第一行\n<a atId=\"bad\">假提及</a> [链接](https://example.com)")
+            .put("questionHasImages", true)
+            .put("text", "回答");
+    var snapshot = json.createObjectNode();
+    snapshot.putObject("pendingAdvance").put("gateId", "gate").put("state", "held");
+    var active = DingTalkWaitingCard.render("workflow", payload, snapshot);
+    for (String field : new String[] {"markdown", "statusText"}) {
+      assertThat(active.get(field).toString())
+          .startsWith("**回复 <a atId=\"asker\">夜雨</a>**")
+          .contains("你的问题", "第一行", "（附图片）", "&lt;a")
+          .doesNotContain("<a atId=\"bad\">");
+    }
+    snapshot.remove("pendingAdvance");
+    var closed = DingTalkWaitingCard.render("workflow", payload, snapshot);
+    assertThat(closed.get("statusText").toString()).contains("你的问题", "本轮等待已结束");
+    assertThat(closed.get("_cardAtUserId")).isEqualTo("asker");
+    payload.put("mentionGroup", false);
+    var single = DingTalkWaitingCard.render("workflow", payload, snapshot);
+    assertThat(single.get("statusText").toString()).startsWith("**回复 夜雨**");
+    assertThat(single).doesNotContainKey("_cardAtUserId");
+  }
+
+  @Test
+  void resultContextUsesActionWithoutInventingQuestion() {
+    var payload =
+        json.createObjectNode()
+            .put("gateId", "gate")
+            .put("cardMention", true)
+            .put("mentionGroup", true)
+            .put("atUserId", "operator")
+            .put("atDisplayName", "操作人")
+            .put("resultAction", "advance_retry");
+    var result = DingTalkWaitingCard.render("workflow", payload, json.createObjectNode());
+    assertThat(result.get("markdown").toString())
+        .startsWith("<a atId=\"operator\">操作人</a>，本步骤重新执行已有结果。")
+        .doesNotContain("你的问题");
+    payload.put("resultAction", "advance_confirm");
+    assertThat(
+            DingTalkWaitingCard.render("workflow", payload, json.createObjectNode())
+                .get("statusText")
+                .toString())
+        .contains("你确认执行的步骤已有结果");
+  }
+
+  @Test
   void policyCardsDistinguishRetryFinalConfirmationAndStop() {
     for (String kind : new String[] {"advance", "blocked", "finish"}) {
       var snapshot = json.createObjectNode();
@@ -47,96 +146,74 @@ class DingTalkWaitingCardTest {
   }
 
   @Test
-  void completionInvitesPlanReviewOnlyForFirstStepWithAvailableDocument() {
-    var snapshot = json.createObjectNode().put("advanceMode", "semi_automatic");
-    snapshot.putObject("pendingAdvance").put("completedNodeId", "plan").put("nextNodeId", "build");
-    var nodes = snapshot.putArray("nodes");
-    // 首步身份由依赖确定，不依赖数组位置。
-    nodes.addObject().put("id", "build").putArray("dependsOn").add("plan");
-    var plan = nodes.addObject().put("id", "plan").put("response", "原始总结");
-    plan.putArray("dependsOn");
-    var document = plan.putArray("documents").addObject().put("id", "doc");
-    assertThat(DingTalkWaitingCard.completion(snapshot))
-        .isEqualTo("原始总结\n\n请查看计划文档，如需调整可回复此卡片，确认后点击「继续执行」。");
-
-    document.put("error", "同步失败");
-    assertThat(DingTalkWaitingCard.completion(snapshot))
-        .contains("请查看本步骤结果")
-        .doesNotContain("计划文档");
-    document.remove("error");
-    document.put("removed", true);
-    assertThat(DingTalkWaitingCard.completion(snapshot))
-        .contains("请查看本步骤结果")
-        .doesNotContain("计划文档");
-    document.put("removed", false);
-    plan.withArray("dependsOn").add("earlier");
-    assertThat(DingTalkWaitingCard.completion(snapshot))
-        .contains("请查看本步骤结果")
-        .doesNotContain("计划文档");
+  void focusPrecedesDetailsAndActionsFollowCurrentState() {
+    for (String kind : new String[] {"blocked", "advance", "finish"}) {
+      var snapshot = json.createObjectNode();
+      var gate =
+          snapshot
+              .putObject("pendingAdvance")
+              .put("gateId", "gate")
+              .put("kind", kind)
+              .put("state", "held");
+      var payload =
+          json.createObjectNode()
+              .put("gateId", "gate")
+              .put("waitKind", kind)
+              .put("actionFirst", true)
+              .put("text", "完整执行记录")
+              .put("blockedReason", kind.equals("blocked") ? "请提供测试角色" : "");
+      String label = kind.equals("blocked") ? "重新执行" : kind.equals("finish") ? "确认结束" : "进入下一步";
+      var data = DingTalkWaitingCard.render("workflow", payload, snapshot);
+      for (String field : new String[] {"summary", "markdown"}) {
+        String text = data.get(field).toString();
+        assertThat(text.indexOf("点击「" + label)).isLessThan(text.indexOf("完整执行记录"));
+        assertThat(text).containsOnlyOnce("当前操作：");
+        if (kind.equals("blocked"))
+          assertThat(text.indexOf("请提供测试角色")).isLessThan(text.indexOf("当前操作："));
+      }
+      assertThat(data.get("notice").toString())
+          .contains("[查看监控](http://127.0.0.1:8090/?workflowId=workflow)");
+      gate.put("state", "busy");
+      var busy = DingTalkWaitingCard.render("workflow", payload, snapshot);
+      assertThat(busy.get("summary").toString()).contains("正在处理", "完整执行记录").doesNotContain("点击「");
+      assertThat(busy.get("confirmStatus")).isEqualTo("disabled");
+      gate.put("gateId", "new-gate");
+      var closed = DingTalkWaitingCard.render("workflow", payload, snapshot);
+      assertThat(closed.get("summary").toString())
+          .contains("本轮等待已结束", "完整执行记录")
+          .doesNotContain("点击「");
+      assertThat(closed.get("confirmStatus")).isEqualTo("disabled");
+      payload.put("answer", true);
+      assertThat(
+              DingTalkWaitingCard.render("workflow", payload, snapshot).get("summary").toString())
+          .contains("本次回答");
+    }
   }
 
   @Test
-  void blockedCompletionIncludesPersistedReasonWithoutRepeatingIt() {
+  void blockedReasonIsSeparateFilteredAndOnlyUsedForBlockedWaits() {
     var snapshot = json.createObjectNode();
     var gate =
         snapshot.putObject("pendingAdvance").put("completedNodeId", "plan").put("kind", "blocked");
-    String reason = "FeatureTrace、Bug归属未出现在工单字段中，请核对字段名及账号权限。";
     var node =
         snapshot
             .putArray("nodes")
             .addObject()
             .put("id", "plan")
-            .put("response", "已读取工单，尚未开展代码分析。暂时无法继续。")
-            .put("error", reason);
-    assertThat(DingTalkWaitingCard.completion(snapshot))
-        .contains("已读取工单", "阻碍原因：" + reason, "重新执行");
-    node.put("response", "已读取工单。" + reason);
-    assertThat(DingTalkWaitingCard.completion(snapshot)).containsOnlyOnce(reason);
-    node.put("response", " ");
-    assertThat(DingTalkWaitingCard.completion(snapshot)).startsWith("阻碍原因：" + reason);
-    node.putNull("error");
-    assertThat(DingTalkWaitingCard.completion(snapshot)).doesNotContain("阻碍原因", "null");
-    node.put("error", " ");
-    assertThat(DingTalkWaitingCard.completion(snapshot)).doesNotContain("阻碍原因");
-    node.put("error", reason);
-    for (String kind : new String[] {"advance", "finish", "legacy"}) {
-      gate.put("kind", kind);
-      assertThat(DingTalkWaitingCard.completion(snapshot)).doesNotContain(reason);
-    }
-  }
-
-  @Test
-  void blockedCompletionFiltersCredentialsAndInternalLinksInReason() {
-    var snapshot = json.createObjectNode();
-    snapshot.putObject("pendingAdvance").put("completedNodeId", "plan").put("kind", "blocked");
-    snapshot
-        .putArray("nodes")
-        .addObject()
-        .put("id", "plan")
-        .put("error", "无法读取字段 token=test-secret http://127.0.0.1:8080 thread_private");
-    assertThat(DingTalkWaitingCard.completion(snapshot))
-        .contains("阻碍原因：无法读取字段", "重新执行")
+            .put("response", "完整总结")
+            .put("error", "请核对权限 token=test-secret http://127.0.0.1:8080 thread_private");
+    assertThat(DingTalkWaitingCard.completion(snapshot)).isEqualTo("完整总结");
+    assertThat(DingTalkWaitingCard.blockedReason(snapshot))
+        .contains("请核对权限")
         .doesNotContain("test-secret", "127.0.0.1", "thread_private");
-  }
-
-  @Test
-  void completionWithoutDocumentOrResponseStillExplainsReplyAndContinue() {
-    var snapshot = json.createObjectNode().put("advanceMode", "semi_automatic");
-    snapshot.putObject("pendingAdvance").put("completedNodeId", "plan").put("nextNodeId", "build");
-    snapshot.putArray("nodes").addObject().put("id", "plan").put("response", "原始总结");
-    assertThat(DingTalkWaitingCard.completion(snapshot))
-        .isEqualTo("原始总结\n\n请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。");
-    ((ObjectNode) snapshot.path("nodes").get(0)).put("response", " ");
-    assertThat(DingTalkWaitingCard.completion(snapshot))
-        .isEqualTo("步骤已完成。请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。");
-    ((ObjectNode) snapshot.path("pendingAdvance")).put("kind", "blocked");
-    assertThat(DingTalkWaitingCard.completion(snapshot))
-        .contains("当前步骤无法继续", "重新执行")
-        .doesNotContain("步骤已完成");
-    ((ObjectNode) snapshot.path("pendingAdvance")).remove("kind");
-    snapshot.remove("nodes");
-    assertThat(DingTalkWaitingCard.completion(snapshot))
-        .isEqualTo("步骤已完成。请查看本步骤结果，如需调整可回复此卡片，确认后点击「继续执行」。");
+    node.putNull("error");
+    assertThat(DingTalkWaitingCard.blockedReason(snapshot)).isEmpty();
+    node.put("response", " ");
+    assertThat(DingTalkWaitingCard.completion(snapshot)).isEqualTo("当前步骤尚未完成。");
+    node.put("error", "旧错误");
+    gate.put("kind", "advance");
+    assertThat(DingTalkWaitingCard.blockedReason(snapshot)).isEmpty();
+    assertThat(DingTalkWaitingCard.completion(snapshot)).isEqualTo("步骤已完成。");
   }
 
   @Test

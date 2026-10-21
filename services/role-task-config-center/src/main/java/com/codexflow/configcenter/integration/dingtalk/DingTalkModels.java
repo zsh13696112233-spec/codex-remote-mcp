@@ -24,7 +24,41 @@ final class DingTalkModels {
       String sessionWebhook,
       String quotedText,
       List<String> referenceIds,
-      boolean quotedCard) {
+      boolean quotedCard,
+      String senderDisplayName) {
+
+    Message(
+        String messageId,
+        String conversationId,
+        String conversationType,
+        String senderUserId,
+        String content,
+        boolean mentionedBot,
+        boolean mentionAll,
+        String replyToMessageId,
+        String conversationTitle,
+        List<String> imageCodes,
+        String sessionWebhook,
+        String quotedText,
+        List<String> referenceIds,
+        boolean quotedCard) {
+      this(
+          messageId,
+          conversationId,
+          conversationType,
+          senderUserId,
+          content,
+          mentionedBot,
+          mentionAll,
+          replyToMessageId,
+          conversationTitle,
+          imageCodes,
+          sessionWebhook,
+          quotedText,
+          referenceIds,
+          quotedCard,
+          null);
+    }
 
     Message(
         String messageId,
@@ -109,7 +143,8 @@ final class DingTalkModels {
           sessionWebhook,
           quotedText,
           List.of(),
-          quotedCard);
+          quotedCard,
+          senderDisplayName);
     }
 
     Message(
@@ -178,7 +213,8 @@ final class DingTalkModels {
           sessionWebhook,
           quotedText,
           referenceIds,
-          quotedCard);
+          quotedCard,
+          senderDisplayName);
     }
 
     Message(

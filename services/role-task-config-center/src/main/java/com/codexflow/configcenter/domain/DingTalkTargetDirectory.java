@@ -28,6 +28,15 @@ public class DingTalkTargetDirectory {
   }
 
   @Transactional(readOnly = true)
+  public String personDisplayName(String clientId, String userId) {
+    return targets
+        .findByClientIdAndTargetTypeAndExternalId(clientId, "PERSON", userId)
+        .filter(person -> !person.deleted)
+        .map(person -> person.displayName)
+        .orElse(null);
+  }
+
+  @Transactional(readOnly = true)
   public List<TargetView> list(String clientId) {
     return targets
         .findByClientIdAndDeletedFalseOrderByTargetTypeAscDisplayNameAsc(clientId)

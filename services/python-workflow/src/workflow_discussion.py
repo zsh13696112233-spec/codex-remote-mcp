@@ -90,7 +90,7 @@ class DiscussionService:
         if target is None:
             return False
         documents_enabled = await db(self.store.document_enabled, workflow_id, target["nodeId"])
-        multi = documents_enabled and target.get("resultProtocolVersion") == 4
+        multi = documents_enabled and target.get("resultProtocolVersion") in (4, 5)
         record = await db(self.store.get_discussion, workflow_id, message["messageId"])
         if record:
             if record["state"] == "completed":
@@ -115,6 +115,8 @@ class DiscussionService:
                 "保留未要求改变的内容，遵守原权限，不修改平台运行状态、不调用流程控制工具。"
                 "文字继续、停止、跳过、重跑不能控制流程，请用户点击当前等待卡片对应按钮，或在配置中心取消。"
                 "仅按结构输出 text（给用户的回答）和 summary（完整总结或 null）。"
+                "text 先直接回答当前问题、说明尚需用户处理或决定的事项，再解释细节，不重复平台按钮提示。"
+                "需要更新 summary 时，先写结论、待办和未决风险，再写执行细节与证据；普通提问仍保持 summary 为 null。"
                 "总结应包含已采纳的要求、相关文件路径、下一步任务和未决事项，不包含未采纳的设想。"
                 "不得声称执行了未完成的文件修改。\n当前完整交接总结：\n"
                 + (target["response"] or "") + "\n用户本条消息：\n" + message["text"]

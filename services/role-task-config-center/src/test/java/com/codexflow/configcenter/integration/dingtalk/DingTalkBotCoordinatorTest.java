@@ -20,6 +20,33 @@ import tools.jackson.databind.node.ObjectNode;
 /** 统一入口不依赖群绑定；回答与每次提问关联。 */
 class DingTalkBotCoordinatorTest {
   @Test
+  void legacyProgressDeliveryAndUpdateAddMonitorLinkWithoutMutatingPayload() {
+    ReflectionTestUtils.setField(bot, "monitorUrl", "http://192.0.2.1:8090/");
+    var payload = json.createObjectNode();
+    payload.putObject("card").put("markdown", "旧正文").put("cardBody", "进度");
+    var item = new DingTalkModels.Outbox("legacy", ID, "group", "root", "card", payload);
+    when(store.isLatestCardOutbox("legacy", ID)).thenReturn(true);
+    when(transport.sendCard(eq("group"), eq("root"), anyMap()))
+        .thenReturn(new DingTalkModels.SendResult("sent"));
+    bot.deliver(item);
+    when(store.binding(ID))
+        .thenReturn(
+            Optional.of(
+                new DingTalkModels.Binding(ID, "group", "root", "active", 0, "sent", false)));
+    bot.deliver(item);
+    var captor = ArgumentCaptor.forClass(java.util.Map.class);
+    verify(transport).sendCard(eq("group"), eq("root"), captor.capture());
+    verify(transport).updateCard(eq("sent"), captor.capture());
+    for (var card : captor.getAllValues()) {
+      for (String field : List.of("markdown", "cardBody")) {
+        assertThat(card.get(field).toString())
+            .containsOnlyOnce("[查看监控](http://192.0.2.1:8090/?workflowId=" + ID + ")");
+      }
+    }
+    assertThat(payload.path("card").path("markdown").asText()).isEqualTo("旧正文");
+  }
+
+  @Test
   void submittingBindingWaitsWhileInitialSubmissionIsProtected() {
     var binding = new DingTalkModels.Binding(ID, "group", "root", "submitting", 0, null, false);
     when(gateway.get("/workflows/" + ID))
@@ -218,7 +245,9 @@ class DingTalkBotCoordinatorTest {
                   .path("confirmRequestSucceeded")
                   .asText())
           .isEqualTo("true");
-      verify(runs).waitingAction(ID, gate, name);
+      if (name.equals("retry"))
+        verify(runs).waitingAction(ID, gate, name, "00000000-0000-4000-8000-000000000999");
+      else verify(runs).waitingAction(ID, gate, name);
     }
     verify(gateway, never()).post(contains("/confirm"), any());
   }
@@ -268,6 +297,9 @@ class DingTalkBotCoordinatorTest {
                   null,
                   false);
             });
+    org.mockito.Mockito.lenient()
+        .when(store.registerActionContext(any(), any(), any(), any()))
+        .thenReturn("00000000-0000-4000-8000-000000000999");
     when(store.registerInbound(eq("app"), any(), any()))
         .thenReturn(new DingTalkModels.Inbound("question", ID, "assistant-id", "accepted"));
   }
@@ -560,7 +592,12 @@ class DingTalkBotCoordinatorTest {
                 .asText())
         .isEqualTo("true");
     verify(gateway)
-        .post("/workflows/" + ID + "/advance/11111111111111111111111111111111/confirm", null);
+        .post(
+            eq("/workflows/" + ID + "/advance/11111111111111111111111111111111/confirm"),
+            argThat(
+                body ->
+                    "00000000-0000-4000-8000-000000000999"
+                        .equals(body.path("notificationContextId").asText())));
     verify(gateway, never()).post(contains("/hold"), any());
     verify(gateway, never()).post(contains("/input-observations"), any());
     verify(store).refreshWaitingCards(eq(ID), any());
@@ -1182,6 +1219,21 @@ class DingTalkBotCoordinatorTest {
     verify(store).recordProcess(eq(ID), isNull(), eq(2L), body.capture(), eq(true), eq(true));
     assertThat(body.getValue()).contains("已完成需求核对").doesNotContain("jiraComment", "not_applicable");
     verify(gateway, never()).post(anyString(), any());
+  }
+
+  @Test
+  void codexFailureIsExplicitInTerminalNotification() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
+    when(gateway.get("/workflows/" + ID))
+        .thenReturn(
+            json.createObjectNode()
+                .put("status", "failed")
+                .put("error", DingTalkResultText.CODEX_FAILURE));
+    var event = json.createObjectNode().put("type", "workflow.failed");
+    ReflectionTestUtils.invokeMethod(bot, "consumeEvent", binding, event, 2L);
+    var body = ArgumentCaptor.forClass(String.class);
+    verify(store).recordProcess(eq(ID), isNull(), eq(2L), body.capture(), eq(true), eq(true));
+    assertThat(body.getValue()).contains(DingTalkResultText.CODEX_FAILURE);
   }
 
   @Test

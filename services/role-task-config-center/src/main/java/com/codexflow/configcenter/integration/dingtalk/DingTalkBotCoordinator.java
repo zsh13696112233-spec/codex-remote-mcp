@@ -461,11 +461,19 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           || !store.ownsWaitingCard(event, workflowId, gateId)) return false;
       boolean confirmed = true;
       try {
+        String contextId = null;
+        if (!"advance_stop".equals(action)) {
+          contextId =
+              store.registerActionContext(workflowId, gateId, action, event.operatorUserId());
+        }
         if ("advance_confirm".equals(action)) {
-          gateway.post("/workflows/" + workflowId + "/advance/" + gateId + "/confirm", null);
+          gateway.post(
+              "/workflows/" + workflowId + "/advance/" + gateId + "/confirm",
+              objectMapper.createObjectNode().put("notificationContextId", contextId));
+        } else if ("advance_retry".equals(action)) {
+          workflowRunService.waitingAction(workflowId, gateId, "retry", contextId);
         } else {
-          workflowRunService.waitingAction(
-              workflowId, gateId, "advance_retry".equals(action) ? "retry" : "stop");
+          workflowRunService.waitingAction(workflowId, gateId, "stop");
         }
       } catch (GatewayFailure error) {
         if (error.getStatusCode() != 409 && error.getStatusCode() != 404) throw error;
@@ -755,6 +763,14 @@ class DingTalkBotCoordinator implements SmartLifecycle {
               "blocked".equals(snapshot.path("termination").path("outcome").asText())
                   ? "因阻断结束。"
                   : "无待处理任务，已结束。";
+        if (("workflow.failed".equals(type) && DingTalkResultText.codexFailure(snapshot))
+            || ("node.failed".equals(type)
+                && DingTalkResultText.CODEX_FAILURE.equals(
+                    event.path("payload").path("error").asText())))
+          notice =
+              DingTalkExecutionNotice.stepLabel(event, snapshot)
+                  + "："
+                  + DingTalkResultText.CODEX_FAILURE;
         if ("workflow.cancelled".equals(type)) {
           notice += cancellationSummary(snapshot);
         } else if (TERMINAL_EVENTS.contains(type) && !snapshot.path("response").asText().isBlank())
@@ -1003,6 +1019,12 @@ class DingTalkBotCoordinator implements SmartLifecycle {
         }
         Map<String, Object> card =
             objectMapper.convertValue(item.payload().path("card"), Map.class);
+        if (item.workflowId() != null) {
+          String link = DingTalkMonitorLink.markdown(monitorUrl, item.workflowId());
+          for (String field : List.of("markdown", "cardBody")) {
+            card.put(field, card.getOrDefault(field, "") + "\n\n" + link);
+          }
+        }
         DingTalkModels.Binding binding =
             item.workflowId() == null ? null : store.binding(item.workflowId()).orElse(null);
         if (binding != null && binding.progressCardInstanceId() != null) {

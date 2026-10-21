@@ -418,7 +418,11 @@ class OfficialDingTalkTransport implements DingTalkTransport {
   public void updateCard(String cardInstanceId, Map<String, Object> cardData) {
     ObjectNode body = objectMapper.createObjectNode();
     body.put("outTrackId", cardInstanceId);
-    body.putObject("cardData").set("cardParamMap", stringValues(cardData));
+    var parameters = new java.util.LinkedHashMap<>(cardData);
+    parameters.remove("_cardAtUserId");
+    parameters.remove("_cardAtDisplayName");
+    parameters.remove("_templateId");
+    body.putObject("cardData").set("cardParamMap", stringValues(parameters));
     authorized("PUT", "/v1.0/card/instances", body);
   }
 
@@ -590,6 +594,14 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     } else throw new IllegalArgumentException("不支持的卡片接收类型。");
     var parameters = new java.util.LinkedHashMap<>(cardData);
     parameters.remove("_templateId");
+    Object mentionId = parameters.remove("_cardAtUserId");
+    Object mentionName = parameters.remove("_cardAtDisplayName");
+    if ("GROUP".equals(targetType) && mentionId instanceof String id && !id.isBlank()) {
+      body.putArray("cardAtUserIds").add(id);
+      ((ObjectNode) body.path("imGroupOpenDeliverModel"))
+          .putObject("atUserIds")
+          .put(id, String.valueOf(mentionName));
+    }
     body.putObject("cardData").set("cardParamMap", stringValues(parameters));
     return body;
   }
@@ -704,7 +716,8 @@ class OfficialDingTalkTransport implements DingTalkTransport {
           firstText(value, "sessionWebhook"),
           quotedText,
           List.copyOf(references),
-          quote.path("content").path("cardContent").isArray());
+          quote.path("content").path("cardContent").isArray(),
+          value.path("senderNick").asText(null));
     } catch (Exception error) {
       throw new IllegalArgumentException("无法解析钉钉机器人消息。", error);
     }
