@@ -154,7 +154,7 @@ class WaitStore:
                 return
             error = "重新执行结果尚未确认，请核查执行状态；未自动重发。" if uncertain else "重新执行失败，请查看任务详情。"
             if before_start:
-                error = "原步骤执行未能启动，已保持等待；请核查原会话、执行机及权限后重试。"
+                error = "原步骤执行未能启动，已保持等待；请核查服务、原会话、执行机及权限后重试。"
                 connection.execute("UPDATE workflow_nodes SET status='waiting',error=? WHERE workflow_id=? AND node_id=?", (error, workflow_id, gate["completed_node_id"]))
                 self._create_policy_wait(connection, workflow_id, gate["completed_node_id"], json.loads(gate["business_result_json"]))
                 connection.execute("UPDATE workflow_advance_gates SET status='held',held_at=?,updated_at=? WHERE workflow_id=? AND kind='blocked' AND status='pending'", (now, now, workflow_id))

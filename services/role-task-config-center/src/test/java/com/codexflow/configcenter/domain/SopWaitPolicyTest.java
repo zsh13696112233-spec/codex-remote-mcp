@@ -54,11 +54,13 @@ class SopWaitPolicyTest extends GroupedFixtureSupport {
             .path("id")
             .asText();
     var first = runs.prepareLatest(task);
+    assertThat(first.payload().path("resultProtocolVersion").asInt()).isEqualTo(4);
     assertThat(first.payload().path("waitPolicy"))
         .isEqualTo(json.createObjectNode().put("version", 2));
     // 模拟升级前已保存的运行，重试必须保留其原策略。
     var historical = runRepository.findById(first.workflowId()).orElseThrow();
     var original = first.payload().deepCopy();
+    original.put("resultProtocolVersion", 2);
     original
         .putObject("waitPolicy")
         .put("version", 1)

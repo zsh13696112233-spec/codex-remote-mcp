@@ -3,8 +3,9 @@ import tempfile
 import unittest
 import uuid
 import asyncio
+import sqlite3
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from pathlib import Path
 
 from workflow_store import WorkflowStore, utc_now
@@ -99,6 +100,34 @@ class WaitTests(unittest.TestCase):
         with self.store._connect() as c:
             self.assertEqual(c.execute("SELECT count(*) FROM workflow_node_attempts").fetchone()[0], 1)
         state = self.store.get_workflow("serial-demo")
+        self.assertEqual([n["status"] for n in state["nodes"]], ["queued", "pending", "pending"])
+
+    def test_legacy_attempt_table_upgrade_preserves_history_and_allows_retry(self):
+        self.start(manual=True)
+        gate = self.sync(result("blocked"))
+        with self.store._connect() as c:
+            c.execute("ALTER TABLE workflow_node_attempts DROP COLUMN dispatch_token")
+            c.execute(
+                "INSERT INTO workflow_node_attempts(workflow_id,node_id,attempt_number,status,response,archived_at) "
+                "VALUES ('serial-demo','a',0,'waiting','历史总结',?)", (utc_now(),))
+            c.execute("UPDATE workflow_nodes SET attempt_count=1 WHERE workflow_id='serial-demo' AND node_id='a'")
+        self.store.claim_policy_wait("serial-demo", gate["gateId"], "retry")
+        with self.assertRaisesRegex(sqlite3.OperationalError, "dispatch_token"):
+            self.store.prepare_wait_execution("serial-demo", gate["gateId"])
+        self.assertEqual(self.store.policy_wait("serial-demo", gate["gateId"])["execution_started"], 0)
+        # 重复初始化不改写历史，也不自动执行工作流。
+        self.store = WorkflowStore(self.store.path)
+        self.store = WorkflowStore(self.store.path)
+        self.assertTrue(self.store.claim_policy_wait("serial-demo", gate["gateId"], "retry")["duplicate"])
+        self.assertIsNotNone(self.store.prepare_wait_execution("serial-demo", gate["gateId"]))
+        self.assertIsNone(self.store.prepare_wait_execution("serial-demo", gate["gateId"]))
+        with self.store._connect() as c:
+            rows = c.execute("SELECT attempt_number,response,dispatch_token FROM workflow_node_attempts ORDER BY attempt_number").fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(tuple(rows[0]), (0, "历史总结", None))
+        self.assertEqual(rows[1]["attempt_number"], 1)
+        state = self.store.get_workflow("serial-demo")
+        self.assertEqual(state["nodes"][0]["attemptCount"], 2)
         self.assertEqual([n["status"] for n in state["nodes"]], ["queued", "pending", "pending"])
 
     def test_timeout_only_finalizes_after_cleanup_and_preserves_original_reason(self):
@@ -259,6 +288,30 @@ class ManualWaitTests(unittest.TestCase):
 
 
 class WaitExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_preparation_failure_returns_to_manual_wait_without_dispatch(self):
+        from workflow_wait_service import WaitService
+        fixture = WaitTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.start(manual=True)
+        gate = fixture.sync(result("blocked"))
+        fixture.store.claim_policy_wait("serial-demo", gate["gateId"], "retry")
+        with fixture.store._connect() as c:
+            c.execute("ALTER TABLE workflow_node_attempts DROP COLUMN dispatch_token")
+        gateway = SimpleNamespace(store=fixture.store, _control_locks={},
+            _pause_supervisor=AsyncMock(), _resume_supervisor_if_needed=AsyncMock())
+        service = WaitService(gateway)
+        with patch.object(service, "execute", new_callable=AsyncMock) as execute:
+            with self.assertLogs("workflow_wait_service", level="ERROR"):
+                await service.process(fixture.store.due_policy_waits()[0])
+            execute.assert_not_awaited()
+        state = fixture.store.get_workflow("serial-demo")
+        self.assertEqual(state["pendingAdvance"]["state"], "held")
+        self.assertNotEqual(state["pendingAdvance"]["gateId"], gate["gateId"])
+        self.assertEqual(state["nodes"][0]["attemptCount"], 0)
+        self.assertIn("未能启动", state["nodes"][0]["error"])
+        self.assertEqual(fixture.store.due_policy_waits(), [])
+
     async def test_manual_retry_uses_original_workspace_and_returns_to_wait(self):
         from codex_orchestrator_mcp import Orchestrator, AgentConfig
         from workflow_wait_service import WaitService

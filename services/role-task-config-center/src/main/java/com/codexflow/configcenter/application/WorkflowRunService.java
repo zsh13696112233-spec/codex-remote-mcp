@@ -10,6 +10,9 @@ import com.codexflow.configcenter.integration.dingtalk.DingTalkProactiveNotifica
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -24,6 +27,10 @@ public class WorkflowRunService {
 
   private static final Set<String> ACTIVE_STATUSES =
       Set.of("submitting", "queued", "running", "cancelling");
+
+  // 只协调本进程内的在途请求；重启恢复仍以持久化运行状态为准。
+  private final ConcurrentHashMap<String, CompletableFuture<ObjectNode>> submissions =
+      new ConcurrentHashMap<>();
 
   private final WorkflowRunStore store;
   private final TaskLaunchStore launches;
@@ -202,9 +209,7 @@ public class WorkflowRunService {
       } catch (GatewayFailure error) {
         if (error.getStatusCode() == 404) {
           try {
-            if ("submitting".equals(store.runStatus(active.workflowId()))) {
-              submitPrepared(store.getPrepared(active.workflowId()));
-            }
+            recoverSubmission(active.workflowId());
           } catch (RuntimeException ignored) {
             // 提交结果仍不明确时保留占用，下一轮继续恢复。
           }
@@ -217,6 +222,51 @@ public class WorkflowRunService {
 
   /** 向网关提交已持久化的运行，并记录成功响应或失败原因。 */
   public ObjectNode submitPrepared(PreparedRun prepared) {
+    return coordinateSubmission(prepared, false);
+  }
+
+  /** 新运行先留出首次提交窗口；只有确实补交成功才返回 true。 */
+  public boolean recoverSubmission(String workflowId) {
+    if (!store.submissionRecoveryDue(workflowId)) return false;
+    return coordinateSubmission(store.getPrepared(workflowId), true) != null;
+  }
+
+  private ObjectNode coordinateSubmission(PreparedRun prepared, boolean recovery) {
+    String workflowId = prepared.workflowId();
+    CompletableFuture<ObjectNode> pending = new CompletableFuture<>();
+    CompletableFuture<ObjectNode> existing = submissions.putIfAbsent(workflowId, pending);
+    if (existing != null) {
+      if (recovery) return null;
+      try {
+        return existing.join();
+      } catch (CompletionException error) {
+        if (error.getCause() instanceof RuntimeException cause) throw cause;
+        throw error;
+      }
+    }
+    try {
+      // 轮询读到的 submitting 可能已过期，取得提交权后必须重新检查。
+      String status = store.runStatus(workflowId);
+      if ("submit_failed".equals(status)) {
+        throw new ConflictFailure("任务提交失败，请查看运行记录。");
+      }
+      if (!"submitting".equals(status)) {
+        ObjectNode result = store.runDetail(workflowId);
+        pending.complete(result);
+        return recovery ? null : result;
+      }
+      ObjectNode result = submitOnce(prepared);
+      pending.complete(result);
+      return result;
+    } catch (RuntimeException | Error error) {
+      pending.completeExceptionally(error);
+      throw error;
+    } finally {
+      submissions.remove(workflowId, pending);
+    }
+  }
+
+  private ObjectNode submitOnce(PreparedRun prepared) {
     try {
       String taskId = store.taskDefinitionId(prepared.workflowId());
       ObjectNode payload = prepared.payload();

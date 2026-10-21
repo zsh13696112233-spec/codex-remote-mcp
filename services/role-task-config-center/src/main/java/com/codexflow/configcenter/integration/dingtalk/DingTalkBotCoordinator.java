@@ -308,7 +308,9 @@ class DingTalkBotCoordinator implements SmartLifecycle {
           message,
           "任务已启动：" + message.content() + "。后续请发送工作流编号加问题，或引用本消息。");
     } catch (RuntimeException error) {
-      reply(message, workflowId, "任务暂未成功启动，请在运行记录中查看状态。");
+      if (!reconcileSubmissionFailure(workflowId)) {
+        reply(message, workflowId, "任务暂未成功启动，请在运行记录中查看状态。");
+      }
     }
   }
 
@@ -556,6 +558,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   }
 
   private boolean recoverSubmission(DingTalkModels.Binding binding) {
+    if (reconcileSubmissionFailure(binding.workflowId())) return false;
     try {
       gateway.get("/workflows/" + binding.workflowId());
       store.markSubmitted(binding.workflowId());
@@ -564,18 +567,25 @@ class DingTalkBotCoordinator implements SmartLifecycle {
       if (error.getStatusCode() != 404) return false;
     }
     try {
-      workflowRunService.submitPrepared(workflowRunStore.getPrepared(binding.workflowId()));
+      if (!workflowRunService.recoverSubmission(binding.workflowId())) {
+        // 首次提交可能在本轮查询期间失败；返回 false 也需要同步已确认的失败状态。
+        reconcileSubmissionFailure(binding.workflowId());
+        return false;
+      }
       store.markSubmitted(binding.workflowId());
       enqueueCurrentProgress(
-          binding.workflowId(), "服务恢复后已继续提交任务。", "recovered-card:" + binding.workflowId());
+          binding.workflowId(), "任务已补交，将继续执行。", "recovered-card:" + binding.workflowId());
       return true;
     } catch (RuntimeException error) {
-      if ("submit_failed".equals(workflowRunStore.runStatus(binding.workflowId()))) {
-        store.markSubmissionFailed(
-            properties.getClientId(), binding.workflowId(), "任务启动失败，请稍后重新 @机器人运行。");
-      }
+      reconcileSubmissionFailure(binding.workflowId());
       return false;
     }
+  }
+
+  private boolean reconcileSubmissionFailure(String workflowId) {
+    if (!"submit_failed".equals(workflowRunStore.runStatus(workflowId))) return false;
+    store.markSubmissionFailed(properties.getClientId(), workflowId, "任务启动失败，请在运行记录中查看原因，处理后重新运行。");
+    return true;
   }
 
   private boolean consumeEvent(DingTalkModels.Binding binding, JsonNode event, long sequence) {

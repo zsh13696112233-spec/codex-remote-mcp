@@ -1794,10 +1794,20 @@ def _sidecar_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         result["document"] = validate_result(snapshot["document"])
     if "documents" in snapshot:
         from workflow_documents import validate_many
-        result["documents"] = validate_many(snapshot["documents"])
+        items = snapshot["documents"]
+        semi = isinstance(items, list) and any(isinstance(item, dict) and "primary" in item for item in items)
+        result["documents"] = validate_many(items, semi=semi)
     if "businessResult" in snapshot:
         from workflow_outcomes import validate
-        result["businessResult"] = validate(snapshot["businessResult"], 3 if isinstance(snapshot["businessResult"], dict) and "documents" in snapshot["businessResult"] else 2 if isinstance(snapshot["businessResult"], dict) and "jiraDeveloper" in snapshot["businessResult"] else 1)
+        value = snapshot["businessResult"]
+        version = 1
+        if isinstance(value, dict):
+            version = 2 if "jiraDeveloper" in value else 1
+            if "documents" in value:
+                items = value["documents"]
+                version = 4 if isinstance(items, list) and any(isinstance(item, dict) and "primary" in item for item in items) else 3
+        # 空文档清单的 v3/v4 结构相同；存储层仍以运行冻结版本校验。
+        result["businessResult"] = validate(value, version)
     return result
 
 

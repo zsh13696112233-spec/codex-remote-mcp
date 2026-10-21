@@ -108,6 +108,14 @@ public class WorkflowRunStore {
     return findRun(workflowId).status;
   }
 
+  /** 首次提交包含最长各 30 秒的提交与结果核对；恢复不抢占这一窗口。 */
+  @Transactional(readOnly = true)
+  public boolean submissionRecoveryDue(String workflowId) {
+    TaskRunEntity run = findRun(workflowId);
+    return "submitting".equals(run.status)
+        && !run.submittedAt.plusSeconds(60).isAfter(Instant.now());
+  }
+
   /** 查询指定任务的历史运行列表。 */
   @Transactional(readOnly = true)
   public List<ObjectNode> listRuns(String taskId) {
@@ -319,7 +327,7 @@ public class WorkflowRunStore {
     }
     ObjectNode root = json.newObject();
     root.put("workflowId", workflowId);
-    root.put("resultProtocolVersion", "automatic".equals(task.sop.advanceMode) ? 3 : 2);
+    root.put("resultProtocolVersion", "automatic".equals(task.sop.advanceMode) ? 3 : 4);
     root.put("taskDefinitionId", task.id);
     root.put("groupId", task.groupId);
     root.put("name", task.name);

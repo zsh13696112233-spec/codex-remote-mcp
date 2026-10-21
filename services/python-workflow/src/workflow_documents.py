@@ -11,7 +11,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 FILE_LIMIT = 512 * 1024
-METADATA_COLUMNS = "document_id,node_id,name,format,revision,updated_at,error,removed,content IS NOT NULL AS available"
+METADATA_COLUMNS = "source_key,document_id,node_id,name,format,revision,updated_at,error,removed,content IS NOT NULL AS available"
 ERROR = "主文档未同步，请检查是否生成文件及其格式、大小和读取权限。"
 DOCUMENT_SCHEMA = {
     "anyOf": [{"type": "null"}, {
@@ -30,6 +30,42 @@ INSTRUCTION = (
     "只报告本次明确交付的 UTF-8 .md/.markdown/.txt 主文档，最大512 KiB；"
     "不要列入参考资料、日志、敏感配置或凭据，不返回文档正文。"
 )
+
+
+SEMI_DOCUMENTS_SCHEMA = {
+    "type": "array", "items": {
+        "type": "object", "additionalProperties": False, "required": ["name", "path", "primary"],
+        "properties": {**DOCUMENT_SCHEMA["anyOf"][1]["properties"], "primary": {"type": "boolean"}},
+    },
+}
+SEMI_INSTRUCTION = (
+    "本步骤展示多份交付文档，使用 documents 清单，每项为 name、path、primary。"
+    "正式方案必须标为 primary=true，交接总结等附属文档为 false；最多一份主文档。"
+    "主次按用途确定，不按生成顺序或文件名猜测。没有正式方案时不拿总结冒充主文档。"
+    "只报告本次已交付的 UTF-8 .md/.markdown/.txt，每份最大512 KiB，"
+    "不列入日志、参考资料、历史备份、代码或敏感配置；无文档返回空数组。"
+    "本规则优先于历史角色职责中的单文档或不带主次身份的文档输出示例。"
+)
+
+
+def validate_descriptors(documents: Any) -> None:
+    if not isinstance(documents, list):
+        raise ValueError("步骤文档清单格式无效。")
+    primary_count = 0
+    paths = set()
+    for item in documents:
+        if not isinstance(item, dict) or set(item) != {"name", "path", "primary"}:
+            raise ValueError("步骤文档字段无效。")
+        if not valid_name(item["name"]) or not isinstance(item["path"], str) or not item["path"].strip() or len(item["path"]) > 4096:
+            raise ValueError("步骤文档字段无效。")
+        if type(item["primary"]) is not bool:
+            raise ValueError("文档主次身份无效。")
+        primary_count += item["primary"]
+        if item["path"] in paths:
+            raise ValueError("交付文档路径重复。")
+        paths.add(item["path"])
+    if primary_count > 1:
+        raise ValueError("只能指定一份主文档。")
 
 
 def enabled(connection: sqlite3.Connection, workflow_id: str, node_id: str) -> bool:
@@ -173,61 +209,75 @@ def save(connection: sqlite3.Connection, workflow_id: str, node_id: str, source_
 def view(row: sqlite3.Row, body: bool = False) -> dict[str, Any]:
     result = {'id': row['document_id'], 'nodeId': row['node_id'], 'name': row['name'],
               'format': row['format'], 'revision': row['revision'], 'updatedAt': row['updated_at'],
-              'error': row['error'], 'removed': bool(row['removed']), 'available': bool(row['available']) if 'available' in row.keys() else row['content'] is not None}
+              'error': row['error'], 'removed': bool(row['removed']), 'primary': row['source_key'] == '@main', 'available': bool(row['available']) if 'available' in row.keys() else row['content'] is not None}
     if body:
         result['content'] = row['content']
     return result
 
 
-async def collect_many(client: Any, cwd: str, documents: list[dict[str, str]], denied_paths=()) -> list[dict[str, Any]]:
+async def collect_many(client: Any, cwd: str, documents: list[dict[str, Any]], denied_paths=(), *, semi: bool = False) -> list[dict[str, Any]]:
     """逐份采集；来源指纹仅用于中央去重，不进入公开结果。"""
+    if semi:
+        validate_descriptors(documents)
     results = {}
     for document in documents:
         value = document['path']
         try:
             path, _ = path_for(cwd, value)
             identity = str(path).casefold() if isinstance(path, PureWindowsPath) else str(path)
-            if path.suffix.lower() not in {'.md', '.txt'}:
+            if not semi and path.suffix.lower() not in {'.md', '.txt'}:
                 raise ValueError(ERROR)
         except ValueError:
             identity = cwd + '/' + value
             item = failure()
         else:
-            item = await collect(client, cwd, document, denied_paths)
+            item = await collect(client, cwd, {k: document[k] for k in ("name", "path")}, denied_paths)
         if valid_name(document['name']):
             item['name'] = document['name']
         key = hashlib.sha256(identity.encode()).hexdigest()
-        results[key] = {**item, 'sourceKey': key}
+        if semi and key in results:
+            raise ValueError('交付文档规范化路径重复。')
+        results[key] = {**item, 'sourceKey': key, **({'primary': document['primary']} if semi else {})}
     return list(results.values())
 
 
-def validate_many(items: Any) -> list[dict[str, Any]]:
+def validate_many(items: Any, *, semi: bool = False) -> list[dict[str, Any]]:
     if not isinstance(items, list):
         raise ValueError('文档快照清单无效。')
     keys = set()
+    primary_count = 0
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get('sourceKey'), str) or not re.fullmatch(r'[0-9a-f]{64}', item['sourceKey']):
             raise ValueError('文档来源标识无效。')
         if item['sourceKey'] in keys:
             raise ValueError('文档来源标识重复。')
         keys.add(item['sourceKey'])
-        validate_result({key: value for key, value in item.items() if key != 'sourceKey'})
+        if semi:
+            if type(item.get('primary')) is not bool:
+                raise ValueError('文档主次身份无效。')
+            primary_count += item['primary']
+        validate_result({key: value for key, value in item.items() if key not in ({'sourceKey', 'primary'} if semi else {'sourceKey'})})
+    if primary_count > 1:
+        raise ValueError('只能指定一份主文档。')
     return items
 
 
 def save_many(connection: sqlite3.Connection, workflow_id: str, node_id: str, source_id: str,
               items: list[dict[str, Any]], now: str) -> None:
-    node = connection.execute("""SELECT n.agent_id FROM workflow_nodes n JOIN workflows w USING(workflow_id)
-        WHERE n.workflow_id=? AND n.node_id=? AND w.advance_mode='automatic' AND w.result_protocol_version=3""",
+    node = connection.execute("""SELECT n.agent_id,w.result_protocol_version FROM workflow_nodes n JOIN workflows w USING(workflow_id)
+        WHERE n.workflow_id=? AND n.node_id=? AND ((w.advance_mode='automatic' AND w.result_protocol_version=3) OR
+        (w.advance_mode='semi_automatic' AND w.result_protocol_version=4 AND n.position=0
+         AND EXISTS (SELECT 1 FROM workflow_nodes next WHERE next.workflow_id=n.workflow_id AND next.position=1)))""",
         (workflow_id, node_id)).fetchone()
     if node is None:
-        raise ValueError('仅新版全自动步骤可以保存文档清单。')
-    validate_many(items)
+        raise ValueError('当前步骤不支持保存文档清单。')
+    semi = node["result_protocol_version"] == 4
+    validate_many(items, semi=semi)
     if connection.execute('SELECT 1 FROM workflow_document_batches WHERE workflow_id=? AND node_id=? AND source_id=?',
                           (workflow_id, node_id, source_id)).fetchone():
         return
     for item in items:
-        key = hashlib.sha256((node['agent_id'] + '/' + item['sourceKey']).encode()).hexdigest()
+        key = '@main' if semi and item['primary'] else hashlib.sha256((node['agent_id'] + '/' + item['sourceKey']).encode()).hexdigest()
         document_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f'{workflow_id}/{node_id}/{key}'))
         previous = connection.execute("""SELECT content,format,revision FROM workflow_documents
             WHERE workflow_id=? AND source_key=? AND content IS NOT NULL ORDER BY updated_at DESC,rowid DESC LIMIT 1""",
@@ -262,7 +312,7 @@ def ordered_nodes(nodes: list) -> list:
 def automatic_views(connection: sqlite3.Connection, workflow_id: str, nodes: list) -> tuple[dict, list]:
     by_node, latest = {}, {}
     for number, node in enumerate(ordered_nodes(nodes), 1):
-        rows = connection.execute(f"SELECT {METADATA_COLUMNS},source_key FROM workflow_documents WHERE workflow_id=? AND node_id=? AND removed=0 ORDER BY rowid",
+        rows = connection.execute(f"SELECT {METADATA_COLUMNS} FROM workflow_documents WHERE workflow_id=? AND node_id=? AND removed=0 ORDER BY rowid",
                                  (workflow_id, node['node_id'])).fetchall()
         by_node[node['node_id']] = [view(row) for row in rows]
         for row in rows:

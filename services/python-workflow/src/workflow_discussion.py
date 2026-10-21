@@ -21,15 +21,15 @@ SCHEMA = {
 }
 
 
-def validate(raw: str, documents_enabled: bool = False) -> dict[str, Any]:
+def validate(raw: str, documents_enabled: bool = False, *, multi: bool = False) -> dict[str, Any]:
     try:
         value = json.loads(raw)
     except (TypeError, ValueError) as error:
         raise RuntimeError("执行者回答格式无效，交接总结未更新。") from error
     # 升级前已结束的讨论可能仍使用旧结果结构。
-    if documents_enabled and isinstance(value, dict) and set(value) == {"text", "summary"}:
+    if documents_enabled and not multi and isinstance(value, dict) and set(value) == {"text", "summary"}:
         value["document"] = None
-    if not isinstance(value, dict) or set(value) != ({"text", "summary", "document"} if documents_enabled else {"text", "summary"}):
+    if not isinstance(value, dict) or set(value) != ({"text", "summary", "documents"} if multi else {"text", "summary", "document"} if documents_enabled else {"text", "summary"}):
         raise RuntimeError("执行者回答格式无效，交接总结未更新。")
     for name in ("text", "summary"):
         item = value[name]
@@ -37,6 +37,14 @@ def validate(raw: str, documents_enabled: bool = False) -> dict[str, Any]:
             continue
         if not isinstance(item, str) or not item.strip() or len(item) > RESULT_LIMIT:
             raise RuntimeError("执行者回答为空或超过容量限制，交接总结未更新。")
+    if multi:
+        from workflow_documents import validate_descriptors
+        try:
+            validate_descriptors(value["documents"])
+        except ValueError as error:
+            raise RuntimeError("讨论文档清单无效，交接总结未更新。") from error
+        if value["summary"] is None and value["documents"]:
+            raise RuntimeError("普通提问不能更新文档。")
     return value
 
 
@@ -82,6 +90,7 @@ class DiscussionService:
         if target is None:
             return False
         documents_enabled = await db(self.store.document_enabled, workflow_id, target["nodeId"])
+        multi = documents_enabled and target.get("resultProtocolVersion") == 4
         record = await db(self.store.get_discussion, workflow_id, message["messageId"])
         if record:
             if record["state"] == "completed":
@@ -115,7 +124,21 @@ class DiscussionService:
                            "遇阻时只按明确要求补充信息或修订产物，剩余正式业务由用户点击‘重新执行’后处理。"
                            "等待期间禁止执行阻断停止评论或转交人工等收尾；只有平台明确宣布超时阻断后才允许。")
             output_schema = SCHEMA
-            if documents_enabled:
+            if multi:
+                from workflow_documents import SEMI_DOCUMENTS_SCHEMA
+                output_schema = {**SCHEMA, "required": ["text", "summary", "documents"],
+                    "properties": {**SCHEMA["properties"], "documents": SEMI_DOCUMENTS_SCHEMA}}
+                prompt += (
+                    "\n本步骤展示多份文档，正式方案是唯一主文档（primary=true），交接总结及其他文档为 false。"
+                    "用户说‘修改方案’时只修改正式方案，不改写交接总结文件、其他附件或业务日志；"
+                    "仅在明确要求修改某份其他文档时才处理该文档。对象不明时先澄清，不扩大范围。"
+                    "同步更新供下一步使用的文字 summary 以反映方案变化，不等于改写总结文件。"
+                    "返回 documents（每项 name/path/primary），仅列本次明确要求且实际修改的文档；"
+                    "没有修改或普通提问返回空数组，不重新交付未修改的文档，未列出的条目由平台保留。"
+                    "保持主文档身份；正式方案改名或移动仍为主文档，不拿总结替代方案。"
+                    "只在原工作目录和权限内处理 UTF-8 .md/.markdown/.txt，不返回正文。"
+                )
+            elif documents_enabled:
                 from workflow_documents import SCHEMA as DOCUMENT_SCHEMA
                 output_schema = {**SCHEMA, "required": ["text", "summary", "document"],
                     "properties": {**SCHEMA["properties"], "document": DOCUMENT_SCHEMA["properties"]["document"]}}
@@ -191,11 +214,17 @@ class DiscussionService:
         if raw is None:
             raise RuntimeError("执行者未完成讨论，交接总结未更新。")
         try:
-            decision = validate(raw, documents_enabled)
+            decision = validate(raw, documents_enabled, multi=multi)
         except RuntimeError:
             await db(self.store.update_discussion, workflow_id, message["messageId"], state="failed")
             raise
-        if documents_enabled and decision["summary"] is not None:
+        if multi and decision["summary"] is not None and decision["documents"]:
+            from workflow_documents import collect_many
+            agent = self.orchestrator.get_agent(target["agentId"])
+            async with self.orchestrator._client_factory(agent.url, token=self.orchestrator._resolve_agent_token(agent)) as client:
+                decision["documentResults"] = await collect_many(
+                    client, target["cwd"], decision["documents"], [agent.token_file], semi=True)
+        elif documents_enabled and not multi and decision["summary"] is not None:
             from workflow_documents import collect, failure
             async def capture():
                 if decision.get("document") is None:

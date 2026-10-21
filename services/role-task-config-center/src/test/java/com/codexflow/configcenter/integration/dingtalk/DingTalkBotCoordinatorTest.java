@@ -20,6 +20,64 @@ import tools.jackson.databind.node.ObjectNode;
 /** 统一入口不依赖群绑定；回答与每次提问关联。 */
 class DingTalkBotCoordinatorTest {
   @Test
+  void submittingBindingWaitsWhileInitialSubmissionIsProtected() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "submitting", 0, null, false);
+    when(gateway.get("/workflows/" + ID))
+        .thenThrow(new com.codexflow.configcenter.client.GatewayFailure(404, "missing"));
+    when(runs.recoverSubmission(ID)).thenReturn(false);
+    assertThat((Boolean) ReflectionTestUtils.invokeMethod(bot, "recoverSubmission", binding))
+        .isFalse();
+    verify(store, never()).markSubmitted(ID);
+    verify(store, never()).markSubmissionFailed(any(), any(), any());
+    verify(store, never()).enqueueText(any(), any(), any(), any(), any());
+    verify(runs, never()).submitPrepared(any());
+  }
+
+  @Test
+  void failedSubmissionStopsBindingPollingWithoutQueryingGateway() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "submitting", 0, null, false);
+    when(runStore.runStatus(ID)).thenReturn("submit_failed");
+
+    ReflectionTestUtils.invokeMethod(bot, "pollBinding", binding);
+
+    verify(store).markSubmissionFailed(eq("app"), eq(ID), contains("任务启动失败"));
+    verifyNoInteractions(gateway, runs);
+    verify(store, never()).markSubmitted(ID);
+  }
+
+  @Test
+  void submissionFailureDuringRecoveryAlsoStopsBindingPolling() {
+    var binding = new DingTalkModels.Binding(ID, "group", "root", "submitting", 0, null, false);
+    when(runStore.runStatus(ID)).thenReturn("submitting", "submit_failed");
+    when(gateway.get("/workflows/" + ID))
+        .thenThrow(new com.codexflow.configcenter.client.GatewayFailure(404, "missing"));
+    when(runs.recoverSubmission(ID)).thenReturn(false);
+
+    ReflectionTestUtils.invokeMethod(bot, "pollBinding", binding);
+
+    verify(store).markSubmissionFailed(eq("app"), eq(ID), contains("任务启动失败"));
+    verify(store, never()).markSubmitted(ID);
+  }
+
+  @Test
+  void successfulRecoveryDoesNotClaimAServiceRestart() {
+    var binding =
+        new DingTalkModels.Binding(
+            ID, "group", "GROUP", "group", "群聊", "root", "web", "submitting", 0, null, false);
+    when(gateway.get("/workflows/" + ID))
+        .thenThrow(new com.codexflow.configcenter.client.GatewayFailure(404, "missing"))
+        .thenReturn(json.createObjectNode().put("status", "queued"));
+    when(runs.recoverSubmission(ID)).thenReturn(true);
+    when(store.binding(ID)).thenReturn(Optional.of(binding));
+    assertThat((Boolean) ReflectionTestUtils.invokeMethod(bot, "recoverSubmission", binding))
+        .isTrue();
+    verify(store).markSubmitted(ID);
+    verify(store)
+        .enqueueText(
+            eq("recovered-card:" + ID), eq(ID), eq("group"), eq("root"), contains("任务已补交"));
+  }
+
+  @Test
   void failedStepUsesMonitorNoticeAndDeliveryKeepsMessageReference() {
     var binding = new DingTalkModels.Binding(ID, "group", "root", "active", 0, null, false);
     ReflectionTestUtils.invokeMethod(
@@ -617,6 +675,35 @@ class DingTalkBotCoordinatorTest {
     verify(store).enqueueStartReply(anyString(), eq(ID), any(), contains("任务已启动"));
     verify(store, never()).enqueueCard(any(), any(), any());
     verify(store, never()).enqueueProgressMarkdown(any(), any(), any(), any());
+  }
+
+  @Test
+  void definitiveStartFailureEndsBindingImmediately() {
+    when(store.reserveStart(eq("app"), any()))
+        .thenReturn(new DingTalkModels.StartReservation("started", ID, json.createObjectNode()));
+    when(runs.submitPrepared(any()))
+        .thenThrow(new com.codexflow.configcenter.client.GatewayFailure(400, "rejected"));
+    when(runStore.runStatus(ID)).thenReturn("submit_failed");
+
+    bot.safelyHandleMessage(message("销售日报"));
+
+    verify(store).markSubmissionFailed(eq("app"), eq(ID), contains("任务启动失败"));
+    verify(store, never()).enqueueStartReply(any(), any(), any(), any());
+    verify(store, never()).enqueueReply(any(), any(), any(), any());
+  }
+
+  @Test
+  void uncertainStartFailureKeepsBindingForRecovery() {
+    when(store.reserveStart(eq("app"), any()))
+        .thenReturn(new DingTalkModels.StartReservation("started", ID, json.createObjectNode()));
+    when(runs.submitPrepared(any()))
+        .thenThrow(new com.codexflow.configcenter.client.GatewayFailure(502, "unavailable"));
+    when(runStore.runStatus(ID)).thenReturn("submitting");
+
+    bot.safelyHandleMessage(message("销售日报"));
+
+    verify(store, never()).markSubmissionFailed(any(), any(), any());
+    verify(store).enqueueReply(anyString(), eq(ID), any(), contains("暂未成功启动"));
   }
 
   @Test

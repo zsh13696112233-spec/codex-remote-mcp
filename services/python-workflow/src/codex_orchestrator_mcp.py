@@ -1252,10 +1252,10 @@ class Orchestrator:
                         job.turn_id = self._extract_id(turn_result, "turn")
                         stage = "turn/completed"
                         await self._consume_turn(job, client, deadline)
-                        from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, parse as parse_outcome
-                        if job.status == "completed" and job.output_schema in (OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3):
+                        from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4, parse as parse_outcome
+                        if job.status == "completed" and job.output_schema in (OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4):
                             try:
-                                value = parse_outcome(job.response or "", 1 if job.output_schema == SCHEMA_V1 else 3 if job.output_schema == SCHEMA_V3 else 2)
+                                value = parse_outcome(job.response or "", 1 if job.output_schema == SCHEMA_V1 else 4 if job.output_schema == SCHEMA_V4 else 3 if job.output_schema == SCHEMA_V3 else 2)
                                 job.business_result = value
                                 job.response = value["summary"]
                             except (ValueError, KeyError, TypeError) as error:
@@ -1269,10 +1269,10 @@ class Orchestrator:
                                     else "步骤结果不是有效的 JSON 对象或字段类型不正确。"
                                 )}
                         from workflow_documents import SCHEMA as DOCUMENT_SCHEMA, collect as collect_documents, ERROR as DOCUMENT_ERROR
-                        if job.status == "completed" and job.output_schema == SCHEMA_V3 and job.business_result is not None:
+                        if job.status == "completed" and (job.output_schema == SCHEMA_V3 or (job.output_schema == SCHEMA_V4 and job.capture_document)) and job.business_result is not None:
                             from workflow_documents import collect_many
-                            job.document_results = await collect_many(client, job.cwd, job.business_result["documents"], [agent.token_file])
-                        if job.status == "completed" and job.business_result is not None and job.capture_document:
+                            job.document_results = await collect_many(client, job.cwd, job.business_result["documents"], [agent.token_file], semi=job.output_schema == SCHEMA_V4)
+                        if job.status == "completed" and job.business_result is not None and job.capture_document and job.output_schema != SCHEMA_V4:
                             try:
                                 job.document_result = await asyncio.wait_for(collect_documents(client, job.cwd, job.business_result.get("document"), [agent.token_file]), 30)
                             except asyncio.TimeoutError:
@@ -1728,8 +1728,8 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
     store = get_workflow_store()
     snapshot = job.snapshot()
     from workflow_documents import SCHEMA as DOCUMENT_SCHEMA
-    from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3
-    if job.output_schema in (DOCUMENT_SCHEMA, OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3) and not job.completed.is_set() and job.status == "completed":
+    from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4
+    if job.output_schema in (DOCUMENT_SCHEMA, OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4) and not job.completed.is_set() and job.status == "completed":
         snapshot["status"] = "running"
         snapshot["response"] = None
     current_node = store.get_node(workflow_id, node_id)
@@ -1895,10 +1895,10 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             "必要的阻断原因、未验证项和实际业务结论必须在正式结果中完整保留。\n"
         )
         document_options = {}
-        if node.get("captureDocument"):
+        if node.get("captureDocument") and node.get("resultProtocolVersion") != 4:
             node["prompt"] += DOCUMENT_INSTRUCTION
             document_options["output_schema"] = DOCUMENT_SCHEMA
-        if node.get("resultProtocolVersion") in (1, 2, 3):
+        if node.get("resultProtocolVersion") in (1, 2, 3, 4):
             from workflow_outcomes import schema, instruction
             node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"), node["resultProtocolVersion"], defer_blocked=bool(node.get("waitPolicy")))
             document_options["output_schema"] = schema(node["resultProtocolVersion"])

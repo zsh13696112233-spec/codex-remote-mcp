@@ -77,7 +77,15 @@ class WaitService:
                     await db(gateway.store.complete_final_wait, workflow_id, gate_id)
                     await gateway._schedule_pending()
                     return
-                target = await db(gateway.store.prepare_wait_execution, workflow_id, gate_id)
+                try:
+                    target = await db(gateway.store.prepare_wait_execution, workflow_id, gate_id)
+                except Exception:
+                    if row["status"] != "executing":
+                        raise
+                    # 准备事务失败时尚未派发，恢复人工等待，避免反复扫描同一失败。
+                    LOGGER.exception("重新执行准备失败，gate=%s。", gate_id)
+                    await db(gateway.store.fail_wait_execution, workflow_id, gate_id, before_start=True)
+                    return
             if target is not None:
                 await self.execute(workflow_id, gate_id, target)
         except asyncio.CancelledError:
@@ -152,6 +160,8 @@ class WaitService:
                 await db(gateway.store.finish_business_termination, workflow_id)
             else:
                 snapshot = {**job.snapshot(), "businessResult": job.business_result}
+                if job.document_results is not None:
+                    snapshot["documents"] = job.document_results
                 if job.document_result is not None:
                     snapshot["document"] = job.document_result
                 await db(gateway.store.sync_node_job, workflow_id, target["nodeId"], snapshot)

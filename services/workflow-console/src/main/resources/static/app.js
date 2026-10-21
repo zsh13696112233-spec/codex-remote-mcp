@@ -83,7 +83,7 @@ async function gateway() {
 }
 
 async function refresh() {
-  if (state.refreshing) return;
+  if (state.refreshing || (state.refreshError && !state.refreshRetrying)) return;
   state.refreshing = true;
   try {
     const query = new URLSearchParams();
@@ -114,7 +114,9 @@ async function refresh() {
     scheduleRefresh(idle ? 15000 : 2000);
   } catch (error) {
     const firstFailure = !state.refreshError;
-    state.refreshError = error.message;
+    state.refreshError = error.status === 404
+      ? "找不到该任务，请到配置中心查看提交结果或核对任务编号。"
+      : "暂时无法读取任务信息，请稍后重新加载。";
     state.refreshRetrying = !error.status || error.status >= 500 || [408, 429].includes(error.status);
     renderRefreshError();
     if (state.refreshRetrying) {
@@ -122,7 +124,7 @@ async function refresh() {
       if (firstFailure) toast("连接暂时中断，正在自动重试");
     } else {
       stop();
-      if (firstFailure) toast(error.message);
+      if (firstFailure) toast(state.refreshError);
     }
   } finally {
     state.refreshing = false;
@@ -150,7 +152,7 @@ async function setExecutionDetails(enabled) {
   renderMessages();
   try { localStorage.setItem("monitor.executionDetails", String(enabled)); }
   catch { /* 浏览器禁用存储时仍可在当前页面切换。 */ }
-  if (state.workflowId) {
+  if (state.workflowId && !state.refreshError) {
     try { await events(); }
     catch { toast("执行详情加载失败，请稍后重试"); }
   }
@@ -528,7 +530,7 @@ function renderSteps(nodes, initializing = false) {
       list.append(make("strong", "", "交付文档"));
       for (const doc of node.documents) {
         const available = doc.available && !doc.removed;
-        const label = doc.name + (doc.removed ? "（已移除）" : doc.error ? (available ? "（最新版本未同步） · 查看上次成功版本" : "（未同步）") : " · 查看文档");
+        const label = (doc.primary ? "【主文档】" : "") + doc.name + (doc.removed ? "（已移除）" : doc.error ? (available ? "（最新版本未同步） · 查看上次成功版本" : "（未同步）") : " · 查看文档");
         const link = make(available ? "a" : "span", "", label);
         if (available) {
           link.href = `document.html?workflowId=${encodeURIComponent(state.workflowId)}&documentId=${encodeURIComponent(doc.id)}`;
@@ -564,10 +566,10 @@ function renderSteps(nodes, initializing = false) {
       const gate = make("div", "advance-waiting");
       const copy = make("div", "advance-copy");
       copy.append(
-        make("strong", "", policy ? (blocked ? "当前步骤遇到阻碍，等待人工处理" : finalWait ? "最终结果等待确认" : "等待进入下一步") : held
+        make("strong", "", advance.state === "busy" ? "正在处理步骤操作，请稍候" : policy ? (blocked ? "当前步骤遇到阻碍，等待人工处理" : finalWait ? "最终结果等待确认" : "等待进入下一步") : held
           ? `保持等待：暂不进入${next?.displayName || "下一步骤"}`
           : `等待进入下一步：${next?.displayName || "下一步骤"}`),
-        make("span", "", policy ? (advance.state === "busy" ? "正在处理，请等待处理结果。" : held ? "等待人工处理，不会自动流转或结束，请通过按钮操作。" : `无人回复将在 ${new Date(advance.expiresAt).toLocaleString()} 自动${blocked?"阻断结束":finalWait?"正常结束":"进入下一步"}。回复后取消倒计时。`) + (blocked ? "请通过钉钉卡片“重新执行”处理本步骤，或在配置中心终止任务。" : "") : held
+        make("span", "", policy ? (advance.state === "busy" ? "正在处理，请等待处理结果。" : held ? "等待人工处理，不会自动流转或结束，请通过按钮操作。" : `无人回复将在 ${new Date(advance.expiresAt).toLocaleString()} 自动${blocked?"阻断结束":finalWait?"正常结束":"进入下一步"}。回复后取消倒计时。`) + (blocked && advance.state !== "busy" ? "请通过钉钉卡片“重新执行”处理本步骤，或在配置中心终止任务。" : "") : held
           ? "正在与本步骤执行者讨论。明确提出修改或采纳后更新交接总结，完成后请点击继续。"
           : "两分钟内未回复将自动继续。收到讨论消息后保持等待，点击继续交接最新版总结。")
       );
@@ -613,6 +615,9 @@ function render(snapshot) {
   $("#jiraKey").textContent = jiraKey;
   $("#jira").hidden = !jiraKey;
   $("#id").textContent = snapshot.workflowId || state.workflowId;
+  $("#refreshNotice").hidden = true;
+  $(".live-badge").hidden = false;
+  $("#executionDetails").disabled = false;
   const status = $("#status");
   status.textContent = snapshot.termination ? (TERMINAL.has(snapshot.status) ? (snapshot.termination.outcome === "blocked" ? "因阻断结束" : "无待处理任务，已结束") : "正在结束") : isInitializing(snapshot) ? "准备中" : zh(snapshot.status);
   status.className = `status ${visualState(snapshot.status)}`;
@@ -625,6 +630,8 @@ function render(snapshot) {
   const allStepsPending = nodes.length === 0 || nodes.every(node => node.status === "pending");
   $("#current").textContent = snapshot.termination ? snapshot.response : initializing
     ? initializationMessage(snapshot)
+    : snapshot.pendingAdvance?.state === "busy"
+    ? "正在处理步骤操作，请稍候"
     : snapshot.pendingAdvance?.kind === "blocked"
     ? "当前步骤遇到阻碍，等待人工处理"
     : snapshot.pendingAdvance?.kind === "finish"
@@ -657,9 +664,18 @@ function renderRefreshError() {
     : state.refreshError;
   $("#updated").textContent = new Date().toLocaleString("zh-CN", {hour12: false});
   if (!state.snapshot) {
-    $("#name").textContent = "正在加载任务";
+    $("#name").textContent = "任务信息无法加载";
+    $("#steps").replaceChildren(make("p", "", "暂时无法读取步骤信息。"));
+    $("#progress").textContent = "—";
     $("#id").textContent = state.workflowId;
   }
+  $("#refreshNotice").hidden = false;
+  $("#refreshReason").textContent = state.refreshRetrying
+    ? "连接暂时中断，正在自动重试。" : state.refreshError + " 已停止自动查询。";
+  $(".live-badge").hidden = true;
+  $("#executionDetails").disabled = true;
+  renderComposer();
+  renderAdvanceCountdown();
   renderMessages();
 }
 
@@ -674,6 +690,7 @@ function renderDuration() {
 
 function renderAdvanceCountdown() {
   document.querySelectorAll("[data-advance-gate]").forEach(button => {
+    if (state.refreshError) { button.disabled = true; return; }
     const action = state.advanceAction;
     const acting = action?.gateId === button.dataset.advanceGate;
     const held = button.dataset.advanceState === "held";
@@ -740,8 +757,8 @@ async function runAdvanceAction(gateId, action) {
 function renderComposer() {
   const input = $("#chatInput");
   const button = $("#sendMessage");
-  input.disabled = state.sending;
-  button.disabled = state.sending || !input.value.trim();
+  input.disabled = state.sending || !state.snapshot || !!state.refreshError;
+  button.disabled = input.disabled || !input.value.trim();
   button.textContent = state.sending ? "发送中…" : "发送";
   $("#chatHint").textContent = TERMINAL.has(state.snapshot?.status)
     ? "任务已结束，仍可只读咨询"
@@ -749,7 +766,7 @@ function renderComposer() {
 }
 
 async function sendChatMessage(messageId, originalText) {
-  if (state.sending) return;
+  if (state.sending || !state.snapshot || state.refreshError) return;
   const input = $("#chatInput");
   const value = text(originalText ?? input.value).trim();
   if (!value) return;
@@ -800,8 +817,8 @@ function scheduleRefresh(delay) {
 
 function start() {
   stop();
+  state.refreshRetrying = true;
   refresh();
-  scheduleRefresh(2000);
   state.durationTimer = setInterval(renderDuration, 1000);
 }
 function stop() {
@@ -823,6 +840,7 @@ $("#chatForm").onsubmit = event => {
 };
 $("#chatInput").addEventListener("input", renderComposer);
 $("#olderMessages").onclick = loadOlderMessages;
+$("#reloadWorkflow").onclick = start;
 try { state.showDetails = localStorage.getItem("monitor.executionDetails") === "true"; }
 catch { /* 无本地存储时默认精简。 */ }
 $("#executionDetails").checked = state.showDetails;

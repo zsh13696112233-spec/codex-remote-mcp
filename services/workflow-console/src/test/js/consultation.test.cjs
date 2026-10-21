@@ -186,7 +186,27 @@ test('busy manual waits never display automatic timeout copy', () => {
     `, context);
     const text = elements.map(item => item.textContent || '').join(' ');
     assert.match(text, /正在处理，请等待处理结果/);
-    assert.doesNotMatch(text, /无人回复将在|自动正常结束|自动进入下一步|自动阻断结束/);
+    assert.match(text, /正在处理步骤操作/);
+    assert.doesNotMatch(text, /无人回复将在|自动正常结束|自动进入下一步|自动阻断结束|等待人工处理|最终结果等待确认|请通过钉钉卡片/);
+  }
+});
+
+test('current phase shows processing instead of human confirmation while busy', () => {
+  for (const kind of ['advance', 'finish', 'blocked']) {
+    const context = app();
+    const elements = new Map();
+    context.document.querySelector = selector => {
+      if (!elements.has(selector)) elements.set(selector, {});
+      return elements.get(selector);
+    };
+    context.waitKind = kind;
+    vm.runInContext(`
+      renderDuration = renderSteps = renderAdvanceCountdown = renderComposer = () => {};
+      state.snapshot={status:'running',nodes:[{id:'a',status:'waiting'}],
+        pendingAdvance:{kind:waitKind,state:'busy'}};
+      render(state.snapshot);
+    `, context);
+    assert.equal(elements.get('#current').textContent, '正在处理步骤操作，请稍候');
   }
 });
 

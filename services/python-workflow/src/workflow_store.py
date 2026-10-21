@@ -414,6 +414,14 @@ class WorkflowStore(InputImageStore, WaitStore):
                    OR permission_profile = 'read_only' AND write_enabled = 1
                 """
             )
+            attempt_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(workflow_node_attempts)")
+            }
+            if "dispatch_token" not in attempt_columns:
+                connection.execute(
+                    "ALTER TABLE workflow_node_attempts ADD COLUMN dispatch_token TEXT"
+                )
             workflow_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(workflows)").fetchall()
@@ -720,10 +728,12 @@ class WorkflowStore(InputImageStore, WaitStore):
     def create_workflow(self, value: dict[str, Any]) -> dict[str, Any]:
         spec = self.normalize_spec(value)
         version = value.get("resultProtocolVersion", 2)
-        if type(version) is not int or version not in (1, 2, 3):
+        if type(version) is not int or version not in (1, 2, 3, 4):
             raise ValueError("步骤结果协议版本无效。")
         if version == 3 and spec["advanceMode"] != "automatic":
             raise ValueError("版本3仅适用于全自动运行。")
+        if version == 4 and spec["advanceMode"] != "semi_automatic":
+            raise ValueError("版本4仅适用于半自动运行。")
         spec["resultProtocolVersion"] = version
         timestamp = utc_now()
         encoded_spec = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
@@ -1465,12 +1475,12 @@ class WorkflowStore(InputImageStore, WaitStore):
                 document_views, document_summary = automatic_views(connection, workflow_id, node_rows)
             if workflow["advance_mode"] == "semi_automatic" and len(node_rows) > 1:
                 first_node = node_rows[0]["node_id"]
-                row = connection.execute(
+                rows = connection.execute(
                     f"SELECT {METADATA_COLUMNS} FROM workflow_documents WHERE workflow_id=? AND node_id=? AND removed=0 "
-                    "ORDER BY CASE WHEN source_key='@main' THEN 0 ELSE 1 END, rowid LIMIT 1",
-                    (workflow_id, first_node)).fetchone()
-                if row is not None:
-                    document_views[first_node] = [document_view(row)]
+                    "ORDER BY CASE WHEN source_key='@main' THEN 0 ELSE 1 END, rowid"
+                    + ("" if workflow["result_protocol_version"] == 4 else " LIMIT 1"),
+                    (workflow_id, first_node)).fetchall()
+                document_views[first_node] = [document_view(row) for row in rows]
             last_sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) FROM workflow_events WHERE workflow_id = ?",
                 (workflow_id,),
@@ -2072,6 +2082,9 @@ class WorkflowStore(InputImageStore, WaitStore):
                     raise RuntimeError("讨论尚未确认完成。")
                 if record["state"] == "completed":
                     return
+                if discussion.get("documentResults") is not None:
+                    from workflow_documents import save_many
+                    save_many(connection, workflow_id, target["nodeId"], "discussion:" + message_id, discussion["documentResults"], now)
                 if discussion.get("documentResult") is not None:
                     from workflow_documents import save as save_documents
                     save_documents(connection, workflow_id, target["nodeId"], "discussion:" + message_id, discussion["documentResult"], now)
@@ -3131,16 +3144,16 @@ class WorkflowStore(InputImageStore, WaitStore):
             workflow = connection.execute("SELECT status, termination_json, result_protocol_version FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if workflow["status"] in {"completed", "failed", "cancelled"}:
                 return
-            if workflow["result_protocol_version"] in (1, 2, 3) and old["status"] in TERMINAL_NODE_STATUSES | {"waiting"}:
+            if workflow["result_protocol_version"] in (1, 2, 3, 4) and old["status"] in TERMINAL_NODE_STATUSES | {"waiting"}:
                 return
-            if workflow["result_protocol_version"] in (1, 2, 3) and status == "completed":
+            if workflow["result_protocol_version"] in (1, 2, 3, 4) and status == "completed":
                 if old["job_id"] and snapshot.get("job_id") != old["job_id"]:
                     raise RuntimeError("步骤执行版本缺失或已变化。")
                 for key in ("thread_id", "turn_id"):
                     if old[key] and snapshot.get(key) and old[key] != snapshot[key]:
                         raise RuntimeError("步骤执行版本已变化。")
             outcome = None
-            if status == "completed" and workflow["result_protocol_version"] in (1, 2, 3):
+            if status == "completed" and workflow["result_protocol_version"] in (1, 2, 3, 4):
                 from workflow_outcomes import validate
                 try:
                     outcome = validate(snapshot.get("businessResult"), workflow["result_protocol_version"])
@@ -3152,6 +3165,8 @@ class WorkflowStore(InputImageStore, WaitStore):
                     if outcome["outcome"] == "blocked":
                         status = "failed"
                         snapshot["error"] = outcome["reason"]
+            if outcome is not None and workflow["result_protocol_version"] == 4 and outcome["documents"] and not self.document_enabled(workflow_id, node_id):
+                raise ValueError("当前步骤不采集文档。")
             if outcome is not None and outcome["jiraComment"]["issueKey"].strip():
                 # 与正式结果同一事务保存展示信息；不从总结猜测，也不改变流程决定。
                 issue_key = outcome["jiraComment"]["issueKey"].strip()
@@ -3172,10 +3187,15 @@ class WorkflowStore(InputImageStore, WaitStore):
                         "UPDATE workflows SET jira_context_json=? WHERE workflow_id=?",
                         (json.dumps(context, ensure_ascii=False), workflow_id),
                     )
-            if outcome is not None and workflow["result_protocol_version"] == 3:
+            if outcome is not None and (workflow["result_protocol_version"] == 3 or
+                    (workflow["result_protocol_version"] == 4 and self.document_enabled(workflow_id, node_id))):
                 from workflow_documents import save_many
                 if outcome['documents'] and not snapshot.get('documents'):
                     raise ValueError('步骤已交付文档，但缺少文档采集结果。')
+                if workflow["result_protocol_version"] == 4:
+                    items = snapshot.get("documents", [])
+                    if sorted((d["name"], d["primary"]) for d in outcome["documents"]) != sorted((d.get("name", ""), d.get("primary", False)) for d in items):
+                        raise ValueError("文档采集结果与交付清单不一致。")
                 save_many(connection, workflow_id, node_id,
                           "job:" + str(snapshot.get("job_id") or old["job_id"]), snapshot.get("documents", []), utc_now())
             if outcome is not None and outcome["outcome"] == "blocked" and self._wait_policy(connection, workflow_id):

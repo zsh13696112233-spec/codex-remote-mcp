@@ -111,8 +111,14 @@ final class DingTalkWaitingCard {
         String name = doc.path("name").asText("交付文档");
         for (String special : List.of("[", "]", "(", ")", "`", "<", ">", "\\", "*", "\n", "\r"))
           name = name.replace(special, " ");
-        documents.append("- ").append(name);
+        documents.append("- ");
+        if (doc.path("primary").asBoolean()) documents.append("【主文档】");
+        documents.append(name);
         if (doc.path("error").isTextual()) documents.append("（尚未同步）");
+        if (!doc.path("available").asBoolean()) {
+          documents.append("\n");
+          continue;
+        }
         documents
             .append(" [查看文档](")
             .append(base)
@@ -123,7 +129,6 @@ final class DingTalkWaitingCard {
                 java.net.URLEncoder.encode(
                     doc.path("id").asText(), java.nio.charset.StandardCharsets.UTF_8))
             .append(")\n");
-        break;
       }
     }
     values.put("statusText", status);
@@ -179,8 +184,10 @@ final class DingTalkWaitingCard {
             && !snapshot.path("pendingAdvance").path("nextNodeId").asText().isBlank()) {
           for (JsonNode document : node.path("documents")) {
             if (document.path("removed").asBoolean()) continue;
-            if (!document.path("id").asText().isBlank() && !document.path("error").isTextual())
-              subject = "计划文档";
+            if (document.path("primary").asBoolean(!document.has("primary"))
+                && document.path("available").asBoolean(true)
+                && !document.path("id").asText().isBlank()
+                && !document.path("error").isTextual()) subject = "计划文档";
             break;
           }
         }

@@ -150,11 +150,32 @@ class DingTalkWaitingCardTest {
     var snapshot = json.createObjectNode();
     snapshot.putObject("pendingAdvance").put("gateId", "gate").put("state", "held");
     var node = snapshot.putArray("nodes").addObject().put("id", "plan").put("resultRevision", 4);
-    node.putArray("documents").addObject().put("id", "doc").put("name", "[方案].md");
+    var docs = node.putArray("documents");
+    docs.addObject()
+        .put("id", "doc")
+        .put("name", "[方案].md")
+        .put("primary", true)
+        .put("available", true);
+    docs.addObject()
+        .put("id", "summary")
+        .put("name", "交接总结")
+        .put("primary", false)
+        .put("available", true);
+    docs.addObject()
+        .put("id", "missing")
+        .put("name", "未同步文档")
+        .put("available", false)
+        .put("error", "未同步");
     var data = DingTalkWaitingCard.render("flow", payload, snapshot, "http://example.test:8090/");
     assertThat(data).containsEntry("_templateId", "wide.schema").containsEntry("summary", "总结");
     assertThat(data.get("documents").toString())
-        .contains("http://example.test:8090/document.html?workflowId=flow&documentId=doc");
+        .contains(
+            "【主文档】",
+            "交接总结",
+            "未同步文档",
+            "documentId=summary",
+            "http://example.test:8090/document.html?workflowId=flow&documentId=doc")
+        .doesNotContain("documentId=missing");
     assertThat(DingTalkWaitingCard.documentRevision(snapshot, payload)).isEqualTo(4);
     payload.remove("documentTemplateId");
     assertThat(DingTalkWaitingCard.render("flow", payload, snapshot).get("markdown").toString())

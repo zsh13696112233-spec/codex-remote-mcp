@@ -195,9 +195,95 @@ class WorkflowRunServiceTest {
     verify(store, org.mockito.Mockito.times(2)).pendingRuntimeScopes("task-1");
   }
 
+  @Test
+  void recoveryDoesNotRaceAnInFlightInitialSubmission() throws Exception {
+    var entered = new java.util.concurrent.CountDownLatch(1);
+    var release = new java.util.concurrent.CountDownLatch(1);
+    ObjectNode accepted = objectMapper.createObjectNode().put("status", "queued");
+    when(store.getPrepared(WORKFLOW_ID)).thenReturn(prepared);
+    when(gateway.post("/workflows", prepared.payload()))
+        .thenAnswer(
+            invocation -> {
+              entered.countDown();
+              if (!release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                throw new AssertionError("提交未释放");
+              return accepted;
+            });
+    when(store.recordGatewayStatus(WORKFLOW_ID, accepted, "queued"))
+        .thenReturn(objectMapper.createObjectNode());
+    var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+    try {
+      var first = executor.submit(() -> service.submitPrepared(prepared));
+      assertThat(entered.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+      // 即使首次请求已超过恢复窗口，在途提交也不能被另一恢复入口抢占。
+      assertThat(service.recoverSubmission(WORKFLOW_ID)).isFalse();
+      when(launches.activeLaunches())
+          .thenReturn(List.of(new TaskLaunchStore.ActiveLaunch("task", WORKFLOW_ID)));
+      when(gateway.get("/workflows/" + WORKFLOW_ID)).thenThrow(new GatewayFailure(404, "missing"));
+      service.reconcileActiveRuns();
+      verify(gateway).post("/workflows", prepared.payload());
+      release.countDown();
+      assertThat(first.get(5, java.util.concurrent.TimeUnit.SECONDS)).isNotNull();
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void freshReservationIsNotRecoveredBeforeInitialSubmissionStarts() {
+    when(store.submissionRecoveryDue(WORKFLOW_ID)).thenReturn(false);
+    assertThat(service.recoverSubmission(WORKFLOW_ID)).isFalse();
+    verify(store, never()).getPrepared(WORKFLOW_ID);
+    verify(gateway, never())
+        .post(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+  }
+
+  @Test
+  void staleRecoverySnapshotDoesNotResubmitAcceptedRun() {
+    when(store.getPrepared(WORKFLOW_ID)).thenReturn(prepared);
+    when(store.runStatus(WORKFLOW_ID)).thenReturn("running");
+    when(store.runDetail(WORKFLOW_ID))
+        .thenReturn(objectMapper.createObjectNode().put("status", "running"));
+    assertThat(service.recoverSubmission(WORKFLOW_ID)).isFalse();
+    assertThat(service.submitPrepared(prepared).path("status").asText()).isEqualTo("running");
+    verify(gateway, never())
+        .post(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+  }
+
+  @Test
+  void failedAttemptReleasesInFlightSlotAndRestartCanRecoverPersistedRun() {
+    when(store.getPrepared(WORKFLOW_ID)).thenReturn(prepared);
+    when(gateway.get("/workflows/" + WORKFLOW_ID)).thenThrow(new GatewayFailure(404, "missing"));
+    when(gateway.post("/workflows", prepared.payload()))
+        .thenThrow(new GatewayFailure(502, "offline"));
+    assertThatThrownBy(() -> service.submitPrepared(prepared)).isInstanceOf(GatewayFailure.class);
+    ObjectNode accepted = objectMapper.createObjectNode().put("status", "queued");
+    org.mockito.Mockito.doReturn(accepted).when(gateway).post("/workflows", prepared.payload());
+    when(store.recordGatewayStatus(WORKFLOW_ID, accepted, "queued"))
+        .thenReturn(objectMapper.createObjectNode());
+    assertThat(service.recoverSubmission(WORKFLOW_ID)).isTrue();
+    var restarted =
+        new WorkflowRunService(
+            store, launches, gateway, mock(DingTalkProactiveNotificationService.class));
+    assertThat(restarted.recoverSubmission(WORKFLOW_ID)).isTrue();
+  }
+
+  @Test
+  void delayedInitialCallerDoesNotReportAPreviouslyRejectedSubmissionAsStarted() {
+    when(store.runStatus(WORKFLOW_ID)).thenReturn("submit_failed");
+    assertThatThrownBy(() -> service.submitPrepared(prepared))
+        .isInstanceOf(ConflictFailure.class)
+        .hasMessageContaining("任务提交失败");
+    verify(gateway, never())
+        .post(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+  }
+
   @BeforeEach
   void setUp() {
     store = mock(WorkflowRunStore.class);
+    when(store.runStatus(WORKFLOW_ID)).thenReturn("submitting");
+    when(store.submissionRecoveryDue(WORKFLOW_ID)).thenReturn(true);
     launches = mock(TaskLaunchStore.class);
     gateway = mock(GatewayClient.class);
     service =
