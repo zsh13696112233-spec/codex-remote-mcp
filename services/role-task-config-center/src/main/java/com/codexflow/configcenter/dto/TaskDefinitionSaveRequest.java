@@ -20,7 +20,7 @@ import jakarta.validation.constraints.Size;
  * @param scheduleTime 每日运行时间，格式 HH:mm
  * @param scheduleIntervalMinutes 间隔运行分钟数，范围 5–1440
  * @param notifyDingTalk 网页或定时运行后是否推送钉钉
- * @param blockedNotificationGroupId 阻断通知群；null 保留，空字符串清除
+ * @param blockedNotificationGroupId 开发人通知群；null 保留，空字符串清除
  */
 public record TaskDefinitionSaveRequest(
     @NotBlank @Size(max = 160) String name,

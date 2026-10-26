@@ -26,9 +26,12 @@ function toast(s){const e=$("#toast");e.textContent=s;e.style.display="block";se
 function time(v){return v?new Date(v).toLocaleString("zh-CN",{hour12:false}):"—"}
 function status(x){return `<span class="badge ${x.enabled?"":"off"}">${x.enabled?"启用中":"已停用"}</span>`}
 let syncWaitFocus=null;
-function setSyncWait(visible){
+function setSyncWait(visible,title="正在同步公司人员",message="正在从钉钉通讯录拉取人员和部门，请勿关闭或刷新页面。"){
   const wait=$("#syncWait");
   if(visible){
+    wait.classList.toggle("spinner-only",!title&&!message);
+    wait.ariaLabel=title||"正在加载页面";
+    wait.querySelector("strong").textContent=title;wait.querySelector("p").textContent=message;
     syncWaitFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;
     document.querySelectorAll("aside,main").forEach(element=>element.inert=true);
     wait.hidden=false;wait.focus();return;
@@ -56,9 +59,16 @@ async function loadRuntime({preserveOnFailure=false}={}){
   await Promise.all([loadAgents({preserveOnFailure}),loadGatewayReady()]);
   state.lastRuntimeRefreshAt=new Date().toISOString();
 }
-async function loadBase(){
-  await loadRuntime();
-  [state.roles,state.sops,state.tasks,state.dingtalkTargets]=await Promise.all([api("/api/roles"),api("/api/sops"),api("/api/task-definitions"),api("/api/dingtalk/targets")]);
+async function loadBase(page=state.page){
+  if(page!=="sops")void loadGatewayReady();
+  if(page==="roles")state.roles=await api("/api/roles");
+  else if(page==="tasks")state.tasks=await api("/api/task-definitions");
+  else if(page==="sops"){
+    const [roles,sops]=await Promise.all([api("/api/roles"),api("/api/sops"),loadRuntime()]);
+    state.roles=roles;state.sops=sops;
+  }else if(page==="dingtalk"){
+    [state.tasks,state.dingtalkTargets]=await Promise.all([api("/api/task-definitions"),api("/api/dingtalk/targets")]);
+  }else if(page==="dingtalk-targets")state.tasks=await api("/api/task-definitions");
 }
 function roleCard(x){return `<article class="card role-card"><div class="role-card-selection">${groupCheckbox(x)}</div><div class="role-card-heading"><h3 title="${esc(x.name)}">${esc(x.name)}</h3>${status(x)}</div><div class="role-card-group">${groupMark(x)}</div><p class="role-card-duty">${esc(x.duty||'暂未填写角色职责')}</p><div class="role-card-footer"><span class="meta">更新于 ${time(x.updatedAt)}</span><div class="actions"><button data-action="edit-role" data-id="${esc(x.id)}">编辑</button><button class="role-delete" data-action="delete-role" data-id="${esc(x.id)}">删除</button></div></div></article>`}
 function taskCard(x){const binding=x.dingtalkTarget?`${targetTypeLabel(x.dingtalkTarget.targetType)} ${x.dingtalkTarget.displayName}`:"未设置钉钉通知";return `<article class="card role-card task-card"><div class="role-card-selection">${groupCheckbox(x)}</div><div class="role-card-heading"><h3 title="${esc(x.name)}">${esc(x.name)}</h3>${status(x)}</div><div class="role-card-group">${groupMark(x)}${x.activeWorkflowId?'<span class="badge task-running">运行中</span>':''}</div><p class="role-card-duty">${esc(x.objective||"暂未填写任务目标")}</p><div class="task-card-context"><span title="${esc(x.sopName||'')}"><b>SOP</b>${esc(x.sopName||"未选择工作流")}</span><span title="${esc(binding)}"><b>通知</b>${esc(binding)}</span></div><div class="role-card-footer"><span class="meta">更新于 ${time(x.updatedAt)}</span><div class="actions"><button class="primary" ${!x.groupId?'disabled title="请先归组"':''} data-action="run-task" data-id="${esc(x.id)}">运行</button><button data-action="runs" data-id="${esc(x.id)}" data-name="${esc(x.name)}">记录</button><button data-action="edit-task" data-id="${esc(x.id)}">编辑</button><button data-action="copy-task" data-id="${esc(x.id)}">复制</button><button class="role-delete" data-action="delete-task" data-id="${esc(x.id)}">删除</button></div></div></article>`}
@@ -84,7 +94,7 @@ function renderDingTalkConfig(){
       <div id="dingtalkTestResult" class="test-result"></div>
       <footer><button type="button" data-dingtalk-test>测试连接</button><button class="primary" type="submit">保存配置</button></footer>
     </form>
-  </section><section class="settings-panel" id="blockedConfigPanel">正在加载阻断通知配置…</section>`;
+  </section><section class="settings-panel" id="blockedConfigPanel">正在加载开发人通知配置…</section>`;
   loadBlockedConfig();
 }
 function dingtalkPayload(){
@@ -100,7 +110,7 @@ function renderDingTalkTargets(){
   $("#content").innerHTML=`<section class="target-panel">
     <div class="settings-heading"><div><h2>钉钉通知对象</h2><p>一个群或人员可接收多个任务的通知；通知配置不限制机器人使用权限。</p></div>${configured?'<span class="connection-status online"><i></i>应用已配置</span>':'<span class="connection-status off"><i></i>请先配置机器人</span>'}</div>
     <div class="target-toolbar"><div class="target-tabs"><button class="${state.dingtalkTargetType==="GROUP"?"active":""}" data-target-type="GROUP">群聊</button><button class="${state.dingtalkTargetType==="PERSON"?"active":""}" data-target-type="PERSON">人员</button></div>${state.dingtalkTargetType==="GROUP"?`<button data-target-refresh ${configured?"":"disabled"}>刷新群聊</button>`:`<button data-target-sync ${configured?"":"disabled"}>同步公司人员</button>`}</div>
-    <p class="hint">${state.dingtalkTargetType==="GROUP"?'在群里首次 @ 机器人后，点击“刷新群聊”；管理员确认名称并启用后才可供任务定义选择。':'点击“同步公司人员”从钉钉通讯录拉取。首次同步的人员默认停用，确认后手动启用。'}</p>
+    <p class="hint">${state.dingtalkTargetType==="GROUP"?'在群里首次 @ 机器人后，点击“刷新群聊”；管理员确认名称并启用后才可供任务定义选择。':'点击“同步公司人员”从钉钉通讯录拉取。人员“启用”控制普通通知对象选择；开发人自动通知按姓名匹配通讯录中的可用人员，不要求启用。'}</p>
     ${list}
   </section>`;
 }
@@ -129,7 +139,7 @@ function targetCard(x){
   const name=x.targetType==="PERSON"?`<strong>${esc(x.displayName)}</strong>`:`<input data-target-name maxlength="160" value="${esc(x.displayName)}">`;
   const save=x.targetType==="PERSON"?"":'<button class="primary" data-target-save>保存</button>';
   const remove=x.targetType==="PERSON"?"":'<button data-target-delete>删除</button>';
-  return `<article class="target-card" data-target-id="${x.id}"><div class="target-main"><div class="target-name"><span class="target-kind">${targetTypeLabel(x.targetType)}</span>${name}</div><p>${x.departmentDisplay?`部门：${esc(x.departmentDisplay)}`:`钉钉标识：${esc(x.externalId)}`}</p><small>最近同步：${time(x.lastSyncedAt)}${unavailable?' · 当前已不在通讯录中':''}${owner?` · 已配置通知任务：${esc(owner.name)}`:""}</small></div><label class="check"><input data-target-enabled type="checkbox" ${x.enabled?"checked":""} ${unavailable?"disabled":""}> 启用</label><div class="actions"><button data-target-test>测试</button>${x.targetType==="PERSON"?'<button data-jira-mapping>Jira 开发人映射</button>':""}${save}${remove}</div></article>`;
+  return `<article class="target-card" data-target-id="${x.id}"><div class="target-main"><div class="target-name"><span class="target-kind">${targetTypeLabel(x.targetType)}</span>${name}</div><p>${x.departmentDisplay?`部门：${esc(x.departmentDisplay)}`:`钉钉标识：${esc(x.externalId)}`}</p><small>最近同步：${time(x.lastSyncedAt)}${unavailable?' · 当前已不在通讯录中':''}${owner?` · 已配置通知任务：${esc(owner.name)}`:""}</small></div><label class="check"><input data-target-enabled type="checkbox" ${x.enabled?"checked":""} ${unavailable?"disabled":""}> 启用</label><div class="actions"><button data-target-test>测试</button>${save}${remove}</div></article>`;
 }
 
 function supervisorAgents(){
@@ -162,6 +172,7 @@ function renderRuntimeStatus(){
 
 let pageRenderVersion=0;
 async function render({reload=true}={}){
+  if(state.page!=="machines"&&typeof leaveMachines==="function")leaveMachines();
   const version=++pageRenderVersion,page=state.page;
   const current=()=>version===pageRenderVersion&&state.page===page;
   if(reload)await loadGroups();
@@ -174,7 +185,7 @@ async function render({reload=true}={}){
   if(state.page==="machines"){await renderMachines();return}
   if(state.page==="skills"){await renderSkills();return}
   if(state.page==="mcps"){await renderMcps();return}
-  if(reload){if(state.page==="runtime")await loadRuntime();else await loadBase()}
+  if(reload){if(state.page==="runtime")await loadRuntime();else await loadBase(page)}
   if(!current())return;
   if(state.page==="dingtalk"){
     $(".toolbar").classList.add("hidden");
@@ -233,9 +244,36 @@ document.addEventListener("click",e=>{
 });
 $("#content").addEventListener("change",e=>{if(e.target.matches('[data-group-item]'))updateRoleSelection()});
 function openRole(x={enabled:true}){const f=$("#roleForm");f.reset();f.id.value=x.id||"";f.version.value=x.version??0;f.name.value=x.name||"";f.duty.value=x.duty||"";f.enabled.checked=x.enabled!==false;bindGroupForm(f,x);$("#roleDialog").showModal()}
+function openRoleDutyEditor(){
+  const text=$("#roleDutyText");
+  text.value=$("#roleForm").duty.value;
+  text.setCustomValidity("");
+  $("#roleDutyDialog").showModal();
+  text.focus();
+}
+$("[data-role-duty-edit]").addEventListener("click",openRoleDutyEditor);
+$("#roleDutyText").addEventListener("input",e=>e.target.setCustomValidity(""));
+$("#roleDutyForm").addEventListener("submit",e=>{
+  e.preventDefault();
+  const text=$("#roleDutyText");
+  if(!text.value.trim()){text.setCustomValidity("请填写角色职责");text.reportValidity();return}
+  $("#roleForm").duty.value=text.value;
+  $("#roleDutyDialog").close();
+});
 function taskRequirements(x={}){return[x.objective||"",x.additionalNotes?`补充要求：\n${x.additionalNotes}`:""].filter(Boolean).join("\n\n")}
 function syncTaskDingTalkTargetFields(f=$("#taskForm"),selectedId=""){const type=f.querySelector('[name="dingtalkTargetType"]:checked')?.value||"NONE",field=f.querySelector("[data-task-target-select]"),select=f.dingtalkTargetId;if(type==="NONE"){field.classList.add("hidden");select.required=false;select.innerHTML='<option value="">不配置主动通知</option>';return}const typeLabel=type==="PERSON"?"人员":"群聊",used=new Set(state.tasks.filter(t=>t.id!==f.id.value&&t.dingtalkTargetId).map(t=>t.dingtalkTargetId)),targets=state.dingtalkTargets.filter(t=>t.targetType===type&&((t.enabled&&t.available&&true)||t.id===selectedId));field.querySelector("[data-task-target-label]").textContent=`选择${typeLabel}`;field.classList.remove("hidden");select.required=true;select.innerHTML=`<option value="">${targets.length?`请选择${typeLabel}`:`暂无可选${typeLabel}`}</option>${targets.map(t=>`<option value="${t.id}" ${t.id===selectedId?"selected":""}>${esc(t.displayName)}${!t.enabled||!t.available?"（已不可用）":""}</option>`).join("")}`;select.value=selectedId||""}
-function openTask(x={enabled:true}){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=taskRequirements(x);f.additionalNotes.value="";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");const selectedTarget=x.dingtalkTarget||state.dingtalkTargets.find(t=>t.id===x.dingtalkTargetId),selectedType=selectedTarget?.targetType||"NONE",typeInput=f.querySelector(`[name="dingtalkTargetType"][value="${selectedType}"]`);if(typeInput)typeInput.checked=true;syncTaskDingTalkTargetFields(f,x.dingtalkTargetId||"");f.blockedNotificationGroupId.innerHTML=blockedGroupOptions(x.blockedNotificationGroupId);f.blockedNotificationGroupId.value=x.blockedNotificationGroupId||"";f.notifyDingTalk.checked=x.notifyDingTalk===true;f.enabled.checked=x.enabled!==false;bindGroupForm(f,x,id=>{const old=f.sopId.value;f.sopId.innerHTML='<option value="">请选择同组 SOP</option>'+state.sops.filter(s=>s.groupId===id&&(s.enabled||s.id===x.sopId)).map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");f.sopId.value=[...f.sopId.options].some(o=>o.value===old)?old:""});$("#taskDialog").showModal()}
+let taskEditorLoading=false;
+async function openTask(x={enabled:true}){
+  if(taskEditorLoading)return;
+  taskEditorLoading=true;
+  setSyncWait(true,"正在打开任务编辑","正在加载工作流和通知对象，请稍候。");
+  try{
+    [state.sops,state.dingtalkTargets]=await Promise.all([api("/api/sops"),api("/api/dingtalk/targets")]);
+  }catch(error){toast(error.message);return}
+  finally{taskEditorLoading=false;setSyncWait(false)}
+  showTaskForm(x);
+}
+function showTaskForm(x){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=taskRequirements(x);f.additionalNotes.value="";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");const selectedTarget=x.dingtalkTarget||state.dingtalkTargets.find(t=>t.id===x.dingtalkTargetId),selectedType=selectedTarget?.targetType||"NONE",typeInput=f.querySelector(`[name="dingtalkTargetType"][value="${selectedType}"]`);if(typeInput)typeInput.checked=true;syncTaskDingTalkTargetFields(f,x.dingtalkTargetId||"");f.blockedNotificationGroupId.innerHTML=blockedGroupOptions(x.blockedNotificationGroupId);f.blockedNotificationGroupId.value=x.blockedNotificationGroupId||"";f.notifyDingTalk.checked=x.notifyDingTalk===true;f.enabled.checked=x.enabled!==false;bindGroupForm(f,x,id=>{const old=f.sopId.value;f.sopId.innerHTML='<option value="">请选择同组 SOP</option>'+state.sops.filter(s=>s.groupId===id&&(s.enabled||s.id===x.sopId)).map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");f.sopId.value=[...f.sopId.options].some(o=>o.value===old)?old:""});$("#taskDialog").showModal()}
 
 function blankSop(){return{groupId:concreteGroup(),id:"",name:"",description:"",supervisorAgentId:(suggestedAgents("supervisor")[0]?.agentId||""),supervisorTimeoutSec:7200,advanceMode:"automatic",dingtalkShowExecutionDetails:false,defaultStepModel:"gpt-6.1-sol",defaultStepReasoningEffort:null,enabled:true,steps:[]}}
 function normalizeStep(s){const permissionProfile=s.permissionProfile||(s.writeEnabled===true?"workspace_write":"read_only");return{...s,_clientId:s._clientId||uid(),displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",permissionProfile,writeEnabled:permissionProfile!=="read_only",modelOverride:s.modelOverride||null,reasoningEffortOverride:s.reasoningEffortOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
@@ -273,7 +311,7 @@ function renderSopWorkspace(){
       <div class="flow-canvas" data-flow-canvas>${flowHtml()}</div>
     </section>
     <aside class="sop-inspector-panel">${inspectorHtml()}</aside>
-  </div><dialog id="sopManageDialog" class="wide" aria-labelledby="sopManageTitle"><div class="sop-manage-body"><h2 id="sopManageTitle">管理工作流</h2><div class="group-actions"><span data-role-count data-total="${visibleSops().length}" role="status">共 ${visibleSops().length} 个工作流</span><span data-batch-actions hidden><button data-assign-group>归组 / 改组</button><button data-clear-group-selection>取消选择</button></span></div><div class="sop-manage-list">${sopListHtml()}</div><footer><button data-dialog-close>关闭</button></footer></div></dialog>`;
+  </div><dialog id="sopManageDialog" class="wide" aria-labelledby="sopManageTitle"><div class="sop-manage-body"><button type="button" class="dialog-close" data-dialog-close aria-label="关闭弹窗" title="关闭">×</button><h2 id="sopManageTitle">管理工作流</h2><div class="group-actions"><span data-role-count data-total="${visibleSops().length}" role="status">共 ${visibleSops().length} 个工作流</span><span data-batch-actions hidden><button data-assign-group>归组 / 改组</button><button data-clear-group-selection>取消选择</button></span></div><div class="sop-manage-list">${sopListHtml()}</div><footer><button data-dialog-close>关闭</button></footer></div></dialog>`;
 }
 function renderSopPicker(){
   const draft=state.sop.draft,items=visibleSops();
@@ -383,6 +421,7 @@ function updateAgentRuntimeUi(){
   if(selected){const view=supervisorRuntimeView(state.sop.draft?.supervisorAgentId||"");selected.className=`agent-selection-status ${view.state}`;selected.innerHTML=`<i></i><span>${esc(view.label)}</span><b>${esc(view.detail)}</b>`}
 }
 async function refreshAgentRuntimeStatuses(){
+  if(state.page==="machines"){await refreshMachineStatuses();return}
   if(document.hidden||!["sops","runtime"].includes(state.page)||state.agentRefreshInFlight)return;
   state.agentRefreshInFlight=true;
   try{await loadRuntime({preserveOnFailure:true})}finally{state.agentRefreshInFlight=false}
@@ -473,9 +512,9 @@ async function selectSop(id){
 }
 function startNewSop(){if(!concreteGroup())return chooseGroup(()=>startNewSop());if(!confirmDiscard())return;setDraft(blankSop());renderSopWorkspace();setTimeout(()=>document.querySelector('[data-sop-field="name"]')?.focus(),0)}
 
-$("#roleForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.currentTarget;if(f.dataset.saving)return;f.dataset.saving="true";const submit=f.querySelector("button.primary");submit.disabled=true;const b={groupId:f.elements.groupId.value,name:f.name.value,duty:f.duty.value,enabled:f.enabled.checked};try{if(f.id.value){b.version=Number(f.version.value);await api(`/api/roles/${f.id.value}`,{method:"PUT",body:JSON.stringify(b)})}else await api("/api/roles",{method:"POST",body:JSON.stringify(b)});$("#roleDialog").close();toast("角色已保存");render()}catch(x){toast(x.message)}finally{delete f.dataset.saving;submit.disabled=false}});
+$("#roleForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.currentTarget;if(f.dataset.saving)return;if(!f.duty.value.trim()){openRoleDutyEditor();$("#roleDutyText").reportValidity();return}f.dataset.saving="true";const submit=f.querySelector("button.primary");submit.disabled=true;const b={groupId:f.elements.groupId.value,name:f.name.value,duty:f.duty.value,enabled:f.enabled.checked};try{if(f.id.value){b.version=Number(f.version.value);await api(`/api/roles/${f.id.value}`,{method:"PUT",body:JSON.stringify(b)})}else await api("/api/roles",{method:"POST",body:JSON.stringify(b)});$("#roleDialog").close();toast("角色已保存");render()}catch(x){toast(x.message)}finally{delete f.dataset.saving;submit.disabled=false}});
 $("#taskForm").addEventListener("submit",async e=>{e.preventDefault();const f=e.currentTarget;if(f.dataset.saving)return;f.dataset.saving="true";const submit=f.querySelector("button.primary");submit.disabled=true;const b={groupId:f.elements.groupId.value,name:f.name.value,objective:f.objective.value,sopId:f.sopId.value,additionalNotes:f.additionalNotes.value,enabled:f.enabled.checked,dingtalkTargetId:f.dingtalkTargetId.value||null,notifyDingTalk:f.notifyDingTalk.checked,blockedNotificationGroupId:f.blockedNotificationGroupId.value};try{await api(f.id.value?`/api/task-definitions/${f.id.value}`:"/api/task-definitions",{method:f.id.value?"PUT":"POST",body:JSON.stringify(b)});$("#taskDialog").close();toast("任务定义已保存");render()}catch(x){toast(x.message)}finally{delete f.dataset.saving;submit.disabled=false}});
-document.addEventListener("click",e=>{const button=e.target.closest("[data-dialog-close]");if(button)button.closest("dialog")?.close()});
+document.addEventListener("click",e=>{const button=e.target.closest("[data-dialog-close]");if(button){const dialog=button.closest("dialog");if(dialog&&dialog.dispatchEvent(new Event("cancel",{cancelable:true})))dialog.close()}});
 $("#taskForm").addEventListener("change",e=>{if(e.target.name==="dingtalkTargetType")syncTaskDingTalkTargetFields(e.currentTarget)});
 
 $("#content").addEventListener("click",async e=>{
@@ -621,7 +660,7 @@ async function showRuns(id, name, page = 0, status = "") {
     page = result.page;
     runHistory.page = page;
     const labels = {submitting:"正在提交",queued:"等待开始",running:"正在进行",cancelling:"正在停止",completed:"已完成",failed:"未完成",cancelled:"已停止",submit_failed:"提交失败"};
-    $("#runList").innerHTML = (list.length ? list.map(r => `<div class="run"><div class="run-history-heading"><b>${esc(r.workflowId)}</b> <span class="badge" data-status="${esc(r.status)}">${esc((r.termination ? (["completed","failed","cancelled"].includes(r.status) ? (r.termination.outcome === "blocked" ? "因阻断结束" : "无待处理任务，已结束") : "正在结束") : labels[r.status]) || "状态未知")}</span></div><p class="meta">启动时间：${time(r.submittedAt)}${r.sourceWorkflowId ? ` · 重试自 ${esc(r.sourceWorkflowId)}` : ""}</p><div class="actions"><a class="run-monitor" href="${esc(r.monitorUrl)}" target="_blank" rel="noopener">查看监控 ↗</a><button type="button" data-blocked-status="${esc(r.workflowId)}">阻断通知详情</button><button ${!r.groupId?'disabled title="旧运行请使用最新配置重新运行"':''} data-retry="${esc(r.workflowId)}">按原快照重试</button>${["queued","running","submitting"].includes(r.status) ? `<button data-cancel="${esc(r.workflowId)}" title="当前步骤执行中不支持取消，请在步骤结束后操作">取消</button>` : ""}</div></div>`).join("") : `<div class="empty">${status ? '暂无符合该状态的运行记录' : '暂无运行记录'}</div>`)
+    $("#runList").innerHTML = (list.length ? list.map(r => `<div class="run"><div class="run-history-heading"><b>${esc(r.workflowId)}</b> <span class="badge" data-status="${esc(r.status)}">${esc((r.termination ? (["completed","failed","cancelled"].includes(r.status) ? (r.termination.outcome === "blocked" ? "因阻断结束" : "无待处理任务，已结束") : "正在结束") : labels[r.status]) || "状态未知")}</span></div><p class="meta">启动时间：${time(r.submittedAt)}${r.sourceWorkflowId ? ` · 重试自 ${esc(r.sourceWorkflowId)}` : ""}</p><div class="actions"><a class="run-monitor" href="${esc(r.monitorUrl)}" target="_blank" rel="noopener">查看监控 ↗</a><button type="button" data-blocked-status="${esc(r.workflowId)}">开发人通知详情</button><button ${!r.groupId?'disabled title="旧运行请使用最新配置重新运行"':''} data-retry="${esc(r.workflowId)}">按原快照重试</button>${["queued","running","submitting"].includes(r.status) ? `<button data-cancel="${esc(r.workflowId)}" title="当前步骤执行中不支持取消，请在步骤结束后操作">取消</button>` : ""}</div></div>`).join("") : `<div class="empty">${status ? '暂无符合该状态的运行记录' : '暂无运行记录'}</div>`)
       + `<div class="run-history-pagination"><span>共 ${result.total} 条 · 第 ${page + 1} / ${totalPages} 页</span><div class="actions"><button type="button" data-history-page="${page - 1}" ${page === 0 ? "disabled" : ""}>上一页</button><label>跳至 <input id="runHistoryPage" required type="number" min="1" max="${Math.min(totalPages,100001)}" value="${page + 1}" aria-label="跳转页码"> 页</label><button type="button" data-history-jump>跳转</button><button type="button" data-history-page="${page + 1}" ${page + 1 >= totalPages ? "disabled" : ""}>下一页</button></div></div>`;
   } catch (error) {
     if (request === runHistory.request) $("#runList").innerHTML = `<div class="empty">${esc(error.message)} <button data-history-page="${page}">重新加载</button></div>`;
@@ -663,9 +702,13 @@ $("#runList").addEventListener("keydown", event => {
   }
 });
 
-document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
-  if(b.dataset.page===state.page)return;
+let navigationPending=false;
+async function navigateToPage(b,retry=false){
+  if(navigationPending||(!retry&&b.dataset.page===state.page))return;
   if(state.page==="sops"){const dirty=isSopDirty();if(!confirmDiscard())return;if(dirty)discardSopChanges()}
+  navigationPending=true;
+  setSyncWait(true,"","");
+  try{
   if(state.page==='skills'||b.dataset.page==='skills'){resetSkillSelection();skillView.tab='library'}
   if(state.page==='mcps'){document.querySelector('#mcpDialog')?.close();mcpView.version++}
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
@@ -674,8 +717,15 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=async()=>{
   const map={mcps:["MCP 管理",""],skills:["Skill 管理",""],groups:["分组管理","＋ 新建分组"],schedules:["定时任务管理","＋ 新建定时任务"],runs:["任务运行",""],machines:["机器管理",""],roles:["角色管理","＋ 新建角色"],sops:["SOP 工作流","＋ 新建 SOP"],tasks:["任务定义","＋ 新建任务"],runtime:["运行状态",""],dingtalk:["钉钉机器人",""],"dingtalk-targets":["钉钉通知对象",""]};
   [$("#title").textContent,$("#create").textContent]=map[state.page];
   $("#create").classList.toggle("hidden",["runs","machines","skills","mcps","runtime","dingtalk","dingtalk-targets"].includes(state.page));
-  try{await render()}catch(e){toast(e.message)}
-});
+  await render();
+  }catch(error){
+    const content=$("#content");content.className="content";
+    content.innerHTML='<div class="empty" role="alert">页面加载失败，请重试。<p><button type="button" data-navigation-retry>重新加载</button></p></div>';
+    content.querySelector('[data-navigation-retry]').onclick=()=>navigateToPage(b,true);
+    toast(error.message);
+  }finally{setSyncWait(false);navigationPending=false}
+}
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>navigateToPage(b));
 $("#create").onclick=()=>state.page==="groups"?editGroup():state.page==="roles"?openRole():state.page==="sops"?startNewSop():state.page==="tasks"?openTask():state.page==="schedules"?openSchedule().catch(e=>toast(e.message)):null;
 $("#refresh").onclick=async()=>{if(state.page==="sops"&&!confirmDiscard())return;try{if(state.page==="sops"){effortCatalogs.clear();const id=state.sop.draft?.id;await loadGroups();renderGroupFilter();await loadBase();if(id&&state.sops.some(s=>s.id===id))setDraft(await api(`/api/sops/${id}`));else if(visibleSops().length)setDraft(visibleSops()[0]);else state.sop.draft=null;renderSopWorkspace()}else await render()}catch(e){toast(e.message)}};
 window.addEventListener("beforeunload",e=>{if(isSopDirty()){e.preventDefault();e.returnValue=""}});

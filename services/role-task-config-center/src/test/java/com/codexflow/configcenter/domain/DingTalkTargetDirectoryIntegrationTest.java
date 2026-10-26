@@ -92,6 +92,20 @@ class DingTalkTargetDirectoryIntegrationTest {
   }
 
   @Test
+  @org.springframework.transaction.annotation.Transactional
+  void ordinaryNotificationStillRequiresEnabledPerson() {
+    String clientId = "ordinary-" + UUID.randomUUID();
+    targets.syncPeople(
+        clientId, List.of(new DingTalkTargetDirectory.RemotePerson("ordinary-user", "开发人", "研发部")));
+    var person = targets.list(clientId).get(0);
+    assertThatThrownBy(() -> targets.requiredSelectable(person.id(), "task"))
+        .isInstanceOf(ConflictFailure.class)
+        .hasMessageContaining("未启用");
+    targets.update(clientId, person.id(), null, true);
+    assertThat(targets.requiredSelectable(person.id(), "task").id).isEqualTo(person.id());
+  }
+
+  @Test
   void rejectsDeletingDirectoryPerson() {
     String clientId = "person-delete-" + UUID.randomUUID();
     targets.syncPeople(

@@ -51,7 +51,7 @@ async function renderGroups(){
 }
 function groupDialog(title,html,onSave){
   let d=$('#sharedGroupDialog');if(!d){d=document.createElement('dialog');d.id='sharedGroupDialog';document.body.append(d)}
-  d.innerHTML=`<form><h2>${esc(title)}</h2>${html}<p role="alert"></p><footer><button type="button" data-dialog-close>取消</button><button type="submit" class="primary">确定</button></footer></form>`;
+  d.innerHTML=`<form><button type="button" class="dialog-close" data-dialog-close aria-label="关闭弹窗" title="关闭">×</button><h2>${esc(title)}</h2>${html}<p role="alert"></p><footer><button type="button" data-dialog-close>取消</button><button type="submit" class="primary">确定</button></footer></form>`;
   d.querySelector('form').onsubmit=async e=>{e.preventDefault();const f=e.currentTarget,b=f.querySelector('[type=submit]');if(b.disabled)return;b.disabled=true;try{await onSave(f);d.close()}catch(error){f.querySelector('[role=alert]').textContent=error.message}finally{b.disabled=false}};d.showModal();
 }
 function editGroup(id){const g=groupState.items.find(x=>x.id===id);groupDialog(g?'重命名分组':'新建分组',`<label>分组名称<input name="groupName" maxlength="100" required value="${esc(g?.name||'')}"></label>`,async f=>{await api(g?`/api/groups/${encodeURIComponent(g.id)}`:'/api/groups',{method:g?'PUT':'POST',body:JSON.stringify({name:f.elements.groupName.value.trim()})});await render()})}

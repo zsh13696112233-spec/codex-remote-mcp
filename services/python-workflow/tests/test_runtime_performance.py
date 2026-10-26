@@ -62,7 +62,7 @@ class DatabaseThreadTests(unittest.IsolatedAsyncioTestCase):
         store = SimpleNamespace(
             get_workflow=lambda _: {"status": "running", "supervisor": {}},
             has_supervisor_lease=lambda _: True,
-            get_workflow_spec=lambda _: {"workflowId": "one"},
+            get_workflow_spec=lambda _: {"workflowId": "one", "supervisorAgentId": "local"},
         )
         gateway = WorkflowGateway(store, SimpleNamespace(jobs={}, list_agents=lambda: []))
         entered, release, second_started = asyncio.Event(), asyncio.Event(), asyncio.Event()

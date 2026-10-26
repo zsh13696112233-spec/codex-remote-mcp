@@ -1,13 +1,10 @@
 package com.codexflow.configcenter.domain;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.sql.Timestamp;
 import java.time.Instant;
-import java.util.HexFormat;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -15,7 +12,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
-/** 阻断通知独立事务记录；不占用任务运行槽，不依赖聊天绑定。 */
+/** 开发人通知独立事务记录；不占用任务运行槽，不依赖聊天绑定。 */
 @Service
 public class BlockedNotificationStore {
   private final JdbcTemplate db;
@@ -29,8 +26,6 @@ public class BlockedNotificationStore {
     this.targets = targets;
   }
 
-  public record Mapping(String targetId, String accountType, String accountId) {}
-
   public record Notice(
       String id,
       String workflowId,
@@ -40,59 +35,6 @@ public class BlockedNotificationStore {
       String state,
       String reason,
       int attempts) {}
-
-  @Transactional(readOnly = true)
-  public List<Mapping> mappings(String clientId) {
-    return db.query(
-        "SELECT m.* FROM codex_jira_developer_mappings m JOIN codex_sop_dingtalk_targets t ON t.id=m.target_id WHERE t.client_id=? AND t.deleted=false ORDER BY t.display_name",
-        (r, n) ->
-            new Mapping(
-                r.getString("target_id"), r.getString("account_type"), r.getString("account_id")),
-        clientId);
-  }
-
-  @Transactional
-  public void saveMapping(String clientId, Mapping mapping) {
-    lockConfiguration();
-    var target =
-        targets
-            .findForUpdate(mapping.targetId())
-            .orElseThrow(() -> new NotFoundFailure("找不到钉钉人员。"));
-    if (!target.clientId.equals(clientId) || !"PERSON".equals(target.targetType) || target.deleted)
-      throw new IllegalArgumentException("请选择当前机器人的钉钉人员。");
-    String account = mapping.accountId() == null ? "" : mapping.accountId().trim();
-    if (account.isEmpty()) {
-      db.update("DELETE FROM codex_jira_developer_mappings WHERE target_id=?", target.id);
-      return;
-    }
-    if (!Set.of("accountId", "key", "name").contains(mapping.accountType())
-        || account.length() > 256) throw new IllegalArgumentException("Jira 账号类型或长度无效。");
-    String identity = identity(clientId, mapping.accountType(), account);
-    if (!db.queryForList(
-            "SELECT target_id FROM codex_jira_developer_mappings WHERE identity_hash=? AND target_id<>?",
-            identity,
-            target.id)
-        .isEmpty()) throw new ConflictFailure("该 Jira 账号已关联其他钉钉人员。");
-    db.update("DELETE FROM codex_jira_developer_mappings WHERE target_id=?", target.id);
-    db.update(
-        "INSERT INTO codex_jira_developer_mappings(target_id,identity_hash,account_type,account_id) VALUES (?,?,?,?)",
-        target.id,
-        identity,
-        mapping.accountType(),
-        account);
-  }
-
-  private static String identity(String client, String type, String account) {
-    try {
-      return HexFormat.of()
-          .formatHex(
-              MessageDigest.getInstance("SHA-256")
-                  .digest(
-                      (client + "\n" + type + "\n" + account).getBytes(StandardCharsets.UTF_8)));
-    } catch (java.security.NoSuchAlgorithmException error) {
-      throw new IllegalStateException(error);
-    }
-  }
 
   @Transactional(readOnly = true)
   public String template() {
@@ -114,14 +56,18 @@ public class BlockedNotificationStore {
     if (id == null || id.isBlank()) return json.nullNode();
     // 群停用不阻断业务启动；冻结原身份，投递前再检查可用性并记录无法通知。
     var group = targets.findById(id).orElseThrow(() -> new IllegalArgumentException("通知群不存在。"));
-    if (!"GROUP".equals(group.targetType)) throw new IllegalArgumentException("阻断通知只能选择群聊。");
+    if (!"GROUP".equals(group.targetType)) throw new IllegalArgumentException("开发人通知只能选择群聊。");
     return snapshot(group);
   }
 
   private ObjectNode target(String id, String type) {
     var target = targets.findById(id).orElseThrow(() -> new IllegalArgumentException("通知对象不存在。"));
-    if (!type.equals(target.targetType) || target.deleted || !target.enabled || !target.available)
-      throw new IllegalArgumentException("通知人员或群聊未启用或已不可用。");
+    // 开发人通知不受人员的普通通知启用开关控制；群聊仍须启用。
+    if (!type.equals(target.targetType)
+        || target.deleted
+        || !target.available
+        || ("GROUP".equals(type) && !target.enabled))
+      throw new IllegalArgumentException("通知人员已不可用，或通知群未启用或已不可用。");
     return snapshot(target);
   }
 
@@ -134,17 +80,18 @@ public class BlockedNotificationStore {
   }
 
   @Transactional(readOnly = true)
-  public JsonNode resolvePerson(String clientId, JsonNode developer) {
-    var ids =
-        db.queryForList(
-            "SELECT target_id FROM codex_jira_developer_mappings WHERE identity_hash=?",
-            String.class,
-            identity(
-                clientId,
-                developer.path("accountType").asText(),
-                developer.path("accountId").asText()));
-    if (ids.isEmpty()) throw new IllegalArgumentException("Jira 开发人尚未配置钉钉映射。");
-    return target(ids.get(0), "PERSON");
+  public JsonNode resolvePerson(String clientId, String displayName) {
+    String name = displayName.strip();
+    if (name.isEmpty()) throw new IllegalArgumentException("Jira 开发人姓名为空，无法通知。");
+    // Java 精确比较避免 MySQL 默认排序规则把大小写或不同字符视为同名。
+    return targets
+        .findByClientIdAndDeletedFalseOrderByTargetTypeAscDisplayNameAsc(clientId)
+        .stream()
+        .filter(person -> "PERSON".equals(person.targetType) && person.available)
+        .filter(person -> name.equals(person.displayName.strip()))
+        .min(Comparator.comparing(person -> person.id))
+        .map(this::snapshot)
+        .orElseThrow(() -> new IllegalArgumentException("未找到同名且通讯录可用的钉钉人员，无法通知。"));
   }
 
   @Transactional(readOnly = true)
@@ -224,7 +171,7 @@ public class BlockedNotificationStore {
   @Transactional(readOnly = true)
   public Map<String, Object> view(String id) {
     var notice = read(id);
-    if (notice == null) return Map.of("state", "not_enabled", "reason", "未启用阻断通知");
+    if (notice == null) return Map.of("state", "not_enabled", "reason", "未启用开发人通知");
     return Map.of(
         "state", notice.state(), "reason", notice.reason(), "attempts", notice.attempts());
   }

@@ -3,9 +3,10 @@ import base64
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 import uuid
-from contextlib import closing
+from contextlib import closing, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -413,6 +414,56 @@ class WorkflowStoreTests(unittest.TestCase):
         )
         claimed_second = self.store.claim_next_workflow("supervisor-a")
         self.assertEqual(claimed_second["workflowId"], "fifo-b")
+
+    def test_busy_claim_does_not_begin_write_transaction(self):
+        self.store.create_workflow(serial_workflow())
+        self.store.claim_next_workflow("local")
+        statements = []
+        connect = self.store._connect
+
+        @contextmanager
+        def traced_connect():
+            with connect() as connection:
+                connection.set_trace_callback(statements.append)
+                yield connection
+
+        with patch.object(self.store, "_connect", traced_connect):
+            self.assertIsNone(self.store.claim_next_workflow("local"))
+        self.assertFalse(any(sql.startswith("BEGIN") for sql in statements))
+
+    def test_terminal_residual_lease_is_cleaned_before_claim(self):
+        self.store.create_workflow(serial_workflow())
+        self.store.claim_next_workflow("local")
+        second = serial_workflow()
+        second["workflowId"] = "next"
+        self.store.create_workflow(second)
+        with self.store._connect() as connection:
+            connection.execute("UPDATE workflows SET status='completed' WHERE workflow_id='serial-demo'")
+        self.assertEqual(self.store.claim_next_workflow("local")["workflowId"], "next")
+
+    def test_concurrent_claims_recheck_after_read_precheck(self):
+        self.store.create_workflow(serial_workflow())
+        barrier = threading.Barrier(2)
+        connect = self.store._connect
+        synchronized = []
+
+        @contextmanager
+        def synchronized_connect():
+            with connect() as connection:
+                # Both independent connections finish their read before either takes the write lock.
+                def trace(sql):
+                    if sql == "BEGIN IMMEDIATE":
+                        synchronized.append(barrier.wait(timeout=5))
+                connection.set_trace_callback(trace)
+                yield connection
+
+        with patch.object(self.store, "_connect", synchronized_connect):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(self.store.claim_next_workflow, "local") for _ in range(2)]
+                results = [future.result(timeout=10) for future in futures]
+        self.assertEqual(sorted(synchronized), [0, 1])
+        self.assertEqual(sum(value is not None for value in results), 1)
+        self.assertTrue(self.store.has_supervisor_lease("serial-demo"))
 
     def test_cancelled_queued_workflow_never_acquires_lease(self) -> None:
         value = serial_workflow()

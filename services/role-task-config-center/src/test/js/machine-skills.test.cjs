@@ -7,7 +7,7 @@ function setup(){
   const listeners={},button={},alert={};
   const form={elements:{remark:{value:' 测试机 '},ip:{value:'192.0.2.1'},port:{value:'4500'},groupId:{value:'g'},supervisor:{checked:false},executor:{checked:true},skillEnabled:{checked:true},skillRoot:{value:' /work/skills '},mcpEnabled:{checked:true},mcpRoot:{value:'C:\\deploy\\program'}},querySelector:s=>s==='[type=submit]'?button:alert};
   const dialog={innerHTML:'',querySelector:s=>s==='form'?form:{before(){}},showModal(){},close(){this.closed=true}};
-  const context=vm.createContext({document:{createElement:()=>({}),querySelector:()=>dialog,querySelectorAll:()=>[],addEventListener:(name,fn)=>listeners[name]=fn},state:{agents:[]},concreteGroup:()=> 'g',esc:v=>String(v??'').replaceAll('<','&lt;').replaceAll('"','&quot;'),time:v=>v,status:()=>'',groupMark:()=>'',render:async()=>{},toast:()=>{},api:async()=>({})});
+  const context=vm.createContext({document:{createElement:()=>({}),querySelector:()=>dialog,querySelectorAll:()=>[],addEventListener:(name,fn)=>listeners[name]=fn},state:{agents:[]},groupState:{items:[]},concreteGroup:()=> 'g',esc:v=>String(v??'').replaceAll('<','&lt;').replaceAll('"','&quot;'),time:v=>v,status:()=>'',groupMark:()=>'',render:async()=>{},toast:()=>{},api:async()=>({})});
   vm.runInContext(source,context);
   const run=code=>vm.runInContext(code,context);
   const machine={agentId:'machine-a',ip:'192.0.2.1',port:4500,groupId:'g',enabled:true,capabilities:['executor'],skillInstallation:{enabled:true,root:'/work/skills'}};
@@ -43,17 +43,17 @@ test('directory detection uses saved machine ID, blocks duplicate clicks, and re
   const first=h.listeners.click(event);await h.listeners.click(event);assert.equal(calls,1);
   reject(new Error('离线'));await first;assert.equal(button.disabled,false);assert.equal(h.run('pendingMachineActions.size'),0);
 });
-test('machine card escapes persisted directory and diagnostic text',()=>{
+test('machine detail escapes persisted directory and diagnostic text',()=>{
   const h=setup();h.context.machine.skillInstallation={enabled:false,root:'<img>',checkMessage:'<script>'};
-  const html=h.run('machineCard(machine,"executor")');assert.match(html,/未授权/);assert.match(html,/&lt;img>/);assert.doesNotMatch(html,/<script>/);
+  const html=h.run('machineDetailReadOnly(machine)');assert.match(html,/未授权/);assert.match(html,/&lt;img>/);assert.doesNotMatch(html,/<script>/);
 });
 
 test('executor online status follows the saved connection test across page loads',()=>{
-  for(const [testStatus,label] of [['passed','在线'],['failed','离线'],['untested','在线状态未知']]){
+  for(const [testStatus,label] of [['passed','最近检测在线'],['failed','最近检测离线'],['untested','未检测']]){
     const h=setup();Object.assign(h.context.machine,{testStatus,testedAt:'2026-09-22T08:00:00Z'});
     const html=h.run('machineCard(machine,"executor")');
-    assert.ok(html.includes(`>● ${label}</span>`));
-    assert.match(html,/2026-09-22T08:00:00Z/);
+    assert.ok(html.includes(`>${label}</span>`));
+    assert.match(h.run('machineDetailReadOnly(machine)'),/2026-09-22T08:00:00Z/);
   }
 });
 
@@ -63,7 +63,7 @@ test('supervisor and dual-role cards retain runtime status independently of conn
       for(const [connectionStatus,testStatus,label] of [['offline','passed','离线'],['online','failed','在线'],['unknown','passed','在线状态未知']]){
         const h=setup();Object.assign(h.context.machine,{capabilities,connectionStatus,testStatus});
         h.context.role=role;
-        assert.ok(h.run('machineCard(machine,role)').includes(`>● ${label}</span>`));
+        assert.ok(h.run('machineCard(machine,role)').includes(`>${label}</span>`));
       }
     }
   }
@@ -133,7 +133,7 @@ test('business delete confirms, deduplicates requests and refreshes on success',
   h.context.api=(url,options)=>{calls++;assert.equal(url,'/api/agents/machine-a');assert.equal(options.method,'DELETE');return new Promise(r=>resolve=r)};
   h.context.render=async()=>{refresh++};
   const button={dataset:{machineAction:'delete',id:'machine-a'}},event={target:{closest:()=>button}};
-  assert.match(h.run('machineCard(machine,"executor")'),/data-machine-action="delete"/);
+  assert.match(h.run('machineDetailActions(machine)'),/data-machine-action="delete"/);
   const pending=h.listeners.click(event);await h.listeners.click(event);assert.equal(calls,1);
   resolve({deleted:true});await pending;assert.equal(refresh,1);assert.equal(button.disabled,false);
 });

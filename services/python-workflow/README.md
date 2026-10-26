@@ -85,7 +85,7 @@ Skill 包通过中央 `skill_group_packages` 关联表加入一个或多个现�
 
 `GET /agents` 返回登记 ID、IP、端口、分组、检测记录、默认目录/模型、启停、能力、主监督容量和权限上限。对于具备主监督能力的执行机，还返回 `connectionStatus`（`online`、`offline`、`unknown`）、基于持久租约计算的 `availability`（`idle`、`busy`）、`checkedAt` 和 `lastOnlineAt`；不返回令牌或原始连接异常。`local_db` 每 10 秒执行轻量 WebSocket 探测；`remote_sidecar` 使用 SQLite 中的权威心跳，5 秒上报一次，20 秒未续租即离线。`POST /workflows` 在写入 SQLite 前校验主监督和每个步骤执行机是否存在、启用、能力匹配，并继续执行权限档位校验；不要求各步骤使用相同执行机或工作目录。
 
-提交成功的工作流先进入 `queued`。调度器按主监督分别以 `created_at + workflow_id` 领取最早任务；同一主监督固定只运行一个工作流，不同主监督可以并行。远程租约包含不可预测令牌、Sidecar 实例 ID、续租时间和过期时间；写接口在同一个 SQLite 写事务中重新校验租约，旧实例和旧令牌不能回写。完成、失败和取消时与终态在同一事务释放，半自动暂停继续占用。远程主监督离线时新工作流立即失败；运行中失联、实例更换或心跳超时会结束并释放租约（已保存提前结束决定时保留该结果，其余标记失败），不自动迁移。网关重启保留已持久化的提前结束决定，其余遗留的 `running/cancelling` 工作流标记失败、清空租约并继续排队任务，不重新附着旧外部会话。
+提交成功的工作流先进入 `queued`。启动恢复时全量调度；提交、心跳、任务结束、取消及等待收尾仅触发所属主监督调度，租约过期仅触发受影响主监督。调度沿用全局锁，忙碌主监督领取前只读检查占用，实际领取仍在写事务内重新校验并清理终态残留租约。调度器按主监督分别以 `created_at + workflow_id` 领取最早任务；同一主监督固定只运行一个工作流，不同主监督可以并行。远程租约包含不可预测令牌、Sidecar 实例 ID、续租时间和过期时间；写接口在同一个 SQLite 写事务中重新校验租约，旧实例和旧令牌不能回写。完成、失败和取消时与终态在同一事务释放，半自动暂停继续占用。远程主监督离线时新工作流立即失败；运行中失联、实例更换或心跳超时会结束并释放租约（已保存提前结束决定时保留该结果，其余标记失败），不自动迁移。网关重启保留已持久化的提前结束决定，其余遗留的 `running/cancelling` 工作流标记失败、清空租约并继续排队任务，不重新附着旧外部会话。
 
 已有任意格式工作流附件保留在共享数据库中；新的图片生成事件会在事件截断前被合并并保存为附件。业务文档通过独立的文档采集与展示接口处理，不再从托管输出目录发布附件。单文件上限为 20 MB，每个工作流的当前与历史文件合计最多 50 个，同一 SHA-256 内容自动去重。网关继续通过 `GET /workflows/{workflowId}/artifacts/{artifactId}` 只读返回附件，不提供任意文件路径读取能力。非图片响应强制附件下载并设置 `nosniff`。
 
@@ -243,11 +243,11 @@ MCP 逐机任务持久化 `diagnostics` 检测摘要，由安装汇总和批次�
 
 ### Jira 开发人结果（版本 2）
 
-`jiraDeveloper` 严格包含 `status/accountType/accountId/displayName/detail`。凡正式步骤处理唯一 Jira，成功或阻断均返回 `jiraComment.issueKey` 并实际读取该 Jira 的 `Public.Jira.Fields.Developer`，不因评论为 `not_applicable` 省略编号或开发人，不为展示新增评论或修改 Jira：唯一人员为 `resolved`，账号优先使用实际返回的 `accountId`，其次 `key`、`name`，`accountType` 标明所选字段，`accountId` 保留原值；禁止使用姓名、经办人或发起人推断。账号上限 256、显示名 160、说明 2000 字符。
+`jiraDeveloper` 严格包含 `status/accountType/accountId/displayName/detail`。凡正式步骤处理唯一 Jira，成功或阻断均返回 `jiraComment.issueKey` 并实际读取该 Jira 的 `Public.Jira.Fields.Developer`，不因评论为 `not_applicable` 省略编号或开发人，不为展示新增评论或修改 Jira：唯一人员为 `resolved`，账号保留实际返回的 `accountId/key/name` 标识及类型，`displayName` 必须填写开发人对象实际返回的显示名，平台通知按显示名精确匹配钉钉人员，不使用用户名或拼音替代显示名；禁止使用姓名、经办人或发起人推断。账号上限 256、显示名 160、说明 2000 字符。
 
 空值、多人、无法读取分别为 `empty/multiple/unavailable`，账号类型与账号必须为空；未处理 Jira 的非阻断步骤可用 `not_applicable`。多人可在显示名内返回实际姓名列表，不选择其中一人。建议在 `detail` 说明读取情况，但允许空字符串或纯空白，不因开发人或说明为空把业务结果判为格式无效，也不猜测或补填人员。开发人读取结果不单独阻断业务，已有业务阻断决定仍保留；`resolved` 仍必须提供唯一 Jira 与稳定账号。中央根据冻结版本严格校验，本机和远程共用规则；旧运行没有开发人信息，不从正文提取或补发通知。负责人转交结果放在 `jiraComment.detail`，其 `status` 仅表示评论结果。
 
-Python 不持有钉钉凭据或发送通知；8091 在确认阻断终态后按冻结群配置通知开发人。升级顺序和验收见 [Jira 阻断通知部署说明](../../docs/JIRA_BLOCKED_NOTIFICATION.zh-CN.md)。
+Python 不持有钉钉凭据或发送通知；8091 在全自动成功完成或确认阻断终态后按冻结群配置通知开发人。升级顺序和验收见 [Jira 阻断通知部署说明](../../docs/JIRA_BLOCKED_NOTIFICATION.zh-CN.md)。
 
 ## 步骤思考强度
 

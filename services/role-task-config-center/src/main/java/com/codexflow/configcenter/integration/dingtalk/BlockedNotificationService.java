@@ -4,7 +4,6 @@ import com.codexflow.configcenter.client.GatewayClient;
 import com.codexflow.configcenter.domain.BlockedNotificationStore;
 import com.codexflow.configcenter.domain.WorkflowRunStore;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
@@ -14,7 +13,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
-/** 独立于普通进度消息的阻断通知，只有明确未发送的临时失败才重试。 */
+/** 独立于普通进度消息的开发人通知，只有明确未发送的临时失败才重试。 */
 @Service
 public class BlockedNotificationService {
   private static final Logger LOG = LoggerFactory.getLogger(BlockedNotificationService.class);
@@ -40,14 +39,6 @@ public class BlockedNotificationService {
     this.json = json;
   }
 
-  public List<BlockedNotificationStore.Mapping> mappings() {
-    return store.mappings(settings.current().clientId());
-  }
-
-  public void mapping(BlockedNotificationStore.Mapping value) {
-    store.saveMapping(settings.current().clientId(), value);
-  }
-
   public Map<String, String> config() {
     return Map.of("templateId", store.template());
   }
@@ -65,11 +56,11 @@ public class BlockedNotificationService {
     var current = settings.current();
     if (!current.enabled()) throw new IllegalArgumentException("请先启用钉钉机器人。");
     String template = store.template();
-    if (template.isBlank()) throw new IllegalArgumentException("请先配置并发布专用阻断卡片模板。");
+    if (template.isBlank()) throw new IllegalArgumentException("请先配置并发布开发人通知卡片模板。");
     ObjectNode payload =
         json.createObjectNode()
             .put("_templateId", template)
-            .put("title", "阻断通知测试")
+            .put("title", "开发人通知测试")
             .put("body", safe(text))
             .put("detailLink", "");
     store.reserveTest(id, current.clientId(), groupId, personId, payload);
@@ -82,41 +73,72 @@ public class BlockedNotificationService {
       try {
         observe(store.read(id));
       } catch (RuntimeException error) {
-        LOG.warn("阻断通知暂未完成终态核对，记录={}，异常类型={}。", id, error.getClass().getSimpleName());
+        LOG.warn("开发人通知暂未完成终态核对，记录={}，异常类型={}。", id, error.getClass().getSimpleName());
       }
     }
   }
 
   void observe(BlockedNotificationStore.Notice notice) {
+    if (!"watching".equals(notice.state())) return;
     if ("submit_failed".equals(runs.runStatus(notice.workflowId()))) {
-      store.finish(notice.id(), "watching", "not_applicable", "任务未成功提交，无需阻断通知。");
+      store.finish(notice.id(), "watching", "not_applicable", "任务未成功提交，无需开发人通知。");
       return;
     }
     JsonNode runtime = gateway.get("/workflows/" + notice.workflowId());
     String state = runtime.path("status").asText();
     if (!Set.of("completed", "failed", "cancelled").contains(state)) return;
     JsonNode termination = runtime.path("termination");
-    if (!"failed".equals(state) || !"blocked".equals(termination.path("outcome").asText())) {
-      store.finish(notice.id(), "watching", "not_applicable", "本次运行无需阻断通知。");
+    boolean blocked =
+        "failed".equals(state) && "blocked".equals(termination.path("outcome").asText());
+    JsonNode context = runtime.path("jiraContext");
+    boolean completed =
+        "completed".equals(state)
+            && "automatic".equals(runtime.path("advanceMode").asText())
+            && !termination.isObject()
+            && !context.path("issueKey").asText().isBlank();
+    if (!blocked && !completed) {
+      store.finish(notice.id(), "watching", "not_applicable", "本次运行无需开发人通知。");
       return;
     }
     JsonNode developer = termination.path("jiraDeveloper");
-    if (!"resolved".equals(developer.path("status").asText())) {
+    String developerStatus =
+        completed ? context.path("developerStatus").asText() : developer.path("status").asText();
+    String developerName =
+        completed ? context.path("developerName").asText() : developer.path("displayName").asText();
+    if (!"resolved".equals(developerStatus)) {
       store.finish(
           notice.id(),
           "watching",
           "unavailable",
-          switch (developer.path("status").asText()) {
+          switch (developerStatus) {
             case "empty" -> "Jira 开发人为空，无法通知。";
             case "multiple" -> "Jira 开发人为多人，无法通知。";
-            default -> "未取得唯一 Jira 开发人账号，无法通知。";
+            default -> "未取得唯一 Jira 开发人姓名，无法通知。";
           });
       return;
     }
     try {
       String template = store.template();
-      if (template.isBlank()) throw new IllegalArgumentException("尚未配置专用阻断卡片模板。");
-      var person = store.resolvePerson(notice.group().path("clientId").asText(), developer);
+      if (template.isBlank()) throw new IllegalArgumentException("尚未配置开发人通知卡片模板。");
+      var person = store.resolvePerson(notice.group().path("clientId").asText(), developerName);
+      if (completed) {
+        ObjectNode payload =
+            json.createObjectNode()
+                .put("_templateId", template)
+                .put("title", "Jira 自动流程已完成")
+                .put(
+                    "body",
+                    safe(
+                        "Jira："
+                            + context.path("issueKey").asText()
+                            + "\n开发人："
+                            + developerName
+                            + "\n执行结果："
+                            + DingTalkResultText.display(runtime.path("response").asText())))
+                .put("detailLink", "[查看监控](" + runs.monitorUrl(notice.workflowId()) + ")");
+        store.prepare(notice.id(), person, payload);
+        return;
+      }
       String step = "阻断步骤";
       int index = 0;
       for (JsonNode node : runtime.path("nodes")) {
@@ -163,7 +185,7 @@ public class BlockedNotificationService {
       try {
         send(id);
       } catch (RuntimeException error) {
-        LOG.warn("阻断通知状态保存暂未完成，记录={}，异常类型={}。", id, error.getClass().getSimpleName());
+        LOG.warn("开发人通知状态保存暂未完成，记录={}，异常类型={}。", id, error.getClass().getSimpleName());
       }
     }
   }
@@ -175,7 +197,7 @@ public class BlockedNotificationService {
     if (!current.enabled()
         || !store.available(notice.group(), "GROUP", current.clientId())
         || !store.available(notice.person(), "PERSON", current.clientId())) {
-      store.finish(id, "sending", "unavailable", "原通知群、人员或机器人已停用或不可用。");
+      store.finish(id, "sending", "unavailable", "原通知人员已不可用，或通知群、机器人已停用或不可用。");
       return;
     }
     Map<String, Object> payload = new LinkedHashMap<>();

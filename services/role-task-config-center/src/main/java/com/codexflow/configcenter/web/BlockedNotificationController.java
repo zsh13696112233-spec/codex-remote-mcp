@@ -1,13 +1,11 @@
 package com.codexflow.configcenter.web;
 
-import com.codexflow.configcenter.domain.BlockedNotificationStore;
 import com.codexflow.configcenter.integration.dingtalk.BlockedNotificationService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
-import java.util.List;
 import java.util.Map;
 import org.springframework.web.bind.annotation.*;
 
@@ -18,17 +16,6 @@ public class BlockedNotificationController {
 
   public BlockedNotificationController(BlockedNotificationService service) {
     this.service = service;
-  }
-
-  @GetMapping("/mappings")
-  public List<BlockedNotificationStore.Mapping> mappings() {
-    return service.mappings();
-  }
-
-  @PutMapping("/mappings/{targetId}")
-  public void mapping(@PathVariable String targetId, @Valid @RequestBody MappingRequest request) {
-    service.mapping(
-        new BlockedNotificationStore.Mapping(targetId, request.accountType(), request.accountId()));
   }
 
   @GetMapping("/config")
@@ -50,10 +37,6 @@ public class BlockedNotificationController {
   public Map<String, Object> test(@Valid @RequestBody TestRequest request) {
     return service.test(request.requestId(), request.groupId(), request.personId(), request.text());
   }
-
-  public record MappingRequest(
-      @NotNull @Pattern(regexp = "accountId|key|name") String accountType,
-      @NotNull @Size(max = 256) String accountId) {}
 
   public record ConfigRequest(@NotNull @Size(max = 256) String templateId) {}
 

@@ -195,17 +195,21 @@ class WorkflowGateway:
                     catalogs[key] = await self.orchestrator.agent_models(key)
                 require_effort(catalogs[key], node.get("model") or agents_by_id[key].get("model"), node["reasoningEffort"])
         snapshot = await _database_call(self.store.create_workflow, spec)
-        await self._schedule_pending()
+        await self._schedule_pending(spec["supervisorAgentId"])
         return await _database_call(
             self.store.get_workflow, str(snapshot["workflowId"])
         )
 
-    async def _schedule_pending(self) -> None:
+    async def _schedule_pending(self, supervisor_id: str | None = None) -> None:
         if self._closing:
             return
         async with self._schedule_lock:
+            if self._closing:
+                return
             for agent in self.orchestrator.list_agents():
                 agent_id = str(agent["agent_id"])
+                if supervisor_id is not None and agent_id != supervisor_id:
+                    continue
                 capabilities = set(
                     agent.get("capabilities")
                     or (
@@ -253,20 +257,20 @@ class WorkflowGateway:
                     raise
                 self._tasks[workflow_id] = task
                 task.add_done_callback(
-                    lambda done, selected=workflow_id: self._drop_task(selected, done)
+                    lambda done, selected=workflow_id, owner=agent_id: self._drop_task(selected, done, owner)
                 )
 
-    def _drop_task(self, workflow_id: str, task: asyncio.Task[Any]) -> None:
+    def _drop_task(self, workflow_id: str, task: asyncio.Task[Any], supervisor_id: str) -> None:
         if self._tasks.get(workflow_id) is task:
             self._tasks.pop(workflow_id, None)
         if not self._closing:
             asyncio.create_task(
-                self._schedule_after_task(), name="workflow-schedule-after-finish"
+                self._schedule_after_task(supervisor_id), name="workflow-schedule-after-finish"
             )
 
-    async def _schedule_after_task(self) -> None:
+    async def _schedule_after_task(self, supervisor_id: str) -> None:
         try:
-            await self._schedule_pending()
+            await self._schedule_pending(supervisor_id)
         except Exception:
             LOGGER.exception("工作流终态后调度下一项失败。")
 
@@ -410,8 +414,8 @@ class WorkflowGateway:
                     task = self._tasks.get(item["workflowId"])
                     if task is not None and not task.done():
                         task.cancel()
-                if expired:
-                    await self._schedule_pending()
+                for supervisor_id in sorted({item["supervisorId"] for item in expired}):
+                    await self._schedule_pending(supervisor_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -467,7 +471,7 @@ class WorkflowGateway:
             task = self._tasks.get(str(failed_id))
             if task is not None and not task.done():
                 task.cancel()
-        await self._schedule_pending()
+        await self._schedule_pending(supervisor_id)
         result["heartbeatIntervalSec"] = SIDECAR_HEARTBEAT_INTERVAL_SEC
         result["leaseTimeoutSec"] = SIDECAR_LEASE_TIMEOUT_SEC
         return result
@@ -1208,10 +1212,12 @@ class WorkflowGateway:
                     name=f"workflow-supervisor-resume:{workflow_id}",
                 )
                 self._tasks[workflow_id] = task
-                task.add_done_callback(lambda done: self._drop_task(workflow_id, done))
+                task.add_done_callback(
+                    lambda done, owner=spec["supervisorAgentId"]: self._drop_task(workflow_id, done, owner)
+                )
                 return
         # 排队工作流由正常调度器领取，先释放锁，避免嵌套获取同一把锁。
-        await self._schedule_pending()
+        await self._schedule_pending(snapshot["supervisor"]["agentId"])
 
     async def cancel(self, workflow_id: str, gate_id: str | None = None) -> dict[str, Any]:
         from workflow_discussion import DiscussionService
@@ -1253,7 +1259,7 @@ class WorkflowGateway:
             await self.orchestrator.cancel(job_id)
         if task is not None and not task.done():
             task.cancel()
-        await self._schedule_pending()
+        await self._schedule_pending(result["supervisor"]["agentId"])
         return result
 
 

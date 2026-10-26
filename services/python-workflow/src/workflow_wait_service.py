@@ -75,7 +75,8 @@ class WaitService:
                 await gateway._pause_supervisor(workflow_id)
                 if row["status"] == "finishing":
                     await db(gateway.store.complete_final_wait, workflow_id, gate_id)
-                    await gateway._schedule_pending()
+                    state = await db(gateway.store.get_workflow, workflow_id)
+                    await gateway._schedule_pending(state["supervisor"]["agentId"])
                     return
                 try:
                     target = await db(gateway.store.prepare_wait_execution, workflow_id, gate_id)
@@ -98,6 +99,8 @@ class WaitService:
         closing = target["gate"]["status"] == "closing"
         original = json.loads(target["gate"]["business_result_json"])
         job = None
+        state = await db(gateway.store.get_workflow, workflow_id)
+        supervisor_id = state["supervisor"]["agentId"]
         try:
             if not target["threadId"]:
                 raise RuntimeError("原步骤会话不可恢复。")
@@ -168,7 +171,7 @@ class WaitService:
                 await db(gateway.store.sync_node_job, workflow_id, target["nodeId"], snapshot)
                 if await db(gateway.store.has_business_termination, workflow_id):
                     await db(gateway.store.finish_business_termination, workflow_id)
-            await gateway._schedule_pending()
+            await gateway._schedule_pending(supervisor_id)
         except asyncio.CancelledError:
             if job and not job.completed.is_set():
                 await gateway.assistant_orchestrator.cancel(job.job_id)
@@ -181,9 +184,9 @@ class WaitService:
                 original["summary"] = original["summary"][:19000] + "\n阻断收尾未确认完成，请人工核查。"
                 await db(gateway.store.finish_wait_result, workflow_id, gate_id, original)
                 await db(gateway.store.finish_business_termination, workflow_id)
-                await gateway._schedule_pending()
+                await gateway._schedule_pending(supervisor_id)
             else:
                 before_start = job is None or job.error_stage in {"queued", "configuration", "connect", "initialize", "reasoning/check", "permission/check", "thread/resume", "thread/start", "image/stage", "model/list"}
                 uncertain = not before_start and job.error_kind not in {"turn_failed", "invalid_business_result"}
                 await db(gateway.store.fail_wait_execution, workflow_id, gate_id, uncertain=uncertain, before_start=before_start)
-                await gateway._schedule_pending()
+                await gateway._schedule_pending(supervisor_id)

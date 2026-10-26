@@ -12,6 +12,57 @@ class DingTalkWaitingCardTest {
   private final ObjectMapper json = new ObjectMapper();
 
   @Test
+  void savedJiraContextPrecedesMentionsForEveryWaitKindAndAnswer() {
+    for (String kind : new String[] {"advance", "blocked", "finish"}) {
+      for (boolean answer : new boolean[] {false, true}) {
+        var payload =
+            json.createObjectNode()
+                .put("gateId", "gate")
+                .put("waitKind", kind)
+                .put("answer", answer)
+                .put("cardMention", true)
+                .put("mentionGroup", true)
+                .put("atUserId", "operator")
+                .put("atDisplayName", "操作人")
+                .put("text", "Jira：TEXT-999，开发人：正文姓名");
+        var snapshot = json.createObjectNode();
+        snapshot.putObject("pendingAdvance").put("gateId", "gate").put("state", "held");
+        var original = DingTalkWaitingCard.render("flow", payload, snapshot);
+        assertThat(original.get("statusText").toString()).doesNotContain("Jira：");
+        var context = snapshot.putObject("jiraContext");
+        context
+            .put("issueKey", "TEST-123")
+            .put("developerStatus", "resolved")
+            .put("developerName", "张三");
+        var data = DingTalkWaitingCard.render("flow", payload, snapshot);
+        for (String field : new String[] {"markdown", "statusText"}) {
+          assertThat(data.get(field).toString())
+              .startsWith("**Jira：TEST-123 ｜ 开发人：张三**\n\n")
+              .containsOnlyOnce("Jira：TEST-123")
+              .contains("<a atId=\"operator\">操作人</a>");
+        }
+        for (String field :
+            new String[] {
+              "summary", "confirmAction", "confirmStatus", "showStop", "_cardAtUserId"
+            }) {
+          assertThat(data.get(field)).isEqualTo(original.get(field));
+        }
+        context.put("developerStatus", "unavailable").put("developerName", "");
+        snapshot.remove("pendingAdvance");
+        var refreshed = DingTalkWaitingCard.render("flow", payload, snapshot);
+        assertThat(refreshed.get("statusText").toString())
+            .startsWith("**Jira：TEST-123 ｜ 开发人：获取失败**\n\n")
+            .contains("本轮等待已结束");
+        assertThat(refreshed.get("confirmStatus")).isEqualTo("disabled");
+        context.put("issueKey", "");
+        assertThat(
+                DingTalkWaitingCard.render("flow", payload, snapshot).get("statusText").toString())
+            .doesNotContain("Jira：");
+      }
+    }
+  }
+
+  @Test
   void monitorLinkSurvivesAllWaitStatesAndBothTemplates() {
     for (String kind : new String[] {"advance", "blocked", "finish"}) {
       for (boolean answer : new boolean[] {false, true}) {

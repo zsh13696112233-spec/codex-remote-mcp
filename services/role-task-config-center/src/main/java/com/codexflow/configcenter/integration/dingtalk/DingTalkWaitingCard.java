@@ -173,6 +173,11 @@ final class DingTalkWaitingCard {
         values.put("_cardAtDisplayName", payload.path("atDisplayName").asText());
       }
     }
+    String jiraLine = DingTalkJiraContext.line(snapshot.path("jiraContext"));
+    if (!jiraLine.isBlank()) {
+      values.put("markdown", jiraLine + "\n\n" + values.get("markdown"));
+      values.put("statusText", jiraLine + "\n\n" + values.get("statusText"));
+    }
     String monitorLink = DingTalkMonitorLink.markdown(monitorUrl, workflowId);
     values.put("markdown", values.get("markdown") + "\n\n" + monitorLink);
     values.put("notice", values.get("notice") + "\n\n" + monitorLink);

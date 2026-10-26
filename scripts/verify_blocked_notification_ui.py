@@ -23,7 +23,6 @@ def main():
                dict(id='person', targetType='PERSON', enabled=True, available=True, displayName='测试开发人', externalId='p')]
     posts = []
     errors = []
-    mappings = []
     fail_config = [True]
 
     def route_api(route):
@@ -37,10 +36,6 @@ def main():
         elif path.endswith('/blocked-notifications/test'):
             posts.append(route.request.post_data_json)
             body = {'state': 'pending'}
-        elif '/blocked-notifications/mappings/' in path:
-            mappings.append(route.request.post_data_json)
-        elif path.endswith('/blocked-notifications/mappings'):
-            body = []
         elif '/blocked-notifications/' in path:
             body = {'state': 'unknown', 'reason': '发送结果未确认，未自动重发。'}
         elif path == '/api/dingtalk/config':
@@ -79,18 +74,13 @@ def main():
             page.screenshot(path='/tmp/blocked-notification-config.png', full_page=True)
             page.locator('[data-page=dingtalk-targets]').click()
             page.locator('[data-target-type=PERSON]').click()
-            page.get_by_role('button', name='Jira 开发人映射').click()
-            page.locator('[data-blocked-mapping] [name=accountType]').select_option('key')
-            page.locator('[data-blocked-mapping] [name=accountId]').fill('dev-1')
-            page.get_by_role('button', name='保存映射').click()
-            page.wait_for_function('!document.querySelector("[data-blocked-mapping]")')
-            assert mappings == [{'accountType': 'key', 'accountId': 'dev-1'}]
+            assert page.locator('[data-jira-mapping]').count() == 0
             page.evaluate('openTask({blockedNotificationGroupId:"group"})')
             assert page.locator('#taskForm [name=blockedNotificationGroupId]').input_value() == 'group'
             page.locator('#taskDialog [data-dialog-close]').click()
             assert not errors, errors
             browser.close()
-            print('阻断通知页面：错误恢复、重复发送、刷新恢复、状态、映射和任务群回填通过。')
+            print('阻断通知页面：错误恢复、重复发送、刷新恢复、状态、映射入口移除和任务群回填通过。')
     finally:
         server.shutdown()
 

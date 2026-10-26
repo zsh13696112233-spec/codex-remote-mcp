@@ -177,6 +177,19 @@ class OutcomeStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.get_workflow("serial-demo")["termination"])
         self.assertIsNotNone(self.store.get_workflow("serial-demo")["pendingAdvance"])
 
+    def test_display_name_instructions_preserve_result_protocol(self):
+        from workflow_outcomes import validate
+        for version in (2, 3, 4, 5):
+            for waiting in (False, True):
+                prompt = instruction("w", "n", False, version, defer_blocked=waiting)
+                self.assertIn("displayName 必须填写开发人对象实际返回的显示名", prompt)
+                self.assertIn("平台按显示名精确匹配钉钉人员", prompt)
+                self.assertNotIn("accountType 固定为 name", prompt)
+        for identity_type in ("name", "key", "accountId"):
+            value = result()
+            value["jiraDeveloper"].update(accountType=identity_type, accountId="Developer1")
+            self.assertEqual(validate(value, 2)["jiraDeveloper"]["accountId"], "Developer1")
+
     def test_protocol_and_marker_are_stable(self):
         self.start()
         self.assertEqual(self.store.get_spec("serial-demo")["resultProtocolVersion"], 2)

@@ -73,7 +73,7 @@ function mcpDiagnosticRows(value){
 }
 function mcpDialog(html){
   let d=$('#mcpDialog');if(!d){d=document.createElement('dialog');d.id='mcpDialog';document.body.append(d)}
-  d.innerHTML=`<div class="skill-upload-dialog">${html}<p role="alert"></p><footer><button data-mcp="close">关闭</button></footer></div>`;
+  d.innerHTML=`<div class="skill-upload-dialog"><button type="button" class="dialog-close" data-dialog-close aria-label="关闭弹窗" title="关闭">×</button>${html}<p role="alert"></p><footer><button data-mcp="close">关闭</button></footer></div>`;
   d.dataset.batchId='';d.oncancel=e=>{if(mcpView.busy)e.preventDefault()};d.showModal();return d;
 }
 async function mcpSubmit(path,payload,key){

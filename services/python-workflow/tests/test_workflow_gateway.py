@@ -505,6 +505,121 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 await gateway.stop()
                 await gateway.event_batcher.close()
 
+    async def test_targeted_schedule_and_startup_full_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            gateway = fixture_gateway(store, self.FakeOrchestrator())
+            with patch.object(store, "claim_next_workflow", return_value=None) as claim:
+                await gateway._schedule_pending("supervisor-a")
+                self.assertEqual([call.args[0] for call in claim.call_args_list], ["supervisor-a"])
+                claim.reset_mock()
+                await gateway.start()
+                self.assertEqual([call.args[0] for call in claim.call_args_list], ["supervisor-a", "supervisor-b"])
+            await gateway.stop()
+            await gateway.event_batcher.close()
+
+    async def test_heartbeat_only_checks_its_remote_supervisor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            orchestrator = self.FakeOrchestrator()
+            agents = orchestrator.list_agents()
+            for agent in agents[:2]:
+                agent["orchestration_mode"] = "remote_sidecar"
+            orchestrator.list_agents = lambda: agents
+            gateway = fixture_gateway(store, orchestrator)
+            with patch.object(store, "sidecar_status", wraps=store.sidecar_status) as status, patch.object(
+                store, "claim_next_workflow", wraps=store.claim_next_workflow
+            ) as claim:
+                await gateway.accept_sidecar_heartbeat("supervisor-a", {
+                    "instanceId": "instance-a", "startedAt": utc_now()})
+                self.assertEqual([call.args[0] for call in status.call_args_list], ["supervisor-a"])
+                self.assertEqual([call.args[0] for call in claim.call_args_list], ["supervisor-a"])
+            await gateway.event_batcher.close()
+
+    async def test_simultaneous_schedule_starts_workflow_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            orchestrator = self.FakeOrchestrator()
+            gateway = fixture_gateway(store, orchestrator)
+            store.create_workflow(self.spec("race", "supervisor-a"))
+            try:
+                await asyncio.gather(*(gateway._schedule_pending("supervisor-a") for _ in range(3)))
+                self.assertEqual(len(gateway._tasks), 1)
+                self.assertEqual(orchestrator.dispatch_count, 1)
+            finally:
+                await gateway.stop()
+                await gateway.event_batcher.close()
+
+    async def test_cancel_advances_only_owner_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            gateway = fixture_gateway(store, self.FakeOrchestrator())
+            store.create_workflow(self.spec("cancelled", "supervisor-a"))
+            store.claim_next_workflow("supervisor-a")
+            store.create_workflow(self.spec("next", "supervisor-a"))
+            store.create_workflow(self.spec("unrelated", "supervisor-b"))
+            try:
+                await gateway.cancel("cancelled")
+                self.assertEqual(store.get_workflow("next")["status"], "running")
+                self.assertEqual(store.get_workflow("unrelated")["status"], "queued")
+            finally:
+                await gateway.stop()
+                await gateway.event_batcher.close()
+
+    async def test_resumed_task_completion_advances_owner_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            gateway = fixture_gateway(store, self.FakeOrchestrator())
+            store.create_workflow(self.spec("resume", "supervisor-a"))
+            store.claim_next_workflow("supervisor-a")
+            store.create_workflow(self.spec("next", "supervisor-a"))
+            store.create_workflow(self.spec("unrelated", "supervisor-b"))
+            next_started = asyncio.Event()
+            release = asyncio.Event()
+
+            async def run(spec, **kwargs):
+                if spec["workflowId"] == "resume":
+                    store.finish_workflow("resume", supervisor_status="failed", response=None, error="测试结束")
+                else:
+                    next_started.set()
+                    await release.wait()
+
+            gateway._run_supervisor = run
+            try:
+                await gateway._resume_supervisor_if_needed("resume")
+                await asyncio.wait_for(next_started.wait(), 5)
+                self.assertEqual(store.get_workflow("next")["status"], "running")
+                self.assertEqual(store.get_workflow("unrelated")["status"], "queued")
+            finally:
+                await gateway.stop()
+                await gateway.event_batcher.close()
+
+    async def test_watchdog_schedules_only_expired_owners(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            gateway = fixture_gateway(store, self.FakeOrchestrator())
+            expired = [{"workflowId": "old", "supervisorId": "supervisor-a"}]
+            with patch.object(store, "expire_sidecar_leases", return_value=expired), patch.object(
+                gateway, "_schedule_pending", new_callable=AsyncMock
+            ) as schedule, patch("workflow_gateway.asyncio.sleep", side_effect=asyncio.CancelledError):
+                with self.assertRaises(asyncio.CancelledError):
+                    await gateway._sidecar_watchdog_loop()
+                schedule.assert_awaited_once_with("supervisor-a")
+            await gateway.event_batcher.close()
+
+    async def test_schedule_waiting_for_lock_stops_when_closing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixtureWorkflowStore(Path(directory, "workflows.db"))
+            gateway = fixture_gateway(store, self.FakeOrchestrator())
+            with patch.object(store, "claim_next_workflow") as claim:
+                async with gateway._schedule_lock:
+                    pending = asyncio.create_task(gateway._schedule_pending("supervisor-a"))
+                    await asyncio.sleep(0)
+                    gateway._closing = True
+                await pending
+                claim.assert_not_called()
+            await gateway.event_batcher.close()
+
     async def test_dispatch_preserves_extended_supervisor_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = FixtureWorkflowStore(Path(directory, "workflows.db"))

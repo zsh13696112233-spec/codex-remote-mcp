@@ -6,7 +6,6 @@ import static org.mockito.Mockito.*;
 
 import com.codexflow.configcenter.client.GatewayClient;
 import com.codexflow.configcenter.domain.BlockedNotificationStore;
-import com.codexflow.configcenter.domain.ConflictFailure;
 import com.codexflow.configcenter.domain.WorkflowRunStore;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -50,7 +49,6 @@ class BlockedNotificationTest {
     runs = mock(WorkflowRunStore.class);
     service = new BlockedNotificationService(store, settings, transport, gateway, runs, json);
     store.saveTemplate("blocked.schema");
-    store.saveMapping(client, new BlockedNotificationStore.Mapping(person, "key", "dev-1"));
   }
 
   private String target(String type, String external) {
@@ -61,7 +59,7 @@ class BlockedNotificationTest {
         client,
         type,
         external,
-        external);
+        "developer".equals(external) ? "开发人" : external);
     return id;
   }
 
@@ -104,8 +102,7 @@ class BlockedNotificationTest {
     assertThat(store.read(id).person().path("externalId").asText()).isEqualTo("developer");
     assertThat(store.read(id).payload().path("body").asText()).contains("第1步", "评论未确认");
     String other = target("PERSON", "other");
-    store.saveMapping(client, new BlockedNotificationStore.Mapping(person, "key", ""));
-    store.saveMapping(client, new BlockedNotificationStore.Mapping(other, "key", "dev-1"));
+    db.update("UPDATE codex_sop_dingtalk_targets SET display_name=? WHERE id=?", "开发人", other);
     db.update("UPDATE codex_sop_dingtalk_targets SET display_name=? WHERE id=?", "新名称", person);
     service.observe(store.read(id));
     service.send(id);
@@ -116,7 +113,7 @@ class BlockedNotificationTest {
             eq(client),
             eq("group"),
             eq("developer"),
-            argThat(data -> "developer".equals(data.get("_atDisplayName"))));
+            argThat(data -> "开发人".equals(data.get("_atDisplayName"))));
     assertThat(store.view(id).get("state")).isEqualTo("delivered");
   }
 
@@ -155,36 +152,172 @@ class BlockedNotificationTest {
   }
 
   @Test
-  void duplicateMappingRejectedAndAccountCaseIsExact() {
+  void namesMatchExactlyAndDuplicatesChooseStableId() {
+    db.update("UPDATE codex_sop_dingtalk_targets SET display_name=? WHERE id=?", "  开发人  ", person);
+    entities.clear();
+    assertThat(store.resolvePerson(client, " 开发人 ").path("id").asText()).isEqualTo(person);
     String other = target("PERSON", "other");
-    assertThatThrownBy(
-            () ->
-                store.saveMapping(
-                    client, new BlockedNotificationStore.Mapping(other, "key", "dev-1")))
-        .isInstanceOf(ConflictFailure.class);
-    store.saveMapping(client, new BlockedNotificationStore.Mapping(other, "key", "DEV-1"));
-    assertThat(store.mappings(client)).hasSize(2);
+    db.update("UPDATE codex_sop_dingtalk_targets SET display_name=? WHERE id=?", "开发人", other);
+    entities.clear();
+    String expected = person.compareTo(other) < 0 ? person : other;
+    assertThat(store.resolvePerson(client, "开发人").path("id").asText()).isEqualTo(expected);
+    assertThatThrownBy(() -> store.resolvePerson(client, "开发"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> store.resolvePerson("another-bot", "开发人"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> store.resolvePerson(client, " "))
+        .isInstanceOf(IllegalArgumentException.class);
+    target("PERSON", "Alice");
+    assertThatThrownBy(() -> store.resolvePerson(client, "alice"))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void unavailableMappingTemplateAndTargetsNeverSend() {
+  void unavailableDeletedAndGroupNamesAreNotRecipients() {
+    for (String column : new String[] {"available", "deleted"}) {
+      boolean value = "deleted".equals(column);
+      db.update("UPDATE codex_sop_dingtalk_targets SET " + column + "=? WHERE id=?", value, person);
+      entities.clear();
+      assertThatThrownBy(() -> store.resolvePerson(client, "开发人"))
+          .isInstanceOf(IllegalArgumentException.class);
+      db.update(
+          "UPDATE codex_sop_dingtalk_targets SET " + column + "=? WHERE id=?", !value, person);
+    }
+    assertThatThrownBy(() -> store.resolvePerson(client, "group"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  private ObjectNode completedRuntime() {
+    var value =
+        json.createObjectNode()
+            .put("status", "completed")
+            .put("advanceMode", "automatic")
+            .put("response", "已完成代码审核。 token=secret");
+    value
+        .putObject("jiraContext")
+        .put("issueKey", "TEST-2")
+        .put("developerStatus", "resolved")
+        .put("developerName", "开发人");
+    return value;
+  }
+
+  @Test
+  void automaticCompletionNotifiesByDisplayNameWithoutAccountMapping() {
+    String id = reserve();
+    when(gateway.get("/workflows/" + id)).thenReturn(completedRuntime());
+    service.observe(store.read(id));
+    var notice = store.read(id);
+    assertThat(notice.state()).isEqualTo("pending");
+    assertThat(notice.payload().path("title").asText()).isEqualTo("Jira 自动流程已完成");
+    assertThat(notice.payload().path("body").asText())
+        .contains("TEST-2", "开发人", "已完成代码审核")
+        .doesNotContain("secret");
+    assertThat(notice.payload().path("detailLink").asText()).contains(id);
+    // 重启后只依赖持久化的 pending 记录投递；无需重新观察或读取 Jira。
+    var settings = mock(DingTalkSettingsStore.class);
+    when(settings.current())
+        .thenReturn(new DingTalkSettingsStore.Settings(true, client, "test", "", 1000, true));
+    var restarted = new BlockedNotificationService(store, settings, transport, gateway, runs, json);
+    restarted.send(id);
+    restarted.observe(store.read(id));
+    restarted.send(id);
+    verify(transport, times(1))
+        .sendBlockedCard(eq("blocked-" + id), eq(client), eq("group"), eq("developer"), anyMap());
+    assertThat(store.read(id).state()).isEqualTo("delivered");
+  }
+
+  @Test
+  void completedNotificationExcludesOtherModesAndEarlyTermination() {
+    for (String kind :
+        new String[] {"semi", "no_task", "blocked", "missing_jira", "cancelled", "failed"}) {
+      String id = reserve();
+      var value = completedRuntime();
+      switch (kind) {
+        case "semi" -> value.put("advanceMode", "semi_automatic");
+        case "no_task", "blocked" -> value.putObject("termination").put("outcome", kind);
+        case "missing_jira" -> ((ObjectNode) value.path("jiraContext")).put("issueKey", "");
+        default -> value.put("status", kind);
+      }
+      when(gateway.get("/workflows/" + id)).thenReturn(value);
+      service.observe(store.read(id));
+      assertThat(store.read(id).state()).as(kind).isEqualTo("not_applicable");
+    }
+    verifyNoInteractions(transport);
+  }
+
+  @Test
+  void completedNotificationReportsMissingDeveloperWithoutGuessing() {
+    for (String status :
+        new String[] {"empty", "multiple", "unavailable", "not_applicable", "resolved"}) {
+      String id = reserve();
+      var value = completedRuntime();
+      ((ObjectNode) value.path("jiraContext"))
+          .put("developerStatus", status)
+          .put("developerName", "");
+      when(gateway.get("/workflows/" + id)).thenReturn(value);
+      service.observe(store.read(id));
+      assertThat(store.read(id).state()).isEqualTo("unavailable");
+    }
+    verifyNoInteractions(transport);
+  }
+
+  @Test
+  void unavailableNamesTemplateAndTargetsNeverSend() {
     String id = reserve();
     store.saveTemplate("");
     service.observe(store.read(id));
     assertThat(store.read(id).state()).isEqualTo("unavailable");
     store.saveTemplate("blocked.schema");
     id = reserve();
-    store.saveMapping(client, new BlockedNotificationStore.Mapping(person, "key", ""));
+    db.update("UPDATE codex_sop_dingtalk_targets SET display_name=? WHERE id=?", "其他姓名", person);
+    entities.clear();
     service.observe(store.read(id));
     assertThat(store.read(id).state()).isEqualTo("unavailable");
-    store.saveMapping(client, new BlockedNotificationStore.Mapping(person, "key", "dev-1"));
+    db.update("UPDATE codex_sop_dingtalk_targets SET display_name=? WHERE id=?", "开发人", person);
+    entities.clear();
     id = reserve();
     service.observe(store.read(id));
-    db.update("UPDATE codex_sop_dingtalk_targets SET enabled=false WHERE id=?", person);
+    db.update("UPDATE codex_sop_dingtalk_targets SET available=false WHERE id=?", person);
     entities.clear();
     service.send(id);
     assertThat(store.read(id).state()).isEqualTo("unavailable");
     verifyNoInteractions(transport);
+  }
+
+  @Test
+  void disabledPeopleReceiveCompletedAndBlockedNotifications() {
+    for (boolean completed : new boolean[] {true, false}) {
+      db.update("UPDATE codex_sop_dingtalk_targets SET enabled=false WHERE id=?", person);
+      entities.clear();
+      String id = reserve();
+      when(gateway.get("/workflows/" + id)).thenReturn(completed ? completedRuntime() : runtime());
+      service.observe(store.read(id));
+      assertThat(store.read(id).state()).isEqualTo("pending");
+      service.send(id);
+      assertThat(store.read(id).state()).isEqualTo("delivered");
+      verify(transport)
+          .sendBlockedCard(eq("blocked-" + id), eq(client), eq("group"), eq("developer"), anyMap());
+    }
+  }
+
+  @Test
+  void disablingPersonAfterPreparationDoesNotBlockDelivery() {
+    String id = reserve();
+    service.observe(store.read(id));
+    db.update("UPDATE codex_sop_dingtalk_targets SET enabled=false WHERE id=?", person);
+    entities.clear();
+    service.send(id);
+    assertThat(store.read(id).state()).isEqualTo("delivered");
+  }
+
+  @Test
+  void notificationTestAlsoAcceptsAvailableDisabledPerson() {
+    db.update("UPDATE codex_sop_dingtalk_targets SET enabled=false WHERE id=?", person);
+    entities.clear();
+    String request = UUID.randomUUID().toString();
+    service.test(request, group, person, "测试");
+    service.send("test-" + request);
+    assertThat(store.read("test-" + request).state()).isEqualTo("delivered");
   }
 
   @Test

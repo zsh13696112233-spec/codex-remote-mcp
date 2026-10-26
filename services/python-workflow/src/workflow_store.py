@@ -928,6 +928,16 @@ class WorkflowStore(InputImageStore, WaitStore):
         if lease_timeout_sec is not None and lease_timeout_sec < 5:
             raise ValueError("远程租约超时时间不能小于 5 秒。")
         with self._connect() as connection:
+            # 只读预检查避免忙碌主监督争用写锁；领取仍由下面的事务复查保护。
+            active_lease = connection.execute(
+                "SELECT 1 FROM supervisor_leases l "
+                "JOIN workflows w ON w.workflow_id = l.workflow_id "
+                "WHERE l.supervisor_id = ? "
+                "AND w.status NOT IN ('completed', 'failed', 'cancelled')",
+                (supervisor_id,),
+            ).fetchone()
+            if active_lease is not None:
+                return None
             connection.execute("BEGIN IMMEDIATE")
             lease = connection.execute(
                 "SELECT l.workflow_id, w.status FROM supervisor_leases l "

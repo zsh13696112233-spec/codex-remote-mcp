@@ -8,10 +8,10 @@ const vm=require('node:vm');
 // payloads and rendered markup; it intentionally does not claim visual coverage.
 function fixture(search='') {
   const nodes=new Map();
-  function element(){return {innerHTML:'',value:'',textContent:'',dataset:{},close(){},style:{},classList:{add(){},remove(){},toggle(){}},addEventListener(){},querySelector(){return element()},querySelectorAll(){return []},closest(){return element()}}}
+  function element(){return {innerHTML:'',value:'',textContent:'',dataset:{},close(){},focus(){},style:{},classList:{add(){},remove(){},toggle(){}},addEventListener(){},querySelector(){return element()},querySelectorAll(){return []},closest(){return element()}}}
   const navButtons=['roles','groups','skills'].map(page=>({...element(),dataset:{page}}));
   const document={querySelector(selector){if(!nodes.has(selector))nodes.set(selector,element());return nodes.get(selector)},querySelectorAll(selector){return selector==='nav button'?navButtons:[]},addEventListener(){},createElement:element};
-  const context=vm.createContext({document,window:{addEventListener(){}},location:{search,href:'http://localhost/'+search},history:{replaceState(){}},URL,URLSearchParams,console,queueMicrotask(){},setInterval(){},setTimeout(){},confirm(){return false},fetch(){throw Error('Unexpected network request')}});
+  const context=vm.createContext({document,window:{addEventListener(){}},location:{search,href:'http://localhost/'+search},history:{replaceState(){}},URL,URLSearchParams,HTMLElement:class {},console,queueMicrotask(){},setInterval(){},setTimeout(){},confirm(){return false},fetch(){throw Error('Unexpected network request')}});
   for(const name of ['groups.js','machines.js','run-catalog.js','task-schedules.js','skills.js','app.js']) {
     let script=fs.readFileSync(path.join(__dirname,'../../main/resources/static',name),'utf8');
     if(name==='app.js')script=script.slice(0,script.indexOf('const initialPage='))+script.slice(script.indexOf('const effortCatalogs ='));

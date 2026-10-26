@@ -489,7 +489,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
             + org.springframework.web.util.HtmlUtils.htmlEscape(personId)
             + "\">"
             + org.springframework.web.util.HtmlUtils.htmlEscape(name)
-            + "</a> 查看阻断原因。");
+            + "</a> 查看任务结果。");
     ObjectNode body = waitingCardBody(cardId, "GROUP", groupId, personId, parameters);
     body.putArray("cardAtUserIds").add(personId);
     ((ObjectNode) body.path("imGroupOpenDeliverModel").path("atUserIds")).put(personId, name);

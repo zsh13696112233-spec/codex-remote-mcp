@@ -76,9 +76,34 @@ class BlockedCardTransportTest {
         .isEqualTo("张三");
     var parameters = body.path("cardData").path("cardParamMap");
     assertThat(parameters.path("body").asText())
-        .isEqualTo("缺少源码\n\n请 <a atId=\"staff-123\">张三</a> 查看阻断原因。");
+        .isEqualTo("缺少源码\n\n请 <a atId=\"staff-123\">张三</a> 查看任务结果。");
     assertThat(parameters.has("_atDisplayName")).isFalse();
     assertThat(parameters.has("_templateId")).isFalse();
+  }
+
+  @Test
+  void completedCardMentionsRecipientWithoutBlockedWording() {
+    var body =
+        transport()
+            .blockedCardBody(
+                "completed-card",
+                "target-group",
+                "staff-123",
+                Map.of(
+                    "_templateId",
+                    "dedicated.schema",
+                    "title",
+                    "Jira 自动流程已完成",
+                    "body",
+                    "Jira：TEST-2\n已完成审核",
+                    "_atDisplayName",
+                    "张三"));
+    var parameters = body.path("cardData").path("cardParamMap");
+    assertThat(parameters.path("title").asText()).isEqualTo("Jira 自动流程已完成");
+    assertThat(parameters.path("body").asText())
+        .contains("查看任务结果", "atId=\"staff-123\"")
+        .doesNotContain("阻断");
+    assertThat(body.path("imGroupOpenDeliverModel").path("atUserIds").has("staff-123")).isTrue();
   }
 
   @Test

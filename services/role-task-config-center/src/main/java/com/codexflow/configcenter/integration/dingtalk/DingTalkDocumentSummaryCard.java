@@ -54,7 +54,7 @@ final class DingTalkDocumentSummaryCard {
           default -> snapshot.path("termination").isObject() ? "无待处理任务，已结束" : "已完成";
         });
     data.put("summary", notice);
-    String jiraLine = jiraLine(snapshot.path("jiraContext"));
+    String jiraLine = DingTalkJiraContext.line(snapshot.path("jiraContext"));
     if (!jiraLine.isBlank()) data.put("statusText", jiraLine + "\n\n" + data.get("statusText"));
     data.put("documents", documents.toString());
     data.put("hasDocuments", "true");
@@ -71,20 +71,6 @@ final class DingTalkDocumentSummaryCard {
 
   private static String encode(String value) {
     return URLEncoder.encode(value, StandardCharsets.UTF_8);
-  }
-
-  private static String jiraLine(JsonNode context) {
-    if (context.path("issueKey").asText().isBlank()) return "";
-    String name = label(context.path("developerName").asText()).strip();
-    String developer =
-        switch (context.path("developerStatus").asText()) {
-          case "resolved" -> name.isBlank() ? "姓名未提供" : name;
-          case "multiple" -> name.isBlank() ? "多人（未提供姓名）" : name + "（多人）";
-          case "empty" -> "未填写";
-          case "unavailable" -> "获取失败";
-          default -> "未获取";
-        };
-    return "**Jira：" + label(context.path("issueKey").asText()) + " ｜ 开发人：" + developer + "**";
   }
 
   private static String label(String value) {

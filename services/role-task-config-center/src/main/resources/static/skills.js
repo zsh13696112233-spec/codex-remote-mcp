@@ -8,7 +8,7 @@ function resetSkillSelection(){
 function skillDialog(id,html){
   let dialog=document.querySelector(`#${id}`);
   if(!dialog){dialog=document.createElement('dialog');dialog.id=id;document.body.append(dialog)}
-  dialog.innerHTML=`<div class="skill-upload-dialog">${html}<p class="skill-dialog-error" role="status"></p><footer><button data-skill="close">关闭</button></footer></div>`;
+  dialog.innerHTML=`<div class="skill-upload-dialog"><button type="button" class="dialog-close" data-dialog-close aria-label="关闭弹窗" title="关闭">×</button>${html}<p class="skill-dialog-error" role="status"></p><footer><button data-skill="close">关闭</button></footer></div>`;
   dialog.oncancel=e=>{if(skillView.busy)e.preventDefault()};dialog.showModal();return dialog;
 }
 function skillRequestId(){
@@ -32,7 +32,7 @@ function openSkillUpload(){
   skillView.uploadGroup=concreteGroup();
   let dialog=document.querySelector('#skillUploadDialog');
   if(!dialog){dialog=document.createElement('dialog');dialog.id='skillUploadDialog';document.body.append(dialog)}
-  dialog.innerHTML=`<div class="skill-upload-dialog"><h2>上传 Skill</h2><p>上传到：${esc(groupName(skillView.uploadGroup))}</p><label class="skill-file-drop" for="skillZip"><span class="skill-upload-symbol">↑</span><strong id="skillFileName">点击选择 ZIP 文件</strong><small>最大 20 MiB</small><input id="skillZip" type="file" accept=".zip,application/zip" aria-label="选择 Skill ZIP"></label><p id="skillUploadError" role="status" aria-live="polite"></p><footer><button data-skill-upload-close>取消</button><button data-skill="upload" class="primary">上传</button></footer></div>`;
+  dialog.innerHTML=`<div class="skill-upload-dialog"><button type="button" class="dialog-close" data-dialog-close aria-label="关闭弹窗" title="关闭">×</button><h2>上传 Skill</h2><p>上传到：${esc(groupName(skillView.uploadGroup))}</p><label class="skill-file-drop" for="skillZip"><span class="skill-upload-symbol">↑</span><strong id="skillFileName">点击选择 ZIP 文件</strong><small>最大 20 MiB</small><input id="skillZip" type="file" accept=".zip,application/zip" aria-label="选择 Skill ZIP"></label><p id="skillUploadError" role="status" aria-live="polite"></p><footer><button data-skill-upload-close>取消</button><button data-skill="upload" class="primary">上传</button></footer></div>`;
   dialog.querySelector('[data-skill-upload-close]').onclick=()=>{if(!skillView.busy)dialog.close()};
   dialog.oncancel=event=>{if(skillView.busy)event.preventDefault()};
   dialog.querySelector('#skillZip').onchange=event=>{
