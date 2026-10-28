@@ -50,7 +50,7 @@ async function renderSkills(){
   $("#content").className="content skill-content";
   $("#content").innerHTML='<section class="settings-panel" role="status">正在加载 Skill…</section>';
   try{
-    const [packages,machines,batches,inventory]=await Promise.all([api(skillScope("/api/skills")),api(skillScope("/api/skills/machines")),api(skillScope("/api/skill-deployments")),api(skillScope("/api/skills/inventory")),loadGatewayReady()]);
+    const [packages,machines,batches,inventory]=await Promise.all([api(skillScope("/api/skills")),api(skillScope("/api/skills/machines")),api(skillScope("/api/skill-deployments")),api(skillScope("/api/skills/inventory"))]);
     if(state.page!=="skills"||version!==pageRenderVersion)return;
     skillView.packages=packages.skills;skillView.machines=machines.agents;skillView.groups=machines.groups;skillView.batches=batches.deployments;skillView.inventory=inventory.items||[];skillView.enabled=packages.enabled;
     const pending=savedSkillDeployment();

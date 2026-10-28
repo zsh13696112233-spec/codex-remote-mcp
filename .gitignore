@@ -35,3 +35,8 @@ config/set-app-server-token.bat
 skill-packages/
 *.mcp.lock
 mcp-packages/
+
+# Independent test environment runtime
+/logs/
+/.runtime/
+/config/local/

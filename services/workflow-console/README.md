@@ -41,11 +41,13 @@ Java 根包为 `com.codexflow.console`，Web 控制器、异常映射和
 启动前需要准备：
 
 1. Java 17 和 Maven 3.9 或更高版本。
-2. Python 工作流网关，默认地址为 `http://127.0.0.1:8080`。
+2. Python 工作流网关，默认地址为 `http://127.0.0.1:18080`。
 
 监控中心可以在网关暂时离线时启动，但查询任务和连接状态会提示不可用。
 
 ## 开发启动
+
+当前 `codex/test-environment` 分支默认使用测试端口 `18090` 和测试网关 `18080`，仅监听本机；目录及启动方式见[独立测试环境](../../docs/TEST_ENVIRONMENT.zh-CN.md)。
 
 本项目 macOS 使用 `mvnd`，Windows 使用 `mvn`。下方 PowerShell 示例用于 Windows；macOS 启动、测试、打包和格式化均使用 `mvnd`，路径使用 `/`。
 
@@ -54,9 +56,9 @@ Java 根包为 `com.codexflow.console`，Web 控制器、异常映射和
 ```powershell
 Set-Location .\services\workflow-console
 
-$env:CODEX_GATEWAY_URL = "http://127.0.0.1:8080"
-$env:SERVER_ADDRESS = "0.0.0.0"
-$env:SERVER_PORT = "8090"
+$env:CODEX_GATEWAY_URL = "http://127.0.0.1:18080"
+$env:SERVER_ADDRESS = "127.0.0.1"
+$env:SERVER_PORT = "18090"
 
 mvn spring-boot:run
 ```
@@ -64,7 +66,7 @@ mvn spring-boot:run
 查看指定任务：
 
 ```text
-http://127.0.0.1:8090/?workflowId=<workflowId>
+http://127.0.0.1:18090/?workflowId=<workflowId>
 ```
 
 URL 没有 `workflowId` 时，页面只显示任务编号输入框，不展示全局任务列表。
@@ -74,7 +76,7 @@ URL 没有 `workflowId` 时，页面只显示任务编号输入框，不展示�
 ```powershell
 mvn package
 
-$env:CODEX_GATEWAY_URL = "http://127.0.0.1:8080"
+$env:CODEX_GATEWAY_URL = "http://127.0.0.1:18080"
 java -jar .\target\workflow-console-0.1.0.jar
 ```
 
@@ -82,9 +84,9 @@ java -jar .\target\workflow-console-0.1.0.jar
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SERVER_PORT` | `8090` | 服务端口 |
-| `SERVER_ADDRESS` | `0.0.0.0` | 监听地址 |
-| `CODEX_GATEWAY_URL` | `http://127.0.0.1:8080` | Python 网关地址 |
+| `SERVER_PORT` | `18090` | 服务端口 |
+| `SERVER_ADDRESS` | `127.0.0.1` | 监听地址 |
+| `CODEX_GATEWAY_URL` | `http://127.0.0.1:18080` | Python 网关地址 |
 
 ## 增量刷新
 

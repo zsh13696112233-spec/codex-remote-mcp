@@ -7,6 +7,7 @@ import logging
 import math
 import re
 import time
+import uuid
 from pathlib import PureWindowsPath
 
 LOGGER = logging.getLogger(__name__)
@@ -140,7 +141,14 @@ async def execute_check(gateway, body):
     if not agent.allow_cwd_override and PureWindowsPath(check_cwd) != PureWindowsPath(agent.cwd):
         return result("failed", "检查需使用脚本所在目录，请先授权执行机目录覆盖权限。")
     from codex_orchestrator_mcp import AppServerRpcTimeout
+    from workflow_resources import claim_check, finish_check
+    from workflow_store import utc_now
+    operation_id = uuid.uuid4().hex
+    if not await asyncio.to_thread(claim_check, gateway.store, agent_id, operation_id, utc_now()):
+        return result("skipped", "检查执行机正在处理其他任务或执行状态待核实，本次不执行检查。")
+    stopped = True
     async def run():
+        nonlocal stopped
         client = gateway.orchestrator._client_factory(
             agent.url, token=gateway.orchestrator._resolve_agent_token(agent),
             request_timeout_sec=timeout + 5)
@@ -153,11 +161,13 @@ async def execute_check(gateway, body):
             if remaining < 1:
                 return result("failed", "执行前检查超时，未启动检查脚本及本次任务。")
             # 仅本次检查使用脚本目录，不修改机器登记或其他任务；/d 禁用 AutoRun。
+            stopped = False
             response = await client.request("command/exec", {
                 "command": command_for(path, arguments, remaining),
                 "cwd": check_cwd, "sandboxPolicy": {"type": "dangerFullAccess"},
                 "timeoutMs": (remaining + 3) * 1000, "outputBytesCap": 8192,
             }, timeout_sec=remaining + 4)
+            stopped = type(response.get("exitCode")) is int and response["exitCode"] not in {124, 125}
             return parse_result(response)
     try:
         return await asyncio.wait_for(run(), timeout=max(0, deadline - time.monotonic()))
@@ -167,3 +177,5 @@ async def execute_check(gateway, body):
         # 远程边界隔离；不向页面传递凭据、地址、原始脚本输出或 RPC 错误。
         LOGGER.warning("定时检查执行失败，异常类型=%s", type(error).__name__)
         return result("failed", "无法完成检查，请核对执行机连接、脚本文件和运行权限。")
+    finally:
+        await asyncio.to_thread(finish_check, gateway.store, operation_id, stopped)

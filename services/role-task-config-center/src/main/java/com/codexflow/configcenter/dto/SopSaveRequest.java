@@ -25,7 +25,7 @@ import java.util.List;
 public record SopSaveRequest(
     @NotBlank @Size(max = 160) String name,
     @Size(max = 2000) String description,
-    @NotBlank @Size(max = 128) String supervisorAgentId,
+    @Size(max = 128) String supervisorAgentId,
     Integer supervisorTimeoutSec,
     @Size(max = 64) String defaultStepModel,
     Boolean enabled,
@@ -34,7 +34,69 @@ public record SopSaveRequest(
     @NotEmpty List<@Valid SopStepRequest> steps,
     @NotBlank @Size(max = 36) String groupId,
     Boolean dingtalkShowExecutionDetails,
-    @Size(max = 32) String defaultStepReasoningEffort) {
+    @Size(max = 32) String defaultStepReasoningEffort,
+    @Size(max = 16) String dispatchMode,
+    @Valid JiraDispatchRequest jira) {
+  public SopSaveRequest(
+      String name,
+      String description,
+      String supervisorAgentId,
+      Integer supervisorTimeoutSec,
+      String defaultStepModel,
+      Boolean enabled,
+      String advanceMode,
+      String dingtalkTargetId,
+      List<SopStepRequest> steps,
+      String groupId,
+      Boolean dingtalkShowExecutionDetails,
+      String defaultStepReasoningEffort,
+      String dispatchMode) {
+    this(
+        name,
+        description,
+        supervisorAgentId,
+        supervisorTimeoutSec,
+        defaultStepModel,
+        enabled,
+        advanceMode,
+        dingtalkTargetId,
+        steps,
+        groupId,
+        dingtalkShowExecutionDetails,
+        defaultStepReasoningEffort,
+        dispatchMode,
+        null);
+  }
+
+  public SopSaveRequest(
+      String name,
+      String description,
+      String supervisorAgentId,
+      Integer supervisorTimeoutSec,
+      String defaultStepModel,
+      Boolean enabled,
+      String advanceMode,
+      String dingtalkTargetId,
+      List<SopStepRequest> steps,
+      String groupId,
+      Boolean dingtalkShowExecutionDetails,
+      String defaultStepReasoningEffort) {
+    this(
+        name,
+        description,
+        supervisorAgentId,
+        supervisorTimeoutSec,
+        defaultStepModel,
+        enabled,
+        advanceMode,
+        dingtalkTargetId,
+        steps,
+        groupId,
+        dingtalkShowExecutionDetails,
+        defaultStepReasoningEffort,
+        null);
+  }
+
   public SopSaveRequest(
       String name,
       String description,

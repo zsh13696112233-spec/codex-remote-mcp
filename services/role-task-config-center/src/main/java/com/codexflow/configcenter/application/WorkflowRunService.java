@@ -56,11 +56,59 @@ public class WorkflowRunService {
 
   /** 使用任务定义的最新配置执行一次定时运行。 */
   public ObjectNode runScheduled(String taskId) {
-    return launchLatest(taskId, "schedule", "定时任务已启动。");
+    return runScheduled(taskId, null);
   }
 
   public ObjectNode runScheduled(String taskId, String token) {
-    return launchLatest(taskId, "schedule", "定时任务已启动。", token);
+    ObjectNode preview = store.jiraSchedulingSpec(taskId);
+    if (preview == null) return launchLatest(taskId, "schedule", "定时任务已启动。", token);
+    int count = jiraCapacity(preview);
+    if (count == 0) {
+      launches.deferSchedule(taskId, token);
+      return preview.removeAll().put("waitingResources", true).put("batchCount", 0);
+    }
+    if (store.notifyDingTalk(taskId)) dingtalkNotifications.validate(taskId);
+    var reservations = launches.reserveJiraBatch(taskId, token, count);
+    ObjectNode first = null;
+    RuntimeException failure = null;
+    for (var reservation : reservations) {
+      try {
+        ObjectNode result = submitReservation(reservation, "schedule", "定时 Jira 任务已启动。");
+        if (first == null) first = result;
+      } catch (RuntimeException error) {
+        if (failure == null) failure = error;
+      }
+    }
+    if (failure != null) throw failure;
+    return first.put("batchCount", reservations.size());
+  }
+
+  /** 没有空闲机器时先等待资源，不执行原有检查脚本。 */
+  public boolean deferScheduledForResources(String taskId, String token) {
+    ObjectNode preview = store.jiraSchedulingSpec(taskId);
+    if (preview == null || jiraCapacity(preview) > 0) return false;
+    launches.deferSchedule(taskId, token);
+    return true;
+  }
+
+  private int jiraCapacity(ObjectNode preview) {
+    JsonNode capacity = gateway.post("/jira-capacity", preview).path("capacity");
+    if (!capacity.isIntegralNumber() || capacity.asInt() < 0 || capacity.asInt() > 100)
+      throw new IllegalStateException("Jira 调度容量响应无效。");
+    return capacity.asInt();
+  }
+
+  public JsonNode jiraRuns(String groupId, Long before) {
+    if (groupId == null
+        || !groupId.isEmpty()
+            && !java.util.UUID.fromString(groupId).toString().equalsIgnoreCase(groupId)
+        || before != null && before < 1) throw new IllegalArgumentException("分组或分页参数无效。");
+    JsonNode result =
+        gateway.get("/jira-runs?groupId=" + groupId + (before == null ? "" : "&before=" + before));
+    for (JsonNode item : result.path("items"))
+      if (item instanceof ObjectNode row)
+        row.put("monitorUrl", store.monitorUrl(row.path("workflowId").asText()));
+    return result;
   }
 
   /** 使用历史运行的冻结快照创建并提交一次重试。 */
@@ -174,7 +222,19 @@ public class WorkflowRunService {
   }
 
   public ObjectNode runDetail(String workflowId) {
-    return store.runDetail(workflowId);
+    ObjectNode result = store.runDetail(workflowId);
+    result.put("allocationFresh", false);
+    try {
+      JsonNode live = gateway.get("/workflows/" + workflowId);
+      if (live != null && live.has("allocation") && live.path("resources").isObject()) {
+        result.set("allocation", live.path("allocation"));
+        result.set("resources", live.path("resources"));
+        result.put("allocationFresh", true);
+      }
+    } catch (com.codexflow.configcenter.client.GatewayFailure error) {
+      result.put("allocationFresh", false);
+    }
+    return result;
   }
 
   /** 分批补齐未登记的历史运行，避免等待用户再次运行才完成升级。 */
@@ -283,7 +343,9 @@ public class WorkflowRunService {
       ObjectNode payload = prepared.payload();
       if (taskId != null) {
         // 历史迁移只由后台推进；暂时保留原编号和运行槽，由对账继续补交。
-        if (store.hasPendingRuntimeHistory(taskId, prepared.workflowId())) {
+        if (payload.path("jira").isObject()
+            ? store.hasPendingLegacyRuntimeHistory(taskId, prepared.workflowId())
+            : store.hasPendingRuntimeHistory(taskId, prepared.workflowId())) {
           throw new ConflictFailure("历史运行正在完成升级登记，本次运行已保留，登记完成后会自动继续提交。");
         }
         payload = payload.deepCopy();
@@ -320,6 +382,12 @@ public class WorkflowRunService {
         token == null
             ? launches.reserveLatest(taskId, source)
             : launches.reserveLatest(taskId, source, token);
+    return submitReservation(reservation, source, notice);
+  }
+
+  private ObjectNode submitReservation(
+      TaskLaunchStore.LaunchReservation reservation, String source, String notice) {
+    String taskId = reservation.taskDefinitionId();
     PreparedRun prepared = reservation.prepared();
     boolean notificationReserved = false;
     boolean submissionStarted = false;

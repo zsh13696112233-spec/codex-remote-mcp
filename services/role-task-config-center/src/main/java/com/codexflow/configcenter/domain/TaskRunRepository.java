@@ -10,6 +10,20 @@ import org.springframework.data.repository.query.Param;
 
 /** 任务运行记录的 Spring Data JPA 数据访问接口。 */
 interface TaskRunRepository extends JpaRepository<TaskRunEntity, String> {
+  interface ActiveRun {
+    String getWorkflowId();
+
+    String getTaskDefinitionId();
+  }
+
+  @Query(
+      "SELECT r.workflowId AS workflowId, r.taskDefinition.id AS taskDefinitionId FROM TaskRunEntity r WHERE r.status IN ('submitting','queued','running','cancelling') ORDER BY r.submittedAt")
+  List<ActiveRun> activeRuns();
+
+  @Query(
+      "SELECT r.submittedJson FROM TaskRunEntity r WHERE r.taskDefinition.id=:taskId AND r.runtimeScopeRegistered=false AND r.workflowId<>:workflowId")
+  List<String> pendingScopePayloads(
+      @Param("taskId") String taskId, @Param("workflowId") String workflowId);
 
   @Modifying
   @Query(

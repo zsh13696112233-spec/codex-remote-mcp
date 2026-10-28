@@ -60,15 +60,31 @@ SCHEMA_V4 = copy.deepcopy(SCHEMA_V3)
 SCHEMA_V4["properties"]["documents"] = SEMI_DOCUMENTS_SCHEMA
 
 
-def schema(version: int) -> dict[str, Any]:
+def schema(version: int, *, jira: bool = False) -> dict[str, Any]:
     if type(version) is not int or version not in (1, 2, 3, 4, 5):
         raise ValueError("步骤结果协议版本无效。")
-    return {1: SCHEMA_V1, 2: SCHEMA, 3: SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V4}[version]
+    result = {1: SCHEMA_V1, 2: SCHEMA, 3: SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V4}[version]
+    if jira:
+        result = copy.deepcopy(result)
+        result["required"].append("jiraDelivery")
+        result["properties"]["jiraDelivery"] = {
+            "type": "object", "additionalProperties": False,
+            "required": ["status", "reference", "summary"],
+            "properties": {
+                "status": {"type": "string", "enum": ["submitted", "completed", "blocked", "unknown", "not_applicable"]},
+                "reference": {"type": "string", "maxLength": 1000},
+                "summary": {"type": "string", "maxLength": 2000},
+            },
+        }
+    return result
 
 
-def validate(value: Any, version: int = VERSION) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != set(schema(version)["required"]):
+def validate(value: Any, version: int = VERSION, *, jira: bool = False) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != set(schema(version, jira=jira)["required"]):
         raise ValueError("步骤业务结果格式无效。")
+    if jira:
+        from workflow_jira import validate_delivery
+        validate_delivery(value["jiraDelivery"])
     for key, limit in (("summary", 20000), ("reason", 2000)):
         if not isinstance(value[key], str) or len(value[key]) > limit:
             raise ValueError("步骤业务结果文本无效或超过容量限制。")
@@ -119,7 +135,7 @@ def validate(value: Any, version: int = VERSION) -> dict[str, Any]:
     return value
 
 
-def parse(text: str, version: int = VERSION) -> dict[str, Any]:
+def parse(text: str, version: int = VERSION, *, jira: bool = False) -> dict[str, Any]:
     value = json.loads(text)
     developer = value.get("jiraDeveloper") if isinstance(value, dict) else None
     normalized = (
@@ -131,7 +147,7 @@ def parse(text: str, version: int = VERSION) -> dict[str, Any]:
     )
     if normalized:
         developer["status"] = "unavailable"
-    value = validate(value, version)
+    value = validate(value, version, jira=jira)
     if normalized:
         # 原始回答保留在执行事件中；日志不包含业务正文或账号。
         logging.getLogger(__name__).warning("阻断结果开发人状态已规范化：not_applicable -> unavailable。")

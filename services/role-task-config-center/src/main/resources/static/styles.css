@@ -29,3 +29,5 @@ dialog button.dialog-close { position:absolute; top:16px; right:16px; display:gr
 dialog button.dialog-close:hover { color:#253047; background:#eeedf9; border-color:#c8c4e6; }
 dialog button.dialog-close:focus-visible { outline:2px solid var(--p); outline-offset:2px; }
 dialog button.dialog-close:disabled { opacity:.45; cursor:not-allowed; }
+
+#machineDialog [hidden]{display:none!important}

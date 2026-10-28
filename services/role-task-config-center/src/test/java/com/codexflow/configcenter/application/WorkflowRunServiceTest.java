@@ -33,6 +33,22 @@ class WorkflowRunServiceTest {
   private PreparedRun prepared;
 
   @Test
+  void runDetailShowsAllocationAndDistinguishesUnavailableGateway() {
+    when(store.runDetail(WORKFLOW_ID)).thenAnswer(call -> objectMapper.createObjectNode());
+    ObjectNode live = objectMapper.createObjectNode();
+    live.putObject("allocation").put("executorAgentId", "worker");
+    live.putObject("resources").put("state", "review");
+    live.put("internalSecret", "must-not-copy");
+    when(gateway.get("/workflows/" + WORKFLOW_ID)).thenReturn(live);
+    ObjectNode result = service.runDetail(WORKFLOW_ID);
+    assertThat(result.path("allocationFresh").asBoolean()).isTrue();
+    assertThat(result.path("resources").path("state").asText()).isEqualTo("review");
+    assertThat(result.has("internalSecret")).isFalse();
+    when(gateway.get("/workflows/" + WORKFLOW_ID)).thenThrow(new GatewayFailure(502, "offline"));
+    assertThat(service.runDetail(WORKFLOW_ID).path("allocationFresh").asBoolean()).isFalse();
+  }
+
+  @Test
   void historyRefreshesActiveRecordsBeforeReturningFilteredCount() {
     ObjectNode before = objectMapper.createObjectNode().put("total", 0);
     before.putArray("items");

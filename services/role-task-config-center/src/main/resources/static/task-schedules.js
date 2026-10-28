@@ -2,6 +2,7 @@ let scheduleRows=[];
 let scheduleRenderVersion=0;
 function scheduleCheckSummary(x){
   const labels={pending:"等待检查",checking:"检查中",passed:"检查通过",skipped:"条件不满足",failed:"检查失败"};
+  if(x.waitingResources)return "等待空闲监督机和执行机，已合并为一次待调度请求。";
   if(!x.lastCheckStatus)return x.preCheck?.enabled?"执行前检查已启用，尚未检查":"未启用执行前检查";
   const time=x.lastCheckAt?new Date(x.lastCheckAt).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai",hour12:false}):"—";
   return `${x.preCheck?.enabled?"":"检查已停用 · "}最近检查（北京时间）：${time} · ${labels[x.lastCheckStatus]||"结果未知"} · ${x.lastCheckReason||""}`;

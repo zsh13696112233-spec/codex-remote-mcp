@@ -235,6 +235,7 @@ class EveryStepDocumentsTests(SemiDocumentsTests):
                 'businessResult': outcome([manifest()] if has_documents else []),
                 'documents': [snapshot()] if has_documents else []})
             self.assertEqual(len(self.store.get_workflow(wid)['nodes'][0]['documents']), int(has_documents))
+            self.store.cancel_workflow(wid)
 
     def test_v5_requires_semi_automatic_and_uses_multi_document_contract(self):
         spec = serial_workflow()

@@ -30,7 +30,7 @@ async function renderMachines(){
   const content=document.querySelector('#content');content.className='content machine-content';
   if(!document.querySelector('#machineGrid'))renderMachineBoard();
   updateMachineBoard();
-  await Promise.all([refreshMachineStatuses(true),loadGatewayReady()]);
+  await refreshMachineStatuses(true);
 }
 async function refreshMachineStatuses(force=false){
   if(state.page!=='machines'||(!force&&(document.hidden||machineView.refreshing||pendingMachineActions.size||[...machineRemarkDrafts.values()].some(d=>d.saving))))return;
@@ -61,8 +61,8 @@ function renderMachineBoard(){
 function updateMachineBoard(){
   if(state.page!=='machines')return;
   const grid=document.querySelector('#machineGrid');if(!grid)return;
-  const members=machineView.loaded?state.agents.filter(groupMatches):[];
-  document.querySelector('#machineTotal').textContent=`${groupState.items.find(g=>g.id===groupState.selected)?.name||'全部机器'} · ${new Set(members.map(a=>a.agentId)).size} 台机器`;
+  const members=machineView.loaded?state.agents.filter(a=>a.capabilities?.includes('supervisor')||groupMatches(a)):[];
+  document.querySelector('#machineTotal').textContent=`主监督 + ${groupState.items.find(g=>g.id===groupState.selected)?.name||'全部分组'}执行机 · ${new Set(members.map(a=>a.agentId)).size} 台机器`;
   const note=document.querySelector('#machineRefreshStatus');
   note.textContent=machineView.error||'';
   if(machineView.lastSuccess)note.textContent+=` 最近成功更新 ${time(machineView.lastSuccess)}`;
@@ -75,7 +75,7 @@ function updateMachineBoard(){
   updateMachineDetails();
 }
 function machineRoleColumn(members,role,hasGroup){
-  const title=role==='supervisor'?'主监督机':'执行机',all=members.filter(a=>(a.capabilities||[]).includes(role)),items=machineSorted(all.filter(machineMatches));
+  const title=role==='supervisor'?'主监督机':'执行机',all=members.filter(a=>(a.capabilities||[]).includes(role)&&(role==='supervisor'||groupMatches(a))),items=machineSorted(all.filter(machineMatches));
   const filtered=machineView.query.trim()||machineView.filter!=='all';
   return `<section class="machine-role-column ${role}" aria-label="${title}"><div class="machine-column-heading"><h2>${title} <span>${filtered?`${items.length} / ${all.length}`:all.length} 台</span></h2><button data-machine-action="add" data-role="${role}">＋ 添加</button></div><div class="machine-card-list">${items.map(a=>machineCard(a,role)).join('')||`<div class="machine-role-empty"><strong>${all.length?'没有符合条件的机器':`暂无${title}`}</strong><p>${all.length?'请调整搜索或状态筛选。':hasGroup?'点击添加，登记机器。':'请先选择分组。'}</p></div>`}</div></section>`;
 }
@@ -85,7 +85,7 @@ function machineCard(a,role){
 }
 function machineDetailReadOnly(a){
   const connection=machineConnection(a),executor=(a.capabilities||[]).includes('executor');
-  return `<dl><dt>地址</dt><dd>${esc(a.ip)}:${a.port}</dd><dt>分组</dt><dd>${esc(groupState.items.find(g=>g.id===a.groupId)?.name||'分组不可用')}</dd><dt>角色</dt><dd>${a.capabilities.map(c=>c==='supervisor'?'主监督机':'执行机').join(' / ')}</dd><dt>启停</dt><dd>${a.enabled?'启用中':'已停用'}</dd><dt>连接状态</dt><dd>${connection.label}</dd><dt>检测结果</dt><dd>${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}</dd><dt>最近检测</dt><dd>${esc(time(a.testedAt))}</dd></dl>${executor?`<h3>Skill 安装设置</h3><p>下发：${a.skillInstallation?.enabled?'已授权':'未授权'}</p><p>${esc(a.skillInstallation?.root||'尚未配置安装目录')}</p><p>${esc(a.skillInstallation?.checkMessage||'尚未检测目录')}</p>${a.skillInstallation?.checkedAt?`<p>${esc(time(a.skillInstallation.checkedAt))}</p>`:''}`:''}`;
+  return `<dl><dt>地址</dt><dd>${esc(a.ip)}:${a.port}</dd>${executor?`<dt>分组</dt><dd>${esc(groupState.items.find(g=>g.id===a.groupId)?.name||'分组不可用')}</dd>`:''}<dt>工作目录</dt><dd>${esc(a.defaultCwd||"尚未配置")}</dd><dt>占用</dt><dd>${a.occupation?.state==='review'?'执行状态待核实':a.availability==='busy'?'任务占用中':'空闲'}</dd><dt>角色</dt><dd>${a.capabilities.map(c=>c==='supervisor'?'主监督机':'执行机').join(' / ')}</dd><dt>启停</dt><dd>${a.enabled?'启用中':'已停用'}</dd><dt>连接状态</dt><dd>${connection.label}</dd><dt>检测结果</dt><dd>${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}</dd><dt>最近检测</dt><dd>${esc(time(a.testedAt))}</dd></dl>${executor?`<h3>Skill 安装设置</h3><p>下发：${a.skillInstallation?.enabled?'已授权':'未授权'}</p><p>${esc(a.skillInstallation?.root||'尚未配置安装目录')}</p><p>${esc(a.skillInstallation?.checkMessage||'尚未检测目录')}</p>${a.skillInstallation?.checkedAt?`<p>${esc(time(a.skillInstallation.checkedAt))}</p>`:''}`:''}`;
 }
 function machineDetailActions(a){
   const actions=['test','edit',...((a.capabilities||[]).includes('executor')?['skill-check']:[]),'toggle','delete'];
@@ -104,7 +104,7 @@ function openMachineDetails(a,trigger){
 function closeMachineDetails(){machineView.selected=null;document.querySelector('#machineDetails')?.close()}
 function updateMachineDetails(){
   if(!machineView.selected)return;
-  const a=state.agents.find(a=>a.agentId===machineView.selected&&groupMatches(a));
+  const a=state.agents.find(a=>a.agentId===machineView.selected&&(a.capabilities?.includes('supervisor')||groupMatches(a)));
   if(!a){closeMachineDetails();toast('机器已删除或移出当前分组。');return}
   const dialog=document.querySelector('#machineDetails');if(!dialog)return;
   const info=dialog.querySelector('[data-machine-detail-info]'),actions=dialog.querySelector('.machine-card-actions');
@@ -175,23 +175,31 @@ function openMachineGroup(group){
   };dialog.showModal();
 }
 function openMachine(a,role='executor'){
-  if(!a&&!concreteGroup())return chooseGroup(()=>openMachine(a,role));
+  if(!a&&role==='executor'&&!concreteGroup())return chooseGroup(()=>openMachine(a,role));
   let dialog=document.querySelector('#machineDialog');
   if(!dialog){dialog=document.createElement('dialog');dialog.id='machineDialog';document.body.append(dialog)}
-  dialog.innerHTML=`<form><button type="button" class="dialog-close" data-dialog-close aria-label="关闭弹窗" title="关闭">×</button><h2>${a?'编辑':'添加'}机器</h2>${!a?'<label>备注<input name="remark" maxlength="200" placeholder="可选，最多 100 个字符"></label>':''}<label>IP 地址<input name="ip" required maxlength="45" value="${esc(a?.ip||'')}"></label><label>执行服务端口<input name="port" type="number" min="1" max="65535" required value="${a?.port||4500}"></label><label>分组<select name="groupId">${machineGroups.map(g=>`<option value="${esc(g.id)}" ${g.id===(a?.groupId||selectedMachineGroupId)?'selected':''}>${esc(g.name)}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="supervisor" ${(a?a.capabilities.includes('supervisor'):role==='supervisor')?'checked':''}>主监督</label><label class="check"><input type="checkbox" name="executor" ${(a?a.capabilities.includes('executor'):role==='executor')?'checked':''}>执行机</label><fieldset><legend>Skill 安装设置</legend><label class="check"><input type="checkbox" name="skillEnabled" ${a?.skillInstallation?.enabled?'checked':''}>允许向这台执行机下发 Skill</label><label>执行机上的 Skill 安装目录<input name="skillRoot" maxlength="1024" value="${esc(a?.skillInstallation?.root||'')}" placeholder="填写执行服务可识别的绝对目录"></label><p class="machine-muted">保存后持续有效，无需重启。目录须预先存在，安装仍受执行机写权限限制。保存后可在机器详情检测目录。</p></fieldset><p role="alert" class="machine-error"></p><footer><button type="button" data-close-machine>取消</button><button type="submit" class="primary">保存</button></footer></form>`;
+  dialog.innerHTML=`<form><button type="button" class="dialog-close" data-dialog-close aria-label="关闭弹窗" title="关闭">×</button><h2>${a?'编辑':'添加'}机器</h2>${!a?'<label>备注<input name="remark" maxlength="200" placeholder="可选，最多 100 个字符"></label>':''}<label>IP 地址<input name="ip" required maxlength="45" value="${esc(a?.ip||'')}"></label><label>执行服务端口<input name="port" type="number" min="1" max="65535" required value="${a?.port||4500}"></label><label>工作目录<input name="workingDirectory" required maxlength="1000" value="${esc(a?.defaultCwd||'')}" placeholder="执行服务账号可访问的绝对目录"></label><label data-executor-group>执行机分组<select name="groupId">${machineGroups.map(g=>`<option value="${esc(g.id)}" ${g.id===(a?.groupId||selectedMachineGroupId)?'selected':''}>${esc(g.name)}</option>`).join('')}</select></label><label>机器职责<select name="machineRole"><option value="supervisor" ${(a?a.capabilities.includes('supervisor'):role==='supervisor')?'selected':''}>主监督</option><option value="executor" ${(a?a.capabilities.includes('executor'):role==='executor')?'selected':''}>执行机（按组分配）</option></select></label><fieldset><legend>Skill 安装设置</legend><label class="check"><input type="checkbox" name="skillEnabled" ${a?.skillInstallation?.enabled?'checked':''}>允许向这台执行机下发 Skill</label><label>执行机上的 Skill 安装目录<input name="skillRoot" maxlength="1024" value="${esc(a?.skillInstallation?.root||'')}" placeholder="填写执行服务可识别的绝对目录"></label><p class="machine-muted">保存后持续有效，无需重启。目录须预先存在，安装仍受执行机写权限限制。保存后可在机器详情检测目录。</p></fieldset><p role="alert" class="machine-error"></p><footer><button type="button" data-close-machine>取消</button><button type="submit" class="primary">保存</button></footer></form>`;
   dialog.querySelector('[data-close-machine]').onclick=()=>dialog.close();
   const mcpSettings=a?.mcpInstallation||{};
   const mcpFields=document.createElement('fieldset');
   mcpFields.innerHTML=`<legend>MCP 安装设置（Windows）</legend><label class="check"><input name="mcpEnabled" type="checkbox" ${mcpSettings.enabled?'checked':''}>允许安装 MCP</label><label>安装目录<input name="mcpRoot" value="${esc(mcpSettings.installRoot||mcpSettings.programRoot||'')}" maxlength="1024"></label><p class="machine-muted">平台在此目录内分别创建程序和临时子目录。Python、Node.js 由安装助手查找，无需填写路径；缺少时不自动安装。附带 Skill 使用上方授权目录。</p>`;
   dialog.querySelector('form footer').before(mcpFields);
-  dialog.querySelector('form').onsubmit=async event=>{
+  const machineForm=dialog.querySelector('form');
+  const updateGroupChoice=()=>{
+    const executor=machineForm.elements.machineRole.value==='executor';
+    machineForm.elements.groupId.disabled=!executor;
+    machineForm.elements.groupId.required=executor;
+    machineForm.querySelector('[data-executor-group]').hidden=!executor;
+    machineForm.querySelectorAll('fieldset').forEach(field=>{field.hidden=!executor;field.disabled=!executor});
+  };
+  machineForm.elements.machineRole.onchange=updateGroupChoice;updateGroupChoice();
+  machineForm.onsubmit=async event=>{
     event.preventDefault();const f=event.target,button=f.querySelector('[type=submit]');button.disabled=true;
-    const capabilities=['supervisor','executor'].filter(c=>f.elements[c].checked);
+    const capabilities=[f.elements.machineRole.value];
     try{
       if(!a&&[...f.elements.remark.value.trim()].length>100)throw new Error('机器备注最多 100 个字符。');
-      if(!capabilities.length)throw new Error('请至少选择一种能力。');
       machineView.version++;
-      await api(a?`/api/agents/${encodeURIComponent(a.agentId)}`:'/api/agents',{method:a?'PUT':'POST',body:JSON.stringify({...(!a?{remark:f.elements.remark.value.trim()}:{}),ip:f.elements.ip.value.trim(),port:Number(f.elements.port.value),groupId:f.elements.groupId.value,capabilities,enabled:a?.enabled??true,...(!a||f.elements.mcpEnabled.checked!==!!a.mcpInstallation?.enabled||f.elements.mcpRoot.value.trim()!==(a.mcpInstallation?.installRoot||a.mcpInstallation?.programRoot||'')?{mcpInstallation:{enabled:f.elements.mcpEnabled.checked,platform:'windows',installRoot:f.elements.mcpRoot.value.trim()}}:{}),skillInstallation:{enabled:f.elements.skillEnabled.checked,root:f.elements.skillRoot.value.trim()}})});
+      await api(a?`/api/agents/${encodeURIComponent(a.agentId)}`:'/api/agents',{method:a?'PUT':'POST',body:JSON.stringify({...(!a?{remark:f.elements.remark.value.trim()}:{}),ip:f.elements.ip.value.trim(),port:Number(f.elements.port.value),...(f.elements.workingDirectory.value.trim()?{workingDirectory:f.elements.workingDirectory.value.trim()}:{}),groupId:capabilities.includes('executor')?f.elements.groupId.value:null,capabilities,enabled:a?.enabled??true,...(!a||!capabilities.includes('executor')||f.elements.mcpEnabled.checked!==!!a.mcpInstallation?.enabled||f.elements.mcpRoot.value.trim()!==(a.mcpInstallation?.installRoot||a.mcpInstallation?.programRoot||'')?{mcpInstallation:{enabled:capabilities.includes('executor')&&f.elements.mcpEnabled.checked,platform:'windows',installRoot:f.elements.mcpRoot.value.trim()}}:{}),skillInstallation:{enabled:capabilities.includes('executor')&&f.elements.skillEnabled.checked,root:f.elements.skillRoot.value.trim()}})});
       selectedMachineGroupId=f.elements.groupId.value;dialog.close();await render();toast('已保存。连接信息有变化时请重新检测。');
     }catch(error){f.querySelector('.machine-error').textContent=error.message}finally{button.disabled=false;machineView.refreshing=false}
   };dialog.showModal();

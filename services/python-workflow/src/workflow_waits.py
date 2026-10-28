@@ -213,6 +213,8 @@ class WaitStore:
                 return None
             node = connection.execute("SELECT * FROM workflow_nodes WHERE workflow_id=? AND node_id=?", (workflow_id, gate["completed_node_id"])).fetchone()
             target = self._node_dispatch_spec(node, already_dispatched=True)
+            from workflow_jira import node_instruction
+            target["jiraInstruction"] = node_instruction(connection, workflow_id)
             runtime = connection.execute("SELECT cwd,model FROM workflow_node_runtime WHERE workflow_id=? AND node_id=? AND attempt_number=?", (workflow_id, node["node_id"], node["attempt_count"])).fetchone()
             if runtime:
                 target.update(cwd=runtime["cwd"] or target["cwd"], model=runtime["model"] or target["model"])
@@ -237,7 +239,8 @@ class WaitStore:
             if not gate or gate["status"] != "closing" or workflow["status"] != "running":
                 return
             original = json.loads(gate["business_result_json"])
-            result = validate(result, workflow["result_protocol_version"])
+            jira = connection.execute("SELECT 1 FROM workflow_jira_runs WHERE workflow_id=?", (workflow_id,)).fetchone() is not None
+            result = validate(result, workflow["result_protocol_version"], jira=jira)
             if result["outcome"] != "blocked" or result["jiraComment"]["issueKey"] != original["jiraComment"]["issueKey"]:
                 raise ValueError("收尾结果不能改变阻断决定或工单身份。")
             original.update(summary=result["summary"], jiraComment=result["jiraComment"])

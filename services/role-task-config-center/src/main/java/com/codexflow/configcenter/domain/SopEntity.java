@@ -14,6 +14,12 @@ import java.util.List;
 @Entity
 @Table(name = "codex_sop_sops")
 class SopEntity extends Timestamped {
+  @Column(name = "jira_jql", columnDefinition = "TEXT")
+  String jiraJql;
+
+  @Column(name = "jira_account", nullable = false, length = 128)
+  String jiraAccount = "";
+
   @jakarta.persistence.Column(name = "group_id", length = 36)
   String groupId;
 
@@ -28,7 +34,11 @@ class SopEntity extends Timestamped {
   @Column(length = 2000)
   String description;
 
-  /** 主监督执行机标识；保存配置时不要求执行机在线。 */
+  /** 旧配置保留固定机器，新配置按组自动分配。 */
+  @Column(name = "dispatch_mode", nullable = false, length = 16)
+  String dispatchMode = "group";
+
+  /** 历史固定机器配置的主监督标识。 */
   @Column(name = "supervisor_agent_id", nullable = false)
   String supervisorAgentId = "local";
 

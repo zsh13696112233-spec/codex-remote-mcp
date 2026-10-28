@@ -61,6 +61,7 @@ class DailyTaskScheduler {
   private void launch(TaskScheduleStore.Dispatch dispatch) {
     String taskId = dispatch.taskId();
     try {
+      if (workflowRuns.deferScheduledForResources(taskId, dispatch.token())) return;
       if (!checks.passes(dispatch)) return;
       workflowRuns.runScheduled(taskId, dispatch.token());
     } catch (RuntimeException error) {

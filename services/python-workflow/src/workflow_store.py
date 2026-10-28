@@ -56,9 +56,10 @@ def utc_now() -> str:
 
 from workflow_input_images import InputImageStore
 from workflow_waits import WaitStore, normalize_policy
+from workflow_jira import JiraStore
 
 
-class WorkflowStore(InputImageStore, WaitStore):
+class WorkflowStore(InputImageStore, WaitStore, JiraStore):
     """跨 HTTP 网关和 MCP 子进程共享的 SQLite 工作流状态库。"""
 
     def __init__(self, path: Path | str) -> None:
@@ -550,10 +551,27 @@ class WorkflowStore(InputImageStore, WaitStore):
                 """
             )
 
+        with self._connect() as connection:
+            from workflow_resources import initialize
+            initialize(connection)
+            from workflow_allocation import initialize as initialize_allocations
+            initialize_allocations(connection)
+            from workflow_jira import initialize as initialize_jira
+            initialize_jira(connection)
+        with self._connect() as connection:
+            from workflow_resources import protect_existing_executions
+            protect_existing_executions(connection)
+
     @staticmethod
     def normalize_spec(value: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(value, dict):
             raise ValueError("工作流请求必须是 JSON 对象。")
+        dispatch_mode = value.get("dispatchMode", "fixed")
+        if dispatch_mode not in {"fixed", "group"}:
+            raise ValueError("调度方式无效。")
+        grouped = dispatch_mode == "group"
+        if grouped and not value.get("groupId"):
+            raise ValueError("按组调度必须指定分组。")
         raw_nodes = value.get("nodes")
         if not isinstance(raw_nodes, list) or not raw_nodes:
             raise ValueError("nodes 必须是非空数组。")
@@ -573,9 +591,9 @@ class WorkflowStore(InputImageStore, WaitStore):
             if not isinstance(group_id, str) or not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", group_id):
                 raise ValueError("groupId 必须是有效的分组编号。")
         supervisor_agent_id = str(
-            value.get("supervisorAgentId") or value.get("supervisor_agent_id") or "local"
+            value.get("supervisorAgentId") or value.get("supervisor_agent_id") or ("" if grouped else "local")
         ).strip()
-        if not supervisor_agent_id or len(supervisor_agent_id) > 128:
+        if (not grouped and not supervisor_agent_id) or len(supervisor_agent_id) > 128:
             raise ValueError("supervisorAgentId 必须是 1 到 128 个字符。")
 
         nodes: list[dict[str, Any]] = []
@@ -601,9 +619,9 @@ class WorkflowStore(InputImageStore, WaitStore):
                 or raw_node.get("agent_id")
                 or executor.get("agentId")
                 or executor.get("agent_id")
-                or ("local" if executor_type == "local" else "")
+                or ("local" if executor_type == "local" and not grouped else "")
             ).strip()
-            if not agent_id:
+            if not grouped and not agent_id:
                 raise ValueError(f"远程节点 {node_id} 必须指定 executor.agentId。")
             if len(agent_id) > 128:
                 raise ValueError(f"节点 {node_id} 的 agentId 不能超过 128 个字符。")
@@ -675,8 +693,16 @@ class WorkflowStore(InputImageStore, WaitStore):
                 if dependency == node["id"]:
                     raise ValueError(f"节点 {node['id']} 不能依赖自身。")
         WorkflowStore._validate_acyclic(nodes)
+        if grouped:
+            parents = [parent for node in nodes for parent in node["dependsOn"]]
+            if (sum(not node["dependsOn"] for node in nodes) != 1
+                    or any(len(node["dependsOn"]) > 1 for node in nodes)
+                    or len(set(parents)) != len(parents)):
+                raise ValueError("按组调度只支持严格串行步骤。")
 
         failure_policy = str(value.get("failurePolicy") or "stop").strip().lower()
+        if grouped and failure_policy != "stop":
+            raise ValueError("按组调度的失败策略必须为 stop。")
         if failure_policy not in {"stop", "continue"}:
             raise ValueError("failurePolicy 只能是 stop 或 continue。")
         supervisor_timeout_sec = int(value.get("supervisorTimeoutSec", 7200))
@@ -693,8 +719,18 @@ class WorkflowStore(InputImageStore, WaitStore):
         policy = normalize_policy(value.get("waitPolicy"))
         if policy and advance_mode != "semi_automatic":
             raise ValueError("等待策略仅支持半自动流程。")
+        from workflow_jira import normalize_config
+        jira = normalize_config(value.get("jira"))
+        if jira and not grouped:
+            raise ValueError("监督机统一领取 Jira 仅支持按组调度。")
+        retry_of = value.get("jiraRetryOf")
+        if retry_of is not None and (not jira or not isinstance(retry_of, str) or not 1 <= len(retry_of) <= 128 or retry_of == workflow_id):
+            raise ValueError("Jira 重试来源无效。")
         return {
+            **({"jira": jira} if jira else {}),
+            **({"jiraRetryOf": retry_of} if retry_of else {}),
             **({"waitPolicy": policy} if policy else {}),
+            **({"dispatchMode": "group"} if grouped else {}),
             "workflowId": workflow_id,
             "taskDefinitionId": task_id.strip() if task_id is not None else None,
             "name": value.get("name"),
@@ -736,6 +772,10 @@ class WorkflowStore(InputImageStore, WaitStore):
         if version in (4, 5) and spec["advanceMode"] != "semi_automatic":
             raise ValueError(f"版本{version}仅适用于半自动运行。")
         spec["resultProtocolVersion"] = version
+        grouped = spec.get("dispatchMode") == "group"
+        if grouped:
+            if spec["supervisorAgentId"] or any(n["agentId"] or n["cwd"] is not None for n in spec["nodes"]):
+                raise ValueError("按组调度由平台选择机器和目录，不能指定步骤执行机或目录。")
         timestamp = utc_now()
         encoded_spec = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
         compressed_spec = zlib.compress(encoded_spec.encode("utf-8"), level=6)
@@ -747,15 +787,18 @@ class WorkflowStore(InputImageStore, WaitStore):
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             from mcp_store import ensure_available
-            ensure_available(connection, [spec["supervisorAgentId"], *(node["agentId"] for node in spec["nodes"])])
+            if not grouped:
+                ensure_available(connection, [spec["supervisorAgentId"], *(node["agentId"] for node in spec["nodes"])])
             # Serialize deletion against new submissions, including old snapshots without a group.
             if connection.execute("SELECT 1 FROM sqlite_master WHERE name='registered_agents'").fetchone():
                 for agent_id in {spec["supervisorAgentId"], *(node["agentId"] for node in spec["nodes"])}:
                     if connection.execute("SELECT 1 FROM registered_agents WHERE id=? AND deleted_at IS NOT NULL", (agent_id,)).fetchone():
                         raise ValueError("所选机器已删除，请重新选择机器。")
             if spec.get("taskDefinitionId"):
-                self._require_task_idle(connection, spec["taskDefinitionId"], spec["workflowId"])
-            if spec.get("groupId"):
+                self._require_task_idle(connection, spec["taskDefinitionId"], spec["workflowId"], parallel_jira=bool(spec.get("jira")))
+            if grouped and not connection.execute("SELECT 1 FROM agent_groups WHERE id=? AND deleted_at IS NULL", (spec["groupId"],)).fetchone():
+                raise ValueError("请选择有效分组。")
+            if spec.get("groupId") and not grouped:
                 # 与机器改组使用同一 SQLite 写事务，关闭网关预检之后的并发窗口。
                 for agent_id in {spec["supervisorAgentId"], *(node["agentId"] for node in spec["nodes"])}:
                     registered = connection.execute(
@@ -786,6 +829,10 @@ class WorkflowStore(InputImageStore, WaitStore):
                 )
             except sqlite3.IntegrityError as error:
                 raise ValueError(f"工作流已存在：{spec['workflowId']}") from error
+            if grouped:
+                connection.execute("INSERT INTO workflow_allocations(workflow_id,group_id) VALUES(?,?)", (spec["workflowId"], spec["groupId"]))
+            if spec.get("jira"):
+                connection.execute("INSERT INTO workflow_jira_runs(workflow_id) VALUES(?)", (spec["workflowId"],))
             connection.execute("UPDATE workflows SET result_protocol_version=? WHERE workflow_id=?", (version, spec["workflowId"]))
             if spec.get("waitPolicy"):
                 connection.execute("UPDATE workflows SET wait_policy_json=? WHERE workflow_id=?", (json.dumps(spec["waitPolicy"]), spec["workflowId"]))
@@ -834,12 +881,14 @@ class WorkflowStore(InputImageStore, WaitStore):
         return self.get_workflow(spec["workflowId"])
 
     @staticmethod
-    def _require_task_idle(connection: sqlite3.Connection, task_id: str, workflow_id: str) -> None:
+    def _require_task_idle(connection: sqlite3.Connection, task_id: str, workflow_id: str, *, parallel_jira: bool = False) -> None:
         active = connection.execute(
             "SELECT 1 FROM workflow_task_bindings b JOIN workflows w USING(workflow_id) "
             "WHERE b.task_definition_id = ? AND w.workflow_id <> ? "
-            "AND w.status IN ('queued', 'running', 'cancelling') LIMIT 1",
-            (task_id, workflow_id),
+            "AND (?=0 OR NOT EXISTS (SELECT 1 FROM workflow_jira_runs j WHERE j.workflow_id=w.workflow_id)) "
+            "AND (w.status IN ('queued', 'running', 'cancelling') OR EXISTS "
+            "(SELECT 1 FROM workflow_machine_claims c WHERE c.workflow_id=w.workflow_id)) LIMIT 1",
+            (task_id, workflow_id, int(parallel_jira)),
         ).fetchone()
         if active is not None:
             raise ValueError("当前任务已有其他运行，暂不能启动或返工。")
@@ -874,6 +923,7 @@ class WorkflowStore(InputImageStore, WaitStore):
         error = "工作流网关已重启，任务已中断。"
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE machine_check_claims SET state='review' WHERE state='occupied'")
             rows = connection.execute(
                 "SELECT workflow_id, termination_json FROM workflows "
                 "WHERE status IN ('running', 'cancelling') "
@@ -912,6 +962,9 @@ class WorkflowStore(InputImageStore, WaitStore):
                     timestamp,
                 )
             connection.execute("DELETE FROM supervisor_leases")
+            from workflow_resources import release_if_stopped
+            for workflow_id in workflow_ids:
+                release_if_stopped(connection, workflow_id)
         return workflow_ids
 
     def claim_next_workflow(
@@ -920,6 +973,8 @@ class WorkflowStore(InputImageStore, WaitStore):
         *,
         sidecar_instance_id: str | None = None,
         lease_timeout_sec: int | None = None,
+        eligible_executors: dict[str, set[str]] | None = None,
+        allow_group: bool = True,
     ) -> dict[str, Any] | None:
         """以固定 FIFO 顺序为一个主监督领取至多一个工作流。"""
         timestamp = utc_now()
@@ -975,15 +1030,26 @@ class WorkflowStore(InputImageStore, WaitStore):
                 sidecar_renewed_at = str(sidecar["last_heartbeat_at"])
                 sidecar_expires_at = sidecar_deadline.isoformat()
 
-            row = connection.execute(
+            rows = connection.execute(
                 "SELECT workflow_id FROM workflows "
-                "WHERE supervisor_agent_id = ? AND status = 'queued' "
-                "ORDER BY created_at, workflow_id LIMIT 1",
-                (supervisor_id,),
-            ).fetchone()
-            if row is None:
+                "WHERE (supervisor_agent_id = ? OR (? AND supervisor_agent_id = '')) AND status = 'queued' "
+                "ORDER BY created_at, workflow_id", (supervisor_id, int(allow_group)),
+            ).fetchall()
+            from workflow_allocation import select_executor
+            from workflow_resources import acquire
+            from mcp_store import workflow_agents
+            workflow_id = None
+            for row in rows:
+                candidate_id = str(row["workflow_id"])
+                eligible = eligible_executors.get(candidate_id, set()) if eligible_executors is not None else None
+                if not select_executor(connection, candidate_id, supervisor_id, timestamp, eligible):
+                    continue
+                if not acquire(connection, candidate_id, workflow_agents(connection, candidate_id), timestamp):
+                    continue
+                workflow_id = candidate_id
+                break
+            if workflow_id is None:
                 return None
-            workflow_id = str(row["workflow_id"])
             lease_token = uuid.uuid4().hex if sidecar_instance_id else None
             expires_at = sidecar_expires_at
             connection.execute(
@@ -1235,6 +1301,16 @@ class WorkflowStore(InputImageStore, WaitStore):
                 )
         return expired
 
+    def sidecar_agent_ids(self, supervisor_id, lease_token):
+        from mcp_store import workflow_agents
+        with self._connect() as connection:
+            lease = connection.execute("SELECT workflow_id FROM supervisor_leases WHERE supervisor_id=?", (supervisor_id,)).fetchone()
+            if not lease:
+                return {supervisor_id}
+            self._validate_sidecar_access_with_connection(connection, supervisor_id, lease["workflow_id"],
+                lease_token=lease_token, require_lease=True)
+            return set(workflow_agents(connection, lease["workflow_id"]))
+
     def validate_sidecar_access(
         self,
         supervisor_id: str,
@@ -1319,6 +1395,8 @@ class WorkflowStore(InputImageStore, WaitStore):
         connection.execute(
             "DELETE FROM supervisor_leases WHERE workflow_id = ?", (workflow_id,)
         )
+        from workflow_resources import release_if_stopped
+        release_if_stopped(connection, workflow_id)
         self._add_event_with_connection(
             connection,
             workflow_id,
@@ -1379,16 +1457,12 @@ class WorkflowStore(InputImageStore, WaitStore):
             )
 
     def get_spec(self, workflow_id: str) -> dict[str, Any]:
+        from workflow_allocation import decode, resolve
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT spec_json, spec_zlib FROM workflows WHERE workflow_id = ?",
-                (workflow_id,),
-            ).fetchone()
-        if row is None:
-            raise ValueError(f"找不到工作流：{workflow_id}")
-        if row["spec_zlib"] is not None:
-            return json.loads(zlib.decompress(row["spec_zlib"]).decode("utf-8"))
-        return json.loads(row["spec_json"])
+            row = connection.execute("SELECT spec_json,spec_zlib FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"找不到工作流：{workflow_id}")
+            return resolve(connection, decode(row))
 
     def poll_workflow(self, workflow_id: str, known_revision: str | None = None,
                       known_results: list[int] | None = None) -> dict[str, Any]:
@@ -1443,6 +1517,10 @@ class WorkflowStore(InputImageStore, WaitStore):
             ).fetchone()
             if workflow is None:
                 raise ValueError(f"找不到工作流：{workflow_id}")
+            from workflow_allocation import snapshot as allocation_snapshot
+            from workflow_resources import snapshot as resource_snapshot
+            allocation = allocation_snapshot(connection, workflow_id)
+            resources = resource_snapshot(connection, workflow_id)
             node_rows = connection.execute(
                 """
                 SELECT workflow_id, node_id, position, agent_id, executor_type,
@@ -1546,6 +1624,8 @@ class WorkflowStore(InputImageStore, WaitStore):
         current_nodes = [node["id"] for node in nodes if node["status"] in ACTIVE_NODE_STATUSES]
         completed_count = sum(node["status"] == "completed" for node in nodes)
         return {
+            "allocation": allocation,
+            "resources": resources,
             "workflowId": workflow["workflow_id"],
             "name": workflow["name"],
             "status": workflow["status"],
@@ -2787,7 +2867,8 @@ class WorkflowStore(InputImageStore, WaitStore):
         node = next((value for value in spec["nodes"] if value["id"] == node_id), None)
         if node is None:
             raise ValueError("找不到步骤。")
-        AgentRegistry(self).validate(spec["supervisorAgentId"], [node["agentId"]], require_test=True)
+        AgentRegistry(self).validate(spec["supervisorAgentId"], [node["agentId"]], require_test=True,
+                                     group_id=spec.get("groupId"), global_supervisor=spec.get("dispatchMode") == "group")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             from mcp_store import ensure_available
@@ -2882,6 +2963,8 @@ class WorkflowStore(InputImageStore, WaitStore):
                     )
 
             original_prompt = row["original_prompt"] or row["prompt"]
+            from workflow_jira import node_instruction
+            jira_instruction = node_instruction(connection, workflow_id)
             revision_rows = connection.execute(
                 """
                 SELECT retry_ordinal, instruction
@@ -2897,6 +2980,11 @@ class WorkflowStore(InputImageStore, WaitStore):
                 dependency_rows,
                 revision_rows,
             )
+            if jira_instruction:
+                budget = PROMPT_LIMIT - len(jira_instruction)
+                if len(actual_prompt) > budget:
+                    actual_prompt = actual_prompt[:budget - len(TRUNCATION_NOTICE)] + TRUNCATION_NOTICE
+                actual_prompt += jira_instruction
             if row["thread_id"]:
                 prompt_body = actual_prompt
                 suffix = "\n\n用户已确认新一轮返工。请基于本会话上一版产物完成本次修改，未要求改变的内容保留。"
@@ -2908,6 +2996,11 @@ class WorkflowStore(InputImageStore, WaitStore):
                 actual_prompt = prompt_body + suffix
 
             timestamp = utc_now()
+            from workflow_resources import acquire, prepare_execution
+            from mcp_store import workflow_agents
+            if not acquire(connection, workflow_id, workflow_agents(connection, workflow_id), timestamp):
+                raise RuntimeError("执行机正在处理其他任务，请等待资源释放。")
+            prepare_execution(connection, workflow_id, "node:" + node_id, row["agent_id"])
             connection.execute(
                 """
                 UPDATE workflow_nodes
@@ -3043,6 +3136,7 @@ class WorkflowStore(InputImageStore, WaitStore):
         spec = self.get_spec(row["workflow_id"])
         return {
             "resultProtocolVersion": spec.get("resultProtocolVersion", 0),
+            "jiraEnabled": bool(spec.get("jira")),
             "waitPolicy": spec.get("waitPolicy"),
             "workflowId": row["workflow_id"],
             "nodeId": row["node_id"],
@@ -3087,6 +3181,8 @@ class WorkflowStore(InputImageStore, WaitStore):
                 (workflow_id,),
             ).fetchone():
                 raise RuntimeError("工作流已结束，不能绑定新的步骤执行。")
+            from workflow_resources import observe_execution
+            observe_execution(connection, workflow_id, "node:" + node_id, snapshot)
             connection.execute(
                 """
                 UPDATE workflow_nodes
@@ -3144,7 +3240,7 @@ class WorkflowStore(InputImageStore, WaitStore):
                 )
             old = connection.execute(
                 """
-                SELECT status, job_id, thread_id, turn_id, response, error, finished_at
+                SELECT status, job_id, thread_id, turn_id, response, error, finished_at, attempt_count
                 FROM workflow_nodes
                 WHERE workflow_id = ? AND node_id = ?
                 """,
@@ -3158,7 +3254,10 @@ class WorkflowStore(InputImageStore, WaitStore):
             if old["job_id"] and snapshot.get("job_id") and old["job_id"] != snapshot["job_id"]:
                 raise RuntimeError("步骤执行版本已变化。")
             workflow = connection.execute("SELECT status, termination_json, result_protocol_version FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            from workflow_resources import observe_execution, release_if_stopped
+            observe_execution(connection, workflow_id, "node:" + node_id, snapshot)
             if workflow["status"] in {"completed", "failed", "cancelled"}:
+                release_if_stopped(connection, workflow_id)
                 return
             if workflow["result_protocol_version"] in (1, 2, 3, 4, 5) and old["status"] in TERMINAL_NODE_STATUSES | {"waiting"}:
                 return
@@ -3172,11 +3271,19 @@ class WorkflowStore(InputImageStore, WaitStore):
             if status == "completed" and workflow["result_protocol_version"] in (1, 2, 3, 4, 5):
                 from workflow_outcomes import validate
                 try:
-                    outcome = validate(snapshot.get("businessResult"), workflow["result_protocol_version"])
+                    jira = connection.execute("SELECT issue_key FROM workflow_jira_runs WHERE workflow_id=?", (workflow_id,)).fetchone()
+                    outcome = validate(snapshot.get("businessResult"), workflow["result_protocol_version"], jira=jira is not None)
+                    if jira is not None and outcome["jiraComment"]["issueKey"].strip() != jira["issue_key"]:
+                        raise ValueError("步骤返回的工单与本轮领取编号不一致。")
                 except (ValueError, TypeError, KeyError):
+                    outcome = None
                     status = "failed"
                     snapshot = {**snapshot, "error": "步骤业务结果格式无效。"}
                 if outcome is not None:
+                    if jira is not None:
+                        delivery = outcome["jiraDelivery"]
+                        connection.execute("INSERT INTO workflow_jira_deliveries VALUES(?,?,?,?,?,?,?) ON CONFLICT(workflow_id,node_id,attempt) DO NOTHING",
+                            (workflow_id, node_id, old["attempt_count"], delivery["status"], delivery["reference"], delivery["summary"], utc_now()))
                     snapshot = {**snapshot, "response": outcome["summary"]}
                     if outcome["outcome"] == "blocked":
                         status = "failed"
@@ -3372,9 +3479,79 @@ class WorkflowStore(InputImageStore, WaitStore):
             now,
         )
 
+    def prepare_supervisor_execution(self, workflow_id: str) -> None:
+        from workflow_resources import acquire, prepare_execution
+        from mcp_store import workflow_agents
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT supervisor_agent_id,status FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            if row is None or row["status"] not in {"queued", "running"}:
+                raise RuntimeError("任务已结束，不能启动监督执行。")
+            if not acquire(connection, workflow_id, workflow_agents(connection, workflow_id), utc_now()):
+                raise RuntimeError("机器正在处理其他任务，请等待资源释放。")
+            prepare_execution(connection, workflow_id, "supervisor", row["supervisor_agent_id"])
+
+    def prepare_resource_execution(self, workflow_id, execution_key, agent_id):
+        from workflow_resources import prepare_execution
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not connection.execute("SELECT 1 FROM workflow_machine_claims WHERE workflow_id=? AND agent_id=? AND state='occupied'", (workflow_id, agent_id)).fetchone():
+                raise RuntimeError("任务未持有机器占用，不能启动执行。")
+            prepare_execution(connection, workflow_id, execution_key, agent_id)
+
+    def observe_resource_execution(self, workflow_id, execution_key, snapshot):
+        from workflow_resources import observe_execution, release_if_stopped
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            observe_execution(connection, workflow_id, execution_key, snapshot)
+            release_if_stopped(connection, workflow_id)
+
+    def unresolved_resource_executions(self, after: tuple[str, str] = ("", "")):
+        with self._connect() as connection:
+            return [dict(row) for row in connection.execute("""SELECT g.* FROM workflow_execution_guards g
+                JOIN workflows w USING(workflow_id) WHERE g.stopped=0 AND g.thread_id IS NOT NULL
+                AND g.turn_id IS NOT NULL AND w.status IN ('completed','failed','cancelled')
+                AND (g.workflow_id,g.execution_key)>(?,?)
+                ORDER BY g.workflow_id,g.execution_key LIMIT 16""", after)]
+
+    def confirm_resource_stopped(self, execution):
+        from workflow_resources import release_if_stopped
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("""UPDATE workflow_execution_guards SET stopped=1
+                WHERE workflow_id=? AND execution_key=? AND job_id IS ? AND thread_id=? AND turn_id=?""",
+                (execution["workflow_id"], execution["execution_key"], execution["job_id"], execution["thread_id"], execution["turn_id"]))
+            release_if_stopped(connection, execution["workflow_id"])
+
+    def pending_allocation_specs(self):
+        from workflow_allocation import decode
+        with self._connect() as connection:
+            return [decode(row) for row in connection.execute("""SELECT w.spec_json,w.spec_zlib
+                FROM workflows w JOIN workflow_allocations a USING(workflow_id)
+                WHERE w.status='queued' AND a.executor_id IS NULL ORDER BY w.created_at,w.workflow_id""")]
+
+    def machine_claims(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            claims = {row["agent_id"]: {"workflowId": row["workflow_id"], "state": row["state"], "acquiredAt": row["acquired_at"]}
+                    for row in connection.execute("SELECT * FROM workflow_machine_claims")}
+            claims.update({row["agent_id"]: {"workflowId": None, "state": row["state"], "acquiredAt": row["acquired_at"], "kind": "schedule_check"}
+                           for row in connection.execute("SELECT * FROM machine_check_claims")})
+            return claims
+
+    def reconcile_machine_claims(self) -> None:
+        from workflow_resources import release_if_stopped
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for row in connection.execute("SELECT DISTINCT workflow_id FROM workflow_machine_claims").fetchall():
+                release_if_stopped(connection, row[0])
+
     def update_supervisor(self, workflow_id: str, snapshot: dict[str, Any]) -> None:
         status = str(snapshot.get("status") or "running")
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            from workflow_resources import observe_execution, release_if_stopped
+            observe_execution(connection, workflow_id, "supervisor", snapshot)
+            release_if_stopped(connection, workflow_id)
             connection.execute(
                 """
                 UPDATE workflows
@@ -3581,6 +3758,8 @@ class WorkflowStore(InputImageStore, WaitStore):
         reason: str,
         timestamp: str,
     ) -> str | None:
+        from workflow_resources import release_if_stopped
+        release_if_stopped(connection, workflow_id)
         lease = connection.execute(
             "SELECT supervisor_id FROM supervisor_leases WHERE workflow_id = ?",
             (workflow_id,),

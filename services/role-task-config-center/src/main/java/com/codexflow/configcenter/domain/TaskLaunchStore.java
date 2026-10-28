@@ -41,12 +41,41 @@ public class TaskLaunchStore {
       String taskId, String triggerSource, String dispatchToken) {
     TaskDefinitionEntity task = requiredTaskForUpdate(taskId);
     validateStartable(task);
-    requireIdle(task);
+    requireStartSlot(task);
     if ("schedule".equals(triggerSource)) schedules.requireEnabled(taskId, dispatchToken);
     PreparedRun prepared = workflowRuns.prepareLatest(taskId, triggerSource);
-    task.activeWorkflowId = prepared.workflowId();
+    if (task.sop.jiraJql == null) task.activeWorkflowId = prepared.workflowId();
     tasks.saveAndFlush(task);
     return new LaunchReservation(task.id, prepared, task.notifyDingTalk);
+  }
+
+  @Transactional
+  public List<LaunchReservation> reserveJiraBatch(String taskId, String token, int count) {
+    if (count < 1 || count > 100) throw new IllegalArgumentException("批次数量无效。");
+    TaskDefinitionEntity task = requiredTaskForUpdate(taskId);
+    validateStartable(task);
+    if (task.sop.jiraJql == null) throw new ConflictFailure("任务已关闭 Jira 批量领取，请等待下一次定时触发。");
+    requireStartSlot(task);
+    schedules.requireEnabled(taskId, token);
+    var result = new java.util.ArrayList<LaunchReservation>();
+    for (int i = 0; i < count; i++)
+      result.add(
+          new LaunchReservation(
+              task.id, workflowRuns.prepareLatest(taskId, "schedule"), task.notifyDingTalk));
+    return result;
+  }
+
+  @Transactional
+  public void deferSchedule(String taskId, String token) {
+    validateStartable(requiredTaskForUpdate(taskId));
+    schedules.deferResources(taskId, token);
+  }
+
+  @Transactional(readOnly = true)
+  public boolean isParallelRun(String taskId, String workflowId) {
+    PreparedRun prepared = workflowRuns.getPrepared(workflowId);
+    return taskId.equals(prepared.payload().path("taskDefinitionId").asText())
+        && prepared.payload().path("jira").isObject();
   }
 
   /** 按历史快照创建重试运行，并占用来源任务的运行槽。 */
@@ -57,6 +86,9 @@ public class TaskLaunchStore {
             .orElseThrow(() -> new NotFoundFailure("找不到运行记录：" + sourceWorkflowId));
     TaskDefinitionEntity task = requiredTaskForUpdate(source.taskDefinition.id);
     requireIdle(task);
+    if (isParallelRun(task.id, sourceWorkflowId)
+        && !java.util.Set.of("completed", "failed", "cancelled", "submit_failed")
+            .contains(source.status)) throw new ConflictFailure("来源 Jira 运行尚未结束，请先等待结束。");
     PreparedRun prepared = workflowRuns.prepareRetry(sourceWorkflowId);
     task.activeWorkflowId = prepared.workflowId();
     tasks.saveAndFlush(task);
@@ -67,6 +99,7 @@ public class TaskLaunchStore {
   @Transactional
   public Optional<String> acquireExisting(String taskId, String workflowId) {
     TaskDefinitionEntity task = requiredTaskForUpdate(taskId);
+    if (isParallelRun(taskId, workflowId)) return Optional.empty();
     String busy = conflictingWorkflowId(task, workflowId);
     if (busy != null) return Optional.of(busy);
     task.activeWorkflowId = workflowId;
@@ -83,9 +116,15 @@ public class TaskLaunchStore {
   /** 返回所有待确认终态的任务占用快照。 */
   @Transactional(readOnly = true)
   public List<ActiveLaunch> activeLaunches() {
-    return tasks.findOccupiedTasks().stream()
-        .map(task -> new ActiveLaunch(task.id, conflictingWorkflowId(task, null)))
-        .toList();
+    var result = new java.util.LinkedHashMap<String, ActiveLaunch>();
+    for (var run : runs.activeRuns())
+      result.put(
+          run.getWorkflowId(), new ActiveLaunch(run.getTaskDefinitionId(), run.getWorkflowId()));
+    for (var task : tasks.findOccupiedTasks()) {
+      String id = conflictingWorkflowId(task, null);
+      result.put(id, new ActiveLaunch(task.id, id));
+    }
+    return List.copyOf(result.values());
   }
 
   /** 仅当工作流仍是当前占用者时释放运行槽。 */
@@ -111,6 +150,17 @@ public class TaskLaunchStore {
   private static void requireIdle(TaskDefinitionEntity task) {
     if (conflictingWorkflowId(task, null) != null) {
       throw new ConflictFailure("当前任务仍在运行，请等待完成后再次运行。");
+    }
+  }
+
+  private void requireStartSlot(TaskDefinitionEntity task) {
+    if (task.sop.jiraJql == null) {
+      requireIdle(task);
+      for (String id : runs.activeHistoryIds(task.id))
+        if (isParallelRun(task.id, id)) throw new ConflictFailure("当前任务仍有 Jira 运行，请等待完成。");
+    } else {
+      for (String id : runs.activeHistoryIds(task.id))
+        if (!isParallelRun(task.id, id)) throw new ConflictFailure("当前任务仍有旧模式运行，请等待完成。");
     }
   }
 

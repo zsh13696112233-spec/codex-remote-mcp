@@ -47,7 +47,8 @@ public class TaskScheduleStore {
       Instant expires,
       Instant checkedAt,
       String checkStatus,
-      String checkReason) {}
+      String checkReason,
+      boolean resourcePending) {}
 
   private List<Rule> rules(String suffix, Object... args) {
     return jdbc.query(
@@ -72,7 +73,8 @@ public class TaskScheduleStore {
                 instant(rs.getTimestamp("dispatch_expires_at")),
                 instant(rs.getTimestamp("last_check_at")),
                 rs.getString("last_check_status"),
-                rs.getString("last_check_reason")),
+                rs.getString("last_check_reason"),
+                rs.getBoolean("resource_pending")),
         args);
   }
 
@@ -112,6 +114,7 @@ public class TaskScheduleStore {
             && task.sop.enabled;
     Map<String, Object> v = new LinkedHashMap<>();
     v.put("preCheck", r.check());
+    v.put("waitingResources", r.resourcePending());
     v.put("lastCheckAt", r.checkedAt() == null ? null : r.checkedAt().toString());
     v.put("lastCheckStatus", r.checkStatus());
     v.put("lastCheckReason", r.checkReason());
@@ -210,7 +213,7 @@ public class TaskScheduleStore {
         key);
     if (changed || old != null && !check.equals(old.check()))
       jdbc.update(
-          "UPDATE codex_task_schedules SET dispatch_pending=FALSE,dispatch_token=NULL,dispatch_expires_at=NULL,last_check_reason=CASE WHEN last_check_status IN ('pending','checking') THEN '定时配置已变更，本次检查已失效。' ELSE last_check_reason END,last_check_status=CASE WHEN last_check_status IN ('pending','checking') THEN 'failed' ELSE last_check_status END WHERE id=?",
+          "UPDATE codex_task_schedules SET resource_pending=FALSE,dispatch_pending=FALSE,dispatch_token=NULL,dispatch_expires_at=NULL,last_check_reason=CASE WHEN last_check_status IN ('pending','checking') THEN '定时配置已变更，本次检查已失效。' ELSE last_check_reason END,last_check_status=CASE WHEN last_check_status IN ('pending','checking') THEN 'failed' ELSE last_check_status END WHERE id=?",
           key);
     return view(required(key));
   }
@@ -234,14 +237,14 @@ public class TaskScheduleStore {
   @Transactional
   public void disableTask(String taskId) {
     jdbc.update(
-        "UPDATE codex_task_schedules SET enabled=FALSE,next_at=NULL,dispatch_pending=FALSE,dispatch_token=NULL,last_check_reason=CASE WHEN last_check_status IN ('pending','checking') THEN '关联任务已删除，本次检查已失效。' ELSE last_check_reason END,last_check_status=CASE WHEN last_check_status IN ('pending','checking') THEN 'failed' ELSE last_check_status END WHERE task_definition_id=?",
+        "UPDATE codex_task_schedules SET enabled=FALSE,next_at=NULL,resource_pending=FALSE,dispatch_pending=FALSE,dispatch_token=NULL,last_check_reason=CASE WHEN last_check_status IN ('pending','checking') THEN '关联任务已删除，本次检查已失效。' ELSE last_check_reason END,last_check_status=CASE WHEN last_check_status IN ('pending','checking') THEN 'failed' ELSE last_check_status END WHERE task_definition_id=?",
         taskId);
   }
 
   public void resetAfterGrouping(String taskId) {
     for (Rule r : rules("WHERE task_definition_id=? FOR UPDATE", taskId)) {
       jdbc.update(
-          "UPDATE codex_task_schedules SET next_at=?,dispatch_pending=FALSE WHERE id=?",
+          "UPDATE codex_task_schedules SET next_at=?,resource_pending=FALSE,dispatch_pending=FALSE WHERE id=?",
           r.enabled() ? stamp(next(r.mode(), r.time(), r.minutes(), Instant.now())) : null,
           r.id());
     }
@@ -267,8 +270,19 @@ public class TaskScheduleStore {
                 || rule.expires().isBefore(Instant.now())))
       throw new ConflictFailure("本次定时检查尚未通过或已失效，不再启动。");
     jdbc.update(
-        "UPDATE codex_task_schedules SET dispatch_pending=FALSE,dispatch_token=NULL,dispatch_expires_at=NULL WHERE id=?",
+        "UPDATE codex_task_schedules SET resource_pending=FALSE,dispatch_pending=FALSE,dispatch_token=NULL,dispatch_expires_at=NULL WHERE id=?",
         rule.id());
+  }
+
+  /** 一条定时规则最多保留一次资源等待；重复 tick 不累计启动次数。 */
+  @Transactional
+  public void deferResources(String taskId, String token) {
+    int updated =
+        jdbc.update(
+            "UPDATE codex_task_schedules SET resource_pending=TRUE,dispatch_pending=FALSE,dispatch_token=NULL,dispatch_expires_at=NULL WHERE task_definition_id=? AND enabled=TRUE AND dispatch_pending=TRUE AND dispatch_token=?",
+            taskId,
+            token);
+    if (updated != 1) throw new ConflictFailure("定时触发已失效，不能继续等待资源。");
   }
 
   public record Dispatch(String taskId, String token, String groupId, ScheduleCheckRequest check) {}
@@ -351,11 +365,13 @@ public class TaskScheduleStore {
     if (limit <= 0) return claimed;
     for (Rule r :
         rules(
-            "WHERE enabled = TRUE AND next_at <= ? ORDER BY next_at, id FOR UPDATE",
+            "WHERE enabled=TRUE AND (next_at<=? OR resource_pending=TRUE) AND (dispatch_pending=FALSE OR dispatch_expires_at<=?) ORDER BY next_at,id FOR UPDATE",
+            stamp(now.toInstant()),
             stamp(now.toInstant()))) {
       if (claimed.size() >= limit) break;
       Instant future;
-      if ("interval".equals(r.mode())) {
+      if (r.next().isAfter(now.toInstant())) future = r.next();
+      else if ("interval".equals(r.mode())) {
         long elapsed = Duration.between(r.next(), now.toInstant()).toMinutes();
         future = r.next().plus((elapsed / r.minutes() + 1) * r.minutes(), ChronoUnit.MINUTES);
       } else future = next(r.mode(), r.time(), r.minutes(), now.toInstant());
@@ -368,21 +384,30 @@ public class TaskScheduleStore {
               && task.enabled
               && !task.sop.deleted
               && task.sop.enabled
-              && Duration.between(r.next(), now.toInstant()).compareTo(Duration.ofMinutes(1)) <= 0;
+              && (r.resourcePending()
+                  || Duration.between(r.next(), now.toInstant()).compareTo(Duration.ofMinutes(1))
+                      <= 0);
       String token = ready ? UUID.randomUUID().toString() : null;
       jdbc.update(
-          "UPDATE codex_task_schedules SET next_at=?,dispatch_pending=?,dispatch_token=?,dispatch_expires_at=? WHERE id=?",
+          "UPDATE codex_task_schedules SET resource_pending=FALSE,next_at=?,dispatch_pending=?,dispatch_token=?,dispatch_expires_at=? WHERE id=?",
           stamp(future),
           ready,
           token,
           ready ? stamp(Instant.now().plusSeconds(150)) : null,
           r.id());
-      if (ready && r.check().enabled())
+      boolean checked = r.resourcePending() && "passed".equals(r.checkStatus());
+      if (ready && r.check().enabled() && !checked)
         jdbc.update(
             "UPDATE codex_task_schedules SET last_check_at=?,last_check_status='pending',last_check_reason='等待执行检查。' WHERE id=?",
             stamp(Instant.now()),
             r.id());
-      if (ready) claimed.add(new Dispatch(r.taskId(), token, task.groupId, r.check()));
+      if (ready)
+        claimed.add(
+            new Dispatch(
+                r.taskId(),
+                token,
+                task.groupId,
+                checked ? new ScheduleCheckRequest(false, null, null, null, null) : r.check()));
     }
     return claimed;
   }

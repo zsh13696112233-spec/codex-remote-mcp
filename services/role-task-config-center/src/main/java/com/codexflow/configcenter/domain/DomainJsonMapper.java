@@ -57,6 +57,13 @@ class DomainJsonMapper {
     result.put("groupId", sop.groupId);
     result.put("name", sop.name);
     putNullable(result, "description", sop.description);
+    result.put("dispatchMode", sop.dispatchMode);
+    if (sop.jiraJql == null) result.putNull("jira");
+    else {
+      var jira = result.putObject("jira");
+      jira.put("jql", sop.jiraJql);
+      jira.put("account", sop.jiraAccount);
+    }
     result.put("supervisorAgentId", sop.supervisorAgentId);
     result.put("failurePolicy", sop.failurePolicy);
     result.put("supervisorTimeoutSec", sop.supervisorTimeoutSec);

@@ -180,6 +180,7 @@ class WorkflowMcpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("第1步结果", next_job.prompt)
                     self.assertFalse(Path(directory, "artifacts").exists())
 
+                    store.finish_workflow("write-demo", supervisor_status="completed", response="完成", error=None)
                     await service.dispatch_node("read-demo", "a")
                     read_result = await service.wait_node(
                         "read-demo", "a", timeout_sec=1

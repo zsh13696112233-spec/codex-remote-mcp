@@ -175,6 +175,9 @@ class SupervisorReachabilityTests(unittest.IsolatedAsyncioTestCase):
 
     def test_public_agents_reports_busy_from_persisted_lease(self) -> None:
         class FakeStore:
+            def machine_claims(self):
+                return {}
+
             def leased_supervisor_ids(self):
                 return {"supervisor-a"}
 
@@ -393,6 +396,7 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 "thread_id": self.thread_id,
                 "turn_id": self.turn_id,
                 "status": self.status,
+                "execution_stopped": self.completed.is_set(),
                 "response": self.response,
                 "error": self.error,
                 "started_at": utc_now(),
@@ -426,6 +430,7 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
                     "capabilities": ["executor"],
                     "permission_profiles": ["read_only"],
                 },
+                {"agent_id": "executor-b", "enabled": True, "capabilities": ["executor"], "permission_profiles": ["read_only"]},
             ]
 
         async def dispatch(self, *, agent_id, prompt, **_):
@@ -457,7 +462,7 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
             "nodes": [
                 {
                     "id": "a",
-                    "agentId": "executor",
+                    "agentId": "executor-b" if supervisor_id == "supervisor-b" else "executor",
                     "prompt": "测试",
                     "timeoutSec": 10,
                 }
@@ -545,12 +550,16 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await asyncio.gather(*(gateway._schedule_pending("supervisor-a") for _ in range(3)))
                 self.assertEqual(len(gateway._tasks), 1)
+                for _ in range(100):
+                    if orchestrator.dispatch_count:
+                        break
+                    await asyncio.sleep(0.01)
                 self.assertEqual(orchestrator.dispatch_count, 1)
             finally:
                 await gateway.stop()
                 await gateway.event_batcher.close()
 
-    async def test_cancel_advances_only_owner_queue(self):
+    async def test_cancel_wakes_queues_after_releasing_shared_resources(self):
         with tempfile.TemporaryDirectory() as directory:
             store = FixtureWorkflowStore(Path(directory, "workflows.db"))
             gateway = fixture_gateway(store, self.FakeOrchestrator())
@@ -561,12 +570,12 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await gateway.cancel("cancelled")
                 self.assertEqual(store.get_workflow("next")["status"], "running")
-                self.assertEqual(store.get_workflow("unrelated")["status"], "queued")
+                self.assertEqual(store.get_workflow("unrelated")["status"], "running")
             finally:
                 await gateway.stop()
                 await gateway.event_batcher.close()
 
-    async def test_resumed_task_completion_advances_owner_queue(self):
+    async def test_resumed_completion_wakes_resource_waiters(self):
         with tempfile.TemporaryDirectory() as directory:
             store = FixtureWorkflowStore(Path(directory, "workflows.db"))
             gateway = fixture_gateway(store, self.FakeOrchestrator())
@@ -589,7 +598,7 @@ class MultiSupervisorSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 await gateway._resume_supervisor_if_needed("resume")
                 await asyncio.wait_for(next_started.wait(), 5)
                 self.assertEqual(store.get_workflow("next")["status"], "running")
-                self.assertEqual(store.get_workflow("unrelated")["status"], "queued")
+                self.assertEqual(store.get_workflow("unrelated")["status"], "running")
             finally:
                 await gateway.stop()
                 await gateway.event_batcher.close()

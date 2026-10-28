@@ -42,7 +42,8 @@ class DailyTaskSchedulerTest {
       scheduler.tick();
       verify(schedules).abandonDispatch(second);
       verify(checks, org.mockito.Mockito.never()).passes(second);
-      org.mockito.Mockito.verifyNoInteractions(workflowRuns);
+      verify(workflowRuns).deferScheduledForResources(first.taskId(), first.token());
+      org.mockito.Mockito.verifyNoMoreInteractions(workflowRuns);
     } finally {
       release.countDown();
       scheduler.close();

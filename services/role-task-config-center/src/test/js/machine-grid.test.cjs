@@ -9,14 +9,14 @@ function fixture(){
   vm.runInContext(fs.readFileSync('src/main/resources/static/machines.js','utf8'),c);
   const run=s=>vm.runInContext(s,c);
   run(`function groupMatches(a){return !groupState.selected||a.groupId===groupState.selected}`);
-  const machine={agentId:'one',ip:'192.0.2.1',port:4500,remark:'构建机',enabled:true,groupId:'a',capabilities:['supervisor','executor'],connectionStatus:'online',testStatus:'failed'};
+  const machine={agentId:'one',ip:'192.0.2.1',port:4500,remark:'构建机',enabled:true,groupId:'a',capabilities:['supervisor'],connectionStatus:'online',testStatus:'failed'};
   c.machine=machine;c.state.agents=[machine];
   return {c,run,nodes,machine};
 }
-test('dual-role tiles share status and total counts unique machines',()=>{
+test('single-role machine appears only in its role column',()=>{
   const h=fixture();h.run('machineView.loaded=true;updateMachineBoard()');
   const html=h.nodes.get('#machineGrid').innerHTML;
-  assert.equal((html.match(/data-id="one"/g)||[]).length,2);
+  assert.equal((html.match(/data-id="one"/g)||[]).length,1);
   assert.match(h.nodes.get('#machineTotal').textContent,/1 台机器/);assert.match(html,/machine-tile online/);assert.doesNotMatch(html,/检测 Skill 目录/);
 });
 test('search, disabled precedence and ordering remain stable across state transitions',()=>{
@@ -60,4 +60,13 @@ test('refresh preserves selected details and remark draft when status filter hid
 test('removed machine closes details',()=>{
   const h=fixture();h.run(`machineView.selected='missing';updateMachineDetails()`);
   assert.equal(h.run('machineView.selected'),null);assert.equal(h.nodes.get('#machineDetails').closed,true);
+});
+test('global supervisors remain visible and their details work under an executor group filter',()=>{
+  const h=fixture(),info={innerHTML:''},actions={innerHTML:''},input={value:''};
+  h.nodes.set('#machineDetails',{querySelector:s=>s==='[data-machine-detail-info]'?info:s==='.machine-card-actions'?actions:input});
+  h.c.state.agents=[{...h.machine,groupId:null,capabilities:['supervisor']}];
+  h.run("machineView.loaded=true;machineView.selected='one';updateMachineBoard()");
+  assert.match(h.nodes.get('#machineGrid').innerHTML,/data-id="one"/);
+  assert.equal(h.run('machineView.selected'),'one');
+  assert.doesNotMatch(info.innerHTML,/全局|<dt>分组<\/dt>/);
 });

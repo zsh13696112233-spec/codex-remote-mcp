@@ -357,8 +357,10 @@ class Job:
     business_result: dict[str, Any] | None = field(default=None, repr=False)
     capture_document: bool = field(default=False, repr=False)
     result_protocol_version: int | None = field(default=None, repr=False)
+    jira_enabled: bool = field(default=False, repr=False)
     input_images: list[dict[str, Any]] = field(default_factory=list, repr=False)
     input_image_paths: list[str] = field(default_factory=list, repr=False)
+    execution_stopped: bool = field(default=True, repr=False)
 
     def record_event(self, method: str, received_at: str) -> None:
         self.events_seen += 1
@@ -412,6 +414,7 @@ class Job:
             "last_event_at": self.last_event_at,
             "ws_close_code": self.ws_close_code,
             "ws_close_reason": self.ws_close_reason,
+            "execution_stopped": self.execution_stopped,
             "error_kind": self.error_kind,
             "error_stage": self.error_stage,
             "error_details": self.error_details,
@@ -1160,6 +1163,22 @@ class Orchestrator:
         finally:
             await client.close()
 
+    async def confirm_execution_stopped(self, *, agent_id: str, thread_id: str, turn_id: str) -> bool:
+        """只对明确持久化的原轮次核实；中止请求成功不代表已经停止。"""
+        agent = self.get_agent(agent_id)
+        async with self._client_factory(agent.url, token=self._resolve_agent_token(agent)) as client:
+            result = await client.request("thread/read", {"threadId": thread_id, "includeTurns": True})
+            thread = result.get("thread") or {}
+            if thread.get("id") != thread_id:
+                return False
+            turn = self._find_turn(thread.get("turns"), turn_id)
+            if not turn:
+                return False
+            if turn.get("status") in {"completed", "failed", "interrupted"}:
+                return True
+            await client.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout_sec=INTERRUPT_TIMEOUT_SEC)
+            return False  # 下一次读取确认终态后才能释放。
+
     async def _run_job(self, job: Job, agent: AgentConfig) -> None:
         stage = "queued"
         try:
@@ -1253,6 +1272,7 @@ class Orchestrator:
                             turn_params["approvalsReviewer"] = job.approvals_reviewer
                         if job.output_schema is not None:
                             turn_params["outputSchema"] = job.output_schema
+                        job.execution_stopped = False
                         turn_result = await self._request_with_deadline(
                             client,
                             "turn/start",
@@ -1264,9 +1284,9 @@ class Orchestrator:
                         stage = "turn/completed"
                         await self._consume_turn(job, client, deadline)
                         from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4, parse as parse_outcome
-                        if job.status == "completed" and job.output_schema in (OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4):
+                        if job.status == "completed" and (job.jira_enabled or job.output_schema in (OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4)):
                             try:
-                                value = parse_outcome(job.response or "", job.result_protocol_version or (1 if job.output_schema == SCHEMA_V1 else 4 if job.output_schema == SCHEMA_V4 else 3 if job.output_schema == SCHEMA_V3 else 2))
+                                value = parse_outcome(job.response or "", job.result_protocol_version or (1 if job.output_schema == SCHEMA_V1 else 4 if job.output_schema == SCHEMA_V4 else 3 if job.output_schema == SCHEMA_V3 else 2), jira=job.jira_enabled)
                                 job.business_result = value
                                 job.response = value["summary"]
                             except (ValueError, KeyError, TypeError) as error:
@@ -1280,10 +1300,10 @@ class Orchestrator:
                                     else "步骤结果不是有效的 JSON 对象或字段类型不正确。"
                                 )}
                         from workflow_documents import SCHEMA as DOCUMENT_SCHEMA, collect as collect_documents, ERROR as DOCUMENT_ERROR
-                        if job.status == "completed" and (job.output_schema == SCHEMA_V3 or (job.output_schema == SCHEMA_V4 and job.capture_document)) and job.business_result is not None:
+                        if job.status == "completed" and (job.result_protocol_version == 3 or job.output_schema == SCHEMA_V3 or ((job.result_protocol_version in (4, 5) or job.output_schema == SCHEMA_V4) and job.capture_document)) and job.business_result is not None:
                             from workflow_documents import collect_many
-                            job.document_results = await collect_many(client, job.cwd, job.business_result["documents"], [agent.token_file], semi=job.output_schema == SCHEMA_V4)
-                        if job.status == "completed" and job.business_result is not None and job.capture_document and job.output_schema != SCHEMA_V4:
+                            job.document_results = await collect_many(client, job.cwd, job.business_result["documents"], [agent.token_file], semi=job.result_protocol_version in (4, 5) or job.output_schema == SCHEMA_V4)
+                        if job.status == "completed" and job.business_result is not None and job.capture_document and job.result_protocol_version not in (3, 4, 5) and job.output_schema != SCHEMA_V4:
                             try:
                                 job.document_result = await asyncio.wait_for(collect_documents(client, job.cwd, job.business_result.get("document"), [agent.token_file]), 30)
                             except asyncio.TimeoutError:
@@ -1675,6 +1695,7 @@ class Orchestrator:
         job.response = final_messages[-1] if final_messages else None
 
         turn_status = str(turn.get("status") or "unknown")
+        job.execution_stopped = turn_status in {"completed", "interrupted", "failed"}
         if turn_status == "completed":
             job.status = "completed"
         elif turn_status == "interrupted":
@@ -1751,7 +1772,7 @@ def _sync_workflow_job(workflow_id: str, node_id: str, job: Job) -> dict[str, An
     snapshot = job.snapshot()
     from workflow_documents import SCHEMA as DOCUMENT_SCHEMA
     from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4
-    if job.output_schema in (DOCUMENT_SCHEMA, OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4) and not job.completed.is_set() and job.status == "completed":
+    if (job.jira_enabled or job.output_schema in (DOCUMENT_SCHEMA, OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4)) and not job.completed.is_set() and job.status == "completed":
         snapshot["status"] = "running"
         snapshot["response"] = None
     current_node = store.get_node(workflow_id, node_id)
@@ -1845,6 +1866,13 @@ async def cancel(job_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+async def jira_claim_next(workflow_id: str) -> dict[str, Any]:
+    """监督机按冻结查询条件领取一个 Jira，并将同一账号下发给本轮执行机。重复调用复用原工单。"""
+    from jira_runtime import claim_next
+    return await claim_next(get_workflow_store(), orchestrator, workflow_id)
+
+
+@mcp.tool()
 async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
     """派发工作流节点；节点配置来自共享数据库，且依赖未完成时拒绝启动。"""
     store = get_workflow_store()
@@ -1923,7 +1951,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         if node.get("resultProtocolVersion") in (1, 2, 3, 4, 5):
             from workflow_outcomes import schema, instruction
             node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"), node["resultProtocolVersion"], defer_blocked=bool(node.get("waitPolicy")))
-            document_options["output_schema"] = schema(node["resultProtocolVersion"])
+            document_options["output_schema"] = schema(node["resultProtocolVersion"], jira=node.get("jiraEnabled", False))
         job = await orchestrator.dispatch(
             **document_options,
             agent_id=node["agentId"],
@@ -1940,6 +1968,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         )
         job.capture_document = bool(node.get("captureDocument"))
         job.result_protocol_version = node.get("resultProtocolVersion")
+        job.jira_enabled = node.get("jiraEnabled", False)
     except Exception as error:
         store.sync_node_job(
             workflow_id,
@@ -1948,6 +1977,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
                 "status": "failed",
                 "error": str(error),
                 "finished_at": utc_now(),
+                "execution_stopped": True,
             },
         )
         raise

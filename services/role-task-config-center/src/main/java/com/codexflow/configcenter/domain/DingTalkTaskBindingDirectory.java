@@ -75,6 +75,8 @@ public class DingTalkTaskBindingDirectory {
       String taskId, String workflowId, String clientId) {
     TaskDefinitionEntity task = requiredForUpdate(taskId);
     validateStartable(task, clientId);
+    // 批量运行的通知按 workflowId 绑定，不覆盖用户聊天的单项任务路由。
+    if (taskLaunches.isParallelRun(taskId, workflowId)) return view(task);
     if (!workflowId.equals(task.activeWorkflowId)) {
       throw new ConflictFailure("当前任务运行状态已变化，请稍后重试。");
     }

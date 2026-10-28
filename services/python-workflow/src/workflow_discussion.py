@@ -73,6 +73,10 @@ class DiscussionService:
                     "threadId": record["thread_id"], "includeTurns": True})
         turn = next((t for t in data.get("thread", {}).get("turns", [])
                      if t.get("id") == record["turn_id"]), {})
+        if turn.get("status") in {"completed", "failed", "interrupted"}:
+            await db(self.store.observe_resource_execution, record["workflow_id"], "discussion:" + record["message_id"],
+                     {"job_id": record.get("job_id"), "thread_id": record["thread_id"], "turn_id": record["turn_id"],
+                      "status": turn["status"], "execution_stopped": True})
         if turn.get("status") == "completed":
             replies = [i for i in turn.get("items", []) if i.get("type") == "agentMessage"]
             final = [i for i in replies if i.get("phase") == "final_answer"] or replies
@@ -168,6 +172,8 @@ class DiscussionService:
                             payload={"receivedAt": received_at, "messageId": message["messageId"],
                                      "stepNumber": target["stepNumber"], "message": event})
 
+                execution_key = "discussion:" + message["messageId"]
+                await db(self.store.prepare_resource_execution, workflow_id, execution_key, target["agentId"])
                 try:
                     job = await self.orchestrator.dispatch(
                         agent_id=target["agentId"], thread_id=target["threadId"], prompt=prompt,
@@ -177,14 +183,18 @@ class DiscussionService:
                         output_schema=output_schema, event_callback=record_event,
                         input_images=images)
                 except Exception:
+                    await db(self.store.observe_resource_execution, workflow_id, execution_key,
+                             {"status": "failed", "execution_stopped": True})
                     await db(self.store.update_discussion, workflow_id, message["messageId"], state="failed")
                     raise
                 self.gateway._discussion_jobs[workflow_id] = job
             try:
                 await db(self.store.update_discussion, workflow_id, message["messageId"], job_id=job.job_id)
+                await db(self.store.observe_resource_execution, workflow_id, execution_key, job.snapshot())
                 saved_turn = None
                 while not job.completed.is_set():
                     if job.turn_id and job.turn_id != saved_turn:
+                        await db(self.store.observe_resource_execution, workflow_id, execution_key, job.snapshot())
                         await db(self.store.update_discussion, workflow_id, message["messageId"],
                                  turn_id=job.turn_id, state="running")
                         saved_turn = job.turn_id
@@ -212,6 +222,7 @@ class DiscussionService:
                 # 保留起始或运行记录，后续只能核对原轮次，不能再次派发。
                 raise
             finally:
+                await db(self.store.observe_resource_execution, workflow_id, execution_key, job.snapshot())
                 self.gateway._discussion_jobs.pop(workflow_id, None)
         if raw is None:
             raise RuntimeError("执行者未完成讨论，交接总结未更新。")

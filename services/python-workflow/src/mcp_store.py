@@ -193,6 +193,9 @@ class McpStore:
             db.execute("BEGIN IMMEDIATE")
             candidates = db.execute("SELECT * FROM mcp_tasks WHERE state='queued' ORDER BY created_at,id").fetchall()
             for row in candidates:
+                from workflow_resources import claimed
+                if claimed(db, row["agent_id"]):
+                    continue
                 agent = row["agent_id"]
                 if db.execute("SELECT 1 FROM mcp_tasks WHERE agent_id=? AND occupied=1 AND id<>?", (agent, row["id"])).fetchone():
                     continue

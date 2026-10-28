@@ -58,7 +58,12 @@ class WorkflowStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "已结束"):
             self.store.attach_node_job("serial-demo", "b", {"job_id": "late", "status": "running"})
         self.store.finish_workflow("serial-demo", supervisor_status="failed", response=None, error="late")
-        self.assertEqual(self.store.get_workflow("serial-demo"), snapshot)
+        after = self.store.get_workflow("serial-demo")
+        self.assertEqual(after["resources"]["state"], "released")
+        self.assertGreater(after["stateVersion"], snapshot["stateVersion"])
+        # 已确认停止的迟到结果只能释放机器，不能改写已冻结的业务终态。
+        for key in snapshot.keys() - {"resources", "stateVersion"}:
+            self.assertEqual(after[key], snapshot[key], key)
 
     def test_effort_survives_storage_and_old_schema_upgrade(self):
         # Simulate a database created before the nullable column existed.
@@ -180,6 +185,7 @@ class WorkflowStoreTests(unittest.TestCase):
                 self.store.accept_chat_message(mode, message, "退回第一步")
                 self.assertIsNone(self.store.discussion_target(mode, message))
                 self.assertNotIn("retryPolicy", self.store.get_workflow(mode))
+                self.store.finish_workflow(mode, supervisor_status="failed", response=None, error="本用例结束")
 
     def test_legacy_message_retry_cannot_capture_current_wait(self) -> None:
         gate = self.waiting_gate()
@@ -388,6 +394,8 @@ class WorkflowStoreTests(unittest.TestCase):
         parallel = serial_workflow()
         parallel["workflowId"] = "parallel"
         parallel["supervisorAgentId"] = "supervisor-b"
+        for node in parallel["nodes"]:
+            node["agentId"] = "executor-b"
         self.store.create_workflow(first)
         self.store.create_workflow(second)
         self.store.create_workflow(parallel)
@@ -702,6 +710,8 @@ class WorkflowStoreTests(unittest.TestCase):
             self.store.prepare_node_dispatch("serial-demo", "b")["alreadyDispatched"]
         )
 
+        self.store.sync_node_job("serial-demo", "b", {"status": "failed", "execution_stopped": True})
+        self.store.finish_workflow("serial-demo", supervisor_status="failed", response=None, error="本用例结束")
         failed = serial_workflow()
         failed["workflowId"] = "failed-demo"
         failed["advanceMode"] = "semi_automatic"

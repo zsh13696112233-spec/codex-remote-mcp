@@ -36,5 +36,10 @@ py-modules = [
   "workflow_runtime_client",
   "workflow_sidecar",
   "workflow_store",
+  "workflow_resources",
+  "workflow_allocation",
+  "workflow_jira",
+  "jira_runtime",
+  "jira_routes",
   "workflow_input_images",
 ]

@@ -35,6 +35,79 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
   @Autowired Validator validator;
   @Autowired ObjectMapper json;
 
+  @Test
+  @Transactional
+  void groupSopFreezesRequirementsWithoutChoosingMachinesOrDirectories() {
+    String role = jdbc.queryForObject("SELECT id FROM codex_sop_roles LIMIT 1", String.class);
+    var step =
+        new SopStepRequest(
+            "步骤",
+            role,
+            "执行",
+            null,
+            null,
+            null,
+            null,
+            false,
+            "read_only",
+            null,
+            60,
+            Set.of(),
+            Set.of());
+    var request =
+        new SopSaveRequest(
+            "分组流程",
+            null,
+            null,
+            7200,
+            "gpt-6.1-sol",
+            true,
+            "automatic",
+            null,
+            List.of(step, step),
+            GROUP,
+            false,
+            "high",
+            "group");
+    assertThat(validator.validate(request)).isEmpty();
+    var sop = service.createSop(request);
+    var task =
+        service.createTask(
+            grouped(
+                new TaskDefinitionSaveRequest("分组任务", "执行", sop.path("id").asText(), null, true)));
+    var run = runStore.prepareLatest(task.path("id").asText());
+    assertThat(sop.path("dispatchMode").asText()).isEqualTo("group");
+    assertThat(run.payload().path("dispatchMode").asText()).isEqualTo("group");
+    assertThat(run.payload().has("supervisorAgentId")).isFalse();
+    var nodes = run.payload().path("nodes");
+    for (var node : nodes) {
+      assertThat(node.has("executor")).isFalse();
+      assertThat(node.has("cwd")).isFalse();
+      assertThat(node.path("reasoningEffort").asText()).isEqualTo("high");
+    }
+    assertThat(nodes.get(1).path("dependsOn").get(0).asText())
+        .isEqualTo(nodes.get(0).path("id").asText());
+    var retry = runStore.prepareRetry(run.workflowId());
+    assertThat(retry.payload().path("dispatchMode").asText()).isEqualTo("group");
+    assertThat(retry.payload().path("nodes")).isEqualTo(nodes);
+    var fixed =
+        new SopSaveRequest(
+            "混合配置",
+            null,
+            "supervisor",
+            7200,
+            "gpt-6.1-sol",
+            true,
+            "automatic",
+            null,
+            List.of(step),
+            GROUP,
+            false,
+            null,
+            "group");
+    assertThatThrownBy(() -> service.createSop(fixed)).hasMessageContaining("清除固定机器");
+  }
+
   @Autowired
   @Qualifier("requestMappingHandlerMapping")
   RequestMappingHandlerMapping mappings;
@@ -178,7 +251,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
         .contains("styles.css?v=20261016-run-history")
         .contains("sync-wait.css?v=20260905")
         .contains("id=\"syncWait\"")
-        .contains("app.js?v=20261016-run-history")
+        .contains("app.js?v=20261027-group-dispatch")
         .contains("任务目标")
         .contains("发送给所有步骤")
         .contains("type=\"hidden\" name=\"additionalNotes\"");
@@ -208,7 +281,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
   }
 
   @Test
-  void requestValidationRejectsInvalidSupervisorAgentId() {
+  void requestValidationAllowsUnassignedSupervisorButRejectsOversizedId() {
     SopSaveRequest blank =
         grouped(new SopSaveRequest("测试", null, " ", null, null, true, "automatic", List.of()));
     SopSaveRequest tooLong =
@@ -218,7 +291,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
 
     assertThat(validator.validate(blank))
         .extracting(violation -> violation.getPropertyPath().toString())
-        .contains("supervisorAgentId");
+        .doesNotContain("supervisorAgentId");
     assertThat(validator.validate(tooLong))
         .extracting(violation -> violation.getPropertyPath().toString())
         .contains("supervisorAgentId");

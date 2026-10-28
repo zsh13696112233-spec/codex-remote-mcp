@@ -65,6 +65,7 @@ public class WorkflowRunStore {
     ObjectNode payload = (ObjectNode) json.read(source.submittedJson);
     String workflowId = UUID.randomUUID().toString();
     payload.put("workflowId", workflowId);
+    if (payload.path("jira").isObject()) payload.put("jiraRetryOf", sourceWorkflowId);
     if (!payload.has("resultProtocolVersion")) payload.put("resultProtocolVersion", 1);
     payload.put("taskDefinitionId", source.taskDefinition.id);
     ObjectNode snapshot = (ObjectNode) json.read(source.snapshotJson);
@@ -100,6 +101,20 @@ public class WorkflowRunStore {
   @Transactional(readOnly = true)
   public boolean notifyDingTalk(String taskId) {
     return findTask(taskId, false).notifyDingTalk;
+  }
+
+  /** 只读调度预览；每一条实际运行仍另行冻结完整快照。 */
+  @Transactional(readOnly = true)
+  public ObjectNode jiraSchedulingSpec(String taskId) {
+    TaskDefinitionEntity task = findTask(taskId, false);
+    return task.sop.jiraJql == null ? null : workflowPayload(task, UUID.randomUUID().toString());
+  }
+
+  /** 同批新运行自带任务归属，不互相等待升级登记；真正缺少归属的旧快照仍须先登记。 */
+  @Transactional(readOnly = true)
+  public boolean hasPendingLegacyRuntimeHistory(String taskId, String workflowId) {
+    return runs.pendingScopePayloads(taskId, workflowId).stream()
+        .anyMatch(payload -> !json.read(payload).hasNonNull("taskDefinitionId"));
   }
 
   /** 返回运行记录最近一次已知状态。 */
@@ -329,9 +344,14 @@ public class WorkflowRunStore {
     root.put("workflowId", workflowId);
     root.put("resultProtocolVersion", "automatic".equals(task.sop.advanceMode) ? 3 : 5);
     root.put("taskDefinitionId", task.id);
+    if (task.sop.jiraJql != null) {
+      root.putObject("jira").put("jql", task.sop.jiraJql).put("account", task.sop.jiraAccount);
+    }
     root.put("groupId", task.groupId);
     root.put("name", task.name);
-    root.put("supervisorAgentId", task.sop.supervisorAgentId);
+    boolean grouped = "group".equals(task.sop.dispatchMode);
+    if (grouped) root.put("dispatchMode", "group");
+    else root.put("supervisorAgentId", task.sop.supervisorAgentId);
     root.put("failurePolicy", "stop");
     root.put("supervisorTimeoutSec", task.sop.supervisorTimeoutSec);
     root.put("advanceMode", task.sop.advanceMode);
@@ -346,14 +366,16 @@ public class WorkflowRunStore {
       node.put("id", step.id);
       node.put("displayName", step.displayName);
       node.put("roleName", step.role.name);
-      var executor = node.putObject("executor");
-      executor.put("type", step.executorType);
-      executor.put("agentId", step.agentId);
+      if (!grouped) {
+        var executor = node.putObject("executor");
+        executor.put("type", step.executorType);
+        executor.put("agentId", step.agentId);
+      }
       node.put("prompt", basePrompt(task, step, stepNumber));
       var dependencies = node.putArray("dependsOn");
       if (previous != null) dependencies.add(previous);
       previous = step.id;
-      if (step.workingDirectory != null) node.put("cwd", step.workingDirectory);
+      if (!grouped && step.workingDirectory != null) node.put("cwd", step.workingDirectory);
       node.put("write", step.writeEnabled);
       node.put("permissionProfile", step.permissionProfile);
       node.put(

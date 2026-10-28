@@ -175,10 +175,9 @@ class SidecarStoreTests(unittest.TestCase):
             sidecar_instance_id="instance-b",
             lease_timeout_sec=20,
         )
-        self.assertIsNotNone(next_claim)
-        self.assertEqual(
-            self.store.get_workflow("replacement-next")["status"], "running"
-        )
+        self.assertIsNone(next_claim)
+        self.assertEqual(self.store.get_workflow("replacement-next")["status"], "queued")
+        self.assertEqual(self.store.machine_claims()["supervisor-a"]["state"], "review")
 
     def test_expiry_fails_active_workflow_and_releases_slot(self) -> None:
         self._online_and_claim("expiry-demo")

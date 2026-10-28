@@ -314,6 +314,7 @@ class DiscussionTests(unittest.IsolatedAsyncioTestCase):
         completed.set()
         job = SimpleNamespace(job_id="failed-job", turn_id="known-turn", completed=completed,
                               status="failed", error_stage="turn/completed", response=None)
+        job.snapshot = lambda: {"job_id": job.job_id, "turn_id": job.turn_id, "status": job.status, "execution_stopped": False}
         client = AsyncMock()
         client.__aenter__.return_value = client
         client.request.return_value = {"thread": {"turns": [{

@@ -7,6 +7,7 @@ import com.codexflow.configcenter.dto.TaskDefinitionSaveRequest;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
@@ -20,6 +21,11 @@ public class ConfigService {
   private static final Set<String> SUPPORTED_MODELS = Set.of("gpt-6-astra", "gpt-6.1-sol");
   private static final Set<String> EXECUTOR_TYPES = Set.of("local", "remote");
   private static final Set<String> ADVANCE_MODES = Set.of("automatic", "semi_automatic");
+  private static final Pattern JIRA_OPEN_QUERY =
+      Pattern.compile(
+          "project\\s*=\\s*(\"(?:\\\\[\"\\\\]|[^\"\\\\])+\"|'(?:\\\\['\\\\]|[^'\\\\])+'|[\\p{L}\\p{N}_-]+)"
+              + "\\s+AND\\s+status\\s*=\\s*(?:\"Open\"|'Open'|Open)",
+          Pattern.CASE_INSENSITIVE);
   private static final Set<String> PERMISSION_PROFILES =
       Set.of("read_only", "workspace_write", "auto_review", "full_access");
 
@@ -299,13 +305,50 @@ public class ConfigService {
   /** 将 SOP 请求字段和完整步骤列表应用到聚合根。 */
   private void applySop(SopEntity sop, SopSaveRequest body) {
     assignSop(sop, body.groupId(), false);
-    groups.validateMachines(
-        body.groupId(),
-        body.supervisorAgentId(),
-        body.steps().stream().map(SopStepRequest::agentId).toList());
+    String mode = normalizeNullable(body.dispatchMode());
+    if (mode == null)
+      mode = normalizeNullable(body.supervisorAgentId()) == null ? "group" : "fixed";
+    if (!java.util.Set.of("fixed", "group").contains(mode))
+      throw new IllegalArgumentException("调度方式无效。");
+    sop.dispatchMode = mode;
+    if (body.jira() != null && !"group".equals(mode))
+      throw new IllegalArgumentException("监督机统一领取 Jira 仅支持按组调度。");
+    sop.jiraJql = body.jira() == null ? null : normalizeNullable(body.jira().jql());
+    sop.jiraAccount =
+        body.jira() == null || body.jira().account() == null ? "" : body.jira().account().trim();
+    if (body.jira() != null
+        && (sop.jiraJql == null
+            || sop.jiraJql.chars().anyMatch(c -> c < 32)
+            || sop.jiraAccount.chars().anyMatch(c -> c < 32)))
+      throw new IllegalArgumentException("请填写有效的 Jira 查询条件和账号别名。");
+    if (sop.jiraJql != null) {
+      var query = JIRA_OPEN_QUERY.matcher(sop.jiraJql);
+      if (!query.matches()) throw new IllegalArgumentException("Jira 领取条件只能指定项目，状态固定为 Open。");
+      String project = query.group(1);
+      if ((project.startsWith("\"") || project.startsWith("'"))
+          && project.substring(1, project.length() - 1).isBlank())
+        throw new IllegalArgumentException("请填写 Jira 项目名称。");
+      sop.jiraJql = "project = " + project + " AND status = \"Open\"";
+    }
+    if ("fixed".equals(mode)) {
+      if (normalizeNullable(body.supervisorAgentId()) == null
+          || body.steps().stream().anyMatch(step -> normalizeNullable(step.agentId()) == null))
+        throw new IllegalArgumentException("固定机器配置必须指定监督机和各步骤执行机。");
+      groups.validateMachines(
+          body.groupId(),
+          body.supervisorAgentId(),
+          body.steps().stream().map(SopStepRequest::agentId).toList());
+    } else if (normalizeNullable(body.supervisorAgentId()) != null
+        || body.steps().stream()
+            .anyMatch(
+                step ->
+                    normalizeNullable(step.agentId()) != null
+                        || normalizeNullable(step.workingDirectory()) != null)) {
+      throw new IllegalArgumentException("按组调度由平台分配机器和工作目录，请清除固定机器设置。");
+    }
     sop.name = body.name().trim();
     sop.description = normalizeNullable(body.description());
-    sop.supervisorAgentId = body.supervisorAgentId().trim();
+    sop.supervisorAgentId = "group".equals(mode) ? "" : body.supervisorAgentId().trim();
     sop.failurePolicy = "stop";
     sop.supervisorTimeoutSec =
         integerInRange(body.supervisorTimeoutSec(), "supervisorTimeoutSec", 7200, 10, 43200);
@@ -324,7 +367,7 @@ public class ConfigService {
     for (SopStepRequest step : body.steps()) {
       String effort = normalizeEffort(step.reasoningEffortOverride());
       if (effort == null) effort = sop.defaultStepReasoningEffort;
-      if (effort != null)
+      if (effort != null && "fixed".equals(mode))
         groups.validateEffort(
             step.agentId(),
             normalizeNullable(step.modelOverride()) == null
@@ -358,8 +401,9 @@ public class ConfigService {
     if (!EXECUTOR_TYPES.contains(step.executorType)) {
       throw new IllegalArgumentException("执行位置只能是 local 或 remote。");
     }
-    step.agentId = body.agentId().trim();
-    step.workingDirectory = normalizeNullable(body.workingDirectory());
+    step.agentId = "group".equals(sop.dispatchMode) ? "" : body.agentId().trim();
+    step.workingDirectory =
+        "group".equals(sop.dispatchMode) ? null : normalizeNullable(body.workingDirectory());
     step.permissionProfile = normalizeNullable(body.permissionProfile());
     if (step.permissionProfile == null) {
       step.permissionProfile =
@@ -473,8 +517,9 @@ public class ConfigService {
       throw new ConflictFailure("SOP 已被有效任务引用，请先解除引用后再改组。");
     if (validateExisting) {
       for (SopStepEntity step : s.steps) GroupService.same(id, step.role.groupId);
-      groups.validateMachines(
-          id, s.supervisorAgentId, s.steps.stream().map(n -> n.agentId).toList());
+      if ("fixed".equals(s.dispatchMode))
+        groups.validateMachines(
+            id, s.supervisorAgentId, s.steps.stream().map(n -> n.agentId).toList());
     }
     s.groupId = id;
   }

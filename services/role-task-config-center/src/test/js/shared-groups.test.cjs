@@ -22,6 +22,76 @@ function fixture(search='') {
   return {run,nodes,context,navButtons};
 }
 
+function jiraFixture(jira=null){
+  const h=fixture('?groupId=a');
+  h.context.savedJira=jira;
+  h.run("setDraft({...blankSop(),id:'saved',dispatchMode:'group',name:'Jira 流程',jira:savedJira,steps:[{roleId:'ra',displayName:'步骤',timeoutSec:60}]})");
+  return h;
+}
+
+test('Jira project is the only query field and status stays fixed after reload',()=>{
+  const {run}=jiraFixture();
+  run("Object.assign(state.sop.draft,{jiraEnabled:true,jiraProject:' 产品研发 A ',jiraAccount:' bot '})");
+  assert.equal(run('validateSop()'),'');
+  assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = "Open"');
+  assert.equal(run('sopPayload().jira.account'),'bot');
+  const html=run('workflowInspectorHtml()');
+  assert.match(html,/data-sop-field="jiraProject"/);
+  assert.doesNotMatch(html,/jiraStatus|Jira 状态|Open/);
+  assert.doesNotMatch(html,/data-sop-field="jiraJql"/);
+  run("setDraft({...sopPayload(),id:'saved'})");
+  assert.equal(run('state.sop.draft.jiraProject'),'产品研发 A');
+  assert.equal(run('Object.hasOwn(state.sop.draft,"jiraStatus")'),false);
+  assert.equal(run('isSopDirty()'),false);
+  run("state.sop.draft.jiraStatus='Closed';state.sop.draft.jiraJql='project = OTHER AND status = Closed'");
+  assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = "Open"');
+});
+
+test('Jira names containing quotes and backslashes stay within quoted values',()=>{
+  const {run,context}=jiraFixture();
+  context.project='研发 "A"\\B';
+  context.issueStatus='Closed';
+  run('Object.assign(state.sop.draft,{jiraEnabled:true,jiraProject:project,jiraStatus:issueStatus})');
+  assert.equal(run('sopPayload().jira.jql'),'project = "研发 \\"A\\"\\\\B" AND status = "Open"');
+  run("setDraft({...sopPayload(),id:'saved'})");
+  assert.equal(run('state.sop.draft.jiraProject'),context.project);
+  assert.equal(run('Object.hasOwn(state.sop.draft,"jiraStatus")'),false);
+  assert.match(run('workflowInspectorHtml()'),/&quot;A&quot;/);
+});
+
+test('legacy simple Jira queries retain the project and save fixed Open',()=>{
+  const query="project = PROJ AND status = 'In Progress'";
+  const {run}=jiraFixture({jql:query,account:''});
+  assert.equal(run('state.sop.draft.jiraProject'),'PROJ');
+  assert.equal(run('sopPayload().jira.jql'),'project = "PROJ" AND status = "Open"');
+  assert.equal(run('isSopDirty()'),false);
+});
+
+test('complex legacy Jira queries require a project before replacement or can be disabled',()=>{
+  const query='project = PROJ AND status in (Open, "In Progress") AND assignee = currentUser() ORDER BY created ASC';
+  const {run}=jiraFixture({jql:query,account:'bot'});
+  assert.match(run('workflowInspectorHtml()'),/请填写项目名称后保存/);
+  run("state.sop.draft.name='新名称'");
+  assert.match(run('validateSop()'),/请填写 Jira 项目名称/);
+  run("state.sop.draft.jiraProject='NEW'");
+  assert.equal(run('validateSop()'),'');
+  assert.equal(run('sopPayload().jira.jql'),'project = "NEW" AND status = "Open"');
+  run('state.sop.draft.jiraEnabled=false');
+  assert.equal(run('sopPayload().jira'),null);
+});
+
+test('Jira project is required and rejects controls or oversized generated queries',()=>{
+  const {run,context}=jiraFixture();
+  run('state.sop.draft.jiraEnabled=true');
+  assert.match(run('validateSop()'),/请填写 Jira 项目名称/);
+  context.badStatus='Open\nOR status = Closed';
+  run('state.sop.draft.jiraProject=badStatus');
+  assert.match(run('validateSop()'),/控制字符/);
+  context.longName='"'.repeat(2000);
+  run('state.sop.draft.jiraProject=longName');
+  assert.match(run('validateSop()'),/过长/);
+});
+
 test('all, unassigned and concrete filters preserve their distinct meanings',()=>{
   const {run}=fixture('?groupId=a');
   assert.equal(run('state.roles.filter(groupMatches).map(x=>x.id).join()'),'ra');
@@ -43,7 +113,7 @@ test('SOP palette, machines and payload stay within the selected group',()=>{
   run(`state.sop.draft.steps[0].roleId='rb'`);
   assert.match(run('validateSop()'),/角色必须属于当前分组/);
   run(`state.sop.draft.steps[0].roleId='ra';state.sop.draft.groupId='b'`);
-  assert.match(run('validateSop()'),/当前分组的主监督/);
+  assert.match(run('validateSop()'),/角色必须属于当前分组/);
 });
 
 test('dirty SOP cancellation retains the draft and previous filter',async()=>{
@@ -307,34 +377,25 @@ test('rebuilding the SOP editor invalidates an older selection response',async()
   assert.equal(run('state.sop.draft.id'),'s1');
 });
 
-test('SOP machine remarks label both selectors while payloads retain IDs',()=>{
+test('SOP editor converts legacy machine choices into a group request',()=>{
   const {run,context}=fixture('?groupId=a');context.queueMicrotask=()=>{};
-  run(`state.agentsAvailable=true;state.agents[0].remark='<开发>';state.agents[0].ip='192.0.2.1';state.agents[0].port=4500;
-    state.agents.push({...state.agents[0],agentId:'duplicate',ip:'192.0.2.2'});
-    setDraft({...blankSop(),name:'草稿',supervisorAgentId:'ma',steps:[{roleId:'ra',displayName:'步骤',agentId:'ma'}]});`);
-  for(const scope of ['supervisor','executor']){
-    const html=run(`agentChoiceButtons('${scope}','${scope}')`);
-    assert.match(html,/&lt;开发&gt;（192.0.2.1:4500）/);assert.match(html,/192.0.2.2:4500/);
-    assert.match(html,/data-agent-id="ma"/);
-  }
-  assert.match(run('workflowInspectorHtml()'),/data-agent-display="supervisor" readonly title="[^"\n]*" value="&lt;开发&gt;（192.0.2.1:4500）"/);
-  assert.match(run('nodeInspectorHtml(state.sop.draft.steps[0])'),/data-agent-display="executor" readonly title="[^"\n]*" value="&lt;开发&gt;（192.0.2.1:4500）"/);
-  assert.equal(run('sopPayload().supervisorAgentId'),'ma');assert.equal(run('sopPayload().steps[0].agentId'),'ma');
-  run(`state.agents[0].remark=''`);assert.equal(run(`agentSelectionLabel('ma')`),'192.0.2.1:4500');
-  assert.equal(run(`agentDisplayLabel({ip:'::1',port:4500,remark:'本机'})`),'本机（[::1]:4500）');
-  assert.equal(run(`agentSelectionLabel('missing')`),'missing（不可用）');
+  run(`setDraft({id:'old',groupId:'a',name:'旧流程',dispatchMode:'fixed',supervisorAgentId:'ma',steps:[{roleId:'ra',displayName:'步骤',agentId:'ma',workingDirectory:'/old'}]});`);
+  assert.equal(run('sopPayload().dispatchMode'),'group');
+  assert.equal(run('sopPayload().supervisorAgentId'),undefined);
+  assert.equal(run('sopPayload().steps[0].agentId'),undefined);
+  assert.equal(run('sopPayload().steps[0].workingDirectory'),undefined);
+  assert.match(run('workflowInspectorHtml()'),/点击保存后/);
+  assert.doesNotMatch(run('workflowInspectorHtml()'),/data-agent-display/);
+  assert.doesNotMatch(run('nodeInspectorHtml(state.sop.draft.steps[0])'),/data-agent-display|data-node-field="workingDirectory"/);
 });
-test('machine refresh updates labels and menus without mutating an unsaved SOP',()=>{
-  const {run,context,nodes}=fixture('?groupId=a');
-  run(`state.agentsAvailable=true;setDraft({...blankSop(),name:'未保存草稿',supervisorAgentId:'ma',steps:[{roleId:'ra',agentId:'ma'}]});state.sop.selectedNodeId=state.sop.draft.steps[0]._clientId;`);
+test('machine refresh does not mutate an unsaved group SOP',()=>{
+  const {run,context}=fixture('?groupId=a');
+  run(`setDraft({...blankSop(),name:'未保存草稿',steps:[{roleId:'ra'}]});`);
   const before=run('JSON.stringify(state.sop.draft)');
-  const inputs=['supervisor','executor'].map(scope=>({dataset:{agentDisplay:scope},value:'旧名称',menu:{},closest(){return {querySelector:()=>this.menu}}}));
-  context.document.querySelectorAll=selector=>selector==='[data-agent-display]'?inputs:[];
-  run(`state.agents[0].remark='新备注';state.agents[0].ip='192.0.2.1';state.agents[0].port=4500;updateAgentRuntimeUi()`);
-  for(const input of inputs){assert.equal(input.value,'新备注（192.0.2.1:4500）');assert.match(input.menu.innerHTML,/新备注/)}
+  context.document.querySelectorAll=()=>[];
+  run(`state.agents[0].remark='新备注';updateAgentRuntimeUi()`);
   assert.equal(run('JSON.stringify(state.sop.draft)'),before);
 });
-
 
 test('deleted group selection returns to all groups after reload',async()=>{
   const {run,context}=fixture('?groupId=a&runPage=2');

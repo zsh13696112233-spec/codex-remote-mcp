@@ -66,6 +66,8 @@ class DocumentStoreTests(unittest.TestCase):
         self.assertTrue(self.store.document_enabled('serial-demo', 'a'))
         self.assertTrue(self.store.prepare_node_dispatch('serial-demo', 'a')['captureDocument'])
         self.assertFalse(self.store.document_enabled('serial-demo', 'b'))
+        self.store.sync_node_job('serial-demo', 'a', {'status': 'failed', 'execution_stopped': True})
+        self.store.finish_workflow('serial-demo', supervisor_status='failed', response=None, error='本用例结束')
         for mode, count in [('automatic', 3), ('semi_automatic', 1)]:
             spec = serial_workflow()
             spec['workflowId'] = mode + str(count)
@@ -75,6 +77,8 @@ class DocumentStoreTests(unittest.TestCase):
             self.store.create_workflow(spec)
             self.assertFalse(self.store.document_enabled(spec['workflowId'], 'a'))
             self.assertFalse(self.store.prepare_node_dispatch(spec['workflowId'], 'a')['captureDocument'])
+            self.store.sync_node_job(spec['workflowId'], 'a', {'status': 'failed', 'execution_stopped': True})
+            self.store.finish_workflow(spec['workflowId'], supervisor_status='failed', response=None, error='本用例结束')
             with self.store._connect() as db, self.assertRaises(ValueError):
                 save(db, spec['workflowId'], 'a', 'bad', self.item, utc_now())
         with self.store._connect() as db, self.assertRaises(ValueError):

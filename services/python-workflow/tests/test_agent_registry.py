@@ -33,7 +33,105 @@ class RegistryTests(unittest.TestCase):
 
     def machine(self, ip="127.0.0.1", capabilities=None, group=None):
         return self.registry.save_agent({"ip": ip, "port": 4500, "groupId": group or self.group,
-                                         "capabilities": capabilities or ["supervisor", "executor"]})
+                                         "capabilities": capabilities or ["supervisor"]})
+
+    def test_single_role_and_deleted_endpoint_reuse(self):
+        for roles in (["supervisor", "executor"], ["executor", "executor"], []):
+            with self.assertRaisesRegex(ValueError, "一种职责"):
+                self.registry.save_agent({"ip": "127.0.0.1", "port": 4500, "capabilities": roles})
+        old = self.machine()
+        self.registry.record_test(old["agentId"], True)
+        with self.assertRaisesRegex(ValueError, "已登记|有效机器"):
+            self.machine()
+        self.registry.delete_agent(old["agentId"])
+        new = self.machine()
+        self.assertNotEqual(old["agentId"], new["agentId"])
+        self.assertEqual(new["testStatus"], "untested")
+        other = self.registry.save_agent({"ip": new["ip"], "port": 4501,
+            "groupId": self.group, "capabilities": ["executor"]})
+        self.assertNotEqual(new["agentId"], other["agentId"])
+        AgentRegistry(self.gateway.store)
+        self.assertEqual(len(self.registry.rows()), 2)
+
+    def test_endpoint_index_upgrade_preserves_machine_references(self):
+        import sqlite3
+        machine = self.machine()
+        key = machine["agentId"]
+        with self.gateway.store._connect() as db:
+            db.execute("DROP INDEX registered_agents_active_endpoint")
+            db.execute("CREATE UNIQUE INDEX legacy_endpoint ON registered_agents(ip,port)")
+        restored = AgentRegistry(self.gateway.store)
+        self.assertEqual(restored.rows()[key]["ip"], machine["ip"])
+        self.assertIsNotNone(restored.skill_settings(key))
+        restored.delete_agent(key)
+        replacement = self.machine()
+        with self.gateway.store._connect() as db:
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("UPDATE registered_agents SET deleted_at=NULL WHERE id=?", (key,))
+        self.assertNotEqual(replacement["agentId"], key)
+
+    def test_deleted_allocation_keeps_original_machine_identity(self):
+        from workflow_allocation import snapshot
+        supervisor = self.machine()
+        executor = self.machine("127.0.0.2", ["executor"])
+        self.gateway.store.create_workflow({"workflowId": "allocation-history",
+            "supervisorAgentId": supervisor["agentId"],
+            "nodes": [{"id": "one", "prompt": "测试", "agentId": executor["agentId"]}]})
+        with self.gateway.store._connect() as db:
+            db.execute("UPDATE workflows SET status='completed' WHERE workflow_id='allocation-history'")
+            db.execute("INSERT INTO workflow_allocations(workflow_id,group_id,supervisor_id,executor_id,cwd) VALUES(?,?,?,?,?)",
+                ("allocation-history", self.group, supervisor["agentId"], executor["agentId"], str(self.root)))
+        self.registry.delete_agent(executor["agentId"])
+        replacement = self.machine("127.0.0.2", ["executor"])
+        with self.gateway.store._connect() as db:
+            allocation = snapshot(db, "allocation-history")
+        self.assertTrue(allocation["executorDeleted"])
+        self.assertFalse(allocation["supervisorDeleted"])
+        self.assertEqual(allocation["executorAgentId"], executor["agentId"])
+        self.assertNotEqual(allocation["executorAgentId"], replacement["agentId"])
+
+    def test_supervisor_can_be_global_and_executor_requires_group(self):
+        body = {"ip": "127.0.0.8", "port": 4500, "capabilities": ["supervisor"]}
+        supervisor = self.registry.save_agent(body)
+        self.assertIsNone(supervisor["groupId"])
+        with self.assertRaisesRegex(ValueError, "分组"):
+            self.registry.save_agent({**body, "ip": "127.0.0.9", "capabilities": ["executor"]})
+
+    def test_working_directory_is_machine_configuration_and_cannot_change_while_occupied(self):
+        machine = self.machine()
+        key = machine["agentId"]
+        for directory in ("relative", "", "C:/bad\npath", "x" * 1001):
+            with self.assertRaisesRegex(ValueError, "工作目录"):
+                self.registry.save_agent({**machine, "workingDirectory": directory}, key)
+        machine = self.registry.save_agent({**machine, "workingDirectory": "C:/work"}, key)
+        self.assertEqual(machine["defaultCwd"], "C:/work")
+        self.registry.record_test(key, True)
+        self.gateway.store.create_workflow({"workflowId": "occupied", "supervisorAgentId": key,
+            "nodes": [{"id": "step", "agentId": key, "prompt": "工作"}]})
+        self.gateway.store.claim_next_workflow(key)
+        with self.assertRaisesRegex(ValueError, "占用"):
+            self.registry.save_agent({**machine, "workingDirectory": "C:/changed"}, key)
+        self.assertEqual(self.registry.save_remark({"remark": "仍可写备注"}, key)["remark"], "仍可写备注")
+
+    def test_upgrade_to_nullable_group_preserves_machine_foreign_keys(self):
+        legacy = WorkflowStore(self.root / "legacy.db")
+        with legacy._connect() as db:
+            db.execute("CREATE TABLE agent_groups(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE)")
+            db.execute("""CREATE TABLE registered_agents(id TEXT PRIMARY KEY,group_id TEXT NOT NULL REFERENCES agent_groups(id),
+                ip TEXT NOT NULL,port INTEGER NOT NULL,config TEXT NOT NULL,test_status TEXT NOT NULL DEFAULT 'untested',tested_at TEXT,
+                UNIQUE(ip,port))""")
+            db.execute("INSERT INTO agent_groups VALUES('old','旧组')")
+            db.execute("INSERT INTO registered_agents VALUES('old','old','127.0.0.1',4500,?,'passed',NULL)",
+                       (json.dumps({"url": "ws://127.0.0.1:4500", "cwd": "/work", "capabilities": ["supervisor"]}),))
+            db.execute("CREATE TABLE existing_child(agent_id TEXT REFERENCES registered_agents(id))")
+            db.execute("INSERT INTO existing_child VALUES('old')")
+        upgraded = AgentRegistry(legacy)
+        self.assertEqual(upgraded.rows()["old"]["test_status"], "passed")
+        with legacy._connect() as db:
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+            db.execute("UPDATE registered_agents SET group_id=NULL WHERE id='old'")
+            self.assertEqual(db.execute("SELECT agent_id FROM existing_child").fetchone()[0], "old")
 
     def test_remark_roundtrip_preserves_execution_and_test_state(self):
         body = {"ip": "127.0.0.1", "port": 4500, "groupId": self.group,
@@ -70,14 +168,14 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(self.registry.save_agent(body, key)["remark"], saved["remark"])
         self.assertEqual(AgentRegistry(self.gateway.store).rows()[key]["remark"], saved["remark"])
 
-    def test_remark_edit_ignores_capability_order_and_keeps_machine_identity(self):
-        machine = self.machine(capabilities=["executor", "supervisor"])
+    def test_remark_edit_keeps_machine_identity(self):
+        machine = self.machine(capabilities=["executor"])
         key = machine["agentId"]
         self.registry.record_test(key, True)
         before = self.registry.rows()[key]
         self.config_values["machine_defaults"].update(allow_write=True, token_env="CHANGED_REFERENCE")
-        updated = self.registry.save_agent({**machine, "capabilities": ["supervisor", "executor"],
-                                            "remark": "双角色机器"}, key)
+        updated = self.registry.save_agent({**machine, "capabilities": ["executor"],
+                                            "remark": "执行机"}, key)
         self.assertEqual(updated["agentId"], key)
         for field in ("config", "tested_at", "test_status"):
             self.assertEqual(self.registry.rows()[key][field], before[field])
@@ -130,6 +228,10 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(self.client.post("/agents/" + key + "/test", json={}).status_code, 400)
         with self.assertRaisesRegex(ValueError, "已删除"):
             self.gateway.store.create_workflow({**spec, "workflowId": "deleted-race"})
+        replacement = self.machine()
+        self.assertNotEqual(replacement["agentId"], key)
+        self.assertEqual(self.gateway.store.get_spec("deleted-history")["supervisorAgentId"], key)
+        self.assertEqual(self.gateway.store.get_workflow("deleted-history")["status"], "completed")
         self.assertEqual(self.client.delete("/agents/missing").status_code, 400)
 
     def test_business_delete_blocks_pending_installations(self):
@@ -264,12 +366,12 @@ class RegistryTests(unittest.TestCase):
         machine = self.machine()
         key = machine["agentId"]
         other = self.registry.save_group({"name": "另一业务组"})["id"]
-        self.registry.validate(key, [key], group_id=self.group)
+        self.registry.validate(key, [], group_id=self.group)
         # Legacy independent callers remain compatible without groupId.
-        self.registry.validate(key, [key])
+        self.registry.validate(key, [])
         for group in (other, "bad", "", 123):
             with self.subTest(group=group), self.assertRaises(ValueError):
-                self.registry.validate(key, [key], group_id=group)
+                self.registry.validate(key, [], group_id=group)
         response = self.client.post("/agents/validate", json={
             "supervisorId": key, "executorIds": [key], "groupId": other})
         self.assertEqual(response.status_code, 400)
@@ -298,7 +400,7 @@ class RegistryTests(unittest.TestCase):
         self.registry.save_agent(body, key)
         self.assertEqual(self.registry.rows()[key]["test_status"], "passed")
         with self.assertRaisesRegex(ValueError, "启用"):
-            self.registry.validate(key, [key], require_test=True)
+            self.registry.validate(key, [], require_test=True)
         self.registry.save_agent({**body, "port": 4501}, key)
         self.assertEqual(self.registry.rows()[key]["test_status"], "untested")
 
@@ -357,7 +459,7 @@ class RegistryTests(unittest.TestCase):
             self.registry.validate(supervisor["agentId"], [executor["agentId"]])
         with self.assertRaisesRegex(ValueError, "能力"):
             self.registry.validate(executor["agentId"], [])
-        self.registry.validate(supervisor["agentId"], [supervisor["agentId"]])
+        self.registry.validate(supervisor["agentId"], [])
         with self.assertRaisesRegex(ValueError, "检测"):
             self.registry.validate(supervisor["agentId"], [], require_test=True)
 
@@ -533,7 +635,7 @@ class RegistryTests(unittest.TestCase):
     def test_executor_can_become_supervisor_and_ipv6_is_bracketed(self):
         worker = self.machine("::1", ["executor"])
         self.assertEqual(self.registry.configs()[worker["agentId"]].url, "ws://[::1]:4500")
-        self.registry.save_agent({**worker, "capabilities": ["supervisor", "executor"]}, worker["agentId"])
+        self.registry.save_agent({**worker, "capabilities": ["supervisor"]}, worker["agentId"])
         self.assertEqual(self.registry.configs()[worker["agentId"]].orchestration_mode, "remote_sidecar")
 
     def test_save_syncs_execution_credentials_and_invalidates_only_when_changed(self):
@@ -561,9 +663,9 @@ class RegistryTests(unittest.TestCase):
                 self.assertEqual(config.sidecar_token_file, before.sidecar_token_file)
                 self.assertEqual(config.cwd, before.cwd)
                 self.assertEqual(config.url, before.url)
-                self.registry.validate(key, [key])
+                self.registry.validate(key, [])
                 with self.assertRaisesRegex(ValueError, "检测"):
-                    self.registry.validate(key, [key], require_test=True)
+                    self.registry.validate(key, [], require_test=True)
                 self.registry.record_test(key, True)
                 tested_at = self.registry.rows()[key]["tested_at"]
                 self.client.put(f"/agents/{key}", json=machine)
@@ -598,7 +700,7 @@ class RegistryTests(unittest.TestCase):
             return response.json()
         with patch.object(runtime, "_request", side_effect=request):
             agents = runtime.group_agents()
-        self.assertEqual(len(agents), 2)
+        self.assertEqual(len(agents), 1)  # 无租约时不能获取其他机器的连接凭据。
         self.assertIn(supervisor["agentId"], agents)
         self.assertTrue(all(agent.sidecar_token_file is None for agent in agents.values()))
         self.assertTrue(all(agent.allow_cwd_override for agent in agents.values()))
@@ -655,6 +757,8 @@ class RegistryTests(unittest.TestCase):
         with patch.dict(self.config_values['machine_defaults'], {'orchestration_mode': 'local_db'}):
             machine = self.machine()
         key = machine['agentId']
+        worker = self.machine('127.0.0.2', ['executor'])['agentId']
+        self.registry.record_test(worker, True)
         self.assertEqual(self.registry.configs()[key].orchestration_mode, 'local_db')
         self.assertIsNone(self.registry.configs()[key].sidecar_token_file)
         self.registry.record_test(key, True)
@@ -663,8 +767,8 @@ class RegistryTests(unittest.TestCase):
             self.assertIn(key, Orchestrator().load_agents())
         with patch.object(self.gateway, '_schedule_pending', new=AsyncMock()):
             asyncio.run(self.gateway.submit({'workflowId': 'local-registered', 'supervisorAgentId': key,
-                'nodes': [{'id': 'a', 'agentId': key, 'prompt': 'test'}]}))
-        self.assertEqual(self.gateway.store.prepare_node_dispatch('local-registered', 'a')['agentId'], key)
+                'nodes': [{'id': 'a', 'agentId': worker, 'prompt': 'test'}]}))
+        self.assertEqual(self.gateway.store.prepare_node_dispatch('local-registered', 'a')['agentId'], worker)
 
 
 if __name__ == "__main__":

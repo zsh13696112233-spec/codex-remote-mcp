@@ -448,7 +448,7 @@ class WaitExecutionTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*list(service.tasks.values()))
         await service.tick()
         self.assertEqual(fixture.store.get_workflow("serial-demo")["status"], "completed")
-        gateway._schedule_pending.assert_awaited_once_with("local")
+        gateway._schedule_pending.assert_awaited_once_with()
 
     async def execute(self, outcome, *, closing=False, malformed=False):
         from codex_orchestrator_mcp import Orchestrator, AgentConfig

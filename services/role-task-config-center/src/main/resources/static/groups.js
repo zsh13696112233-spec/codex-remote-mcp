@@ -1,7 +1,7 @@
 const groupUrl=new URL(location.href);
 if(groupUrl.searchParams.get('groupId')==='unassigned'){groupUrl.searchParams.delete('groupId');history.replaceState(null,'',groupUrl)}
 const groupState={selected:groupUrl.searchParams.get('groupId')||'',items:[],error:''};
-const groupedPages=['roles','sops','tasks','schedules','runs','machines','skills','mcps'];
+const groupedPages=['roles','sops','tasks','schedules','runs','jira','machines','skills','mcps'];
 function concreteGroup(){return groupState.items.some(g=>g.id===groupState.selected)?groupState.selected:''}
 function groupMatches(x){return !groupState.selected||(groupState.selected==='unassigned'?!x.groupId:x.groupId===groupState.selected)}
 function visibleSops(){return state.sops.filter(groupMatches)}
@@ -23,7 +23,7 @@ function renderGroupFilter(){
   const countKey={roles:'roleCount',sops:'sopCount',tasks:'taskCount',schedules:'scheduleCount',machines:'machineCount',skills:'skillCount',mcps:'mcpCount'}[state.page];
   const rows=[{id:'',name:'全部分组'},...groupState.items];
   const selected=rows.find(g=>g.id===groupState.selected);
-  panel.innerHTML=`<details class="group-picker"><summary><span>分组</span><strong>${esc(selected?.name||(groupState.error?'分组暂不可用':'分组已不可用'))}</strong><span aria-hidden="true">⌄</span></summary><div class="group-picker-menu"><div class="group-picker-list">${rows.map(g=>`<button type="button" data-select-group="${esc(g.id)}" class="${g.id===groupState.selected?'active':''}" aria-pressed="${g.id===groupState.selected}"><span>${esc(g.name)}</span>${countKey&&g[countKey]!=null?`<small>${Number(g[countKey])||0}</small>`:''}</button>`).join('')}</div></div></details>${groupState.error?`<p class="group-filter-error" role="alert">${esc(groupState.error)} <button data-group-retry>重试</button></p>`:''}`;
+  panel.innerHTML=`<details class="group-picker"><summary><span>${state.page==='machines'?'执行机分组':'分组'}</span><strong>${esc(selected?.name||(groupState.error?'分组暂不可用':'分组已不可用'))}</strong><span aria-hidden="true">⌄</span></summary><div class="group-picker-menu"><div class="group-picker-list">${rows.map(g=>`<button type="button" data-select-group="${esc(g.id)}" class="${g.id===groupState.selected?'active':''}" aria-pressed="${g.id===groupState.selected}"><span>${esc(g.name)}</span>${countKey&&g[countKey]!=null?`<small>${Number(g[countKey])||0}</small>`:''}</button>`).join('')}</div></div></details>${groupState.error?`<p class="group-filter-error" role="alert">${esc(groupState.error)} <button data-group-retry>重试</button></p>`:''}`;
   const actions=$('#groupActions');actions.hidden=true;actions.innerHTML='';
 }
 function closeGroupPicker(restoreFocus=false){

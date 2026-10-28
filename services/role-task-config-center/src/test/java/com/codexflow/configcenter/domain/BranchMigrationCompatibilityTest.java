@@ -16,7 +16,7 @@ class BranchMigrationCompatibilityTest {
             + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
     Flyway.configure().dataSource(url, "sa", "").target("29").load().migrate();
     var flyway = Flyway.configure().dataSource(url, "sa", "").load();
-    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(10);
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(15);
     try (var connection = DriverManager.getConnection(url, "sa", "");
         var statement = connection.createStatement()) {
       statement.executeUpdate(
@@ -31,9 +31,10 @@ class BranchMigrationCompatibilityTest {
         var statement = connection.createStatement();
         var result =
             statement.executeQuery(
-                "SELECT editor_graph_json FROM codex_sop_sops WHERE id='compat-sop'")) {
+                "SELECT editor_graph_json,dispatch_mode FROM codex_sop_sops WHERE id='compat-sop'")) {
       assertThat(result.next()).isTrue();
       assertThat(result.getString(1)).isEqualTo("{}");
+      assertThat(result.getString(2)).isEqualTo("fixed");
     }
   }
 }

@@ -267,6 +267,9 @@ class SkillStore:
                 ORDER BY created_at,id""").fetchall()
             from mcp_store import ensure_available
             for row in rows:
+                from workflow_resources import claimed
+                if claimed(db, row["agent_id"]):
+                    continue
                 try:
                     ensure_available(db, [row["agent_id"]])
                 except ValueError:

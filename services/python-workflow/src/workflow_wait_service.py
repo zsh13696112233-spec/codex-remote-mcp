@@ -75,8 +75,7 @@ class WaitService:
                 await gateway._pause_supervisor(workflow_id)
                 if row["status"] == "finishing":
                     await db(gateway.store.complete_final_wait, workflow_id, gate_id)
-                    state = await db(gateway.store.get_workflow, workflow_id)
-                    await gateway._schedule_pending(state["supervisor"]["agentId"])
+                    await gateway._schedule_pending()
                     return
                 try:
                     target = await db(gateway.store.prepare_wait_execution, workflow_id, gate_id)
@@ -99,8 +98,7 @@ class WaitService:
         closing = target["gate"]["status"] == "closing"
         original = json.loads(target["gate"]["business_result_json"])
         job = None
-        state = await db(gateway.store.get_workflow, workflow_id)
-        supervisor_id = state["supervisor"]["agentId"]
+        prepared_execution = False
         try:
             if not target["threadId"]:
                 raise RuntimeError("原步骤会话不可恢复。")
@@ -116,6 +114,7 @@ class WaitService:
             if closing:
                 prompt += "\n既定阻断原因：" + original["reason"] + "\n已锁定工单：" + (original["jiraComment"]["issueKey"] or "未锁定，不得另选工单")
             prompt += "\n当前总结：\n" + target["summary"]
+            prompt += target.get("jiraInstruction", "")
             prompt += instruction(workflow_id, target["nodeId"], target["captureDocument"] and not closing,
                                   target["resultProtocolVersion"], defer_blocked=not closing)
             if len(prompt) > PROMPT_LIMIT:
@@ -130,20 +129,26 @@ class WaitService:
                     event_type="appserver." + str(message.get("method") or "unknown"),
                     payload={"receivedAt": received_at, "message": message})
 
+            execution_key = "wait:" + gate_id
+            await db(gateway.store.prepare_resource_execution, workflow_id, execution_key, target["agentId"])
+            prepared_execution = True
             job = await gateway.assistant_orchestrator.dispatch(
                 agent_id=target["agentId"], thread_id=target["threadId"], cwd=cwd, model=target["model"],
                 prompt=prompt, write=target["write"], permission_profile=target["permissionProfile"],
                 reasoning_effort=target.get("reasoningEffort"), timeout_sec=target["timeoutSec"],
-                output_schema=schema(target["resultProtocolVersion"]), event_callback=event)
+                output_schema=schema(target["resultProtocolVersion"], jira=target.get("jiraEnabled", False)), event_callback=event)
             job.capture_document = target["captureDocument"] and not closing
             job.result_protocol_version = target["resultProtocolVersion"]
+            job.jira_enabled = target.get("jiraEnabled", False)
             await db(gateway.store.set_wait_job, workflow_id, gate_id, job.job_id, job.turn_id)
             if not closing:
                 await db(gateway.store.update_node_actual_prompt, workflow_id, target["nodeId"], job.prompt)
                 await db(gateway.store.attach_node_job, workflow_id, target["nodeId"], job.snapshot())
+            await db(gateway.store.observe_resource_execution, workflow_id, execution_key, job.snapshot())
             last_turn = None
             while not job.completed.is_set():
                 if job.turn_id != last_turn:
+                    await db(gateway.store.observe_resource_execution, workflow_id, execution_key, job.snapshot())
                     await db(gateway.store.set_wait_job, workflow_id, gate_id, job.job_id, job.turn_id)
                     last_turn = job.turn_id
                 state = await db(gateway.store.get_workflow, workflow_id)
@@ -156,6 +161,7 @@ class WaitService:
                 except asyncio.TimeoutError:
                     pass
             await db(gateway.store.set_wait_job, workflow_id, gate_id, job.job_id, job.turn_id)
+            await db(gateway.store.observe_resource_execution, workflow_id, execution_key, job.snapshot())
             await gateway.flush_events()
             if job.status != "completed" or job.business_result is None:
                 raise RuntimeError("原执行者未返回已确认的步骤结果。")
@@ -171,7 +177,7 @@ class WaitService:
                 await db(gateway.store.sync_node_job, workflow_id, target["nodeId"], snapshot)
                 if await db(gateway.store.has_business_termination, workflow_id):
                     await db(gateway.store.finish_business_termination, workflow_id)
-            await gateway._schedule_pending(supervisor_id)
+            await gateway._schedule_pending()
         except asyncio.CancelledError:
             if job and not job.completed.is_set():
                 await gateway.assistant_orchestrator.cancel(job.job_id)
@@ -184,9 +190,15 @@ class WaitService:
                 original["summary"] = original["summary"][:19000] + "\n阻断收尾未确认完成，请人工核查。"
                 await db(gateway.store.finish_wait_result, workflow_id, gate_id, original)
                 await db(gateway.store.finish_business_termination, workflow_id)
-                await gateway._schedule_pending(supervisor_id)
+                await gateway._schedule_pending()
             else:
                 before_start = job is None or job.error_stage in {"queued", "configuration", "connect", "initialize", "reasoning/check", "permission/check", "thread/resume", "thread/start", "image/stage", "model/list"}
                 uncertain = not before_start and job.error_kind not in {"turn_failed", "invalid_business_result"}
                 await db(gateway.store.fail_wait_execution, workflow_id, gate_id, uncertain=uncertain, before_start=before_start)
-                await gateway._schedule_pending(supervisor_id)
+                await gateway._schedule_pending()
+        finally:
+            if job:
+                await db(gateway.store.observe_resource_execution, workflow_id, "wait:" + gate_id, job.snapshot())
+            elif prepared_execution:
+                await db(gateway.store.observe_resource_execution, workflow_id, "wait:" + gate_id,
+                         {"status": "failed", "execution_stopped": True})

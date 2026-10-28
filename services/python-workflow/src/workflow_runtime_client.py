@@ -116,11 +116,22 @@ class InternalApiClient:
 
     def group_agents(self):
         from codex_orchestrator_mcp import AgentConfig
-        result = self._request("GET", "/internal/v1/agents", None)
+        self.heartbeat()
+        with self._state_lock:
+            lease = self.current_lease
+        result = (self._lease_request("GET", lease["workflowId"], "/internal/v1/agents")
+                  if lease else self._request("GET", "/internal/v1/agents", None))
         return {key: AgentConfig.from_dict(key, value) for key, value in result["agents"].items()}
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self._request("GET", self._workflow_path(workflow_id))
+
+    def jira_context(self, workflow_id: str) -> dict[str, Any]:
+        return self._lease_request("GET", workflow_id, self._workflow_path(workflow_id) + "/jira")
+
+    def jira_update(self, workflow_id: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._lease_request("POST", workflow_id, self._workflow_path(workflow_id) + "/jira",
+                                   {"operation": operation, "payload": payload})
 
     def get_node(self, workflow_id: str, node_id: str) -> dict[str, Any]:
         return self._request("GET", self._node_path(workflow_id, node_id))

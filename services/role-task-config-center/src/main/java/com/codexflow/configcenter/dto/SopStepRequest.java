@@ -27,7 +27,7 @@ public record SopStepRequest(
     String instruction,
     String expectedOutput,
     String executorType,
-    @NotBlank @Size(max = 128) String agentId,
+    @Size(max = 128) String agentId,
     @Size(max = 1000) String workingDirectory,
     Boolean writeEnabled,
     @Size(max = 32) String permissionProfile,

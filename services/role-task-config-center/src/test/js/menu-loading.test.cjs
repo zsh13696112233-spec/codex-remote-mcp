@@ -25,11 +25,9 @@ test('role and task menus tolerate unavailable notification and machine services
     if(!['/api/roles','/api/task-definitions'].includes(path))throw Error('unavailable');
     return [{id:path}];
   };h.context.loadRuntime=async()=>{throw Error('offline')};
-  let checks=0;h.context.loadGatewayReady=()=>{checks++;return new Promise(()=>{})};
   await h.run('loadBase("roles")');await h.run('loadBase("tasks")');
   assert.equal(h.context.state.roles[0].id,'/api/roles');
   assert.equal(h.context.state.tasks[0].id,'/api/task-definitions');
-  assert.equal(checks,2);
 });
 test('task editor waits for fresh candidates and prevents repeat opens',async()=>{
   const h=fixture();let resolveTargets;

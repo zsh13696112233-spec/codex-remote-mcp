@@ -76,8 +76,14 @@ class WorkflowGateway:
         self._schedule_lock = asyncio.Lock()
         self._supervisor_probe_task: asyncio.Task[None] | None = None
         self._sidecar_watchdog_task: asyncio.Task[None] | None = None
+        self._jira_cleanup_task: asyncio.Task[None] | None = None
         self._supervisor_runtime: dict[str, dict[str, Any]] = {}
         self._closing = False
+        self._last_resource_check = 0.0
+        self._resource_check_cursor = ("", "")
+        self._group_candidates: dict[str, set[str]] = {}
+        self._group_check_at = 0.0
+        self._group_check_task: asyncio.Task[None] | None = None
         from workflow_wait_service import WaitService
         self.wait_service = WaitService(self)
         self._wait_task = None
@@ -108,6 +114,9 @@ class WorkflowGateway:
 
     async def stop(self) -> None:
         self._closing = True
+        if self._group_check_task is not None:
+            self._group_check_task.cancel()
+            await asyncio.gather(self._group_check_task, return_exceptions=True)
         if self._wait_task is not None:
             self._wait_task.cancel()
             await asyncio.gather(self._wait_task, return_exceptions=True)
@@ -120,6 +129,10 @@ class WorkflowGateway:
             self._sidecar_watchdog_task.cancel()
             await asyncio.gather(self._sidecar_watchdog_task, return_exceptions=True)
             self._sidecar_watchdog_task = None
+        if self._jira_cleanup_task is not None:
+            self._jira_cleanup_task.cancel()
+            await asyncio.gather(self._jira_cleanup_task, return_exceptions=True)
+            self._jira_cleanup_task = None
         async with self._schedule_lock:
             pass
         await _database_call(self.store.recover_active_workflows_after_restart)
@@ -136,6 +149,10 @@ class WorkflowGateway:
 
     async def submit(self, raw_spec: dict[str, Any]) -> dict[str, Any]:
         spec = WorkflowStore.normalize_spec(raw_spec)
+        if spec.get("dispatchMode") == "group":
+            snapshot = await _database_call(self.store.create_workflow, spec)
+            await self._schedule_pending()
+            return await _database_call(self.store.get_workflow, snapshot["workflowId"])
         await _database_call(self.registry.validate, spec["supervisorAgentId"],
                              [node["agentId"] for node in spec["nodes"]], require_test=True, group_id=spec.get("groupId"))
         agent_values = self.orchestrator.list_agents()
@@ -200,12 +217,71 @@ class WorkflowGateway:
             self.store.get_workflow, str(snapshot["workflowId"])
         )
 
+    async def _eligible_group_executors(self, specs=None):
+        from workflow_jira import compatible_agent
+        if specs is None:
+            specs = await _database_call(self.store.pending_allocation_specs)
+        if not specs:
+            return None
+        rows = await _database_call(self.registry.rows)
+        claims = await _database_call(self.store.machine_claims)
+        catalogs = {}
+        result = {}
+        for spec in specs:
+            eligible = set()
+            for key, row in rows.items():
+                if key in claims or row["group_id"] != spec["groupId"] or row["test_status"] != "passed":
+                    continue
+                agent = self.registry.config_from_row(key, row)
+                if not agent.enabled or "executor" not in agent.capabilities:
+                    continue
+                if spec.get("jira") and not compatible_agent(agent):
+                    continue
+                if any(n["permissionProfile"] not in agent.public_dict()["permission_profiles"] for n in spec["nodes"]):
+                    continue
+                if any(n.get("model") or n.get("reasoningEffort") for n in spec["nodes"]):
+                    if key not in catalogs:
+                        try:
+                            catalogs[key] = await asyncio.wait_for(self.orchestrator.agent_models(key), 5)
+                        except (asyncio.TimeoutError, ModelsUnavailable, ValueError, RuntimeError, OSError):
+                            catalogs[key] = []
+                            LOGGER.info("组调度暂无法验证执行机模型能力。")
+                    models = {m["model"]: m for m in catalogs[key]}
+                    if any((n.get("model") or agent.model) not in models or (
+                            n.get("reasoningEffort") is not None and n["reasoningEffort"] not in
+                            models[n.get("model") or agent.model].get("supportedReasoningEfforts", []))
+                           for n in spec["nodes"]):
+                        continue
+                eligible.add(key)
+            result[spec["workflowId"]] = eligible
+        return result
+
+    async def _refresh_group_candidates(self) -> None:
+        try:
+            self._group_candidates = await self._eligible_group_executors() or {}
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("刷新分组调度候选失败。")
+        finally:
+            self._group_check_at = time.monotonic()
+        if not self._closing:
+            await self._schedule_pending()
+
     async def _schedule_pending(self, supervisor_id: str | None = None) -> None:
         if self._closing:
             return
         async with self._schedule_lock:
+            await _database_call(self.store.reconcile_machine_claims)
             if self._closing:
                 return
+            pending = await _database_call(self.store.pending_allocation_specs)
+            if pending and (self._group_check_task is None or self._group_check_task.done()) and (
+                    time.monotonic() - self._group_check_at >= 10
+                    or any(spec["workflowId"] not in self._group_candidates for spec in pending)):
+                # 远程模型查询不能阻塞心跳续租和中央领取事务。
+                self._group_check_task = asyncio.create_task(self._refresh_group_candidates())
+            eligible = self._group_candidates if pending else None
             for agent in self.orchestrator.list_agents():
                 agent_id = str(agent["agent_id"])
                 if supervisor_id is not None and agent_id != supervisor_id:
@@ -237,10 +313,12 @@ class WorkflowGateway:
                         agent_id,
                         sidecar_instance_id=str(sidecar["instanceId"]),
                         lease_timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC,
+                        eligible_executors=eligible,
                     )
                 else:
                     spec = await _database_call(
-                        self.store.claim_next_workflow, agent_id
+                        self.store.claim_next_workflow, agent_id, eligible_executors=eligible,
+                        allow_group=self._supervisor_runtime.get(agent_id, {}).get("connectionStatus") == "online",
                     )
                 if spec is None:
                     continue
@@ -270,7 +348,7 @@ class WorkflowGateway:
 
     async def _schedule_after_task(self, supervisor_id: str) -> None:
         try:
-            await self._schedule_pending(supervisor_id)
+            await self._schedule_pending()
         except Exception:
             LOGGER.exception("工作流终态后调度下一项失败。")
 
@@ -285,6 +363,7 @@ class WorkflowGateway:
             if self.store is not None
             else set()
         )
+        claims = self.store.machine_claims() if self.store is not None else {}
         result: list[dict[str, Any]] = []
         registry_metadata = {row["agentId"]: row for row in self.registry.public()}
         for item in self.orchestrator.list_agents():
@@ -338,6 +417,9 @@ class WorkflowGateway:
                 )
             metadata = registry_metadata.get(agent_id, {})
             value.update(metadata)
+            claim = claims.get(agent_id)
+            value["availability"] = "busy" if claim or agent_id in leased_supervisors else "idle"
+            value["occupation"] = claim
             result.append(value)
         return result
 
@@ -345,6 +427,8 @@ class WorkflowGateway:
         while not self._closing:
             try:
                 await self._probe_supervisors_once()
+                if await _database_call(self.store.pending_allocation_specs):
+                    await self._schedule_pending()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -405,10 +489,33 @@ class WorkflowGateway:
 
         await asyncio.gather(*(check(agent_id) for agent_id in supervisor_ids))
 
+    async def _reconcile_resource_executions(self):
+        records = await _database_call(self.store.unresolved_resource_executions, self._resource_check_cursor)
+        if not records and self._resource_check_cursor != ("", ""):
+            records = await _database_call(self.store.unresolved_resource_executions)
+        self._resource_check_cursor = (records[-1]["workflow_id"], records[-1]["execution_key"]) if records else ("", "")
+        async def check(record):
+            try:
+                stopped = await asyncio.wait_for(self.orchestrator.confirm_execution_stopped(
+                    agent_id=record["agent_id"], thread_id=record["thread_id"], turn_id=record["turn_id"]), 5)
+            except Exception as error:
+                LOGGER.info("核对机器执行状态失败，类型=%s", type(error).__name__)
+                return
+            if stopped:
+                await _database_call(self.store.confirm_resource_stopped, record)
+        await asyncio.gather(*(check(record) for record in records))
+        if records:
+            await self._schedule_pending()
+
     async def _sidecar_watchdog_loop(self) -> None:
         """及时终止心跳过期的远程租约，并停止中央监督任务。"""
         while not self._closing:
             try:
+                if self._jira_cleanup_task is None or self._jira_cleanup_task.done():
+                    self._jira_cleanup_task = asyncio.create_task(self._cleanup_jira_accounts())
+                if time.monotonic() - self._last_resource_check >= 10:
+                    self._last_resource_check = time.monotonic()
+                    await self._reconcile_resource_executions()
                 expired = await _database_call(self.store.expire_sidecar_leases)
                 for item in expired:
                     task = self._tasks.get(item["workflowId"])
@@ -421,6 +528,20 @@ class WorkflowGateway:
             except Exception:
                 LOGGER.exception("清理过期 Sidecar 租约失败。")
             await asyncio.sleep(SIDECAR_WATCHDOG_INTERVAL_SEC)
+
+    async def _cleanup_jira_accounts(self) -> None:
+        from jira_runtime import cleanup
+        for item in await _database_call(self.store.jira_cleanup_candidates):
+            try:
+                await _database_call(self.store.jira_cleanup_attempted, item["workflow_id"])
+                if item["launcher_path"]:
+                    await cleanup(self.orchestrator, item["executor_id"], item["workflow_id"], item["launcher_path"])
+                await _database_call(self.store.jira_credentials_cleared, item["workflow_id"])
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                LOGGER.warning("运行专属 Jira 账号清理尚未确认，错误类型=%s。", type(error).__name__)
+        await asyncio.sleep(30)
 
     def authenticate_sidecar(self, authorization: str | None) -> str:
         """使用独立 Bearer Token 将内部请求绑定到唯一主监督。"""
@@ -482,8 +603,12 @@ class WorkflowGateway:
         workflow_id = spec["workflowId"]
         current_thread_id = resume_thread_id
         consecutive_no_progress_turns = 0
+        job = None
+        prepared_execution = False
         try:
             while True:
+                job = None
+                prepared_execution = False
                 before = await _database_call(self.store.get_workflow, workflow_id)
                 if before.get("termination"):
                     while not await _database_call(self.store.finish_business_termination, workflow_id):
@@ -532,6 +657,8 @@ class WorkflowGateway:
                     if current_thread_id is None
                     else self._supervisor_resume_prompt(workflow_id)
                 )
+                await _database_call(self.store.prepare_supervisor_execution, workflow_id)
+                prepared_execution = True
                 job = await self.orchestrator.dispatch(
                     agent_id=spec["supervisorAgentId"],
                     prompt=prompt,
@@ -655,6 +782,9 @@ class WorkflowGateway:
                 )
             raise
         except Exception as error:
+            if job is None and prepared_execution:
+                await _database_call(self.store.observe_resource_execution, workflow_id, "supervisor",
+                                     {"status": "failed", "execution_stopped": True})
             try:
                 if self._advance_is_held(await _database_call(self.store.get_workflow, workflow_id)):
                     return
@@ -673,6 +803,9 @@ class WorkflowGateway:
                 response=None,
                 error=str(error),
             )
+        finally:
+            if job is not None:
+                await _database_call(self.store.observe_resource_execution, workflow_id, "supervisor", job.snapshot())
 
     async def _finish_supervisor_workflow(
         self, workflow_id: str, *, supervisor_status: str,
@@ -776,8 +909,15 @@ class WorkflowGateway:
                 for node in spec["nodes"]
             ],
         }
+        jira_prompt = (
+            "本运行由监督机统一领取 Jira。开始调度前必须调用 jira_claim_next(workflowId)，"
+            "平台通过你所在机器已配置的 Jira CLI 查询、去重领取并下发同一账号。"
+            "不要自行读取账号文件，不要在消息或命令中传递令牌。每轮只领取一个工单。"
+            "返回 no_task 时结束本轮；ready 后才能派发步骤。失败时报告无法领取，禁止绕过领取直接派发。"
+            "业务详情读取与修改只由执行机完成。\n" if spec.get("jira") else ""
+        )
         return (
-            "你是这个工作流的主监督会话，不要亲自执行任何节点的业务任务。\n"
+            jira_prompt + "你是这个工作流的主监督会话，不要亲自执行任何节点的业务任务。\n"
             "仅使用 Codex Orchestrator MCP 提供的 dispatch_node、wait_node、"
             "node_status、cancel_node 工具调度节点。\n"
             "每次只能派发依赖已经 completed 的节点；数据库也会强制检查依赖。\n"
@@ -1130,6 +1270,7 @@ class WorkflowGateway:
             if not job.completed.is_set():
                 await self.orchestrator.cancel(job_id)
                 await asyncio.wait_for(job.completed.wait(), timeout=15)
+            await _database_call(self.store.observe_resource_execution, workflow_id, "supervisor", job.snapshot())
         task = self._tasks.get(workflow_id)
         if task is not None and not task.done():
             task.cancel()
@@ -1259,7 +1400,7 @@ class WorkflowGateway:
             await self.orchestrator.cancel(job_id)
         if task is not None and not task.done():
             task.cancel()
-        await self._schedule_pending(result["supervisor"]["agentId"])
+        await self._schedule_pending()
         return result
 
 
@@ -1688,10 +1829,11 @@ async def internal_group_agents(request: Request) -> Response:
     try:
         gateway, supervisor_id = _sidecar_identity(request)
         rows = await _database_call(gateway.registry.rows)
-        own = rows[supervisor_id]
+        allowed = await _database_call(gateway.store.sidecar_agent_ids, supervisor_id,
+                                       request.headers.get("X-Workflow-Lease"))
         values = {}
         for key, row in rows.items():
-            if row["group_id"] != own["group_id"]:
+            if key not in allowed:
                 continue
             from dataclasses import asdict
             config = asdict(gateway.registry.config_from_row(key, row))
@@ -1835,7 +1977,7 @@ def _sidecar_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 items = value["documents"]
                 version = 4 if isinstance(items, list) and any(isinstance(item, dict) and "primary" in item for item in items) else 3
         # v4/v5 字段相同，空文档清单的 v3/v4/v5 结构相同；存储层仍以运行冻结版本校验。
-        result["businessResult"] = validate(value, version)
+        result["businessResult"] = validate(value, version, jira=isinstance(value, dict) and "jiraDelivery" in value)
     return result
 
 
@@ -2260,6 +2402,8 @@ def create_app(
     app.state.mcp_deployment = mcps
     app.router.routes.extend(mcp_routes())
     app.router.routes.extend(skill_routes())
+    from jira_routes import jira_routes
+    app.router.routes.extend(jira_routes())
     return app
 
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from schedule_check import command_for, execute_check, parse_result, validate_spec
+from workflow_store import WorkflowStore
 
 
 class ScheduleCheckTest(unittest.TestCase):
@@ -74,7 +75,20 @@ class RemoteCheckTest(unittest.IsolatedAsyncioTestCase):
         orchestrator = Mock()
         orchestrator._client_factory.return_value = client
         orchestrator._resolve_agent_token.return_value = None
-        return SimpleNamespace(registry=registry, orchestrator=orchestrator), client, agent
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        store = WorkflowStore(Path(folder.name) / "workflow.db")
+        return SimpleNamespace(registry=registry, orchestrator=orchestrator, store=store), client, agent
+
+    async def test_unknown_script_stop_keeps_machine_occupied(self):
+        gateway, client, _ = self.fixture()
+        client.request.side_effect = [{"isFile": True, "isSymlink": False}, TimeoutError()]
+        body = {"agentId": "a", "groupId": "g", "scriptPath": "E:/check.bat"}
+        self.assertEqual("failed", (await execute_check(gateway, body))["status"])
+        self.assertEqual("review", gateway.store.machine_claims()["a"]["state"])
+        client.request.reset_mock()
+        self.assertEqual("skipped", (await execute_check(gateway, body))["status"])
+        client.request.assert_not_called()
 
     async def test_remote_command_uses_script_parent_without_changing_registered_cwd(self):
         gateway, client, agent = self.fixture()

@@ -5,7 +5,7 @@ const fs=require('node:fs');
 const source=fs.readFileSync('src/main/resources/static/machines.js','utf8');
 function setup(){
   const listeners={},button={},alert={};
-  const form={elements:{remark:{value:' 测试机 '},ip:{value:'192.0.2.1'},port:{value:'4500'},groupId:{value:'g'},supervisor:{checked:false},executor:{checked:true},skillEnabled:{checked:true},skillRoot:{value:' /work/skills '},mcpEnabled:{checked:true},mcpRoot:{value:'C:\\deploy\\program'}},querySelector:s=>s==='[type=submit]'?button:alert};
+  const form={elements:{remark:{value:' 测试机 '},ip:{value:'192.0.2.1'},port:{value:'4500'},workingDirectory:{value:' C:\\work '},groupId:{value:'g'},machineRole:{value:'executor'},skillEnabled:{checked:true},skillRoot:{value:' /work/skills '},mcpEnabled:{checked:true},mcpRoot:{value:'C:\\deploy\\program'}},querySelectorAll:()=>[],querySelector:s=>s==='[type=submit]'?button:alert};
   const dialog={innerHTML:'',querySelector:s=>s==='form'?form:{before(){}},showModal(){},close(){this.closed=true}};
   const context=vm.createContext({document:{createElement:()=>({}),querySelector:()=>dialog,querySelectorAll:()=>[],addEventListener:(name,fn)=>listeners[name]=fn},state:{agents:[]},groupState:{items:[]},concreteGroup:()=> 'g',esc:v=>String(v??'').replaceAll('<','&lt;').replaceAll('"','&quot;'),time:v=>v,status:()=>'',groupMark:()=>'',render:async()=>{},toast:()=>{},api:async()=>({})});
   vm.runInContext(source,context);
@@ -22,6 +22,7 @@ test('machine form restores saved settings and submits them with existing machin
   await h.form.onsubmit({preventDefault(){},target:h.form});
   assert.equal(sent.url,'/api/agents/machine-a');
   assert.equal(sent.body.remark,undefined);
+  assert.equal(sent.body.workingDirectory,'C:\\work');
   assert.deepEqual(sent.body.skillInstallation,{enabled:true,root:'/work/skills'});
   assert.deepEqual(sent.body.mcpInstallation,{enabled:true,platform:'windows',installRoot:'C:\\deploy\\program'});
   assert.equal(h.dialog.closed,true);
@@ -143,4 +144,15 @@ test('cancelled or rejected machine deletion leaves the card available',async()=
   const button={dataset:{machineAction:'delete',id:'machine-a'}},event={target:{closest:()=>button}};
   await h.listeners.click(event);assert.equal(calls,0);
   h.context.confirm=()=>true;await h.listeners.click(event);assert.equal(calls,1);assert.equal(refresh,0);assert.equal(button.disabled,false);assert.match(message,/引用/);
+});
+
+test('supervisor role hides group and clears execution installation authorizations',async()=>{
+  const h=setup();h.form.elements.machineRole.value='supervisor';h.run('openMachine(machine)');
+  assert.equal(h.form.elements.groupId.disabled,true);assert.equal(h.alert.hidden,true);
+  let sent;h.context.api=async(url,options)=>{sent=JSON.parse(options.body)};
+  await h.form.onsubmit({preventDefault(){},target:h.form});
+  assert.deepEqual(sent.capabilities,['supervisor']);assert.equal(sent.groupId,null);
+  assert.equal(sent.skillInstallation.enabled,false);assert.equal(sent.mcpInstallation.enabled,false);
+  h.form.elements.machineRole.value='executor';h.form.elements.machineRole.onchange();
+  assert.equal(h.form.elements.groupId.disabled,false);assert.equal(h.alert.hidden,false);
 });

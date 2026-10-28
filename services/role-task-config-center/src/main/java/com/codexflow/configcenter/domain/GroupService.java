@@ -164,7 +164,11 @@ public class GroupService {
   }
 
   public void checkMachineMove(String id, JsonNode body) {
-    require(body.path("groupId").asText());
+    boolean executor = false;
+    for (JsonNode capability : body.path("capabilities"))
+      if ("executor".equals(capability.asText())) executor = true;
+    if (executor || !body.path("groupId").asText("").isBlank())
+      require(body.path("groupId").asText());
     if (id == null) return;
     for (JsonNode machine : gateway.get("/agents").path("agents")) {
       if (!id.equals(machine.path("agentId").asText())

@@ -22,10 +22,9 @@ class AgentRegistry:
                 CREATE TABLE IF NOT EXISTS agent_groups (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE);
                 CREATE TABLE IF NOT EXISTS registered_agents (
-                    id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES agent_groups(id),
+                    id TEXT PRIMARY KEY, group_id TEXT REFERENCES agent_groups(id),
                     ip TEXT NOT NULL, port INTEGER NOT NULL, config TEXT NOT NULL,
-                    test_status TEXT NOT NULL DEFAULT 'untested', tested_at TEXT,
-                    UNIQUE(ip, port));
+                    test_status TEXT NOT NULL DEFAULT 'untested', tested_at TEXT);
                 CREATE TABLE IF NOT EXISTS agent_mcp_settings (
                     agent_id TEXT PRIMARY KEY REFERENCES registered_agents(id), settings TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS agent_skill_settings (
@@ -47,6 +46,31 @@ class AgentRegistry:
                 rule = legacy.get(row["id"], {})
                 db.execute("INSERT OR IGNORE INTO agent_skill_settings(agent_id,enabled,root) VALUES(?,?,?)",
                            (row["id"], int(rule.get("enabled") is True), rule.get("root", "")))
+        # SQLite 需重建表移除旧 NOT NULL 或全表地址唯一约束；保留编号和外键引用。
+        with store._connect() as db:
+            db.execute("PRAGMA foreign_keys=OFF")
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"]: row for row in db.execute("PRAGMA table_info(registered_agents)")}
+            endpoint_unique = any(
+                index["unique"] and not index["partial"]
+                and [column["name"] for column in db.execute(f"PRAGMA index_info('{index['name']}')")] == ["ip", "port"]
+                for index in db.execute("PRAGMA index_list(registered_agents)")
+            )
+            if columns["group_id"]["notnull"] or endpoint_unique:
+                db.execute("""CREATE TABLE registered_agents_new (
+                    id TEXT PRIMARY KEY, group_id TEXT REFERENCES agent_groups(id),
+                    ip TEXT NOT NULL, port INTEGER NOT NULL, config TEXT NOT NULL,
+                    test_status TEXT NOT NULL DEFAULT 'untested', tested_at TEXT,
+                    remark TEXT NOT NULL DEFAULT '', deleted_at TEXT)""")
+                db.execute("""INSERT INTO registered_agents_new
+                    SELECT id,group_id,ip,port,config,test_status,tested_at,remark,deleted_at FROM registered_agents""")
+                db.execute("DROP TABLE registered_agents")
+                db.execute("ALTER TABLE registered_agents_new RENAME TO registered_agents")
+                if db.execute("PRAGMA foreign_key_check").fetchone():
+                    raise RuntimeError("机器登记升级的关联完整性检查失败。")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS registered_agents_active_endpoint ON registered_agents(ip,port) WHERE deleted_at IS NULL")
+            db.commit()
+            db.execute("PRAGMA foreign_keys=ON")
 
     def mcp_settings(self, agent_id):
         from mcp_packages import installation_settings
@@ -129,6 +153,7 @@ class AgentRegistry:
     def public(self) -> list[dict[str, Any]]:
         return [{"agentId": key, "name": row["ip"], "remark": row["remark"], "ip": row["ip"], "port": row["port"],
                  "groupId": row["group_id"], "testStatus": row["test_status"], "testedAt": row["tested_at"],
+                 "defaultCwd": json.loads(row["config"])["cwd"],
                  "enabled": json.loads(row["config"]).get("enabled", True),
                  "skillInstallation": self.skill_settings(key),
                  "mcpInstallation": self.mcp_settings(key),
@@ -143,12 +168,18 @@ class AgentRegistry:
                 raise ValueError("找不到机器。")
             if row["deleted_at"] is not None:
                 return {"deleted": True}
+            from workflow_jira import pending_credentials
+            if pending_credentials(db, agent_id):
+                raise ValueError("此机器的运行专属 Jira 账号尚未确认清理，请保持连接，清理后再删除。")
             if db.execute("""SELECT 1 FROM workflows w WHERE w.status IN ('queued','running','cancelling')
                 AND (w.supervisor_agent_id=? OR EXISTS
                 (SELECT 1 FROM workflow_nodes n WHERE n.workflow_id=w.workflow_id AND n.agent_id=?))
                 LIMIT 1""", (agent_id, agent_id)).fetchone():
                 raise ValueError("机器仍有关联任务运行，请结束运行后再删除。")
             from mcp_store import ensure_available
+            from workflow_resources import claimed
+            if claimed(db, agent_id):
+                raise ValueError("机器仍被任务占用或执行状态待核实，请结束后再修改。")
             ensure_available(db, [agent_id])
             for table, states in (("skill_tasks", ("queued", "running")),
                                   ("mcp_tasks", ("queued", "transferring", "installing", "registering", "verifying", "review"))):
@@ -171,7 +202,12 @@ class AgentRegistry:
         return {"agentId": agent_id, "remark": remark}
 
     def save_agent(self, body: dict[str, Any], agent_id: str | None = None) -> dict[str, Any]:
-        from codex_orchestrator_mcp import AgentConfig
+        from codex_orchestrator_mcp import AgentConfig, is_absolute_remote_path
+        if "workingDirectory" in body and (not isinstance(body["workingDirectory"], str)
+                or len(body["workingDirectory"]) > 1000
+                or not is_absolute_remote_path(body["workingDirectory"])
+                or any(c in body["workingDirectory"] for c in "\r\n\0")):
+            raise ValueError("工作目录必须是执行机上的绝对路径，最多 1000 个字符。")
         if "remark" in body and (not isinstance(body["remark"], str) or len(body["remark"].strip()) > 100):
             raise ValueError("机器备注必须是最多 100 个字符的文本。")
         if not isinstance(body.get("ip"), str) or "%" in body["ip"]:
@@ -184,20 +220,25 @@ class AgentRegistry:
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise ValueError("端口必须为 1–65535 的整数。")
         capabilities = body.get("capabilities")
-        if not isinstance(capabilities, list) or not capabilities or any(not isinstance(c, str) or c not in ("supervisor", "executor") for c in capabilities):
-            raise ValueError("请选择主监督或执行机能力。")
+        if not isinstance(capabilities, list) or len(capabilities) != 1 or any(not isinstance(c, str) or c not in ("supervisor", "executor") for c in capabilities):
+            raise ValueError("每台机器只能选择主监督或执行机中的一种职责。")
         enabled = body.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError("启用状态必须是布尔值。")
-        if not isinstance(body.get("groupId"), str):
+        group_id = body.get("groupId") or None
+        if "executor" in capabilities and not isinstance(group_id, str):
             raise ValueError("请选择有效分组。")
+        body = {**body, "groupId": group_id}
         with self.store._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if not db.execute("SELECT 1 FROM agent_groups WHERE id=? AND deleted_at IS NULL", (body.get("groupId"),)).fetchone():
+            if group_id is not None and not db.execute("SELECT 1 FROM agent_groups WHERE id=? AND deleted_at IS NULL", (group_id,)).fetchone():
                 raise ValueError("请选择有效分组。")
             old = db.execute("SELECT * FROM registered_agents WHERE id=?", (agent_id,)).fetchone() if agent_id else None
             if agent_id and (old is None or old["deleted_at"] is not None):
                 raise ValueError("找不到机器。")
+            from workflow_jira import pending_credentials
+            if old and (old["ip"] != ip or old["port"] != port) and pending_credentials(db, agent_id):
+                raise ValueError("此机器的运行专属 Jira 账号尚未确认清理，暂不能变更连接地址。")
             remark = body["remark"].strip() if "remark" in body else (old["remark"] if old else "")
             if old is not None and old["group_id"] != body["groupId"]:
                 active = db.execute("""SELECT 1 FROM workflows w
@@ -208,10 +249,13 @@ class AgentRegistry:
                 if active:
                     raise ValueError("机器仍有关联任务运行，请结束运行后再改组。")
             agent_id = agent_id or "machine-" + uuid.uuid4().hex
-            if db.execute("SELECT 1 FROM registered_agents WHERE ip=? AND port=? AND id<>?", (ip, port, agent_id)).fetchone():
-                raise ValueError("该 IP 和端口已登记（含已业务删除的机器）。")
+            if db.execute("SELECT 1 FROM registered_agents WHERE ip=? AND port=? AND id<>? AND deleted_at IS NULL", (ip, port, agent_id)).fetchone():
+                raise ValueError("该 IP 和端口已登记为有效机器。")
             from mcp_store import ensure_available
             from mcp_packages import installation_settings
+            from workflow_resources import claimed
+            if claimed(db, agent_id):
+                raise ValueError("机器仍被任务占用或执行状态待核实，请结束后再修改。")
             ensure_available(db, [agent_id])
             previous_mcp = db.execute("SELECT settings FROM agent_mcp_settings WHERE agent_id=?", (agent_id,)).fetchone()
             mcp_rule = installation_settings(body.get("mcpInstallation", json.loads(previous_mcp[0]) if previous_mcp else {}))
@@ -220,7 +264,10 @@ class AgentRegistry:
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='mcp_tasks'").fetchone():
                 if db.execute("SELECT 1 FROM mcp_tasks WHERE agent_id=? AND state='queued'", (agent_id,)).fetchone():
                     raise ValueError("机器仍有待处理 MCP 安装，请完成后修改。")
-            config = json.loads(old["config"]) if old else defaults()
+            config = json.loads(old["config"]) if old else defaults(body.get("workingDirectory"))
+            directory_changed = "workingDirectory" in body and body["workingDirectory"] != config["cwd"]
+            if directory_changed:
+                config["cwd"] = body["workingDirectory"]
             previous = db.execute("SELECT * FROM agent_skill_settings WHERE agent_id=?", (agent_id,)).fetchone()
             skill_enabled = bool(previous["enabled"]) if previous else False
             skill_root = previous["root"] if previous else ""
@@ -246,7 +293,7 @@ class AgentRegistry:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='skill_tasks'").fetchone():
                     if db.execute("SELECT 1 FROM skill_tasks WHERE agent_id=? AND state IN ('queued','running') LIMIT 1", (agent_id,)).fetchone():
                         raise ValueError("这台机器仍有待处理的 Skill 下发，请结束后再修改分组、安装设置或连接地址。")
-            remark_only = (old is not None and remark != old["remark"]
+            remark_only = (not directory_changed and old is not None and remark != old["remark"]
                            and (ip, port, body["groupId"], set(capabilities), enabled)
                            == (old["ip"], old["port"], old["group_id"], set(config.get("capabilities", [])), config.get("enabled", True))
                            and not settings_changed
@@ -289,7 +336,7 @@ class AgentRegistry:
             AgentConfig.from_dict(agent_id, config)
             if config.get("orchestration_mode") == "remote_sidecar":
                 reference = (config.get("sidecar_token_env"), config.get("sidecar_token_file"))
-                for row in db.execute("SELECT config FROM registered_agents WHERE id<>?", (agent_id,)):
+                for row in db.execute("SELECT config FROM registered_agents WHERE id<>? AND deleted_at IS NULL", (agent_id,)):
                     other = json.loads(row["config"])
                     if other.get("orchestration_mode") == "remote_sidecar" and reference == (other.get("sidecar_token_env"), other.get("sidecar_token_file")):
                         raise ValueError("主监督凭据引用重复，请在部署路径模板中使用 IP 和端口区分机器。")
@@ -302,7 +349,7 @@ class AgentRegistry:
                     tested_at=excluded.tested_at, remark=excluded.remark""", (agent_id, body["groupId"], ip, port, json.dumps(config),
                     "untested" if changed else old["test_status"], None if changed else old["tested_at"], remark))
             except sqlite3.IntegrityError as error:
-                raise ValueError("该 IP 和端口已登记（含已业务删除的机器）。") from error
+                raise ValueError("该 IP 和端口已登记为有效机器。") from error
             db.execute("""INSERT INTO agent_skill_settings(agent_id,enabled,root) VALUES(?,?,?)
                 ON CONFLICT(agent_id) DO UPDATE SET enabled=excluded.enabled,root=excluded.root""",
                 (agent_id, int(skill_enabled), skill_root))
@@ -318,7 +365,7 @@ class AgentRegistry:
                               ("passed" if passed else "failed", datetime.now(timezone.utc).isoformat(), agent_id)).rowcount:
                 raise ValueError("找不到机器。")
 
-    def validate(self, supervisor_id: str, executor_ids: list[str], *, require_test: bool = False, group_id: str | None = None) -> None:
+    def validate(self, supervisor_id: str, executor_ids: list[str], *, require_test: bool = False, group_id: str | None = None, global_supervisor: bool = False) -> None:
         if group_id is not None:
             try:
                 uuid.UUID(group_id)
@@ -329,11 +376,11 @@ class AgentRegistry:
         for key, capability in [(supervisor_id, "supervisor")] + [(key, "executor") for key in executor_ids]:
             if key not in rows:
                 raise ValueError("请选择已登记的机器。")
-            if group_id is not None and rows[key]["group_id"] != group_id:
+            if group_id is not None and not (global_supervisor and capability == "supervisor") and rows[key]["group_id"] != group_id:
                 raise ValueError("所选机器必须属于工作流的分组。")
             if capability not in configs[key].capabilities:
                 raise ValueError("机器能力与所选职责不匹配。")
-            if rows[key]["group_id"] != rows[supervisor_id]["group_id"]:
+            if not global_supervisor and rows[key]["group_id"] != rows[supervisor_id]["group_id"]:
                 raise ValueError("主监督只能使用同一分组的执行机。")
             if require_test and (not configs[key].enabled or rows[key]["test_status"] != "passed"):
                 raise ValueError("机器必须启用并通过连接检测后才能运行。")
@@ -346,8 +393,8 @@ def sidecar_token_path(ip: str, port: int) -> str:
     return template.replace("{ip}", ip.replace(":", "_")).replace("{port}", str(port))
 
 
-def defaults() -> dict[str, Any]:
-    cwd = setting("machine_defaults.cwd", "")
+def defaults(cwd: str | None = None) -> dict[str, Any]:
+    cwd = cwd or setting("machine_defaults.cwd", "")
     if not cwd:
         raise ValueError("请先在服务配置中设置 machine_defaults.cwd。")
     result = {"cwd": cwd, "model": setting("machine_defaults.model", "gpt-5.6-sol"),
