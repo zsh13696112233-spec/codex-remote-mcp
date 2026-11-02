@@ -278,7 +278,7 @@ function showTaskForm(x){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.
 
 function blankSop(){return{jiraEnabled:false,jiraJql:"",jiraProject:"",jiraStatus:"待办",jiraAccount:"",groupId:concreteGroup(),id:"",name:"",description:"",dispatchMode:"group",supervisorAgentId:"",supervisorTimeoutSec:7200,advanceMode:"automatic",dingtalkShowExecutionDetails:false,defaultStepModel:"gpt-6.1-sol",defaultStepReasoningEffort:null,enabled:true,steps:[]}}
 function jiraFieldsFromQuery(query){
-  const match=/^\s*project\s*=\s*("(?:\\["\\]|[^"\\])*"|'(?:\\['\\]|[^'\\])*'|[\w-]+)(?:\s+AND\s+status\s*=\s*("(?:\\["\\]|[^"\\])*"|'(?:\\['\\]|[^'\\])*'|[\w-]+))?(?:\s+AND\s+assignee\s*=\s*currentUser\(\s*\))?\s*$/i.exec(query||"");
+  const match=/^\s*project\s*=\s*("(?:\\["\\]|[^"\\])*"|'(?:\\['\\]|[^'\\])*'|[\w-]+)(?:\s+AND\s+status\s*=\s*("(?:\\["\\]|[^"\\])*"|'(?:\\['\\]|[^'\\])*'|[\w-]+))?(?:\s+AND\s+assignee\s*=\s*currentUser\(\s*\))?(?:\s+AND\s+"处理角色"\s*=\s*"Planner")?\s*$/i.exec(query||"");
   if(!match)return null;
   const decode=value=>/^['"]/.test(value)?value.slice(1,-1).replace(/\\(["'\\])/g,'$1'):value;
   const status=match[2]?decode(match[2]):"待办";
@@ -288,7 +288,7 @@ function sopJiraQuery(d){
   const project=(d.jiraProject||"").trim();
   const quote=value=>'"'+value.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"';
   const status=(d.jiraStatus||"").trim();
-  return 'project = '+quote(project)+' AND status = '+(status==="待办"||status==="10205"?'10205':quote(status))+' AND assignee = currentUser()';
+  return 'project = '+quote(project)+' AND status = '+(status==="待办"||status==="10205"?'10205':quote(status))+' AND assignee = currentUser() AND "处理角色" = "Planner"';
 }
 function validateSopJira(d){
   if(!d.jiraEnabled)return "";
@@ -391,7 +391,7 @@ function workflowInspectorHtml(){
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，遇阻先讨论）</option></select></label>
     <p class="meta">启动时自动选择空闲监督机和本组执行机；本次全部步骤在同一台执行机、同一工作目录执行。</p>${d.legacyFixed?'<p class="meta">此 SOP 仍保存着旧机器设置，点击保存后，新运行改用分组调度。历史运行快照保持原样。</p>':''}
     <label class="check"><input data-sop-field="jiraEnabled" type="checkbox" ${d.jiraEnabled?"checked":""}> 监督机统一领取 Jira</label>
-    ${d.jiraEnabled?`${d.jiraJql&&!jiraFieldsFromQuery(d.jiraJql)?'<p class="meta">此 SOP 的旧查询无法自动转换，请填写项目名称后保存。已有运行保持原设置。</p>':''}<label>Jira 项目名称 *<input data-sop-field="jiraProject" maxlength="1000" value="${esc(d.jiraProject||'')}" placeholder="例如：产品研发（也可填写项目编号）"><small>填写 Jira 中实际的项目名称或编号，只领取该 Jira 登录账号负责、符合所填状态的工单。</small></label><label>Jira 状态 *<input data-sop-field="jiraStatus" maxlength="1000" value="${esc(d.jiraStatus??'待办')}" placeholder="例如：待办、Open 或状态编号"><small>默认待办；请填写该项目实际使用的状态名称或编号。待办对应编号 10205。</small></label><label>Jira账号<input data-sop-field="jiraAccount" maxlength="128" value="${esc(d.jiraAccount||'')}" placeholder="只有一个账号时可留空"><small>填写 Jira CLI 中已有的账号别名；账号凭据由监督机传给本轮执行机。</small></label>`:''}
+    ${d.jiraEnabled?`${d.jiraJql&&!jiraFieldsFromQuery(d.jiraJql)?'<p class="meta">此 SOP 的旧查询无法自动转换，请填写项目名称后保存。已有运行保持原设置。</p>':''}<label>Jira 项目名称 *<input data-sop-field="jiraProject" maxlength="1000" value="${esc(d.jiraProject||'')}" placeholder="例如：产品研发（也可填写项目编号）"><small>填写 Jira 中实际的项目名称或编号，只领取该 Jira 登录账号负责、符合所填状态且处理角色为 Planner 的工单。</small></label><label>Jira 状态 *<input data-sop-field="jiraStatus" maxlength="1000" value="${esc(d.jiraStatus??'待办')}" placeholder="例如：待办、Open 或状态编号"><small>默认待办；请填写该项目实际使用的状态名称或编号。待办对应编号 10205。</small></label><label>Jira账号<input data-sop-field="jiraAccount" maxlength="128" value="${esc(d.jiraAccount||'')}" placeholder="只有一个账号时可留空"><small>填写 Jira CLI 中已有的账号别名；账号凭据由监督机传给本轮执行机。</small></label>`:''}
     <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="43200" value="${d.supervisorTimeoutSec}"><small>最多 43200 秒（12 小时），保存后用于新运行。</small></label>
     <label class="check"><input data-sop-field="dingtalkShowExecutionDetails" type="checkbox" ${d.dingtalkShowExecutionDetails?"checked":""}> 钉钉显示思考过程和工具调用</label>
     <p class="meta">关闭后仍发送进度说明、步骤结果和确认通知。修改仅对新运行生效。</p>

@@ -92,7 +92,8 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
         task.path("sopId").asText());
     var retry = runs.prepareRetry(first.workflowId());
     assertThat(retry.payload().path("jira").path("jql").asText())
-        .isEqualTo("project = TEST AND status = 10205 AND assignee = currentUser()");
+        .isEqualTo(
+            "project = TEST AND status = 10205 AND assignee = currentUser() AND \"处理角色\" = \"Planner\"");
     assertThat(retry.payload().path("jira").path("account").asText()).isEqualTo("bot");
     assertThat(retry.payload().path("jiraRetryOf").asText()).isEqualTo(first.workflowId());
     assertThat(first.payload().has("supervisorAgentId")).isFalse();
@@ -125,9 +126,10 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
       String query = "project = TEST AND status = " + status + " AND assignee = currentUser()";
       var task = task(query);
       var run = launches.reserveLatest(task.path("id").asText()).prepared();
-      assertThat(run.payload().path("jira").path("jql").asText()).isEqualTo(query);
+      assertThat(run.payload().path("jira").path("jql").asText())
+          .isEqualTo(query + " AND \"处理角色\" = \"Planner\"");
       assertThat(runs.prepareRetry(run.workflowId()).payload().path("jira").path("jql").asText())
-          .isEqualTo(query);
+          .isEqualTo(query + " AND \"处理角色\" = \"Planner\"");
     }
     assertThatThrownBy(() -> task("project = TEST AND status = '   ' AND assignee = currentUser()"))
         .isInstanceOf(IllegalArgumentException.class)
@@ -140,7 +142,10 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
     var task = task("project = " + project + " AND status = '待办' AND assignee = currentUser()");
     var run = launches.reserveLatest(task.path("id").asText()).prepared();
     assertThat(run.payload().path("jira").path("jql").asText())
-        .isEqualTo("project = " + project + " AND status = 10205 AND assignee = currentUser()");
+        .isEqualTo(
+            "project = "
+                + project
+                + " AND status = 10205 AND assignee = currentUser() AND \"处理角色\" = \"Planner\"");
   }
 
   @Test
@@ -149,7 +154,27 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
       var task = task("project = TEST AND status = " + status + " AND assignee = currentUser()");
       var run = launches.reserveLatest(task.path("id").asText()).prepared();
       assertThat(run.payload().path("jira").path("jql").asText())
-          .isEqualTo("project = TEST AND status = 10205 AND assignee = currentUser()");
+          .isEqualTo(
+              "project = TEST AND status = 10205 AND assignee = currentUser() AND \"处理角色\" = \"Planner\"");
+    }
+  }
+
+  @Test
+  void plannerConditionIsPreservedAndCannotSelectOtherRoles() {
+    String query =
+        "project = TEST AND status = 10205 AND assignee = currentUser() AND \"处理角色\" = \"Planner\"";
+    var task = task(query);
+    var run = launches.reserveLatest(task.path("id").asText()).prepared();
+    assertThat(run.payload().path("jira").path("jql").asText()).isEqualTo(query);
+    for (String suffix :
+        List.of(
+            "\"Reviewer\"", "\"Planner\" OR project = OTHER", "\"Planner\" AND priority = High")) {
+      assertThatThrownBy(
+              () ->
+                  task(
+                      "project = TEST AND status = 10205 AND assignee = currentUser() AND \"处理角色\" = "
+                          + suffix))
+          .isInstanceOf(IllegalArgumentException.class);
     }
   }
 

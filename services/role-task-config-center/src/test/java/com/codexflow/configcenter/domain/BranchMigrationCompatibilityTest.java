@@ -16,7 +16,7 @@ class BranchMigrationCompatibilityTest {
             + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
     Flyway.configure().dataSource(url, "sa", "").target("29").load().migrate();
     var flyway = Flyway.configure().dataSource(url, "sa", "").load();
-    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(16);
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(17);
     try (var connection = DriverManager.getConnection(url, "sa", "");
         var statement = connection.createStatement()) {
       statement.executeUpdate(
@@ -36,5 +36,41 @@ class BranchMigrationCompatibilityTest {
       assertThat(result.getString(1)).isEqualTo("{}");
       assertThat(result.getString(2)).isEqualTo("fixed");
     }
+  }
+
+  @Test
+  void plannerMigrationUpdatesEveryStandardSopIncludingDisabledOnes() throws Exception {
+    String url =
+        "jdbc:h2:mem:planner-"
+            + UUID.randomUUID()
+            + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
+    Flyway.configure().dataSource(url, "sa", "").target("45").load().migrate();
+    String base = "project = TEST AND status = Open AND assignee = currentUser()";
+    String planner = base + " AND \"处理角色\" = \"Planner\"";
+    try (var c = DriverManager.getConnection(url, "sa", "");
+        var q =
+            c.prepareStatement(
+                "INSERT INTO codex_sop_sops(id,name,supervisor_agent_id,default_step_model,jira_jql,enabled) VALUES (?,?, 'local','test',?,?)")) {
+      for (int i = 0; i < 4; i++) {
+        q.setString(1, "planner-" + i);
+        q.setString(2, "SOP " + i);
+        q.setString(3, i == 2 ? planner : i == 3 ? null : base);
+        q.setBoolean(4, i != 1);
+        q.executeUpdate();
+      }
+    }
+    var flyway = Flyway.configure().dataSource(url, "sa", "").load();
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(1);
+    try (var c = DriverManager.getConnection(url, "sa", "");
+        var q = c.createStatement();
+        var r = q.executeQuery("SELECT id,jira_jql FROM codex_sop_sops ORDER BY id")) {
+      int count = 0;
+      while (r.next()) {
+        count++;
+        assertThat(r.getString(2)).isEqualTo(r.getString(1).equals("planner-3") ? null : planner);
+      }
+      assertThat(count).isEqualTo(4);
+    }
+    assertThat(flyway.migrate().migrationsExecuted).isZero();
   }
 }

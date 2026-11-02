@@ -25,7 +25,8 @@ public class ConfigService {
       Pattern.compile(
           "project\\s*=\\s*(\"(?:\\\\[\"\\\\]|[^\"\\\\])+\"|'(?:\\\\['\\\\]|[^'\\\\])+'|[\\p{L}\\p{N}_-]+)"
               + "\\s+AND\\s+status\\s*=\\s*(\"(?:\\\\[\"\\\\]|[^\"\\\\])+\"|'(?:\\\\['\\\\]|[^'\\\\])+'|[\\p{L}\\p{N}_-]+)"
-              + "\\s+AND\\s+assignee\\s*=\\s*currentUser\\(\\s*\\)",
+              + "\\s+AND\\s+assignee\\s*=\\s*currentUser\\(\\s*\\)"
+              + "(?:\\s+AND\\s+\"处理角色\"\\s*=\\s*\"Planner\")?",
           Pattern.CASE_INSENSITIVE);
   private static final Set<String> PERMISSION_PROFILES =
       Set.of("read_only", "workspace_write", "auto_review", "full_access");
@@ -323,7 +324,8 @@ public class ConfigService {
     if (sop.jiraJql != null) {
       var query = JIRA_CLAIM_QUERY.matcher(sop.jiraJql);
       if (!query.matches())
-        throw new IllegalArgumentException("Jira 领取条件只能指定项目和单个状态，负责人固定为当前 Jira 登录账号。");
+        throw new IllegalArgumentException(
+            "Jira 领取条件只能指定项目和单个状态，负责人固定为当前 Jira 登录账号，处理角色固定为 Planner。");
       String project = query.group(1);
       if ((project.startsWith("\"") || project.startsWith("'"))
           && project.substring(1, project.length() - 1).isBlank())
@@ -337,7 +339,11 @@ public class ConfigService {
       // 保留默认待办的编号兼容，其他状态按用户输入查询。
       if (statusValue.equals("待办") || statusValue.equals("10205")) status = "10205";
       sop.jiraJql =
-          "project = " + project + " AND status = " + status + " AND assignee = currentUser()";
+          "project = "
+              + project
+              + " AND status = "
+              + status
+              + " AND assignee = currentUser() AND \"处理角色\" = \"Planner\"";
     }
     if ("fixed".equals(mode)) {
       if (normalizeNullable(body.supervisorAgentId()) == null

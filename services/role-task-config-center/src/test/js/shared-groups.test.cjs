@@ -33,19 +33,19 @@ test('Jira status defaults to pending and is editable after reload',()=>{
   const {run}=jiraFixture();
   run("Object.assign(state.sop.draft,{jiraEnabled:true,jiraProject:' 产品研发 A ',jiraAccount:' bot '})");
   assert.equal(run('validateSop()'),'');
-  assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = 10205 AND assignee = currentUser()');
+  assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner"');
   assert.equal(run('sopPayload().jira.account'),'bot');
   const html=run('workflowInspectorHtml()');
   assert.match(html,/data-sop-field="jiraProject"/);
   assert.match(html,/data-sop-field="jiraStatus"/);
-  assert.match(html,/只领取该 Jira 登录账号负责、符合所填状态的工单/);
+  assert.match(html,/只领取该 Jira 登录账号负责、符合所填状态且处理角色为 Planner 的工单/);
   assert.doesNotMatch(html,/data-sop-field="jiraJql"/);
   run("setDraft({...sopPayload(),id:'saved'})");
   assert.equal(run('state.sop.draft.jiraProject'),'产品研发 A');
   assert.equal(run('state.sop.draft.jiraStatus'),"待办");
   assert.equal(run('isSopDirty()'),false);
   run("state.sop.draft.jiraStatus='Closed';state.sop.draft.jiraJql='project = OTHER AND status = Closed'");
-  assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = "Closed" AND assignee = currentUser()');
+  assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = "Closed" AND assignee = currentUser() AND "处理角色" = "Planner"');
   assert.equal(run('isSopDirty()'),true);
   run("setDraft({...sopPayload(),id:'saved'})");
   assert.equal(run('state.sop.draft.jiraStatus'),'Closed');
@@ -56,7 +56,7 @@ test('Jira names containing quotes and backslashes stay within quoted values',()
   context.project='研发 "A"\\B';
   context.issueStatus='Closed';
   run('Object.assign(state.sop.draft,{jiraEnabled:true,jiraProject:project,jiraStatus:issueStatus})');
-  assert.equal(run('sopPayload().jira.jql'),'project = "研发 \\"A\\"\\\\B" AND status = "Closed" AND assignee = currentUser()');
+  assert.equal(run('sopPayload().jira.jql'),'project = "研发 \\"A\\"\\\\B" AND status = "Closed" AND assignee = currentUser() AND "处理角色" = "Planner"');
   run("setDraft({...sopPayload(),id:'saved'})");
   assert.equal(run('state.sop.draft.jiraProject'),context.project);
   assert.equal(run('state.sop.draft.jiraStatus'),context.issueStatus);
@@ -67,7 +67,7 @@ test('legacy simple Jira queries retain the project and status',()=>{
   const query='project = PROJ AND status = "Open"';
   const {run}=jiraFixture({jql:query,account:''});
   assert.equal(run('state.sop.draft.jiraProject'),'PROJ');
-  assert.equal(run('sopPayload().jira.jql'),'project = "PROJ" AND status = "Open" AND assignee = currentUser()');
+  assert.equal(run('sopPayload().jira.jql'),'project = "PROJ" AND status = "Open" AND assignee = currentUser() AND "处理角色" = "Planner"');
   assert.equal(run('isSopDirty()'),false);
 });
 
@@ -75,7 +75,7 @@ test('legacy pending query gains the assignee filter and fixed query reloads unc
   for(const query of ['project = PROJ AND status = 10205','project = PROJ AND status = 10205 AND assignee = currentUser()']){
     const {run}=jiraFixture({jql:query,account:'bot'});
     assert.equal(run('state.sop.draft.jiraProject'),'PROJ');
-    assert.equal(run('sopPayload().jira.jql'),'project = "PROJ" AND status = 10205 AND assignee = currentUser()');
+    assert.equal(run('sopPayload().jira.jql'),'project = "PROJ" AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner"');
     run("setDraft({...sopPayload(),id:'saved'})");
     assert.equal(run('isSopDirty()'),false);
     assert.doesNotMatch(run('workflowInspectorHtml()'),/旧查询无法自动转换/);
@@ -90,7 +90,7 @@ test('complex legacy Jira queries require a project before replacement or can be
   assert.match(run('validateSop()'),/请填写 Jira 项目名称/);
   run("state.sop.draft.jiraProject='NEW'");
   assert.equal(run('validateSop()'),'');
-  assert.equal(run('sopPayload().jira.jql'),'project = "NEW" AND status = 10205 AND assignee = currentUser()');
+  assert.equal(run('sopPayload().jira.jql'),'project = "NEW" AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner"');
   run('state.sop.draft.jiraEnabled=false');
   assert.equal(run('sopPayload().jira'),null);
 });
@@ -437,4 +437,16 @@ test('deleted group selection returns to all groups after reload',async()=>{
   assert.equal(new URL(replaced).searchParams.has('groupId'),false);
   assert.equal(new URL(replaced).searchParams.has('runPage'),false);
   assert.doesNotMatch(run('groupOptions()'),/value="a"/);
+});
+
+test('Jira Planner filter round-trips and other roles are not accepted as simple queries',()=>{
+  const {run,context}=jiraFixture({jql:'project = ZJSG AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner"',account:'bot'});
+  assert.equal(run('state.sop.draft.jiraProject'),'ZJSG');
+  assert.equal(run('state.sop.draft.jiraStatus'),'待办');
+  assert.equal(run('isSopDirty()'),false);
+  assert.equal(run('sopPayload().jira.jql'),'project = "ZJSG" AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner"');
+  for(const suffix of ['"Reviewer"','"Planner" OR project = OTHER']){
+    context.query='project = ZJSG AND status = 10205 AND assignee = currentUser() AND "处理角色" = '+suffix;
+    assert.equal(run('jiraFieldsFromQuery(query)'),null);
+  }
 });
