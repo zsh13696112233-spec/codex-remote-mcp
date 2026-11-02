@@ -21,10 +21,11 @@ public class ConfigService {
   private static final Set<String> SUPPORTED_MODELS = Set.of("gpt-6-astra", "gpt-6.1-sol");
   private static final Set<String> EXECUTOR_TYPES = Set.of("local", "remote");
   private static final Set<String> ADVANCE_MODES = Set.of("automatic", "semi_automatic");
-  private static final Pattern JIRA_OPEN_QUERY =
+  private static final Pattern JIRA_CLAIM_QUERY =
       Pattern.compile(
           "project\\s*=\\s*(\"(?:\\\\[\"\\\\]|[^\"\\\\])+\"|'(?:\\\\['\\\\]|[^'\\\\])+'|[\\p{L}\\p{N}_-]+)"
-              + "\\s+AND\\s+status\\s*=\\s*(?:\"Open\"|'Open'|Open)",
+              + "\\s+AND\\s+status\\s*=\\s*(\"(?:\\\\[\"\\\\]|[^\"\\\\])+\"|'(?:\\\\['\\\\]|[^'\\\\])+'|[\\p{L}\\p{N}_-]+)"
+              + "\\s+AND\\s+assignee\\s*=\\s*currentUser\\(\\s*\\)",
           Pattern.CASE_INSENSITIVE);
   private static final Set<String> PERMISSION_PROFILES =
       Set.of("read_only", "workspace_write", "auto_review", "full_access");
@@ -284,11 +285,9 @@ public class ConfigService {
 
   /** 将角色请求字段应用到实体，并执行名称唯一性检查。 */
   private void applyRole(RoleEntity role, RoleSaveRequest body, boolean updating) {
-    assignRole(role, body.groupId());
     String name = body.name().trim();
-    if (roles.existsByDeletedFalseAndNameIgnoreCaseAndIdNot(name, role.id)) {
-      throw new ConflictFailure("角色名称已存在。");
-    }
+    requireUniqueRoleName(role.id, body.groupId(), name);
+    assignRole(role, body.groupId());
     role.name = name;
     role.duty = body.duty().trim();
     role.enabled = body.enabled() == null ? !updating || role.enabled : body.enabled();
@@ -322,13 +321,23 @@ public class ConfigService {
             || sop.jiraAccount.chars().anyMatch(c -> c < 32)))
       throw new IllegalArgumentException("请填写有效的 Jira 查询条件和账号别名。");
     if (sop.jiraJql != null) {
-      var query = JIRA_OPEN_QUERY.matcher(sop.jiraJql);
-      if (!query.matches()) throw new IllegalArgumentException("Jira 领取条件只能指定项目，状态固定为 Open。");
+      var query = JIRA_CLAIM_QUERY.matcher(sop.jiraJql);
+      if (!query.matches())
+        throw new IllegalArgumentException("Jira 领取条件只能指定项目和单个状态，负责人固定为当前 Jira 登录账号。");
       String project = query.group(1);
       if ((project.startsWith("\"") || project.startsWith("'"))
           && project.substring(1, project.length() - 1).isBlank())
         throw new IllegalArgumentException("请填写 Jira 项目名称。");
-      sop.jiraJql = "project = " + project + " AND status = \"Open\"";
+      String status = query.group(2);
+      String statusValue =
+          status.startsWith("\"") || status.startsWith("'")
+              ? status.substring(1, status.length() - 1)
+              : status;
+      if (statusValue.isBlank()) throw new IllegalArgumentException("请填写 Jira 状态。");
+      // 保留默认待办的编号兼容，其他状态按用户输入查询。
+      if (statusValue.equals("待办") || statusValue.equals("10205")) status = "10205";
+      sop.jiraJql =
+          "project = " + project + " AND status = " + status + " AND assignee = currentUser()";
     }
     if ("fixed".equals(mode)) {
       if (normalizeNullable(body.supervisorAgentId()) == null
@@ -480,6 +489,7 @@ public class ConfigService {
       switch (kind) {
         case "roles" -> {
           RoleEntity r = findRole(id);
+          requireUniqueRoleName(r.id, groupId, r.name);
           assignRole(r, groupId);
           roles.save(r);
         }
@@ -495,6 +505,12 @@ public class ConfigService {
         }
         default -> throw new IllegalArgumentException("不支持的归组数据类型。");
       }
+    }
+  }
+
+  private void requireUniqueRoleName(String roleId, String groupId, String name) {
+    if (roles.existsByDeletedFalseAndGroupIdAndNameIgnoreCaseAndIdNot(groupId, name, roleId)) {
+      throw new ConflictFailure("当前分组内角色名称已存在。");
     }
   }
 

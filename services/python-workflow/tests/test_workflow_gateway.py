@@ -52,6 +52,21 @@ class SupervisorPromptTests(unittest.TestCase):
         self.assertIn("节点派发后必须调用 wait_node", prompt)
         self.assertIn("用户也可以选择保持等待", prompt)
 
+    def test_jira_claim_required_on_start_and_resume(self) -> None:
+        spec = {"workflowId": "jira-demo", "failurePolicy": "stop", "nodes": [],
+                "jira": {"jql": "project = TEST", "account": "test"}}
+        initial = WorkflowGateway._supervisor_prompt(spec)
+        resumed = WorkflowGateway._supervisor_resume_prompt("jira-demo", jira_enabled=True)
+        for prompt in (initial, resumed):
+            self.assertIn("jira_claim_next", prompt)
+            self.assertIn("workflow_id", prompt)
+            self.assertIn("不是终端命令", prompt)
+            self.assertIn("ready 后才能派发步骤", prompt)
+            self.assertIn("重复调用复用原工单", prompt)
+        self.assertNotIn("jira_claim_next", WorkflowGateway._supervisor_resume_prompt("plain"))
+        spec.pop("jira")
+        self.assertNotIn("jira_claim_next", WorkflowGateway._supervisor_prompt(spec))
+
     def test_chat_prompt_only_classifies_against_latest_snapshot(self) -> None:
         prompt = WorkflowGateway._chat_prompt(
             {
@@ -156,19 +171,21 @@ class SupervisorReachabilityTests(unittest.IsolatedAsyncioTestCase):
                     raise ConnectionError("secret address must not be exposed")
 
         orchestrator = FakeOrchestrator()
-        gateway = fixture_gateway(None, orchestrator)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        gateway = fixture_gateway(WorkflowStore(Path(temp.name) / "runtime.db"), orchestrator)
 
-        await gateway._probe_supervisors_once()
+        await gateway._probe_machines_once()
         first = gateway.public_agents()[0]
         self.assertEqual(first["connectionStatus"], "unknown")
 
-        await gateway._probe_supervisors_once()
+        await gateway._probe_machines_once()
         second = gateway.public_agents()[0]
         self.assertEqual(second["connectionStatus"], "offline")
         self.assertNotIn("error", second)
 
         orchestrator.should_fail = False
-        await gateway._probe_supervisors_once()
+        await gateway._probe_machines_once()
         recovered = gateway.public_agents()[0]
         self.assertEqual(recovered["connectionStatus"], "online")
         self.assertEqual(recovered["checkedAt"], recovered["lastOnlineAt"])
@@ -733,6 +750,8 @@ class WorkflowArtifactHttpTests(unittest.TestCase):
             store = app.state.gateway.store
             app.state.gateway._pause_supervisor = AsyncMock()
             app.state.gateway._resume_supervisor_if_needed = AsyncMock()
+            # 此用例使用无监听端口的执行替身，只验证等待确认 HTTP 协议。
+            app.state.gateway.orchestrator.probe_agent = AsyncMock()
 
             with TestClient(app) as client:
                 store.create_workflow(

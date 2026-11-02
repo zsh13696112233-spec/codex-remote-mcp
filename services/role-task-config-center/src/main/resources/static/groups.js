@@ -55,7 +55,7 @@ function groupDialog(title,html,onSave){
   d.querySelector('form').onsubmit=async e=>{e.preventDefault();const f=e.currentTarget,b=f.querySelector('[type=submit]');if(b.disabled)return;b.disabled=true;try{await onSave(f);d.close()}catch(error){f.querySelector('[role=alert]').textContent=error.message}finally{b.disabled=false}};d.showModal();
 }
 function editGroup(id){const g=groupState.items.find(x=>x.id===id);groupDialog(g?'重命名分组':'新建分组',`<label>分组名称<input name="groupName" maxlength="100" required value="${esc(g?.name||'')}"></label>`,async f=>{await api(g?`/api/groups/${encodeURIComponent(g.id)}`:'/api/groups',{method:g?'PUT':'POST',body:JSON.stringify({name:f.elements.groupName.value.trim()})});await render()})}
-function chooseGroup(next){if(concreteGroup())return next(concreteGroup());groupDialog('先选择分组',`<label>所属分组<select name="groupId" required>${groupOptions()}</select></label><p>选定分组后继续配置。</p>`,async f=>{const id=f.elements.groupId.value;$('#sharedGroupDialog').close();await selectGroup(id);next(id)})}
+function chooseGroup(next){if(concreteGroup())return next(concreteGroup());groupDialog('先选择分组',`<label>所属分组<select name="groupId" required>${groupOptions()}</select></label>`,async f=>{const id=f.elements.groupId.value;$('#sharedGroupDialog').close();await selectGroup(id);next(id)})}
 function bindGroupForm(form,x,onChange=()=>{}){
   form.querySelector('[data-form-group]')?.remove();
   const field=document.createElement('label');field.dataset.formGroup='';field.innerHTML=`所属分组 *<select name="groupId" required>${groupOptions(x.id?x.groupId:concreteGroup())}</select>`;form.querySelector('h2').after(field);

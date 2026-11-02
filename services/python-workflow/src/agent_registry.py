@@ -359,11 +359,19 @@ class AgentRegistry:
                 db.execute("UPDATE agent_skill_settings SET checked_at=NULL,check_message=NULL WHERE agent_id=?", (agent_id,))
         return next(row for row in self.public() if row["agentId"] == agent_id)
 
-    def record_test(self, agent_id: str, passed: bool) -> None:
+    def record_test(self, agent_id: str, passed: bool, *, expected: dict[str, Any] | None = None) -> bool:
         with self.store._connect() as db:
-            if not db.execute("UPDATE registered_agents SET test_status=?, tested_at=? WHERE id=?",
-                              ("passed" if passed else "failed", datetime.now(timezone.utc).isoformat(), agent_id)).rowcount:
+            params = ["passed" if passed else "failed", datetime.now(timezone.utc).isoformat(), agent_id]
+            condition = ""
+            if expected is not None:
+                # 检测期间编辑、删除或已有更新结果时，不写回旧连接的结果。
+                condition = " AND config=? AND group_id IS ? AND tested_at IS ?"
+                params.extend([expected["config"], expected["group_id"], expected["tested_at"]])
+            updated = db.execute("UPDATE registered_agents SET test_status=?, tested_at=? WHERE id=? AND deleted_at IS NULL" + condition,
+                                 params).rowcount
+            if not updated and expected is None:
                 raise ValueError("找不到机器。")
+            return bool(updated)
 
     def validate(self, supervisor_id: str, executor_ids: list[str], *, require_test: bool = False, group_id: str | None = None, global_supervisor: bool = False) -> None:
         if group_id is not None:

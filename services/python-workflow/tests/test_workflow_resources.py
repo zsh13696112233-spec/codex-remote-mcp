@@ -26,6 +26,27 @@ class ResourceTests(unittest.TestCase):
             "nodes": [{"id": "one", "agentId": executor, "prompt": "工作"},
                       {"id": "two", "agentId": executor, "prompt": "检查", "dependsOn": ["one"]}], **extra})
 
+    def test_connection_detection_preserves_busy_and_unconfirmed_claims(self):
+        from codex_orchestrator_mcp import Orchestrator
+        gateway = WorkflowGateway(self.store, Orchestrator())
+        self.create("detection")
+        self.store.claim_next_workflow("s1")
+        self.store.prepare_node_dispatch("detection", "one")
+        async def check():
+            for review in (False, True):
+                if review:
+                    self.store.finish_workflow("detection", supervisor_status="failed", response=None, error="中断")
+                claims = self.store.machine_claims()
+                for failure in (ConnectionError("private"), None):
+                    gateway.orchestrator.probe_agent = AsyncMock(side_effect=failure)
+                    await gateway.test_machine("e1")
+                    self.assertEqual(self.store.machine_claims(), claims)
+                    machine = next(a for a in gateway.public_agents() if a["agentId"] == "e1")
+                    self.assertEqual(machine["availability"], "busy")
+                    self.assertEqual(machine["occupation"]["state"], "review" if review else "occupied")
+                    self.assertEqual(machine["testStatus"], "failed" if failure else "passed")
+        asyncio.run(check())
+
     def test_two_supervisors_cannot_share_executor_and_wait_keeps_claim(self):
         self.create("a")
         self.create("b", "s2")

@@ -72,12 +72,12 @@ def status(name):
         print(f'{name}: 已停止（端口 {PORTS[name]} 无监听）')
 
 
-def check_port(port):
+def check_port(port, host='127.0.0.1'):
     with socket.socket() as probe:
         # 与服务监听套接字一致，允许重用已关闭连接的 TIME_WAIT 端口。
         # 不启用 SO_REUSEPORT，仍拒绝已有监听服务占用的端口。
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        probe.bind(('127.0.0.1', port))
+        probe.bind((host, port))
 
 
 def start(name):
@@ -89,21 +89,27 @@ def start(name):
             raise RuntimeError(f'{name}: 已有活动进程记录，请先检查状态，拒绝重复启动。')
     for directory in (ROOT / 'logs', BASE / 'tmp', BASE / 'run'):
         directory.mkdir(parents=True, exist_ok=True)
-    check_port(port)
+    host = '0.0.0.0'
+    check_port(port, host)
     env = {key: os.environ[key] for key in ('HOME', 'PATH', 'JAVA_HOME', 'LANG') if key in os.environ}
     env.update(TMPDIR=str(BASE/'tmp'), PYTHONDONTWRITEBYTECODE='1',
                PYTHONPATH=str(ROOT/'services/python-workflow/src'))
     if name == 'gateway':
+        # 保留执行服务连接所需的代理及内网绕过规则。
+        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'WS_PROXY', 'WSS_PROXY', 'NO_PROXY'):
+            for variant in (key, key.lower()):
+                if variant in os.environ:
+                    env[variant] = os.environ[variant]
         if os.environ.get('CODEX_APP_SERVER_TOKEN'):
             env['CODEX_APP_SERVER_TOKEN'] = os.environ['CODEX_APP_SERVER_TOKEN']
         command = ['/Users/zhangshuhao/Documents/codex-remote-mcp/.venv/bin/python',
                    str(ROOT/'services/python-workflow/src/workflow_gateway.py'),
-                   '--host', '127.0.0.1', '--port', str(port)]
+                   '--host', host, '--port', str(port)]
     else:
         module = 'workflow-console' if name == 'console' else 'role-task-config-center'
-        env.update(SERVER_ADDRESS='127.0.0.1', SERVER_PORT=str(port),
+        env.update(SERVER_ADDRESS=host, SERVER_PORT=str(port),
                    CODEX_GATEWAY_URL='http://127.0.0.1:18080',
-                   WORKFLOW_MONITOR_URL='http://127.0.0.1:18090',
+                   WORKFLOW_MONITOR_URL='http://192.168.9.97:18090',
                    DINGTALK_ENABLED='false', DINGTALK_CLIENT_ID='', DINGTALK_CLIENT_SECRET='')
         if name == 'config-center':
             env['MYSQL_URL'] = 'jdbc:mysql://192.168.5.236:3306/codex_sop_dev?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai'

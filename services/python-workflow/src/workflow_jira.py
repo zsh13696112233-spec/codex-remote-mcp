@@ -91,8 +91,14 @@ def node_instruction(db, workflow_id):
             f"本轮唯一工单：{row['issue_key']}。所有步骤只处理此工单，不重新搜索或领取其他工单。\n"
             f"通过 PowerShell 调用本轮专属入口 {json.dumps(row['launcher_path'], ensure_ascii=False)}，"
             f"参数与 jira_cli 相同，例如 issue get {row['issue_key']}。"
-            "入口已使用监督机的同一账号；不得读取、打印或更改账号配置，不使用其他已保存账号。"
+            "入口负责传入本轮固定账号及认证参数，读取、评论和修改都直接调用此入口；"
+            "不要自行添加 --user、用户名、密码或令牌，不绕过入口直接调用 jira_cli。"
+            "不得读取、打印或更改账号配置，不使用其他已保存账号。"
+            "若入口仍要求选择账号，报告平台入口异常，不自行换账号。"
             "先实际读取工单，再按职责进行具体修改；领取记录不代表 Jira 已被修改。"
+            "历史完成的工单只要仍符合查询条件就可能再次领取。按职责完成负责人转交后，必须重新读取工单，"
+            "确认实际负责人等于指定接收人且不再是本轮领取账号，才能报告交接成功；"
+            "接收人不明确、转交失败或回查无法确认时，按既有结果协议报告遇阻和待人工动作，不得报告交接成功或擅自选择接收人。"
             "不得把工作流完成当成代码提交成功。最终 jiraDelivery.status 使用 submitted（已有提交凭证）、"
             "completed（本步完成但未提交）、blocked（受阻）、unknown（提交结果不明）或 not_applicable。"
             "reference 填实际确认的提交号或交付链接；submitted 必须实际回查并有凭证，不能只凭已发出提交命令。summary 简述交付结果。\n")
@@ -189,7 +195,7 @@ class JiraStore:
                 for key in dict.fromkeys(candidates):
                     previous = db.execute("SELECT w.status,c.workflow_id FROM jira_issue_claims c JOIN workflows w USING(workflow_id) WHERE c.server_key=? AND c.issue_key=?", (server, key)).fetchone()
                     if previous:
-                        if previous["status"] not in {"failed", "cancelled"} or db.execute("SELECT 1 FROM workflow_machine_claims WHERE workflow_id=?", (previous["workflow_id"],)).fetchone():
+                        if previous["status"] not in {"completed", "failed", "cancelled"} or db.execute("SELECT 1 FROM workflow_machine_claims WHERE workflow_id=?", (previous["workflow_id"],)).fetchone():
                             continue
                         db.execute("DELETE FROM jira_issue_claims WHERE server_key=? AND issue_key=?", (server, key))
                     db.execute("INSERT INTO jira_issue_claims VALUES(?,?,?)", (server, key, workflow_id))
@@ -240,8 +246,11 @@ class JiraStore:
             raise ValueError("分页参数无效。")
         with self._connect() as db:
             rows = db.execute("""SELECT j.*,j.rowid AS cursor,w.status,w.name,b.task_definition_id,w.created_at,w.finished_at,w.termination_json,
-                a.supervisor_id,a.executor_id,a.cwd,a.group_id FROM workflow_jira_runs j JOIN workflows w USING(workflow_id)
-                JOIN workflow_allocations a USING(workflow_id) LEFT JOIN workflow_task_bindings b USING(workflow_id) WHERE (? IS NULL OR a.group_id=?) AND (? IS NULL OR j.rowid<?)
+                a.supervisor_id,a.executor_id,a.cwd,a.group_id,
+                supervisor.remark AS supervisor_remark,executor.remark AS executor_remark FROM workflow_jira_runs j JOIN workflows w USING(workflow_id)
+                JOIN workflow_allocations a USING(workflow_id) LEFT JOIN workflow_task_bindings b USING(workflow_id)
+                LEFT JOIN registered_agents supervisor ON supervisor.id=a.supervisor_id
+                LEFT JOIN registered_agents executor ON executor.id=a.executor_id WHERE (? IS NULL OR a.group_id=?) AND (? IS NULL OR j.rowid<?)
                 ORDER BY j.rowid DESC LIMIT ?""", (group_id, group_id, before, before, limit + 1)).fetchall()
             result = []
             for row in rows[:limit]:
@@ -254,6 +263,7 @@ class JiraStore:
                     "waitingFor": waiting["kind"] if waiting else None,
                     "reason": termination["reason"] if termination else None,
                     "supervisorAgentId": row["supervisor_id"], "executorAgentId": row["executor_id"],
+                    "supervisorRemark": row["supervisor_remark"] or "", "executorRemark": row["executor_remark"] or "",
                     "workingDirectory": row["cwd"], "createdAt": row["created_at"],
                     "claimedAt": row["claimed_at"], "finishedAt": row["finished_at"], "deliveries": deliveries,
                     "resourceState": "occupied" if db.execute("SELECT 1 FROM workflow_machine_claims WHERE workflow_id=?", (row["workflow_id"],)).fetchone() else "released"})

@@ -85,10 +85,13 @@ def snapshot(db: sqlite3.Connection, workflow_id: str) -> dict[str, Any] | None:
     row = db.execute("SELECT * FROM workflow_allocations WHERE workflow_id=?", (workflow_id,)).fetchone()
     if row is None:
         return None
-    deleted = {item["id"] for item in db.execute(
-        "SELECT id FROM registered_agents WHERE id IN (?,?) AND deleted_at IS NOT NULL",
+    agents = {item["id"]: item for item in db.execute(
+        "SELECT id,remark,deleted_at FROM registered_agents WHERE id IN (?,?)",
         (row["supervisor_id"], row["executor_id"]))}
-    return {"supervisorDeleted": row["supervisor_id"] in deleted,
+    deleted = {key for key, agent in agents.items() if agent["deleted_at"] is not None}
+    return {"supervisorRemark": agents[row["supervisor_id"]]["remark"] if row["supervisor_id"] in agents else "",
+            "executorRemark": agents[row["executor_id"]]["remark"] if row["executor_id"] in agents else "",
+            "supervisorDeleted": row["supervisor_id"] in deleted,
             "executorDeleted": row["executor_id"] in deleted,
             "groupId": row["group_id"], "supervisorAgentId": row["supervisor_id"],
             "executorAgentId": row["executor_id"], "workingDirectory": row["cwd"],

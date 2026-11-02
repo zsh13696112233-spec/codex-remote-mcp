@@ -35,8 +35,8 @@ from workflow_store import (
 
 DEFAULT_DB_PATH = Path(__file__).with_name("workflows.db")
 TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "cancelled"}
-SUPERVISOR_PROBE_INTERVAL_SEC = 10.0
-SUPERVISOR_PROBE_TIMEOUT_SEC = 2.5
+MACHINE_PROBE_INTERVAL_SEC = 10.0
+MACHINE_PROBE_TIMEOUT_SEC = 2.5
 SUPERVISOR_OFFLINE_FAILURE_THRESHOLD = 2
 SIDECAR_HEARTBEAT_INTERVAL_SEC = 5
 SIDECAR_LEASE_TIMEOUT_SEC = 20
@@ -74,10 +74,12 @@ class WorkflowGateway:
         self._discussion_jobs: dict[str, Any] = {}
         self._control_in_progress: set[str] = set()
         self._schedule_lock = asyncio.Lock()
-        self._supervisor_probe_task: asyncio.Task[None] | None = None
+        self._machine_probe_task: asyncio.Task[None] | None = None
         self._sidecar_watchdog_task: asyncio.Task[None] | None = None
         self._jira_cleanup_task: asyncio.Task[None] | None = None
         self._supervisor_runtime: dict[str, dict[str, Any]] = {}
+        self._machine_checks: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._machine_check_slots = asyncio.Semaphore(8)
         self._closing = False
         self._last_resource_check = 0.0
         self._resource_check_cursor = ("", "")
@@ -105,8 +107,8 @@ class WorkflowGateway:
             self._ensure_chat_worker(workflow_id)
         await self._schedule_pending()
         self._wait_task = asyncio.create_task(self.wait_service.run(), name="workflow-wait-scheduler")
-        self._supervisor_probe_task = asyncio.create_task(
-            self._supervisor_probe_loop(), name="supervisor-reachability-probe"
+        self._machine_probe_task = asyncio.create_task(
+            self._machine_probe_loop(), name="machine-connection-probe"
         )
         self._sidecar_watchdog_task = asyncio.create_task(
             self._sidecar_watchdog_loop(), name="supervisor-sidecar-watchdog"
@@ -121,10 +123,14 @@ class WorkflowGateway:
             self._wait_task.cancel()
             await asyncio.gather(self._wait_task, return_exceptions=True)
         await self.wait_service.stop()
-        if self._supervisor_probe_task is not None:
-            self._supervisor_probe_task.cancel()
-            await asyncio.gather(self._supervisor_probe_task, return_exceptions=True)
-            self._supervisor_probe_task = None
+        if self._machine_probe_task is not None:
+            self._machine_probe_task.cancel()
+            await asyncio.gather(self._machine_probe_task, return_exceptions=True)
+            self._machine_probe_task = None
+        checks = list(self._machine_checks.values())
+        for check in checks:
+            check.cancel()
+        await asyncio.gather(*checks, return_exceptions=True)
         if self._sidecar_watchdog_task is not None:
             self._sidecar_watchdog_task.cancel()
             await asyncio.gather(self._sidecar_watchdog_task, return_exceptions=True)
@@ -423,71 +429,75 @@ class WorkflowGateway:
             result.append(value)
         return result
 
-    async def _supervisor_probe_loop(self) -> None:
+    async def _machine_probe_loop(self) -> None:
         while not self._closing:
             try:
-                await self._probe_supervisors_once()
+                await self._probe_machines_once()
                 if await _database_call(self.store.pending_allocation_specs):
                     await self._schedule_pending()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                LOGGER.exception("刷新主监督在线状态失败。")
-            await asyncio.sleep(SUPERVISOR_PROBE_INTERVAL_SEC)
+                LOGGER.exception("刷新机器检测状态失败。")
+            await asyncio.sleep(MACHINE_PROBE_INTERVAL_SEC)
 
-    async def _probe_supervisors_once(self) -> None:
-        probe = getattr(self.orchestrator, "probe_agent", None)
-        if not callable(probe):
-            return
-        supervisor_ids: list[str] = []
-        for item in self.orchestrator.list_agents():
-            agent_id = str(item["agent_id"])
-            capabilities = set(
-                item.get("capabilities")
-                or (["supervisor", "executor"] if agent_id == "local" else ["executor"])
-            )
-            if bool(item.get("enabled", True)) and "supervisor" in capabilities:
-                if item.get("orchestration_mode") == "remote_sidecar":
-                    continue
-                supervisor_ids.append(agent_id)
-        configured = set(supervisor_ids)
-        self._supervisor_runtime = {
-            agent_id: value
-            for agent_id, value in self._supervisor_runtime.items()
-            if agent_id in configured
-        }
+    async def _probe_machines_once(self) -> None:
+        rows = await _database_call(self.registry.rows)
+        enabled = [key for key, row in rows.items() if json.loads(row["config"]).get("enabled", True)]
+        self._supervisor_runtime = {key: value for key, value in self._supervisor_runtime.items() if key in enabled}
+        await asyncio.gather(*(self.test_machine(key) for key in enabled))
 
-        async def check(agent_id: str) -> None:
-            checked_at = utc_now()
-            previous = self._supervisor_runtime.get(agent_id, {})
+    async def test_machine(self, agent_id: str) -> dict[str, Any]:
+        # 手动检测与后台检测共用同一任务，浏览器断开不取消正在进行的检测。
+        task = self._machine_checks.get(agent_id)
+        if task is None:
+            task = asyncio.create_task(self._test_machine(agent_id))
+            self._machine_checks[agent_id] = task
+            task.add_done_callback(lambda done: self._machine_checks.pop(agent_id, None))
+        return await asyncio.shield(task)
+
+    async def _test_machine(self, agent_id: str) -> dict[str, Any]:
+        async with self._machine_check_slots:
+            row = (await _database_call(self.registry.rows)).get(agent_id)
+            if row is None:
+                return {"passed": False, "message": "机器已删除，未更新检测结果。"}
+            config = json.loads(row["config"])
+            if not config.get("enabled", True):
+                return {"passed": False, "message": "机器已停用，未进行连接检测。"}
+            remote = "supervisor" in config["capabilities"] and config.get("orchestration_mode") == "remote_sidecar"
+            passed = False
+            message = "连接检测失败，请检查执行服务的协议、凭据和服务日志。"
             try:
-                await asyncio.wait_for(
-                    probe(agent_id, timeout_sec=SUPERVISOR_PROBE_TIMEOUT_SEC),
-                    timeout=SUPERVISOR_PROBE_TIMEOUT_SEC + 0.5,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                failures = int(previous.get("consecutiveFailures", 0)) + 1
+                await asyncio.wait_for(self.orchestrator.probe_agent(agent_id, timeout_sec=MACHINE_PROBE_TIMEOUT_SEC), timeout=8)
+                if remote:
+                    online = await _database_call(self.store.sidecar_status, agent_id, timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC)
+                    if online.get("connectionStatus") != "online":
+                        message = "执行服务连接成功，但主监督尚未上报有效心跳。"
+                        raise RuntimeError("主监督尚未上报有效心跳。")
+                passed = True
+                message = "连接检测通过。"
+            except Exception as error:
+                if isinstance(error, CredentialError):
+                    message = error.public_message
+                elif isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+                    message = "执行服务连接或初始化超时，请检查服务和网络。"
+                elif isinstance(error, ConnectionError):
+                    message = "执行服务连接失败或已断开，请检查服务端口和网络。"
+                LOGGER.info("机器连接检测失败，类型=%s，原因=%s", type(error).__name__, message)
+            saved = await _database_call(self.registry.record_test, agent_id, passed, expected=row)
+            if not saved:
+                return {"passed": False, "message": "机器配置或检测结果已更新，本次结果已丢弃，请等待下一次检测。"}
+            if "supervisor" in config["capabilities"] and not remote:
+                previous = self._supervisor_runtime.get(agent_id, {})
+                checked_at = utc_now()
+                failures = 0 if passed else int(previous.get("consecutiveFailures", 0)) + 1
                 self._supervisor_runtime[agent_id] = {
-                    "connectionStatus": (
-                        "offline"
-                        if failures >= SUPERVISOR_OFFLINE_FAILURE_THRESHOLD
-                        else "unknown"
-                    ),
+                    "connectionStatus": "online" if passed else "offline" if failures >= SUPERVISOR_OFFLINE_FAILURE_THRESHOLD else "unknown",
                     "checkedAt": checked_at,
-                    "lastOnlineAt": previous.get("lastOnlineAt"),
+                    "lastOnlineAt": checked_at if passed else previous.get("lastOnlineAt"),
                     "consecutiveFailures": failures,
                 }
-            else:
-                self._supervisor_runtime[agent_id] = {
-                    "connectionStatus": "online",
-                    "checkedAt": checked_at,
-                    "lastOnlineAt": checked_at,
-                    "consecutiveFailures": 0,
-                }
-
-        await asyncio.gather(*(check(agent_id) for agent_id in supervisor_ids))
+            return {"passed": passed, "message": message}
 
     async def _reconcile_resource_executions(self):
         records = await _database_call(self.store.unresolved_resource_executions, self._resource_check_cursor)
@@ -655,7 +665,7 @@ class WorkflowGateway:
                 prompt = (
                     self._supervisor_prompt(spec)
                     if current_thread_id is None
-                    else self._supervisor_resume_prompt(workflow_id)
+                    else self._supervisor_resume_prompt(workflow_id, jira_enabled=bool(spec.get("jira")))
                 )
                 await _database_call(self.store.prepare_supervisor_execution, workflow_id)
                 prepared_execution = True
@@ -877,14 +887,28 @@ class WorkflowGateway:
         )
 
     @staticmethod
-    def _supervisor_resume_prompt(workflow_id: str) -> str:
+    def _supervisor_resume_prompt(workflow_id: str, *, jira_enabled: bool = False) -> str:
         return (
             "继续监督此前的工作流。先调用 workflow_status 读取最新状态。"
             "已经完成或跳过的步骤不得重新执行；有正在执行的步骤就继续 wait_node；"
-            "有依赖已满足的待执行步骤就继续 dispatch_node。"
+            "有依赖已满足的待执行步骤，在本轮适用的前置要求已满足后再调用 dispatch_node。"
             "不要因为刚刚回答了监控页面的用户咨询而结束工作。"
             "只要仍有可继续的步骤，就必须持续调度和等待；全部步骤结束后再给最终总结。\n"
             f"工作流：{workflow_id}"
+            + ("\n" + WorkflowGateway._jira_supervisor_prompt() if jira_enabled else "")
+        )
+
+    @staticmethod
+    def _jira_supervisor_prompt() -> str:
+        return (
+            "本运行由监督机统一领取 Jira。开始或恢复调度时，先调用 Codex Orchestrator MCP 的 "
+            "jira_claim_next 工具，参数为 workflow_id（本工作流编号）。重复调用复用原工单。"
+            "这是 MCP 工具，不是终端命令，不要用 PowerShell 或 Jira CLI 查找或替代它。"
+            "工具未显示时先通过当前环境的工具发现能力查找；仍不可用则明确报告领取工具未开放，"
+            "不得绕过领取或反复尝试派发步骤。平台负责查询、去重领取并下发同一账号。"
+            "不要自行读取账号文件，不要在消息或命令中传递令牌。每轮只领取一个工单。"
+            "返回 no_task 时结束本轮；ready 后才能派发步骤。失败时报告实际领取错误。"
+            "业务详情读取与修改只由执行机完成。\n"
         )
 
     @staticmethod
@@ -909,16 +933,10 @@ class WorkflowGateway:
                 for node in spec["nodes"]
             ],
         }
-        jira_prompt = (
-            "本运行由监督机统一领取 Jira。开始调度前必须调用 jira_claim_next(workflowId)，"
-            "平台通过你所在机器已配置的 Jira CLI 查询、去重领取并下发同一账号。"
-            "不要自行读取账号文件，不要在消息或命令中传递令牌。每轮只领取一个工单。"
-            "返回 no_task 时结束本轮；ready 后才能派发步骤。失败时报告无法领取，禁止绕过领取直接派发。"
-            "业务详情读取与修改只由执行机完成。\n" if spec.get("jira") else ""
-        )
+        jira_prompt = WorkflowGateway._jira_supervisor_prompt() if spec.get("jira") else ""
         return (
             jira_prompt + "你是这个工作流的主监督会话，不要亲自执行任何节点的业务任务。\n"
-            "仅使用 Codex Orchestrator MCP 提供的 dispatch_node、wait_node、"
+            "使用 Codex Orchestrator MCP 提供的工具完成本轮适用的领取要求，并使用 dispatch_node、wait_node、"
             "node_status、cancel_node 工具调度节点。\n"
             "每次只能派发依赖已经 completed 的节点；数据库也会强制检查依赖。\n"
             "节点派发后必须调用 wait_node，直到得到 completed、failed、cancelled "
@@ -1786,28 +1804,7 @@ async def manage_machines(request: Request) -> Response:
         elif path.endswith("/test"):
             if key not in registry.rows():
                 raise ValueError("找不到机器。")
-            passed = False
-            message = "连接检测失败，请检查执行服务的协议、凭据和服务日志。"
-            try:
-                await asyncio.wait_for(gateway.orchestrator.probe_agent(key), timeout=8)
-                agent = gateway.orchestrator.get_agent(key)
-                if "supervisor" in agent.capabilities and agent.orchestration_mode == "remote_sidecar":
-                    online = await _database_call(gateway.store.sidecar_status, key, timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC)
-                    if online.get("connectionStatus") != "online":
-                        message = "执行服务连接成功，但主监督尚未上报有效心跳。"
-                        raise RuntimeError("主监督尚未上报有效心跳。")
-                passed = True
-                message = "连接检测通过。"
-            except Exception as error:
-                if isinstance(error, CredentialError):
-                    message = error.public_message
-                elif isinstance(error, (TimeoutError, asyncio.TimeoutError)):
-                    message = "执行服务连接或初始化超时，请检查服务和网络。"
-                elif isinstance(error, ConnectionError):
-                    message = "执行服务连接失败或已断开，请检查服务端口和网络。"
-                LOGGER.info("机器连接检测失败，类型=%s，原因=%s", type(error).__name__, message)
-            await _database_call(registry.record_test, key, passed)
-            result = {"passed": passed, "message": message}
+            result = await gateway.test_machine(key)
         elif path.startswith("/agent-groups"):
             if request.method == "GET":
                 result = {"groups": await _database_call(registry.groups)}

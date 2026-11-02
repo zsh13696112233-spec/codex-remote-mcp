@@ -16,6 +16,7 @@ interface RoleRepository extends JpaRepository<RoleEntity, String> {
   /** 按名称模糊查询未软删除的角色，并将新建角色排在前面。 */
   List<RoleEntity> findByDeletedFalseAndNameContainingIgnoreCaseOrderByCreatedAtDesc(String query);
 
-  /** 判断除指定 ID 外是否已有同名角色，用于创建和更新前的唯一性检查。 */
-  boolean existsByDeletedFalseAndNameIgnoreCaseAndIdNot(String name, String id);
+  /** 判断同组内除指定 ID 外是否已有同名角色，用于创建和更新前的唯一性检查。 */
+  boolean existsByDeletedFalseAndGroupIdAndNameIgnoreCaseAndIdNot(
+      String groupId, String name, String id);
 }

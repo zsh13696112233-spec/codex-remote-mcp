@@ -11,7 +11,7 @@ from pathlib import PureWindowsPath
 from workflow_jira import ISSUE_KEY, run_directory, server_key
 
 CONFIG_PATH = PureWindowsPath(r"C:\Users\admin\.jira_cli\config.json")
-POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+POWERSHELL = r"C:\Program Files\PowerShell\7\pwsh.exe"
 FILE_LIMIT = 64 * 1024
 LOGGER = logging.getLogger(__name__)
 
@@ -27,21 +27,46 @@ def account_from_config(content, alias):
                 raise ValueError()
             alias = next(iter(accounts))
         account = accounts[alias]
-        token = account["token"]
-        if (not isinstance(alias, str) or not 1 <= len(alias) <= 128 or any(ord(c) < 32 for c in alias)
-                or not isinstance(token, str) or not 1 <= len(token) <= 8192
-                or any(ord(c) < 32 for c in token) or type(account["readOnly"]) is not bool):
+        if not isinstance(account, dict):
             raise ValueError()
-        return alias, {"baseUrl": server_key(account["baseUrl"]), "token": token,
+        for field in ("token", "username", "password"):
+            value = account.get(field)
+            if value is not None and value != "" and not isinstance(value, str):
+                raise ValueError()
+        token = account.get("token")
+        username, password = account.get("username"), account.get("password")
+        # 空字段视为未配置；有效 token 与 Basic Auth 必须二选一。
+        if token:
+            if username or password:
+                raise ValueError()
+            credentials = {"token": token}
+        else:
+            credentials = {"username": username, "password": password}
+        if any(not isinstance(value, str) or not 1 <= len(value) <= 8192
+               or any(ord(c) < 32 for c in value) for value in credentials.values()):
+            raise ValueError()
+        if (not isinstance(alias, str) or not 1 <= len(alias) <= 128 or any(ord(c) < 32 for c in alias)
+                or type(account["readOnly"]) is not bool):
+            raise ValueError()
+        return alias, {"baseUrl": server_key(account["baseUrl"]), **credentials,
                        "readOnly": account["readOnly"]}
     except (ValueError, TypeError, KeyError, UnicodeError):
-        raise ValueError("监督机 Jira 配置无效、账号不存在或存在多个账号；请检查 SOP 账号别名及 token 配置。") from None
+        raise ValueError("监督机 Jira 配置无效、账号不存在或存在多个账号；请检查 SOP 账号别名，并仅配置 token 或完整的用户名密码。") from None
 
 
 def issue_keys(output):
     try:
         value = json.loads(output)
-        rows = value["issues"] if isinstance(value, dict) else value
+        if isinstance(value, dict) and "items" in value:
+            rows = value["items"]
+            # 每次排除已查编号后从首页查询；不能将非首页或不完整的空页当作无任务。
+            if (type(value["total"]) is not int or value["total"] < 0
+                    or type(value["start_at"]) is not int or value["start_at"] != 0
+                    or type(value["returned"]) is not int or value["returned"] != len(rows)
+                    or value["total"] < len(rows) or (not rows and value["total"] != 0)):
+                raise ValueError()
+        else:
+            rows = value["issues"] if isinstance(value, dict) else value
         if not isinstance(rows, list) or len(rows) > 1000:
             raise ValueError()
         keys = [row["key"] for row in rows]
@@ -49,7 +74,7 @@ def issue_keys(output):
             raise ValueError()
         return list(dict.fromkeys(keys))
     except (ValueError, TypeError, KeyError):
-        raise ValueError("Jira CLI 搜索输出不是工单数组或 issues 数组，或超过 1000 项；请缩小查询范围并检查 CLI JSON 输出。") from None
+        raise ValueError("Jira CLI 搜索输出不是有效的工单数组、issues 数组或 items 首页，或超过 1000 项；请缩小查询范围并检查 CLI JSON 输出。") from None
 
 
 def excluding_query(jql, keys):
@@ -88,10 +113,31 @@ async def read_file(client, path):
         raise ValueError("Jira 配置文件响应无效。") from None
 
 
+# 只更新当前子进程，保留服务额外 PATH；不修改用户或机器环境变量。
+PROCESS_ENVIRONMENT = r"""
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$OutputEncoding=[Console]::OutputEncoding
+$env:PATH=[Environment]::GetEnvironmentVariable('Path','Machine')+';'+[Environment]::GetEnvironmentVariable('Path','User')+';'+$env:PATH
+"""
+
+# 输入来自已校验的运行账号；旧的 token 专属账号文件仍可使用。
+AUTH_ARGUMENTS = r"""
+$authArgs=@('--base-url',$account.baseUrl)
+if ($account.PSObject.Properties['accountAlias']) {
+  $authArgs+=@('--user',$account.accountAlias)
+}
+if ($account.PSObject.Properties['token'] -and $account.token) {
+  $authArgs+=@('--token',$account.token)
+} else {
+  $authArgs+=@('--username',$account.username,'--password',$account.password)
+}
+"""
+
+
 async def powershell(client, code, cwd, *, cap=4096):
     result = await client.request("command/exec", {
         "command": [POWERSHELL, "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                    base64.b64encode(code.encode("utf-16-le")).decode()],
+                    base64.b64encode((PROCESS_ENVIRONMENT + code).encode("utf-16-le")).decode()],
         "cwd": cwd, "sandboxPolicy": {"type": "dangerFullAccess"},
         "timeoutMs": 30000, "outputBytesCap": cap,
     })
@@ -119,18 +165,21 @@ $target=Join-Path $root $runId
 """
 
 INITIALIZE_SCRIPT = r"""
+# 使用当前 PowerShell 7 自带模块，避免继承其他版本的模块搜索路径。
+Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
 foreach ($path in @($root,$target)) {
   $created=!(Test-Path -LiteralPath $path)
   if ($created) { New-Item -ItemType Directory -Path $path | Out-Null }
   Check-Path $path
-  $acl=Get-Acl -LiteralPath $path
+  $existingAcl=Get-Acl -LiteralPath $path
+  if (!$created -and $existingAcl.GetOwner([Security.Principal.SecurityIdentifier]) -ne $sid) { throw 'owner' }
+  # 仅写入所有者和访问规则，不带入审计 ACL，避免要求 SeSecurityPrivilege。
+  $acl=[Security.AccessControl.DirectorySecurity]::new()
   if ($created) { $acl.SetOwner($sid) }
-  elseif ($acl.GetOwner([Security.Principal.SecurityIdentifier]) -ne $sid) { throw 'owner' }
   $acl.SetAccessRuleProtection($true,$false)
-  foreach ($rule in @($acl.Access)) { $acl.RemoveAccessRuleSpecific($rule) }
   $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
-  Set-Acl -LiteralPath $path -AclObject $acl
+  [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($path),$acl)
 }
 foreach ($file in @('account.json','jira.ps1')) {
   $path=Join-Path $target $file
@@ -141,7 +190,7 @@ if (!$cli.Path) { throw 'cli' }
 Write-Output $target
 """
 
-LAUNCHER = r"""$JiraArgs=@($args)
+LAUNCHER = PROCESS_ENVIRONMENT + r"""$JiraArgs=@($args)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 try {
@@ -164,9 +213,22 @@ try {
   if ($account.readOnly) {
     if ($pair -notin @('issue get','issue transitions','issue transition-meta','attachment list','attachment download','field list','user get','user search')) { throw 'read only' }
   }
-  $output=& jira_cli --base-url $account.baseUrl --token $account.token @JiraArgs 2>&1
+""" + AUTH_ARGUMENTS + r"""
+  $secrets=@()
+  foreach ($field in @('token','password')) {
+    if ($account.PSObject.Properties[$field] -and $account.$field) { $secrets+=@($account.$field) }
+  }
+  if ($account.PSObject.Properties['username'] -and $account.username) {
+    $secrets+=@([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($account.username+':'+$account.password)))
+  }
+  $secrets=@($secrets | Sort-Object -Property Length -Descending)
+  $output=& jira_cli @authArgs @JiraArgs 2>&1
   $code=$LASTEXITCODE
-  foreach ($line in $output) { Write-Output ($line.ToString().Replace($account.token,'[已隐藏凭据]')) }
+  foreach ($line in $output) {
+    $text=$line.ToString()
+    foreach ($secret in $secrets) { $text=$text.Replace($secret,'[已隐藏凭据]') }
+    Write-Output $text
+  }
   exit $code
 } catch {
   Write-Output 'Jira 操作失败，请检查本轮账号、权限和命令参数；未自动重发。'
@@ -214,7 +276,7 @@ async def claim_next(store, orchestrator, workflow_id):
                             "$cfg=[Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF) | ConvertFrom-Json\n"
                             "$account=$cfg.accounts.PSObject.Properties[$a[0]].Value\n"
                             "$queryArgs=@($a | Select-Object -Skip 2)\n"
-                            "& jira_cli --base-url $account.baseUrl --token $account.token @queryArgs 2>$null\n"
+                            + AUTH_ARGUMENTS + "\n& jira_cli @authArgs @queryArgs 2>$null\n"
                             "exit $LASTEXITCODE\n} catch { exit 1 }")
                     keys = issue_keys(await powershell(client, code, supervisor.cwd, cap=1024 * 1024))
                 result = await asyncio.to_thread(store.jira_update, workflow_id, "claim", {
@@ -238,7 +300,7 @@ async def claim_next(store, orchestrator, workflow_id):
             if staged["state"] == "ready":
                 upload_pending = False
                 return staged
-            files = {"account.json": json.dumps(account, ensure_ascii=False).encode(), "jira.ps1": b"\xef\xbb\xbf" + LAUNCHER.encode()}
+            files = {"account.json": json.dumps({**account, "accountAlias": alias}, ensure_ascii=False).encode(), "jira.ps1": b"\xef\xbb\xbf" + LAUNCHER.encode()}
             for name, content in files.items():
                 path = directory / name
                 await client.request("fs/writeFile", {"path": str(path), "dataBase64": base64.b64encode(content).decode()})

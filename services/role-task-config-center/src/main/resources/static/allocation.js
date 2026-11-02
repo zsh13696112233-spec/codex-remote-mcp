@@ -5,7 +5,7 @@ function allocationHtml(value) {
   if (!allocation) return '<p>此运行沿用原快照中的固定机器设置。</p>';
   const resources=value.resources||{};
   const resourceLabel={occupied:'任务占用中',review:'执行状态待核实，暂不接收新任务',released:'未占用机器'}[resources.state]||'状态未知';
-  return `<dl><dt>监督机</dt><dd>${esc(allocation.supervisorAgentId||'等待分配')}${allocation.supervisorDeleted?'（已删除）':''}</dd><dt>执行机</dt><dd>${esc(allocation.executorAgentId||'等待分配')}${allocation.executorDeleted?'（已删除）':''}</dd><dt>工作目录</dt><dd>${esc(allocation.workingDirectory||'分配执行机后确定')}</dd><dt>分配时间</dt><dd>${esc(allocation.assignedAt?time(allocation.assignedAt):'尚未分配')}</dd><dt>占用状态</dt><dd>${resourceLabel}</dd></dl>${allocation.waitingReason?`<p>${esc(allocation.waitingReason)}</p>`:''}<p class="meta">全部步骤使用同一台执行机和目录。流程结束后，还须确认远端已停止才会释放机器。</p>`;
+  return `<dl><dt>监督机</dt><dd>${esc(allocation.supervisorAgentId ? (allocation.supervisorRemark?.trim()||'未填写备注') : '等待分配')}${allocation.supervisorDeleted?'（已删除）':''}${allocation.supervisorAgentId?`<br><small>编号：${esc(allocation.supervisorAgentId)}</small>`:''}</dd><dt>执行机</dt><dd>${esc(allocation.executorAgentId ? (allocation.executorRemark?.trim()||'未填写备注') : '等待分配')}${allocation.executorDeleted?'（已删除）':''}${allocation.executorAgentId?`<br><small>编号：${esc(allocation.executorAgentId)}</small>`:''}</dd><dt>工作目录</dt><dd>${esc(allocation.workingDirectory||'分配执行机后确定')}</dd><dt>分配时间</dt><dd>${esc(allocation.assignedAt?time(allocation.assignedAt):'尚未分配')}</dd><dt>占用状态</dt><dd>${resourceLabel}</dd></dl>${allocation.waitingReason?`<p>${esc(allocation.waitingReason)}</p>`:''}<p class="meta">全部步骤使用同一台执行机和目录。流程结束后，还须确认远端已停止才会释放机器。</p>`;
 }
 async function showAllocation(workflowId) {
   let dialog=document.querySelector('#allocationDialog');

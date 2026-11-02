@@ -50,7 +50,7 @@ test('machine detail escapes persisted directory and diagnostic text',()=>{
 });
 
 test('executor online status follows the saved connection test across page loads',()=>{
-  for(const [testStatus,label] of [['passed','最近检测在线'],['failed','最近检测离线'],['untested','未检测']]){
+  for(const [testStatus,label] of [['passed','在线'],['failed','离线'],['untested','未检测']]){
     const h=setup();Object.assign(h.context.machine,{testStatus,testedAt:'2026-09-22T08:00:00Z'});
     const html=h.run('machineCard(machine,"executor")');
     assert.ok(html.includes(`>${label}</span>`));

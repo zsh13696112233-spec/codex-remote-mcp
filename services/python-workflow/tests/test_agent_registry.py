@@ -463,6 +463,95 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "检测"):
             self.registry.validate(supervisor["agentId"], [], require_test=True)
 
+    def test_automatic_detection_updates_executor_failure_recovery_and_time(self):
+        key = self.machine(capabilities=["executor"])["agentId"]
+        disabled = self.machine("127.0.0.2", ["executor"])
+        self.registry.save_agent({**disabled, "enabled": False}, disabled["agentId"])
+        async def check():
+            with patch.object(self.gateway.orchestrator, "probe_agent", new=AsyncMock(side_effect=ConnectionError("private"))) as probe:
+                await self.gateway._probe_machines_once()
+                self.assertEqual(probe.await_count, 1)
+            failed = self.registry.rows()[key]
+            self.assertEqual(failed["test_status"], "failed")
+            self.assertIsNotNone(failed["tested_at"])
+            with patch.object(self.gateway.orchestrator, "probe_agent", new=AsyncMock()):
+                await self.gateway._probe_machines_once()
+            recovered = self.registry.rows()[key]
+            self.assertEqual(recovered["test_status"], "passed")
+            self.assertGreater(recovered["tested_at"], failed["tested_at"])
+            self.assertIsNone(self.registry.rows()[disabled["agentId"]]["tested_at"])
+        asyncio.run(check())
+
+    def test_automatic_and_manual_detection_share_probe(self):
+        key = self.machine(capabilities=["executor"])["agentId"]
+        async def check():
+            started, finish = asyncio.Event(), asyncio.Event()
+            async def probe(*args, **kwargs):
+                started.set()
+                await finish.wait()
+            with patch.object(self.gateway.orchestrator, "probe_agent", new=AsyncMock(side_effect=probe)) as mock:
+                background = asyncio.create_task(self.gateway._probe_machines_once())
+                await started.wait()
+                manual = asyncio.create_task(self.gateway.test_machine(key))
+                await asyncio.sleep(0)
+                finish.set()
+                await background
+                self.assertTrue((await manual)["passed"])
+                self.assertEqual(mock.await_count, 1)
+        asyncio.run(check())
+
+    def test_detection_does_not_overwrite_changed_or_deleted_machine(self):
+        for change in ("edit", "delete", "new-result", "disable"):
+            with self.subTest(change=change):
+                machine = self.machine("127.0.0." + str(10 + len(self.registry.rows())), ["executor"])
+                key = machine["agentId"]
+                async def probe(*args, **kwargs):
+                    if change == "edit":
+                        self.registry.save_agent({**machine, "port": 4501}, key)
+                    elif change == "delete":
+                        self.registry.delete_agent(key)
+                    elif change == "disable":
+                        self.registry.save_agent({**machine, "enabled": False}, key)
+                    else:
+                        self.registry.record_test(key, False)
+                with patch.object(self.gateway.orchestrator, "probe_agent", new=AsyncMock(side_effect=probe)):
+                    result = asyncio.run(self.gateway.test_machine(key))
+                self.assertFalse(result["passed"])
+                self.assertIn("丢弃", result["message"])
+                row = self.registry.rows().get(key)
+                if row:
+                    self.assertEqual(row["test_status"], "failed" if change == "new-result" else "untested")
+
+    def test_background_detection_limits_concurrent_connections(self):
+        for index in range(10):
+            self.machine(f"127.0.0.{index + 1}", ["executor"])
+        async def check():
+            active = peak = 0
+            async def probe(*args, **kwargs):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0.01)
+                active -= 1
+            with patch.object(self.gateway.orchestrator, "probe_agent", new=AsyncMock(side_effect=probe)) as mock:
+                await self.gateway._probe_machines_once()
+                self.assertEqual(mock.await_count, 10)
+                self.assertLessEqual(peak, 8)
+                self.assertGreater(peak, 1)
+        asyncio.run(check())
+
+    def test_background_remote_supervisor_requires_heartbeat(self):
+        key = self.machine()["agentId"]
+        async def check():
+            with patch.object(self.gateway.orchestrator, "probe_agent", new=AsyncMock()):
+                await self.gateway._probe_machines_once()
+                self.assertEqual(self.registry.rows()[key]["test_status"], "failed")
+                self.gateway.store.record_sidecar_heartbeat(key, "instance", utc_now(), lease_timeout_sec=20)
+                await self.gateway._probe_machines_once()
+                self.assertEqual(self.registry.rows()[key]["test_status"], "passed")
+        from workflow_store import utc_now
+        asyncio.run(check())
+
     def test_detection_and_public_response(self):
         machine = self.machine()
         key = machine["agentId"]

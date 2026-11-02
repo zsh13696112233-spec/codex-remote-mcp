@@ -2,24 +2,21 @@ let machineGroups=[];
 let selectedMachineGroupId=null;
 const pendingMachineActions=new Set();
 const machineRemarkDrafts=new Map();
-const machineView={query:'',filter:'all',group:null,selected:null,returnTo:null,version:0,lastSuccess:null,error:'',loaded:false,refreshing:false};
-// Lucide monitor (ISC); original geometry, styled locally. See vendor/lucide/LICENSE.
-const machineMonitorSvg="<svg aria-hidden=\"true\" class=\"machine-monitor\"\n  xmlns=\"http://www.w3.org/2000/svg\"\n  width=\"24\"\n  height=\"24\"\n  viewBox=\"0 0 24 24\"\n  fill=\"none\"\n  stroke=\"currentColor\"\n  stroke-width=\"2\"\n  stroke-linecap=\"round\"\n  stroke-linejoin=\"round\"\n>\n  <rect width=\"20\" height=\"14\" x=\"2\" y=\"3\" rx=\"2\" />\n  <line x1=\"8\" x2=\"16\" y1=\"21\" y2=\"21\" />\n  <line x1=\"12\" x2=\"12\" y1=\"17\" y2=\"21\" />\n</svg>";
+const machineView={filter:'all',group:null,selected:null,returnTo:null,version:0,lastSuccess:null,error:'',loaded:false,refreshing:false};
 function machineConnection(a){
   const supervisor=(a.capabilities||[]).includes('supervisor');
   const connection=supervisor?a.connectionStatus:a.testStatus==='passed'?'online':a.testStatus==='failed'?'offline':'unknown';
   const kind=['online','offline'].includes(connection)?connection:'unknown';
-  return {kind,label:supervisor?({online:'在线',offline:'离线',unknown:'在线状态未知'}[kind]):({online:'最近检测在线',offline:'最近检测离线',unknown:'未检测'}[kind])};
+  return {kind,label:supervisor?({online:'在线',offline:'离线',unknown:'在线状态未知'}[kind]):({online:'在线',offline:'离线',unknown:'未检测'}[kind])};
 }
 function machineDisplayState(a){return a.enabled?machineConnection(a):{kind:'disabled',label:'已停用'}}
 function machineMatches(a){
-  const query=machineView.query.trim().toLowerCase();
-  return (!query||`${a.remark||''} ${a.ip}:${a.port}`.toLowerCase().includes(query))&&(machineView.filter==='all'||machineDisplayState(a).kind===machineView.filter);
+  return machineView.filter==='all'||machineDisplayState(a).kind===machineView.filter||machineOccupation(a).kind===machineView.filter;
 }
 function machineSorted(items){return [...items].sort((a,b)=>a.ip.localeCompare(b.ip,undefined,{numeric:true})||a.port-b.port||a.agentId.localeCompare(b.agentId))}
 function leaveMachines(){
   machineView.version++;closeMachineDetails();
-  Object.assign(machineView,{query:'',filter:'all',group:null,loaded:false,lastSuccess:null,error:''});
+  Object.assign(machineView,{filter:'all',group:null,loaded:false,lastSuccess:null,error:''});
   machineRemarkDrafts.clear();
 }
 async function renderMachines(){
@@ -51,10 +48,9 @@ async function refreshMachineStatuses(force=false){
 }
 function renderMachineBoard(){
   document.querySelector('#content').innerHTML=`<div class="machine-board"><div class="machine-group-detail">
-    <div class="machine-group-heading"><div><h2>机器管理</h2><p id="machineTotal"></p></div><button data-machine-action="refresh">刷新列表</button></div>
-    <div class="machine-filters"><input id="machineSearch" type="search" aria-label="搜索机器" placeholder="搜索备注 / IP / 端口" value="${esc(machineView.query)}"><select id="machineFilter" aria-label="筛选机器状态">${[['all','全部状态'],['online','在线'],['offline','离线'],['unknown','未知'],['disabled','已停用']].map(([value,label])=>`<option value="${value}" ${machineView.filter===value?'selected':''}>${label}</option>`).join('')}</select></div>
+    <div class="machine-group-heading"><div><h2>机器管理</h2><p id="machineTotal"></p></div><div class="machine-filters"><select id="machineFilter" aria-label="筛选机器状态">${[['all','全部状态'],['online','在线'],['offline','离线'],['unknown','未知'],['disabled','已停用'],['busy','忙碌'],['idle','空闲'],['review','执行状态待核实']].map(([value,label])=>`<option value="${value}" ${machineView.filter===value?'selected':''}>${label}</option>`).join('')}</select><button data-machine-action="refresh">刷新列表</button></div></div>
     <p id="machineRefreshStatus" role="status"></p><div id="machineGrid" class="machine-role-columns"></div>
-    <p class="machine-muted">每 10 秒更新状态。普通执行机显示最近连接检测结果，需手动“检测连接”更新。</p>
+    <p class="machine-muted">每 10 秒更新列表。后台自动检测已启用机器，连接、占用、检测结果及检测时间一起更新。</p>
   </div></div>`;
   updateMachineBoard();
 }
@@ -71,21 +67,30 @@ function updateMachineBoard(){
   const focused=document.activeElement?.closest('[data-machine-action="details"]');
   const focusId=focused?.dataset.id,focusRole=focused?.dataset.role;
   const html=machineRoleColumn(members,'supervisor',true)+machineRoleColumn(members,'executor',true);
-  if(grid.machineMarkup!==html){grid.innerHTML=html;grid.machineMarkup=html;if(focusId)[...grid.querySelectorAll('[data-machine-action="details"]')].find(b=>b.dataset.id===focusId&&b.dataset.role===focusRole)?.focus({preventScroll:true})}
+  if(grid.machineMarkup!==html){
+    const scrollPositions=new Map([...grid.querySelectorAll('[data-machine-list]')].map(list=>[list.dataset.machineList,list.scrollLeft]));
+    grid.innerHTML=html;grid.machineMarkup=html;
+    grid.querySelectorAll('[data-machine-list]').forEach(list=>{list.scrollLeft=scrollPositions.get(list.dataset.machineList)||0});
+    if(focusId)[...grid.querySelectorAll('[data-machine-action="details"]')].find(b=>b.dataset.id===focusId&&b.dataset.role===focusRole)?.focus({preventScroll:true});
+  }
   updateMachineDetails();
 }
 function machineRoleColumn(members,role,hasGroup){
   const title=role==='supervisor'?'主监督机':'执行机',all=members.filter(a=>(a.capabilities||[]).includes(role)&&(role==='supervisor'||groupMatches(a))),items=machineSorted(all.filter(machineMatches));
-  const filtered=machineView.query.trim()||machineView.filter!=='all';
-  return `<section class="machine-role-column ${role}" aria-label="${title}"><div class="machine-column-heading"><h2>${title} <span>${filtered?`${items.length} / ${all.length}`:all.length} 台</span></h2><button data-machine-action="add" data-role="${role}">＋ 添加</button></div><div class="machine-card-list">${items.map(a=>machineCard(a,role)).join('')||`<div class="machine-role-empty"><strong>${all.length?'没有符合条件的机器':`暂无${title}`}</strong><p>${all.length?'请调整搜索或状态筛选。':hasGroup?'点击添加，登记机器。':'请先选择分组。'}</p></div>`}</div></section>`;
+  const filtered=machineView.filter!=='all';
+  return `<section class="machine-role-column ${role}" aria-label="${title}"><div class="machine-column-heading"><h2>${title} <span>${filtered?`${items.length} / ${all.length}`:all.length} 台</span></h2><button data-machine-action="add" data-role="${role}">＋ 添加</button></div><div class="machine-card-list">${items.length?`<div class="machine-table-scroll" data-machine-list="${role}"><table class="machine-table"><thead><tr><th>机器备注</th><th>地址</th><th>分组</th><th>启停</th><th>连接状态</th><th>忙碌状态</th><th>检测结果</th><th>最近检测</th><th>操作</th></tr></thead><tbody>${items.map(a=>machineCard(a,role)).join('')}</tbody></table></div>`:`<div class="machine-role-empty"><strong>${all.length?'没有符合条件的机器':`暂无${title}`}</strong><p>${all.length?'请调整状态筛选。':hasGroup?'点击添加，登记机器。':'请先选择分组。'}</p></div>`}</div></section>`;
+}
+function machineOccupation(a){
+  if(a.occupation?.state==='review')return {kind:'review',label:'执行状态待核实'};
+  return a.availability==='busy'?{kind:'busy',label:'忙碌'}:a.availability==='idle'?{kind:'idle',label:'空闲'}:{kind:'unknown',label:'占用状态未知'};
 }
 function machineCard(a,role){
-  const view=machineDisplayState(a),name=a.remark||a.ip;
-  return `<button type="button" class="machine-tile ${view.kind}" data-machine-action="details" data-id="${esc(a.agentId)}" data-role="${role}" aria-label="${esc(name)}，${esc(a.ip)}:${a.port}，${view.label}"><span class="machine-icon">${machineMonitorSvg}${view.kind==='unknown'?'<b class="machine-icon-mark">?</b>':view.kind==='disabled'?'<b class="machine-icon-mark">−</b>':''}</span><strong title="${esc(name)}">${esc(name)}</strong><small title="${esc(a.ip)}:${a.port}">${a.remark?`${esc(a.ip)}:${a.port}`:`端口 ${a.port}`}</small><span class="machine-tile-state">${view.label}</span>${(a.capabilities||[]).length>1?'<span class="machine-dual-role">兼任监督 / 执行</span>':''}</button>`;
+  const connection=machineConnection(a),occupation=machineOccupation(a);
+  return `<tr class="machine-row ${a.enabled?'':'disabled'}"><td><strong>${esc(a.remark||'未填写备注')}</strong></td><td>${esc(a.ip)}:${a.port}</td><td>${esc(role==='supervisor'?'全局':groupState.items.find(g=>g.id===a.groupId)?.name||'分组不可用')}</td><td><span class="badge ${a.enabled?'':'off'}">${a.enabled?'启用中':'已停用'}</span></td><td><span class="machine-state ${connection.kind}">${connection.label}</span></td><td><span class="machine-occupation ${occupation.kind}">${occupation.label}</span></td><td><span class="machine-state ${a.testStatus==='passed'?'online':a.testStatus==='failed'?'offline':'unknown'}">${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}</span></td><td class="machine-tested-at">${esc(time(a.testedAt))}</td><td><button type="button" data-machine-action="details" data-id="${esc(a.agentId)}" data-role="${role}" aria-label="查看${esc(a.remark||a.ip)}详情">详情</button></td></tr>`;
 }
 function machineDetailReadOnly(a){
   const connection=machineConnection(a),executor=(a.capabilities||[]).includes('executor');
-  return `<dl><dt>地址</dt><dd>${esc(a.ip)}:${a.port}</dd>${executor?`<dt>分组</dt><dd>${esc(groupState.items.find(g=>g.id===a.groupId)?.name||'分组不可用')}</dd>`:''}<dt>工作目录</dt><dd>${esc(a.defaultCwd||"尚未配置")}</dd><dt>占用</dt><dd>${a.occupation?.state==='review'?'执行状态待核实':a.availability==='busy'?'任务占用中':'空闲'}</dd><dt>角色</dt><dd>${a.capabilities.map(c=>c==='supervisor'?'主监督机':'执行机').join(' / ')}</dd><dt>启停</dt><dd>${a.enabled?'启用中':'已停用'}</dd><dt>连接状态</dt><dd>${connection.label}</dd><dt>检测结果</dt><dd>${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}</dd><dt>最近检测</dt><dd>${esc(time(a.testedAt))}</dd></dl>${executor?`<h3>Skill 安装设置</h3><p>下发：${a.skillInstallation?.enabled?'已授权':'未授权'}</p><p>${esc(a.skillInstallation?.root||'尚未配置安装目录')}</p><p>${esc(a.skillInstallation?.checkMessage||'尚未检测目录')}</p>${a.skillInstallation?.checkedAt?`<p>${esc(time(a.skillInstallation.checkedAt))}</p>`:''}`:''}`;
+  return `<dl><dt>地址</dt><dd>${esc(a.ip)}:${a.port}</dd>${executor?`<dt>分组</dt><dd>${esc(groupState.items.find(g=>g.id===a.groupId)?.name||'分组不可用')}</dd>`:''}<dt>工作目录</dt><dd>${esc(a.defaultCwd||"尚未配置")}</dd><dt>占用</dt><dd>${machineOccupation(a).label}</dd><dt>角色</dt><dd>${a.capabilities.map(c=>c==='supervisor'?'主监督机':'执行机').join(' / ')}</dd><dt>启停</dt><dd>${a.enabled?'启用中':'已停用'}</dd><dt>连接状态</dt><dd>${connection.label}</dd><dt>检测结果</dt><dd>${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}</dd><dt>最近检测</dt><dd>${esc(time(a.testedAt))}</dd></dl>${executor?`<h3>Skill 安装设置</h3><p>下发：${a.skillInstallation?.enabled?'已授权':'未授权'}</p><p>${esc(a.skillInstallation?.root||'尚未配置安装目录')}</p><p>${esc(a.skillInstallation?.checkMessage||'尚未检测目录')}</p>${a.skillInstallation?.checkedAt?`<p>${esc(time(a.skillInstallation.checkedAt))}</p>`:''}`:''}`;
 }
 function machineDetailActions(a){
   const actions=['test','edit',...((a.capabilities||[]).includes('executor')?['skill-check']:[]),'toggle','delete'];
@@ -148,7 +153,6 @@ async function saveMachineRemark(input){
 }
 document.addEventListener('input',event=>{
   const input=event.target;
-  if(input.id==='machineSearch'){machineView.query=input.value;updateMachineBoard();return}
   if(!input.matches('[data-machine-remark]'))return;
   if(machineRemarkDrafts.get(input.dataset.machineRemark)?.saving)return;
   machineRemarkDrafts.set(input.dataset.machineRemark,{value:input.value,error:'',saving:false});

@@ -163,11 +163,11 @@ CODEX_WORKFLOW_DB = "..."
 [mcp_servers.codex_orchestrator]
 url = "http://127.0.0.1:8082/mcp"
 required = true
-enabled_tools = ["dispatch_node", "wait_node", "node_status", "cancel_node", "workflow_status"]
+enabled_tools = ["jira_claim_next", "dispatch_node", "wait_node", "node_status", "cancel_node", "workflow_status"]
 default_tools_approval_mode = "approve"
 ```
 
-不要同时保留 stdio 和 HTTP 两种同名配置。迁移不需要重新安装另一套 MCP；只是把 Codex 的连接方式由本地 stdio 子进程改成常驻 HTTP Sidecar。`enabled_tools` 把主监督限制在五个编排工具内，`default_tools_approval_mode = "approve"` 只预批准这些工具，避免无人值守任务为每次派发和等待启动一次 Auto-review。
+不要同时保留 stdio 和 HTTP 两种同名配置。迁移不需要重新安装另一套 MCP；只是把 Codex 的连接方式由本地 stdio 子进程改成常驻 HTTP Sidecar。`enabled_tools` 把主监督限制在六个领取与编排工具内，`default_tools_approval_mode = "approve"` 只预批准这些工具，避免无人值守任务为每次派发和等待启动一次 Auto-review。
 
 修改前为 `config.toml` 创建带时间戳的本机备份，但不得提交备份。
 
@@ -217,7 +217,7 @@ Codex 必须依次完成以下验证：
 7. `GET <CENTRAL_GATEWAY_URL>/readyz` 返回成功。
 8. 中央 `GET /agents` 显示 `<AGENT_ID>` 为 `online` 和 `idle`。
 9. 重启 Codex 后，`codex_orchestrator` MCP initialize 成功。
-10. MCP 工具列表包含 `dispatch_node`、`wait_node`、状态和取消相关工具。
+10. 新监督会话的 MCP 工具列表包含 `jira_claim_next`、`dispatch_node`、`wait_node`、状态和取消相关工具。Jira 统一领取缺少 `jira_claim_next` 时不能启动业务步骤；它是平台工具，不是终端命令。
 11. 提交一个只读、单步骤的测试工作流，预期返回 `PHASE_B_OK`。
 12. 测试工作流进入完成终态，并且中央租约已释放。
 

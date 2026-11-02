@@ -70,7 +70,7 @@ class RoleNameReuseIntegrationTest extends GroupedFixtureSupport {
     assertThatThrownBy(
             () -> service.createRole(grouped(new RoleSaveRequest(name, "重复", true, null))))
         .isInstanceOf(ConflictFailure.class)
-        .hasMessage("角色名称已存在。");
+        .hasMessage("当前分组内角色名称已存在。");
     service.updateRole(
         replacement.path("id").asText(),
         grouped(new RoleSaveRequest(name, "更新职责", true, replacement.path("version").asLong())));
