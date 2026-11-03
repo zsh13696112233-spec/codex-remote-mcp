@@ -36,6 +36,17 @@ class DingTalkExecutionNoticeTest {
         .isEqualTo("\nJira：TEST-1\n工单标题：" + "😀".repeat(200) + "…（标题已截断）");
   }
 
+  @Test
+  void startPeopleUsesNamesEscapesAndShowsMissing() {
+    var issue = json.createObjectNode().put("issueKey", "TEST-1");
+    var people = issue.putObject("people").put("assignee", "");
+    people.putArray("developers").add("<甲>").add("乙");
+    assertThat(DingTalkExecutionNotice.jiraStart(issue, true))
+        .contains("开发人：&lt;甲&gt;、乙", "负责人：未获取");
+    people.putArray("developers");
+    assertThat(DingTalkExecutionNotice.jiraStart(issue, false)).contains("开发人：未获取");
+  }
+
   private final ObjectMapper json = new ObjectMapper();
 
   private ObjectNode event(String method, String type) {

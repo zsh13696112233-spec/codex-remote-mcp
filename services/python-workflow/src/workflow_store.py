@@ -728,13 +728,16 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
         binding = value.get("jiraReservation")
         if binding is not None:
             from workflow_jira import ISSUE_KEY, server_key
-            if (not jira or not isinstance(binding, dict) or set(binding) - {"title"} != {"reservationId", "issueKey", "server", "accountId"}
+            if (not jira or not isinstance(binding, dict) or set(binding) - {"title", "people"} != {"reservationId", "issueKey", "server", "accountId"}
                     or not isinstance(binding["reservationId"], str) or not re.fullmatch(r"[0-9a-f-]{36}", binding["reservationId"])
                     or not isinstance(binding["issueKey"], str) or not ISSUE_KEY.fullmatch(binding["issueKey"])
                     or not isinstance(binding["accountId"], str) or not 1 <= len(binding["accountId"]) <= 256):
                 raise ValueError("Jira 预约格式无效。")
             if "title" in binding and (not isinstance(binding["title"], str) or len(binding["title"]) > 1000):
                 raise ValueError("Jira 工单标题必须是不超过 1000 个字符的文本。")
+            if "people" in binding:
+                from jira_pool import validate_people
+                validate_people(binding["people"])
             server_key(binding["server"])
         retry_of = value.get("jiraRetryOf")
         if retry_of is not None and (not jira or not isinstance(retry_of, str) or not 1 <= len(retry_of) <= 128 or retry_of == workflow_id):

@@ -33,7 +33,7 @@ function jiraStopPending(row) {
 }
 function jiraRowHtml(row) {
   return `<td><strong>${esc(row.name||'历史任务')}</strong><small>${esc(groupName(row.groupId))}</small></td>
-    <td><strong>${esc(row.issueKey||'尚未领取')}</strong><small>返工 ${Number(row.reworkCount||0)} 次</small></td>
+    <td><strong>${esc(row.issueKey||'尚未领取')}</strong><small>重试 ${Number(row.retryCount||0)} 次</small></td>
     <td><span class="jira-status ${row.claimState==='ready'?'success':'muted'}">${esc(jiraClaimStatus(row))}</span></td>
     <td><span>监督机：${esc(row.supervisorAgentId?(row.supervisorRemark?.trim()||'未填写备注'):'等待分配')}</span><span>执行机：${esc(row.executorAgentId?(row.executorRemark?.trim()||'未填写备注'):'等待分配')}</span></td>
     <td><span class="jira-status ${jiraStatusKind(row)}">${esc(jiraRunStatus(row))}</span>${jiraStopPending(row)?'<small class="jira-warning">等待确认执行已停止</small>':''}${row.reason?'<small>原因见详情</small>':''}</td>
@@ -66,7 +66,7 @@ function updateJiraRows(rows) {
   existing.forEach(tr=>tr.remove());
 }
 function jiraDetailHtml(row) {
-  return `<p class="meta">${esc(row.name||'历史任务')} · ${esc(row.issueKey||'尚未领取')}</p><dl><dt>下发状态</dt><dd>${esc(jiraClaimStatus(row))}</dd><dt>运行状态</dt><dd>${esc(jiraRunStatus(row))}${jiraStopPending(row)?' · 等待确认执行已停止':''}</dd><dt>领取时间</dt><dd>${row.claimedAt?esc(time(row.claimedAt)):'尚未领取'}</dd><dt>开始时间</dt><dd>${esc(time(row.createdAt))}</dd><dt>结束时间</dt><dd>${row.finishedAt?esc(time(row.finishedAt)):'尚未结束'}</dd><dt>原因说明</dt><dd>${esc(row.reason||'暂无')}</dd></dl><h3>返工 ${Number(row.reworkCount||0)} 次</h3><p class="meta">仅统计有明确正式结果的重新执行；旧记录未完整计入。</p>${(row.reworks||[]).map((r,i)=>`<article class="jira-receipt"><strong>第 ${i+1} 次 · ${esc(time(r.startedAt))}</strong><p>${esc(r.reason)}</p></article>`).join('')}<h3>交付回执</h3>${row.deliveries?.length?row.deliveries.map(d=>`<article class="jira-receipt"><strong>${esc(jiraDeliveryLabels[d.status]||'结果待核实')}</strong><small>${esc(time(d.recordedAt))}</small><p>${esc(d.summary||'')}</p>${d.reference?`<p>凭证：${esc(d.reference)}</p>`:''}</article>`).join(''):'<p class="meta">尚无交付回执</p>'}`;
+  return `<p class="meta">${esc(row.name||'历史任务')} · ${esc(row.issueKey||'尚未领取')}</p><dl><dt>下发状态</dt><dd>${esc(jiraClaimStatus(row))}</dd><dt>运行状态</dt><dd>${esc(jiraRunStatus(row))}${jiraStopPending(row)?' · 等待确认执行已停止':''}</dd><dt>领取时间</dt><dd>${row.claimedAt?esc(time(row.claimedAt)):'尚未领取'}</dd><dt>开始时间</dt><dd>${esc(time(row.createdAt))}</dd><dt>结束时间</dt><dd>${row.finishedAt?esc(time(row.finishedAt)):'尚未结束'}</dd><dt>原因说明</dt><dd>${esc(row.reason||'暂无')}</dd></dl><h3>重试 ${Number(row.retryCount||0)} 次</h3><p class="meta">按同一工单实际执行轮数减 1 统计；启动失败且未执行步骤不计，同一运行内重跑步骤不重复计数。</p>${(row.executions||[]).slice(1).map(r=>`<article class="jira-receipt"><strong>第 ${r.retryNumber} 次重试 · ${esc(time(r.startedAt))}</strong><p>${esc(r.reason)}</p></article>`).join('')}<h3>交付回执</h3>${row.deliveries?.length?row.deliveries.map(d=>`<article class="jira-receipt"><strong>${esc(jiraDeliveryLabels[d.status]||'结果待核实')}</strong><small>${esc(time(d.recordedAt))}</small><p>${esc(d.summary||'')}</p>${d.reference?`<p>凭证：${esc(d.reference)}</p>`:''}</article>`).join(''):'<p class="meta">尚无交付回执</p>'}`;
 }
 function updateJiraDetails() {
   const dialog=$('#jiraDetails'),row=jiraItems.find(item=>item.workflowId===jiraDetailId);
@@ -107,7 +107,7 @@ function jiraCenterHtml() {
       </form>
       <p class="jira-section-note">同一工单合并展示一行，显示当前状态与最近采集时间；历次执行可在运行历史查看。</p>
       <div id="poolItems" class="jira-table-scroll"><div class="empty">正在加载工单…</div></div>
-      <div class="jira-pagination"><span>按首次入池倒序 · 返工次数从启用统计后累计</span><div class="actions"><button id="poolFirst" type="button">最新工单</button><button id="poolNext" type="button" disabled>更早工单</button></div></div>
+      <div class="jira-pagination"><span>按首次入池倒序 · 首次实际执行不计重试，之后每轮实际执行加 1</span><div class="actions"><button id="poolFirst" type="button">最新工单</button><button id="poolNext" type="button" disabled>更早工单</button></div></div>
     </section>
     <section id="jiraCollections" class="jira-view-panel" aria-label="采集记录" hidden>
       <div class="jira-section-heading"><h3>采集记录</h3><span>最近 50 次</span></div>
@@ -202,7 +202,7 @@ let poolRequest=0;
 let poolItems=[];
 let poolExecutionItemId=null;
 function jiraExecutionLabel(execution) {
-  return execution.kind==='rework'?`第 ${execution.reworkNumber} 次返工`:execution.kind==='first'?'首次执行':execution.kind==='legacy'?'历史执行':'再次执行';
+  return execution.retryNumber===0?'首次执行':`第 ${execution.retryNumber} 次重试`;
 }
 function jiraExecutionDetailHtml(row,execution) {
   return `<div class="jira-execution-heading"><h3>${esc(jiraExecutionLabel(execution))}</h3><span class="jira-status ${jiraStatusKind(execution)}">${esc(jiraRunStatus(execution))}</span></div>
@@ -238,11 +238,12 @@ function jiraPoolRowHtml(row) {
   const collectedAt=row.collected_at||row.created_at;
   const sources=row.sources||[{name:row.name,groupId:row.group_id}];
   return `<tr><td>${esc(row.issue_key.split('-')[0])} / ${row.monitorUrl?`<a href="${esc(row.monitorUrl)}" target="_blank" rel="noopener">${esc(row.issue_key)}</a>`:esc(row.issue_key)}<small>${esc(row.title)}</small></td>
+    <td>开发人：${esc(row.people?.developers?.join('、')||'未获取')}<br>负责人：${esc(row.people?.assignee||'未获取')}${row.people?.collectedAt?`<small>${esc(time(row.people.collectedAt))}</small>`:''}</td>
     <td>${sources.map(s=>`<div>${esc(s.name)}<small>${esc(groupName(s.groupId))}</small></div>`).join('')}</td>
     <td>${esc(time(collectedAt))}${waiting?`<small>已等待 ${Math.max(0,Math.floor((Date.now()-Date.parse(row.queued_at||collectedAt))/60000))} 分钟</small>`:''}</td>
     <td><span class="jira-status ${row.run_status?jiraStatusKind(run):waiting?'waiting':'muted'}">${esc(row.run_status?jiraRunStatus(run):labels[row.state]||'等待处理')}</span>${row.stop_pending?'<small class="jira-warning">等待确认执行已停止</small>':''}</td>
     <td>${row.started_at?esc(time(row.started_at)):row.workflow_id?'尚未开始':'未创建运行'}</td>
-    <td>${Number(row.reworkCount||0)} 次</td>
+    <td>${Number(row.retryCount||0)} 次</td>
     <td class="jira-executions-cell">${row.executions?.length?`<button class="jira-executions-view" type="button" data-pool-executions="${esc(row.id)}" aria-label="查看 ${esc(row.issue_key)} 的执行记录">查看</button>`:'<span class="jira-execution-empty">暂无记录</span>'}</td></tr>`;
 }
 async function loadJiraPool(before=poolBefore,{background=false}={}) {
@@ -263,7 +264,7 @@ async function loadJiraPool(before=poolBefore,{background=false}={}) {
     const schedulesOpen=$('#poolSchedules').querySelector('details')?.open;
     $('#poolProjects').innerHTML=`<div><span>项目</span><strong>${projects.length}</strong></div><div><span>待分配工单</span><strong>${projects.reduce((sum,p)=>sum+Number(p.pending||0),0)}</strong></div><div><span>执行中</span><strong>${projects.reduce((sum,p)=>sum+Number(p.running||0),0)}</strong></div>${projects.length?`<details class="jira-project-list"${projectsOpen?' open':''}><summary>项目明细</summary>${projects.map(p=>`<p><strong>${esc(p.project)}</strong><span>待分配 ${Number(p.pending)} · 执行中 ${Number(p.running)}</span><small>最近采集 ${esc(time(p.lastCollectedAt))}</small></p>`).join('')}</details>`:''}`;
     $('#poolSchedules').innerHTML=(result.schedules||[]).length?`<details${schedulesOpen?' open':''}><summary>定时采集 <span>${result.schedules.length} 条规则</span></summary>${result.schedules.map(s=>`<p><strong>${esc(s.name)}</strong><span>下次触发 ${s.nextAt?esc(time(s.nextAt)):'未安排'}</span></p>`).join('')}</details>`:'<span>当前分组暂无启用的定时采集规则</span>';
-    $('#poolItems').innerHTML=result.items.length?`<table class="jira-table jira-pool-table"><thead><tr><th>项目 / 工单</th><th>来源任务</th><th>最近采集</th><th>当前状态</th><th>执行开始</th><th>返工次数</th><th>执行记录</th></tr></thead><tbody>${result.items.map(jiraPoolRowHtml).join('')}</tbody></table>`:'<div class="empty jira-empty"><strong>暂无符合条件的工单</strong><span>可调整筛选条件，或等待任务触发后自动采集。</span></div>';
+    $('#poolItems').innerHTML=result.items.length?`<table class="jira-table jira-pool-table"><thead><tr><th>项目 / 工单</th><th>开发人 / 负责人</th><th>来源任务</th><th>最近采集</th><th>当前状态</th><th>执行开始</th><th>重试次数</th><th>执行记录</th></tr></thead><tbody>${result.items.map(jiraPoolRowHtml).join('')}</tbody></table>`:'<div class="empty jira-empty"><strong>暂无符合条件的工单</strong><span>可调整筛选条件，或等待任务触发后自动采集。</span></div>';
     const batchLabels={waiting:'等待采集机器',collecting:'正在查询',ready:'采集完成',failed:'采集失败',cancelled:'已停止派发'};
     $('#poolCollections').innerHTML=result.collections.length?`<table class="jira-table jira-collection-table"><thead><tr><th>任务</th><th>触发时间</th><th>完成时间</th><th>结果</th><th>工单数</th></tr></thead><tbody>${result.collections.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(time(r.createdAt))}</td><td>${r.finishedAt?esc(time(r.finishedAt)):'尚未完成'}</td><td><span class="jira-status ${r.state==='ready'?'success':r.state==='failed'?'failed':'waiting'}">${esc(batchLabels[r.state]||'状态未知')}</span><small>${esc(r.reason)}</small></td><td>${Number(r.count)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty jira-empty"><strong>暂无采集记录</strong><span>首次手动启动或定时触发后，采集结果会显示在这里。</span></div>';
     updateJiraPoolExecution();

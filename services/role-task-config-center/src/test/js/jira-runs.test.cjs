@@ -126,11 +126,11 @@ test('terminal records retain pending-stop warning and full reasons only in deta
   assert.match(h.run('jiraRowHtml(row)'),/等待确认执行已停止/);assert.doesNotMatch(h.run('jiraRowHtml(row)'),/完整原因/);
   assert.match(h.run('jiraDetailHtml(row)'),/完整原因/);
 });
-test('rework details distinguish explicit non-submission and escape reasons',()=>{
+test('retry details distinguish explicit non-submission and escape reasons',()=>{
   const ctx=context();
-  ctx.row={name:'任务',issueKey:'TEST-1',status:'running',claimState:'ready',createdAt:'now',reworkCount:2,reworks:[{startedAt:'today',reason:'<script>缺少权限</script>'}],deliveries:[{status:'not_submitted',summary:'提交前阻断',recordedAt:'now'}]};
+  ctx.row={name:'任务',issueKey:'TEST-1',status:'running',claimState:'ready',createdAt:'now',retryCount:2,executions:[{retryNumber:0},{retryNumber:1,startedAt:'today',reason:'<script>缺少权限</script>'}],deliveries:[{status:'not_submitted',summary:'提交前阻断',recordedAt:'now'}]};
   const html=vm.runInContext('jiraDetailHtml(row)',ctx);
-  assert.match(html,/返工 2 次/);
+  assert.match(html,/重试 2 次/);
   assert.match(html,/&lt;script&gt;缺少权限/);
   assert.match(html,/要求提交但未提交/);
   assert.doesNotMatch(html,/<script>/);
@@ -160,12 +160,14 @@ test('pool renders merged sources with current run link and latest collection ti
   const h=poolFixture();
   h.result.items=[{issue_key:'TEST-1',title:'<工单>',state:'bound',workflow_id:'run',run_status:'running',
     collected_at:'最近采集时间',started_at:'原执行时间',monitorUrl:'/monitor?workflowId=run',
-    sources:[{name:'<来源一>',groupId:'one'},{name:'来源二',groupId:'two'}],reworkCount:1,
+    sources:[{name:'<来源一>',groupId:'one'},{name:'来源二',groupId:'two'}],retryCount:1,
     reworks:[{startedAt:'上次时间',reason:'<返工原因>'}]}];
   await h.run('loadJiraPool()');
   const html=h.elements['#poolItems'].innerHTML;
   assert.equal((html.match(/<tr>/g)||[]).length,2);
   assert.match(html,/<th>最近采集<\/th>/);
+  assert.match(html,/<th>重试次数<\/th>/);
+  assert.match(html,/<td>1 次<\/td>/);
   assert.match(html,/最近采集时间/);
   assert.match(html,/原执行时间/);
   assert.match(html,/&lt;来源一&gt;/);
@@ -202,24 +204,25 @@ test('pool shows manual wait and stop verification from the current run',()=>{
 });
 test('pool uses a single view action and lists every execution inside the dialog',()=>{
   const ctx=context();
-  ctx.row={id:42,issue_key:'TEST-1',state:'bound',title:'工单',reworkCount:2,sources:[],executions:[
-    {workflowId:'first',kind:'first',status:'failed',outcome:'blocked',reason:'隐藏原因'},
-    {workflowId:'retry1',kind:'rework',reworkNumber:1,status:'failed',outcome:'blocked'},
-    {workflowId:'retry2',kind:'rework',reworkNumber:2,status:'completed'},
-    {workflowId:'old',kind:'legacy',status:'failed'}]};
+  ctx.row={id:42,issue_key:'TEST-1',state:'bound',title:'工单',retryCount:3,reworkCount:1,sources:[],executions:[
+    {workflowId:'first',kind:'first',retryNumber:0,status:'failed',outcome:'blocked',reason:'隐藏原因'},
+    {workflowId:'retry1',kind:'rework',retryNumber:1,status:'failed',outcome:'blocked'},
+    {workflowId:'retry2',kind:'rework',retryNumber:2,status:'completed'},
+    {workflowId:'old',kind:'legacy',retryNumber:3,status:'failed'}]};
   const html=vm.runInContext('jiraPoolRowHtml(row)',ctx);
   assert.equal((html.match(/data-pool-executions=/g)||[]).length,1);
   assert.match(html,/data-pool-executions="42"/);
   assert.match(html,/>查看<\/button>/);
-  assert.doesNotMatch(html,/首次执行|第 1 次返工|隐藏原因|共 4 条/);
+  assert.match(html,/<td>3 次<\/td>/);
+  assert.doesNotMatch(html,/首次执行|第 1 次重试|隐藏原因|共 4 条/);
   const list=vm.runInContext('jiraExecutionListHtml(row)',ctx);
   assert.match(list,/共 4 条/);
   assert.equal((list.match(/<li>/g)||[]).length,4);
   assert.match(list,/首次执行/);
-  assert.match(list,/第 1 次返工/);
-  assert.match(list,/第 2 次返工/);
-  assert.match(list,/历史执行/);
-  ctx.row.reworkCount=0;
+  assert.match(list,/第 1 次重试/);
+  assert.match(list,/第 2 次重试/);
+  assert.match(list,/第 3 次重试/);
+  ctx.row.retryCount=0;
   assert.match(vm.runInContext('jiraPoolRowHtml(row)',ctx),/>查看<\/button>/);
   ctx.row.executions=[];
   assert.doesNotMatch(vm.runInContext('jiraPoolRowHtml(row)',ctx),/data-pool-executions/);
@@ -229,7 +232,7 @@ test('execution dialog separates trigger reason from current blocking and keeps 
   const h=poolFixture(),body={innerHTML:'',querySelectorAll:()=>[]},dialog={open:false,scrollTop:150,querySelector:()=>body,showModal(){this.open=true},close(){this.open=false}};
   h.elements['#jiraBlockedReason']=dialog;
   h.result.items=[{id:42,issue_key:'TEST-1',title:'工单',state:'bound',sources:[],executions:[
-    {workflowId:'retry1',kind:'rework',reworkNumber:1,status:'failed',outcome:'blocked',startedAt:'start',finishedAt:'end',
+    {workflowId:'retry1',kind:'rework',retryNumber:1,status:'failed',outcome:'blocked',startedAt:'start',finishedAt:'end',
       reworkReason:'上轮<原因>',reason:'本轮<阻断>',monitorUrl:'/monitor?workflowId=retry1'}]}];
   await h.run('loadJiraPool()');
   h.run("openJiraPoolExecution('42')");
@@ -243,10 +246,10 @@ test('execution dialog separates trigger reason from current blocking and keeps 
   assert.equal(dialog.open,true);
   assert.equal(dialog.scrollTop,150);
   assert.match(body.innerHTML,/更新后的原因/);
-  h.result.items[0].executions.push({workflowId:'retry2',kind:'rework',reworkNumber:2,status:'completed'});
+  h.result.items[0].executions.push({workflowId:'retry2',kind:'rework',retryNumber:2,status:'completed'});
   await h.run('loadJiraPool(null,{background:true})');
   assert.match(body.innerHTML,/共 2 条/);
-  assert.match(body.innerHTML,/第 2 次返工/);
+  assert.match(body.innerHTML,/第 2 次重试/);
   assert.equal(dialog.scrollTop,150);
   h.result.items[0].executions[0].reason='';
   await h.run('loadJiraPool(null,{background:true})');
@@ -298,10 +301,17 @@ test('pool load errors replace loading messages and refresh errors retain loaded
 
 test('execution records show only current blocking and machine summary',()=>{
   const ctx=context();
-  ctx.row={issue_key:'TEST-1',executions:[{workflowId:'old',kind:'rework',reworkNumber:1,status:'completed',reason:'结束说明隐藏',reworkReason:'旧阻断隐藏',monitorUrl:'/process',machines:{supervisorAgentId:'s',supervisorRemark:'监督<甲>',executorAgentId:'e',executorRemark:'执行乙',executorDeleted:true}}]};
+  ctx.row={issue_key:'TEST-1',executions:[{workflowId:'old',kind:'rework',retryNumber:1,status:'completed',reason:'结束说明隐藏',reworkReason:'旧阻断隐藏',monitorUrl:'/process',machines:{supervisorAgentId:'s',supervisorRemark:'监督<甲>',executorAgentId:'e',executorRemark:'执行乙',executorDeleted:true}}]};
   const html=vm.runInContext('jiraExecutionListHtml(row)',ctx);
   assert.match(html,/监督&lt;甲&gt;/);
   assert.match(html,/执行乙（已删除）/);
   assert.match(html,/查看本轮过程/);
   assert.doesNotMatch(html,/本轮结果|交付|步骤总结|机器详情|旧阻断隐藏|结束说明隐藏|本轮阻断原因|<details/);
+});
+test('pool personnel escapes names and renders missing values',()=>{
+  const ctx=context();ctx.row={issue_key:'TEST-1',sources:[],people:{developers:['<甲>','乙'],assignee:'',collectedAt:'now'}};
+  const html=vm.runInContext('jiraPoolRowHtml(row)',ctx);
+  assert.match(html,/开发人：&lt;甲&gt;、乙/);assert.match(html,/负责人：未获取/);
+  delete ctx.row.people;
+  assert.match(vm.runInContext('jiraPoolRowHtml(row)',ctx),/开发人：未获取/);
 });

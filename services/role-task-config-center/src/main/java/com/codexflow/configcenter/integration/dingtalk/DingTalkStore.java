@@ -72,6 +72,14 @@ class DingTalkStore {
       if (state.equals("started")) {
         ensureConversation(
             clientId, workflowId, request.path("taskDefinitionId").asText(), message, "running");
+        // 异步领取后的运行属于钉钉启动，必须持续向启动会话发送进度和终态。
+        DingTalkWorkflowBindingEntity binding = requiredBindingForUpdate(workflowId);
+        binding.triggerSource = "dingtalk";
+        binding.triggerMessageId = message.messageId();
+        binding.targetName = message.conversationTitle();
+        binding.rootMessageId = message.messageId();
+        binding.initiatorUserId = message.senderUserId();
+        binding.sessionWebhook = message.sessionWebhook();
         taskBindings.acquireForRestart(request.path("taskDefinitionId").asText(), workflowId);
         enqueueStartReply(
             "jira-start:" + message.messageId(),

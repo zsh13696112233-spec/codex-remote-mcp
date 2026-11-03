@@ -28,6 +28,31 @@ def initialize(db):
     CREATE INDEX IF NOT EXISTS idx_jira_pool_issue ON jira_pool_items(server_key,issue_key,state);
     ''')
 
+    db.execute('BEGIN IMMEDIATE')
+    if 'people_json' not in {r[1] for r in db.execute('PRAGMA table_info(jira_pool_items)')}:
+        db.execute('ALTER TABLE jira_pool_items ADD COLUMN people_json TEXT')
+    db.commit()
+
+def validate_people(value):
+    from datetime import datetime
+    if not isinstance(value, dict) or set(value) != {'developers', 'developerStatus', 'assignee', 'assigneeStatus', 'collectedAt'}:
+        raise ValueError('人员展示信息格式无效。')
+    names = value['developers']
+    if (not isinstance(names, list) or len(names) > 100
+            or any(not isinstance(n, str) or not n.strip() or len(n) > 160 for n in names)
+            or not isinstance(value['assignee'], str) or len(value['assignee']) > 160
+            or value['developerStatus'] not in ('resolved', 'empty', 'unavailable')
+            or value['assigneeStatus'] not in ('resolved', 'unavailable')
+            or (value['developerStatus'] == 'resolved') != bool(names)
+            or (value['assigneeStatus'] == 'resolved') != bool(value['assignee'])):
+        raise ValueError('人员展示信息格式无效。')
+    try:
+        timestamp = datetime.fromisoformat(value['collectedAt'].replace('Z', '+00:00'))
+        if timestamp.tzinfo is None:
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError('人员采集时间无效。') from None
+
 
 def request_collection(store, body):
     from workflow_store import utc_now
@@ -96,7 +121,8 @@ def reserve(store, request_id, reservation_id):
         if not old:
             return None
         return {'reservationId': reservation_id, 'issueKey': old['issue_key'], 'title': old['title'],
-                'server': old['server_key'], 'accountId': batch['account_id']}
+                'server': old['server_key'], 'accountId': batch['account_id'],
+                **({'people': json.loads(old['people_json'])} if old['people_json'] else {})}
 
 
 def bind(db, spec):
@@ -109,7 +135,8 @@ def bind(db, spec):
     if (not item or item['state'] != 'reserved' or item['task_id'] != spec.get('taskDefinitionId')
             or item['group_id'] != spec.get('groupId') or json.loads(item['config_json']) != spec['jira'] or item['issue_key'] != binding['issueKey']
             or item['server_key'] != binding['server'] or item['account_id'] != binding['accountId']
-            or ('title' in binding and item['title'] != binding['title'])):
+            or ('title' in binding and item['title'] != binding['title'])
+            or ('people' in binding and json.loads(item['people_json'] or 'null') != binding['people'])):
         raise ValueError('工单预约与提交快照不一致。')
     old = db.execute('SELECT workflow_id FROM jira_issue_claims WHERE server_key=? AND issue_key=?', (item['server_key'], item['issue_key'])).fetchone()
     if old:
@@ -149,7 +176,7 @@ async def collect(gateway, request_id):
                 (shared['finished_at'],shared['server_key'],shared['account_id'],shared['account_alias'],shared['count'],request_id))
             for item in db.execute('SELECT * FROM jira_pool_items WHERE request_id=?', (shared['request_id'],)).fetchall():
                 state = 'pending' if issue_available(db,item['server_key'],item['issue_key']) else 'consumed'
-                db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state) VALUES(?,?,?,?,?)', (request_id,item['server_key'],item['issue_key'],item['title'],state))
+                db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state,people_json) VALUES(?,?,?,?,?,?)', (request_id,item['server_key'],item['issue_key'],item['title'],state,item['people_json']))
             return
     selected = await acquire_supervisor(gateway, 'jira:' + request_id)
     if not selected:
@@ -168,22 +195,27 @@ async def collect(gateway, request_id):
             identity = await account_identity(client, raw, alias, agent.cwd)
             stopped = True
             found = {}
+            assignees = {}
             while True:
                 stopped = False
-                page = await search_page(client, raw, alias, excluding_query(config['jql'], list(found)), agent.cwd)
+                page = await search_page(client, raw, alias, excluding_query(config['jql'], list(found)), agent.cwd, people=assignees)
                 stopped = True
                 if not page:
                     break
                 if any(key in found for key in page) or len(found) + len(page) > 1000:
                     raise ValueError('采集超过 1000 项或分页未前进，请缩小 SOP 查询范围。')
                 found.update(page)
+            from jira_runtime import collect_people
+            stopped = False
+            people = await collect_people(client, raw, alias, agent.cwd, assignees) if found else {}
+            stopped = True
         with gateway.store._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if not db.execute("UPDATE jira_collections SET state='ready',server_key=?,account_id=?,account_alias=?,count=?,finished_at=? WHERE request_id=? AND state='collecting'", (account['baseUrl'], identity, alias, len(found), utc_now(), request_id)).rowcount:
                 return
             for issue, title in found.items():
                 state = 'pending' if issue_available(db, account['baseUrl'], issue) else 'consumed'
-                db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state) VALUES(?,?,?,?,?)', (request_id, account['baseUrl'], issue, title, state))
+                db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state,people_json) VALUES(?,?,?,?,?,?)', (request_id, account['baseUrl'], issue, title, state, json.dumps(people[issue]) if issue in people else None))
     except Exception as error:
         from jira_runtime import JiraCommandError
         if isinstance(error, (JiraCommandError, ValueError)):
@@ -214,6 +246,8 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
             MIN(CASE WHEN p.state IN ('pending','reserved') AND c.state='ready'
                 THEN COALESCE(c.finished_at,c.created_at) END) OVER issue AS queued_at,
             FIRST_VALUE(p.title) OVER (PARTITION BY p.server_key,p.issue_key ORDER BY p.id DESC) AS latest_title,
+            FIRST_VALUE(p.people_json) OVER (PARTITION BY p.server_key,p.issue_key
+                ORDER BY COALESCE(json_extract(p.people_json,'$.collectedAt'),c.finished_at) DESC,p.id DESC) AS latest_people,
             ROW_NUMBER() OVER (PARTITION BY p.server_key,p.issue_key ORDER BY
                 CASE
                     WHEN w.status NOT IN ('completed','failed','cancelled') OR EXISTS (
@@ -238,7 +272,7 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
         LEFT JOIN workflows w ON w.workflow_id=claim.workflow_id
         WHERE r.position=1
     ), board_items AS (
-        SELECT r.issue_id AS id,r.request_id,r.server_key,r.issue_key,r.latest_title AS title,
+        SELECT r.issue_id AS id,r.request_id,r.server_key,r.issue_key,r.latest_title AS title,r.latest_people AS people_json,
             CASE WHEN w.workflow_id IS NOT NULL THEN 'bound' ELSE r.state END AS state,
             r.reservation_id,w.workflow_id,r.name,r.group_id,r.task_id,r.created_at,r.finished_at,
             r.collected_at,r.queued_at,r.source,w.status AS run_status,w.finished_at AS run_finished_at,
@@ -276,6 +310,9 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
         items = []
         for row in rows[:limit]:
             item = dict(row)
+            people_value = item.pop('people_json')
+            if people_value:
+                item['people'] = json.loads(people_value)
             termination = json.loads(item.pop('termination_json') or '{}')
             item['outcome'] = termination.get('outcome')
             item['reason'] = public_text(termination.get('reason'))
@@ -290,6 +327,7 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
             item['reworks'] = rework_history(db, row['server_key'], row['issue_key'])
             item['reworkCount'] = len(item['reworks'])
             item['executions'] = execution_history(db, row['server_key'], row['issue_key'])
+            item['retryCount'] = max(0, len(item['executions']) - 1)
             items.append(item)
         return {'projects': [dict(r) for r in projects], 'items': items, 'collections': [dict(r) for r in collections],
                 'nextCursor': rows[limit - 1]['id'] if len(rows) > limit else None}
@@ -373,6 +411,7 @@ def execution_history(db, server, issue):
         else:
             entry['reworkNumber'] = None
             entry['kind'] = 'first' if tracked and not executions else 'execution' if tracked else 'legacy'
+        entry['retryNumber'] = len(executions)
         executions.append(entry)
     return executions
 

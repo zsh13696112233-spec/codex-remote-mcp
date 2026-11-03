@@ -63,6 +63,34 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(first, reserve(WorkflowStore(self.store.path), a, identifier))
         self.assertIsNone(reserve(self.store, b, str(uuid.uuid4())))
 
+    def test_existing_pool_schema_adds_nullable_people_column(self):
+        request = self.batch(['TEST-1'])
+        with self.store._connect() as db:
+            db.execute('ALTER TABLE jira_pool_items DROP COLUMN people_json')
+        reopened = WorkflowStore(self.store.path)
+        self.assertNotIn('people', reserve(reopened, request, str(uuid.uuid4())))
+        self.assertEqual(board(reopened)['items'][0]['issue_key'], 'TEST-1')
+
+    def test_people_snapshot_is_frozen_and_board_uses_latest_attempt(self):
+        import json
+        first = self.batch(['TEST-1'])
+        people = {'developers': ['甲'], 'developerStatus': 'resolved', 'assignee': '乙',
+                  'assigneeStatus': 'resolved', 'collectedAt': '2026-01-01T00:00:00+00:00'}
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_pool_items SET people_json=? WHERE request_id=?', (json.dumps(people), first))
+        reservation = reserve(self.store, first, str(uuid.uuid4()))
+        self.assertEqual(reservation['people'], people)
+        second = self.batch(['TEST-1'])
+        unavailable = {**people, 'developers': [], 'developerStatus': 'unavailable', 'collectedAt': '2026-01-02T00:00:00+00:00'}
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_pool_items SET people_json=? WHERE request_id=?', (json.dumps(unavailable), second))
+        self.assertEqual(board(self.store)['items'][0]['people'], unavailable)
+        self.assertEqual(reserve(WorkflowStore(self.store.path), first, reservation['reservationId'])['people'], people)
+        with self.store._connect() as db:
+            with self.assertRaisesRegex(ValueError, '快照不一致'):
+                bind(db, {'workflowId': 'test', 'taskDefinitionId': self.task, 'groupId': self.group,
+                          'jira': self.config, 'jiraReservation': {**reservation, 'people': unavailable}})
+
     def test_reservation_keeps_collected_title_after_reopen(self):
         request = self.batch(['TEST-1'])
         reservation = reserve(self.store, request, str(uuid.uuid4()))
@@ -263,6 +291,63 @@ class PoolTests(unittest.TestCase):
         self.assertIsNone(result['executions'][0]['reworkNumber'])
         self.assertEqual(result['executions'][0]['reason'], '历史阻断')
 
+    def test_retry_count_uses_actual_runs_including_legacy_without_rework_results(self):
+        self.batch(['TEST-1'])
+        self.assertEqual(board(self.store)['items'][0]['retryCount'], 0)
+        for index in range(7):
+            name = f'run-{index}'
+            self.workflow(name)
+            with self.store._connect() as db:
+                db.execute("UPDATE workflows SET status=? WHERE workflow_id=?",
+                           ('running' if index == 6 else 'failed' if index >= 2 else 'completed', name))
+                if index in (0, 1, 5, 6):
+                    db.execute("UPDATE workflow_nodes SET job_id=?,started_at=?,attempt_count=? WHERE workflow_id=?",
+                               (f'job-{index}', f'2026-11-03T0{index}:00:00+00:00', 3 if index == 5 else 0, name))
+                if index in (1, 5, 6):
+                    record_rework(db, name, f'2026-11-03T0{index}:00:00+00:00')
+                    record_rework(db, name, f'2026-11-03T0{index}:01:00+00:00')
+                if index == 1:
+                    db.execute("INSERT INTO workflow_jira_deliveries VALUES(?, 'a', 0, 'not_applicable', '', '审核结论：返工', ?)",
+                               (name, utc_now()))
+        # Other Jira servers and issue keys must not contribute to this issue's total.
+        for name, server, issue in [('other-server', 'http://other.test', 'TEST-1'),
+                                    ('other-issue', 'http://jira.test', 'TEST-2')]:
+            self.workflow(name)
+            with self.store._connect() as db:
+                db.execute("UPDATE workflow_jira_runs SET server_key=?,issue_key=? WHERE workflow_id=?", (server, issue, name))
+                db.execute("UPDATE workflow_nodes SET job_id='job' WHERE workflow_id=?", (name,))
+        result = board(self.store)['items'][0]
+        self.assertEqual(result['retryCount'], 3)
+        self.assertEqual(result['reworkCount'], 0)
+        self.assertEqual([e['workflowId'] for e in result['executions']], ['run-0', 'run-1', 'run-5', 'run-6'])
+        self.assertEqual([e['retryNumber'] for e in result['executions']], [0, 1, 2, 3])
+        self.assertEqual(board(self.store)['items'][0]['retryCount'], 3)
+
+    def test_ledger_retry_count_matches_pool_across_groups(self):
+        from unittest.mock import patch
+        from agent_registry import AgentRegistry
+        with patch('agent_registry.setting', return_value={}):
+            AgentRegistry(self.store)
+        self.batch(['TEST-1'])
+        groups = [self.group, str(uuid.uuid4())]
+        for name, group in zip(['first', 'retry'], groups):
+            self.workflow(name)
+            with self.store._connect() as db:
+                db.execute("INSERT INTO workflow_allocations(workflow_id,group_id) VALUES(?,?)", (name, group))
+        self.assertTrue(all(row['retryCount'] == 0 for row in self.store.jira_runs('')['items']))
+        for name, time in [('first', '2026-11-03T00:00:00+00:00'), ('retry', '2026-11-03T01:00:00+00:00')]:
+            with self.store._connect() as db:
+                db.execute("UPDATE workflow_nodes SET job_id=?,started_at=? WHERE workflow_id=?", (name, time, name))
+        pool_count = board(self.store)['items'][0]['retryCount']
+        self.assertEqual(pool_count, 1)
+        for group in ('', *groups):
+            rows = self.store.jira_runs(group)['items']
+            self.assertEqual(len(rows), 1 if group else 2)
+            for row in rows:
+                self.assertEqual(row['retryCount'], pool_count)
+                self.assertEqual(row['reworkCount'], 0)
+                self.assertEqual([e['retryNumber'] for e in row['executions']], [0, 1])
+
     def test_board_pending_keeps_wait_start_and_stable_cursor_across_recollection(self):
         first = self.batch(['TEST-1','TEST-2','TEST-3'])
         with self.store._connect() as db:
@@ -425,7 +510,7 @@ class CollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_complete_pages_only_and_identity_saved_without_credentials(self):
         from unittest.mock import patch, AsyncMock
         from jira_pool import collect
-        with patch('jira_pool.acquire_supervisor',AsyncMock(return_value=('s',self.agent))), patch('jira_runtime.client_for',return_value=self.client), patch('jira_runtime.read_file',AsyncMock(return_value=b'{}')), patch('jira_runtime.account_from_config',return_value=('bot',{'baseUrl':'http://jira.test','token':'not-persisted'})), patch('jira_runtime.account_identity',AsyncMock(return_value='user-1')), patch('jira_runtime.search_page',AsyncMock(side_effect=[{'TEST-1':'标题'},{}])):
+        with patch('jira_pool.acquire_supervisor',AsyncMock(return_value=('s',self.agent))), patch('jira_runtime.client_for',return_value=self.client), patch('jira_runtime.read_file',AsyncMock(return_value=b'{}')), patch('jira_runtime.account_from_config',return_value=('bot',{'baseUrl':'http://jira.test','token':'not-persisted'})), patch('jira_runtime.account_identity',AsyncMock(return_value='user-1')), patch('jira_runtime.search_page',AsyncMock(side_effect=[{'TEST-1':'标题'},{}])), patch('jira_runtime.collect_people',AsyncMock(return_value={})):
             await collect(self.gateway,self.request)
         self.assertEqual(collection(self.store,self.request)['state'],'ready')
         with self.store._connect() as db:

@@ -173,6 +173,16 @@ public class JiraRequestStore {
           json.newObject()
               .put("issueKey", binding.path("issueKey").asText())
               .put("title", binding.path("title").asText()));
+      if (binding.path("people").isObject()) {
+        var source = binding.path("people");
+        var people =
+            json.newObject()
+                .put("assignee", source.path("assignee").asText())
+                .put("collectedAt", source.path("collectedAt").asText());
+        var names = people.putArray("developers");
+        for (var name : source.path("developers")) if (name.isTextual()) names.add(name.asText());
+        ((ObjectNode) out.path("jiraIssue")).set("people", people);
+      }
     }
     return out;
   }

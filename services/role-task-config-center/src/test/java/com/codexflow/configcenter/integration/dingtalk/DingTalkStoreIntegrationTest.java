@@ -75,6 +75,21 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
         .contains("工作流编号：" + workflow, "Jira：TEST-1", "工单标题：修复订单列表筛选异常")
         .doesNotContain("另一个标题", "jira.internal", "private-account");
     assertThat(payload.path("monitorUrl").asText()).endsWith("workflowId=" + workflow);
+    assertThat(store.binding(workflow).orElseThrow().triggerSource()).isEqualTo("dingtalk");
+    store.recordStepFailure(workflow, 1, "步骤执行失败。");
+    store.recordProcess(workflow, null, 2, "因阻断结束。", true, true);
+    store.recordProcess(workflow, null, 2, "因阻断结束。", true, true);
+    var notices =
+        jdbc.queryForList(
+            "SELECT message_kind,conversation_id,payload_json FROM codex_sop_dingtalk_outbox WHERE workflow_id=? AND message_kind IN ('monitor_card','text') ORDER BY created_at",
+            workflow);
+    assertThat(notices).hasSize(2);
+    assertThat(notices)
+        .allSatisfy(
+            row -> assertThat(row.get("conversation_id")).isEqualTo(start.conversationId()));
+    assertThat(notices.get(0).get("payload_json").toString()).contains("步骤执行失败。");
+    assertThat(notices.get(1).get("payload_json").toString()).contains("因阻断结束。");
+    assertThat(store.binding(workflow).orElseThrow().status()).isEqualTo("terminal");
   }
 
   @Test

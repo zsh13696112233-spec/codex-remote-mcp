@@ -344,7 +344,25 @@ final class DingTalkExecutionNotice {
     if (length > 200) title = title.substring(0, title.offsetByCodePoints(0, 200)) + "…（标题已截断）";
     return "\nJira："
         + key
-        + (title.isBlank() ? "" : "\n工单标题：" + (markdown ? startField(title) : title));
+        + (title.isBlank() ? "" : "\n工单标题：" + (markdown ? startField(title) : title))
+        + (issue.path("people").isObject() ? startPeople(issue.path("people"), markdown) : "");
+  }
+
+  private static String startPeople(JsonNode people, boolean markdown) {
+    var names = new java.util.ArrayList<String>();
+    for (var name : people.path("developers")) if (name.isTextual()) names.add(name.asText());
+    return "\n开发人："
+        + personText(String.join("、", names), markdown)
+        + "\n负责人："
+        + personText(people.path("assignee").asText(), markdown);
+  }
+
+  private static String personText(String value, boolean markdown) {
+    String text = safe(value).replaceAll("[\\p{Cntrl}\\s]+", " ").strip();
+    if (text.isBlank()) return "未获取";
+    if (text.codePointCount(0, text.length()) > 200)
+      text = text.substring(0, text.offsetByCodePoints(0, 200)) + "…（已截断）";
+    return markdown ? startField(text) : text;
   }
 
   private static String startField(String value) {

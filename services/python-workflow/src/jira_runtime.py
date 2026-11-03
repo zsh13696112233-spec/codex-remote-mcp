@@ -1,10 +1,9 @@
-"""通过监督机已有 Jira CLI 领取；凭据通过文件 RPC 下发，不进入模型上下文。"""
+"""通过监督机已有 Jira CLI 领取；执行机使用本地账号，凭据不进入模型上下文。"""
 
 import asyncio
 import base64
 import hashlib
 import json
-import logging
 import re
 from pathlib import PureWindowsPath
 
@@ -13,7 +12,6 @@ from workflow_jira import ISSUE_KEY, run_directory, server_key
 CONFIG_PATH = PureWindowsPath(r"C:\Users\admin\.jira_cli\config.json")
 POWERSHELL = r"C:\Program Files\PowerShell\7\pwsh.exe"
 FILE_LIMIT = 64 * 1024
-LOGGER = logging.getLogger(__name__)
 
 
 def account_from_config(content, alias):
@@ -200,12 +198,17 @@ if (!$cli.Path) { throw 'cli' }
 Write-Output $target
 """
 
+LOCAL_ACCOUNT = r"""  $config=Get-Content -LiteralPath (Join-Path $env:USERPROFILE '.jira_cli\config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+  $account=$config.accounts.PSObject.Properties[$accountAlias].Value
+  if ($null -eq $account -or $account.readOnly -isnot [bool]) { throw 'local account' }
+"""
+
+
 LAUNCHER = PROCESS_ENVIRONMENT + r"""$JiraArgs=@($args)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 try {
-  $account=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'account.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-  foreach ($arg in $JiraArgs) {
+""" + LOCAL_ACCOUNT + r"""  foreach ($arg in $JiraArgs) {
     if ($arg -match '^--(token|username|password|user|base-url)(=|$)') { throw 'auth override' }
   }
   $offset=0
@@ -220,10 +223,11 @@ try {
   if ($offset+1 -ge $JiraArgs.Count) { throw 'subcommand' }
   $pair=$JiraArgs[$offset]+' '+$JiraArgs[$offset+1]
   if ($pair -eq 'issue search') { throw 'only assigned issue' }
-  if ($account.readOnly) {
+  if ($supervisorReadOnly -or $account.readOnly) {
     if ($pair -notin @('issue get','issue transitions','issue transition-meta','attachment list','attachment download','field list','user get','user search')) { throw 'read only' }
   }
-""" + AUTH_ARGUMENTS + r"""
+
+  $authArgs=@('--user',$accountAlias)
   $secrets=@()
   foreach ($field in @('token','password')) {
     if ($account.PSObject.Properties[$field] -and $account.$field) { $secrets+=@($account.$field) }
@@ -247,6 +251,12 @@ try {
 """
 
 
+def local_launcher(alias, read_only):
+    # 别名作为 PowerShell 单引号字面量写入，不携带认证参数。
+    return ("$accountAlias='" + alias.replace("'", "''") + "'\n"
+            + "$supervisorReadOnly=$" + ("true" if read_only else "false") + "\n" + LAUNCHER)
+
+
 def client_for(orchestrator, agent):
     if not agent.enabled or not agent.allow_full_access:
         raise PermissionError("Jira CLI 固定命令需要机器已启用并授权完全访问。")
@@ -267,7 +277,7 @@ def account_script(raw, alias):
             "$account=$cfg.accounts.PSObject.Properties[$a[0]].Value\n")
 
 
-async def search_page(client, raw, alias, jql, cwd):
+async def search_page(client, raw, alias, jql, cwd, *, people=None):
     query = base64.b64encode(jql.encode()).decode()
     code = (account_script(raw, alias) + AUTH_ARGUMENTS + "\n"
             "$query=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + query + "'))\n"
@@ -277,6 +287,9 @@ async def search_page(client, raw, alias, jql, cwd):
     keys = issue_keys(output)
     value = json.loads(output)
     rows = value.get('items', value.get('issues', [])) if isinstance(value, dict) else value
+    if people is not None:
+        for row in rows:
+            people[row['key']] = row.get('assignee', row.get('fields', {}).get('assignee'))
     return {key: next((str(r.get('summary') or r.get('fields', {}).get('summary') or '')[:1000]
                       for r in rows if r['key'] == key), '') for key in keys}
 
@@ -308,9 +321,9 @@ async def claim_next(store, orchestrator, workflow_id):
     supervisor = orchestrator.get_agent(context["supervisorId"])
     executor = orchestrator.get_agent(context["executorId"])
     if not executor.allow_write:
-        raise PermissionError("执行机未授权写入，无法接收本轮 Jira 账号。")
-    upload_pending = False
-    launcher_path = None
+        raise PermissionError("执行机未授权写入，无法接收本轮 Jira 入口。")
+    if context.get("launcherPath") and context.get("accountSource", "transferred") != "local":
+        raise ValueError("历史 Jira 账号下发尚未完成，请结束本轮后重新运行。")
     try:
         async with client_for(orchestrator, supervisor) as client:
             raw_config = await read_file(client, CONFIG_PATH)
@@ -343,37 +356,29 @@ async def claim_next(store, orchestrator, workflow_id):
                 excluded.extend(unseen)
         if result["state"] == "no_task":
             return result
-        upload_pending = True
         async with client_for(orchestrator, executor) as client:
-            code = "$runId='" + run_directory(workflow_id) + "'\n" + DIRECTORY_SCRIPT + "\ntry {\n" + INITIALIZE_SCRIPT + "\n} catch { exit 1 }"
+            code = ("$runId='" + run_directory(workflow_id) + "'\n" + DIRECTORY_SCRIPT
+                    + "\ntry {\n$accountAlias='" + alias.replace("'", "''") + "'\n"
+                    + LOCAL_ACCOUNT + INITIALIZE_SCRIPT + "\n} catch { exit 1 }")
             directory = PureWindowsPath(await powershell(client, code, executor.cwd))
             if not directory.is_absolute() or directory.name != run_directory(workflow_id) or directory.parent.name != "CodexFlowJira":
                 raise ValueError("执行机返回的 Jira 运行目录无效。")
             launcher_path = str(directory / "jira.ps1")
-            staged = await asyncio.to_thread(store.jira_update, workflow_id, "stage", {"launcherPath": launcher_path})
+            staged = await asyncio.to_thread(store.jira_update, workflow_id, "stage", {"launcherPath": launcher_path, "accountSource": "local"})
             if staged["state"] == "ready":
-                upload_pending = False
                 return staged
-            files = {"account.json": json.dumps({**account, "accountAlias": alias}, ensure_ascii=False).encode(), "jira.ps1": b"\xef\xbb\xbf" + LAUNCHER.encode()}
-            for name, content in files.items():
-                path = directory / name
-                await client.request("fs/writeFile", {"path": str(path), "dataBase64": base64.b64encode(content).decode()})
-                if await read_file(client, path) != content:
-                    raise ValueError("执行机 Jira 账号下发回读校验失败。")
+            content = b"\xef\xbb\xbf" + local_launcher(alias, account["readOnly"]).encode()
+            path = directory / "jira.ps1"
+            await client.request("fs/writeFile", {"path": str(path), "dataBase64": base64.b64encode(content).decode()})
+            if await read_file(client, path) != content:
+                raise ValueError("执行机 Jira 入口下发回读校验失败。")
         result = await asyncio.to_thread(store.jira_update, workflow_id, "ready", {"launcherPath": str(directory / "jira.ps1")})
-        upload_pending = False
         return result
     except (ValueError, PermissionError):
         raise
     except Exception:
         # 远程 RPC / CLI 异常可包含文件正文或命令参数，禁止穿透到工具结果与日志。
-        raise RuntimeError("监督机 Jira 领取或账号下发失败，请检查 CLI、配置、执行机连接和授权；未启动业务步骤。") from None
-    finally:
-        if upload_pending:
-            try:
-                await cleanup(orchestrator, context["executorId"], workflow_id, launcher_path)
-            except Exception as error:
-                LOGGER.warning("下发未完成的 Jira 账号清理待核实，错误类型=%s。", type(error).__name__)
+        raise RuntimeError("监督机 Jira 领取或入口下发失败，请检查 CLI、配置、执行机连接和授权；未启动业务步骤。") from None
 
 
 async def cleanup(orchestrator, agent_id, workflow_id, launcher_path=None):
@@ -394,3 +399,47 @@ try {
 """)
         if await powershell(client, code, agent.cwd) != "CLEARED":
             raise RuntimeError("本轮 Jira 账号清理未确认。")
+
+
+async def collect_people(client, raw, alias, cwd, assignees):
+    """展示查询只降级已确认结束的失败；超时或断连继续交给采集占用保护。"""
+    from workflow_store import utc_now
+    import re
+
+    async def query(arguments):
+        code = (account_script(raw, alias) + AUTH_ARGUMENTS + "\n"
+                + "& jira_cli @authArgs --output json " + arguments + " 2>$null\n"
+                + "exit $LASTEXITCODE\n} catch { exit 1 }")
+        return json.loads(await powershell(client, code, cwd, cap=1024 * 1024))
+
+    field = None
+    try:
+        fields = await query('field list --custom-only')
+        if isinstance(fields, list):
+            matches = [f.get('id') for f in fields if isinstance(f, dict) and f.get('name') == '开发人']
+            if len(matches) == 1 and isinstance(matches[0], str) and re.fullmatch(r'customfield_[0-9]+', matches[0]):
+                field = matches[0]
+    except (JiraCommandError, json.JSONDecodeError):
+        pass
+    result = {}
+    for key, assignee in assignees.items():
+        names, status = [], 'unavailable'
+        if field:
+            try:
+                value = await query("issue get " + key + " --fields '" + field + "'")
+                fields = value.get('fields') if isinstance(value, dict) else None
+                if isinstance(fields, dict) and field in fields:
+                    value = fields[field]
+                    users = [] if value is None else value if isinstance(value, list) else [value]
+                    if len(users) <= 100 and all(isinstance(u, dict) and isinstance(u.get('displayName'), str)
+                                              and 0 < len(u['displayName'].strip()) <= 160 for u in users):
+                        names = list(dict.fromkeys(u['displayName'].strip() for u in users))
+                        status = 'resolved' if names else 'empty'
+            except (JiraCommandError, json.JSONDecodeError):
+                pass
+        if isinstance(assignee, dict):
+            assignee = assignee.get('displayName')
+        name = assignee.strip() if isinstance(assignee, str) and len(assignee) <= 160 else ''
+        result[key] = {'developers': names, 'developerStatus': status, 'assignee': name,
+                       'assigneeStatus': 'resolved' if name else 'unavailable', 'collectedAt': utc_now()}
+    return result

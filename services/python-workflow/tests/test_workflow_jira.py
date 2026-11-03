@@ -11,7 +11,7 @@ from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from jira_runtime import account_from_config, claim_next, issue_keys, excluding_query, INITIALIZE_SCRIPT, LAUNCHER
+from jira_runtime import account_from_config, claim_next, issue_keys, excluding_query, INITIALIZE_SCRIPT, LAUNCHER, local_launcher
 from tests.registry_fixtures import seed_agents
 from workflow_jira import run_directory, server_key
 from workflow_outcomes import parse, schema
@@ -172,13 +172,14 @@ class JiraStoreTests(unittest.TestCase):
         original_spec = self.store.get_spec("a")
         with self.store._connect() as db:
             db.execute("ALTER TABLE workflow_jira_runs DROP COLUMN cleanup_attempted_at")
+            db.execute("ALTER TABLE workflow_jira_runs DROP COLUMN account_source")
             original_run = dict(db.execute("SELECT * FROM workflow_jira_runs").fetchone())
             original_claim = dict(db.execute("SELECT * FROM jira_issue_claims").fetchone())
 
         upgraded = WorkflowStore(self.store.path)
         with upgraded._connect() as db:
             self.assertEqual(dict(db.execute("SELECT * FROM workflow_jira_runs").fetchone()),
-                {**original_run, "cleanup_attempted_at": None})
+                {**original_run, "cleanup_attempted_at": None, "account_source": "transferred"})
             self.assertEqual(dict(db.execute("SELECT * FROM jira_issue_claims").fetchone()), original_claim)
         self.assertEqual(upgraded.get_spec("a"), original_spec)
         self.assertEqual(upgraded.jira_cleanup_candidates(), [{"workflow_id": "a", "executor_id": "e1",
@@ -227,6 +228,24 @@ class JiraStoreTests(unittest.TestCase):
             AgentRegistry(self.store).delete_agent("e1")
         self.store.jira_credentials_cleared("a")
         self.assertEqual(self.store.jira_cleanup_candidates(), [])
+
+    def test_local_account_source_survives_restart_without_cleanup_or_removal_block(self):
+        from workflow_jira import pending_credentials
+        self.create("local")
+        self.claim("local")
+        path = "C:\\Users\\worker\\AppData\\Local\\CodexFlowJira\\" + run_directory("local") + "\\jira.ps1"
+        payload = {"launcherPath": path, "accountSource": "local"}
+        self.store.jira_update("local", "stage", payload)
+        self.store.jira_update("local", "stage", payload)
+        with self.assertRaisesRegex(RuntimeError, "来源已固定"):
+            self.store.jira_update("local", "stage", {"launcherPath": path})
+        self.store.jira_update("local", "ready", {"launcherPath": path})
+        self.store.cancel_workflow("local")
+        self.store = WorkflowStore(self.store.path)
+        self.assertEqual(self.store.jira_context("local")["accountSource"], "local")
+        self.assertEqual(self.store.jira_cleanup_candidates(), [])
+        with self.store._connect() as db:
+            self.assertFalse(pending_credentials(db, "e1"))
 
     def test_jira_write_rechecks_sidecar_lease(self):
         self.create("a")
@@ -314,10 +333,10 @@ class JiraRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 issue_keys(json.dumps({**empty, **change}))
 
-    async def test_claim_transfers_credentials_only_by_file_rpc(self):
+    async def test_claim_only_transfers_local_launcher(self):
         await self._check_credential_transfer({"token": "fixture-secret-never-in-prompts"}, '[{"key":"TEST-1"}]')
 
-    async def test_claim_transfers_password_credentials_only_by_file_rpc(self):
+    async def test_claim_does_not_transfer_password_credentials(self):
         await self._check_credential_transfer(
             {"username": "fixture-reviewer", "password": "fixture-password-not-in-prompts"},
             '{"items":[{"key":"TEST-1"}],"total":1,"returned":1,"start_at":0}')
@@ -325,32 +344,58 @@ class JiraRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_claim_preserves_explicit_alias_among_multiple_accounts(self):
         await self._check_credential_transfer({"token": "selected-account-secret"}, '[{"key":"TEST-1"}]', selected_alias="planner")
 
-    async def _check_credential_transfer(self, credentials, search_output, selected_alias=""):
+    async def test_local_account_missing_stops_before_upload(self):
+        await self._check_credential_transfer({"token": "secret"}, '[{"key":"TEST-1"}]', failure="account")
+
+    async def test_launcher_readback_failure_does_not_mark_ready(self):
+        await self._check_credential_transfer({"token": "secret"}, '[{"key":"TEST-1"}]', failure="readback")
+
+    async def test_historical_ready_launcher_is_not_replaced(self):
+        store = SimpleNamespace(jira_context=lambda _: {"state": "ready", "issueKey": "TEST-1"})
+        self.assertEqual(await claim_next(store, None, "old"), {"state": "ready", "issueKey": "TEST-1"})
+
+    async def _check_credential_transfer(self, credentials, search_output, selected_alias="", failure=None):
         alias = selected_alias or "bot"
         files = {str(PureWindowsPath(r"C:\Users\admin\.jira_cli\config.json")): json.dumps({"accounts": {
             alias: {"baseUrl": "http://jira.test", **credentials, "readOnly": False},
             **({"reviewer": {"baseUrl": "http://jira.test", "token": "unselected-secret", "readOnly": False}} if selected_alias else {})}}).encode()}
         directory = r"C:\Users\worker\AppData\Local\CodexFlowJira" + "\\" + run_directory("run")
         calls = []
+        operations = []
         async def request(method, params):
             calls.append((method, params))
             if method == "fs/getMetadata":
                 return {"isSymlink": False, "isFile": params["path"] in files, "isDirectory": params["path"] not in files}
-            if method == "fs/readFile": return {"dataBase64": base64.b64encode(files[params["path"]]).decode()}
+            if method == "fs/readFile":
+                content = b"corrupted" if failure == "readback" and params["path"].endswith("jira.ps1") else files[params["path"]]
+                return {"dataBase64": base64.b64encode(content).decode()}
             if method == "fs/writeFile": files[params["path"]] = base64.b64decode(params["dataBase64"]); return {}
             if method == "command/exec":
                 script = base64.b64decode(params["command"][-1]).decode("utf-16-le")
+                if failure == "account" and "Check-Path" in script:
+                    return {"exitCode": 1, "stdout": ""}
                 return {"exitCode": 0, "stdout": directory if "Check-Path" in script else search_output}
             self.fail(method)
         client = AsyncMock()
         client.__aenter__.return_value = client
         client.request.side_effect = request
+        def update(_, operation, payload):
+            operations.append((operation, payload))
+            return {"issueKey": "TEST-1", "state": "ready" if operation == "ready" else "claimed"}
         store = SimpleNamespace(jira_context=lambda _: {"state": "waiting_claim", "supervisorId": "s", "executorId": "e", "issueKey": None,
                 "config": {"jql": "project = TEST", "account": selected_alias}},
-            jira_update=lambda _, operation, payload: {"issueKey": "TEST-1", "state": "ready" if operation == "ready" else "claimed"})
+            jira_update=update)
         agent = SimpleNamespace(enabled=True, allow_full_access=True, allow_write=True, cwd=r"C:\work", url="ws://fixture")
         orchestrator = SimpleNamespace(get_agent=lambda _: agent, _client_factory=lambda *a, **kw: client, _resolve_agent_token=lambda _: None)
+        if failure:
+            with self.assertRaises((ValueError, RuntimeError)):
+                await claim_next(store, orchestrator, "run")
+            self.assertNotIn("ready", [operation for operation, _ in operations])
+            if failure == "account":
+                self.assertNotIn("fs/writeFile", [method for method, _ in calls])
+            return
         value = await claim_next(store, orchestrator, "run")
+        self.assertEqual(next(payload["accountSource"] for operation, payload in operations if operation == "stage"), "local")
         self.assertEqual(value, {"issueKey": "TEST-1", "state": "ready"})
         for secret in credentials.values():
             self.assertNotIn(secret, json.dumps(value))
@@ -361,9 +406,14 @@ class JiraRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(secret, script)
                 self.assertIn("GetEnvironmentVariable('Path','User')", script)
                 self.assertIn("$OutputEncoding", script)
-        transferred = json.loads(files[str(PureWindowsPath(directory) / "account.json")])
-        self.assertEqual(transferred, {"baseUrl": "http://jira.test", "readOnly": False, **credentials, "accountAlias": alias})
-        self.assertEqual(files[str(PureWindowsPath(directory) / "jira.ps1")], b"\xef\xbb\xbf" + LAUNCHER.encode())
+        self.assertNotIn(str(PureWindowsPath(directory) / "account.json"), files)
+        launcher = files[str(PureWindowsPath(directory) / "jira.ps1")]
+        self.assertEqual(launcher, b"\xef\xbb\xbf" + local_launcher(alias, False).encode())
+        for secret in credentials.values():
+            self.assertNotIn(secret.encode(), launcher)
+        self.assertEqual([params["path"] for method, params in calls if method == "fs/writeFile"],
+                         [str(PureWindowsPath(directory) / "jira.ps1")])
+
 
 
 def launcher_probe_script(credentials, arguments, *, read_only=False, account_alias="fixed-planner"):
@@ -371,25 +421,20 @@ def launcher_probe_script(credentials, arguments, *, read_only=False, account_al
     def literal(value):
         return "'" + value.replace("'", "''") + "'"
     account = {"baseUrl": "https://jira.test", "readOnly": read_only, **credentials}
-    expected = ["--base-url", account["baseUrl"]]
-    if account_alias is not None:
-        account["accountAlias"] = account_alias
-        expected += ["--user", account_alias]
+    expected = ["--user", account_alias]
     if "token" in credentials:
-        expected += ["--token", credentials["token"]]
         secrets = [credentials["token"]]
     else:
-        expected += ["--username", credentials["username"], "--password", credentials["password"]]
         secrets = [credentials["password"], base64.b64encode(
             (credentials["username"] + ":" + credentials["password"]).encode()).decode()]
     checks = "($args.Count -eq " + str(len(expected + arguments)) + ") -and " + " -and ".join("($args[" + str(i) + "] -ceq " + literal(value) + ")"
                            for i, value in enumerate(expected + arguments))
     return ("function Get-Content { param($LiteralPath,[switch]$Raw,$Encoding) "
-            + literal(json.dumps(account, ensure_ascii=False)) + " }\n"
+            + literal(json.dumps({"accounts": {account_alias: account}}, ensure_ascii=False)) + " }\n"
             "function jira_cli { if (!(" + checks + ")) { throw 'unexpected arguments' }; "
             "Write-Output 'AUTH_OK'; " + "; ".join("Write-Output " + literal(value) for value in secrets)
             + "; $global:LASTEXITCODE=0 }\n"
-            + "& {\n$PSScriptRoot='C:\\Windows'\n" + LAUNCHER + "\n} " + " ".join(literal(arg) for arg in arguments))
+            + "& {\n$env:USERPROFILE='C:\\Windows'\n" + local_launcher(account_alias, False) + "\n} " + " ".join(literal(arg) for arg in arguments))
 
 
 class JiraLauncherTests(unittest.TestCase):
@@ -418,7 +463,7 @@ class JiraLauncherTests(unittest.TestCase):
     def test_launcher_auth_redaction_and_restrictions(self):
         shell = shutil.which("pwsh") or shutil.which("powershell.exe")
         for credentials in ({"token": "fixture-token"}, {"username": "reviewer", "password": "p"}):
-            for account_alias in ("fixed-planner", None):
+            for account_alias in ("fixed-planner", "planner'quoted"):
                 for arguments, read_only, success in (
                         (["issue", "get", "TEST-1"], False, True),
                         (["issue", "comment", "TEST-1", "text"], False, True),

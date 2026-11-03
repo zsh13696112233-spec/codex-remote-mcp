@@ -49,7 +49,7 @@ def run_directory(workflow_id):
 
 def pending_credentials(db, agent_id):
     return db.execute("""SELECT 1 FROM workflow_jira_runs j JOIN workflow_allocations a USING(workflow_id)
-        WHERE a.executor_id=? AND j.issue_key IS NOT NULL AND j.credentials_cleared=0 LIMIT 1""", (agent_id,)).fetchone() is not None
+        WHERE a.executor_id=? AND j.issue_key IS NOT NULL AND j.credentials_cleared=0 AND j.account_source='transferred' LIMIT 1""", (agent_id,)).fetchone() is not None
 
 
 def initialize(db):
@@ -77,6 +77,8 @@ def initialize(db):
     # 网关与本机 MCP 可能同时初始化，在写事务内检查并升级。
     db.execute("BEGIN IMMEDIATE")
     columns = {row[1] for row in db.execute("PRAGMA table_info(workflow_jira_runs)")}
+    if "account_source" not in columns:
+        db.execute("ALTER TABLE workflow_jira_runs ADD COLUMN account_source TEXT NOT NULL DEFAULT 'transferred'")
     if "cleanup_attempted_at" not in columns:
         db.execute("ALTER TABLE workflow_jira_runs ADD COLUMN cleanup_attempted_at TEXT")
 
@@ -86,12 +88,12 @@ def node_instruction(db, workflow_id):
     if row is None:
         return ""
     if row["state"] != "ready":
-        raise RuntimeError("监督机尚未领取工单并完成账号下发，不能启动步骤。")
+        raise RuntimeError("监督机尚未领取工单并完成入口准备，不能启动步骤。")
     return ("\n【本轮 Jira 任务，优先于角色中自行领取任务的要求】\n"
             f"本轮唯一工单：{row['issue_key']}。所有步骤只处理此工单，不重新搜索或领取其他工单。\n"
             f"通过 PowerShell 调用本轮专属入口 {json.dumps(row['launcher_path'], ensure_ascii=False)}，"
             f"参数与 jira_cli 相同，例如 issue get {row['issue_key']}。"
-            "入口负责传入本轮固定账号及认证参数，读取、评论和修改都直接调用此入口；"
+            "入口负责选择本轮固定账号，读取、评论和修改都直接调用此入口；"
             "不要自行添加 --user、用户名、密码或令牌，不绕过入口直接调用 jira_cli。"
             "不得读取、打印或更改账号配置，不使用其他已保存账号。"
             "若入口仍要求选择账号，报告平台入口异常，不自行换账号。"
@@ -128,7 +130,7 @@ class JiraStore:
         with self._connect() as db:
             return [dict(row) for row in db.execute("""SELECT j.workflow_id,a.executor_id,j.launcher_path FROM workflow_jira_runs j
                 JOIN workflows w USING(workflow_id) JOIN workflow_allocations a USING(workflow_id)
-                WHERE j.credentials_cleared=0 AND j.issue_key IS NOT NULL AND w.status IN ('completed','failed','cancelled')
+                WHERE j.credentials_cleared=0 AND j.account_source='transferred' AND j.issue_key IS NOT NULL AND w.status IN ('completed','failed','cancelled')
                 AND NOT EXISTS (SELECT 1 FROM workflow_machine_claims c WHERE c.workflow_id=j.workflow_id)
                 ORDER BY COALESCE(j.cleanup_attempted_at,''),w.finished_at,j.workflow_id LIMIT 20""")]
 
@@ -149,7 +151,8 @@ class JiraStore:
                     "executorId": allocation["executor_id"], "cwd": allocation["cwd"],
                     "state": row["state"], "issueKey": row["issue_key"],
                     "server": row["server_key"], "account": row["account_alias"],
-                    "fingerprint": row["credential_fingerprint"], "launcherPath": row["launcher_path"]}
+                    "fingerprint": row["credential_fingerprint"], "launcherPath": row["launcher_path"],
+                    "accountSource": row["account_source"]}
 
     def jira_update(self, workflow_id, operation, payload, *, sidecar_supervisor_id=None, lease_token=None):
         from workflow_store import utc_now
@@ -236,7 +239,12 @@ class JiraStore:
                 if row["launcher_path"] and row["launcher_path"] != path:
                     raise RuntimeError("本轮 Jira 入口已固定，不能修改。")
                 if operation == "stage":
-                    db.execute("UPDATE workflow_jira_runs SET launcher_path=? WHERE workflow_id=?", (path, workflow_id))
+                    source = payload.get("accountSource", "transferred")
+                    if not isinstance(source, str) or source not in {"local", "transferred"}:
+                        raise ValueError("Jira 账号来源无效。")
+                    if row["launcher_path"] and row["account_source"] != source:
+                        raise RuntimeError("本轮 Jira 账号来源已固定，不能修改。")
+                    db.execute("UPDATE workflow_jira_runs SET launcher_path=?,account_source=? WHERE workflow_id=?", (path, source, workflow_id))
                     return {"issueKey": row["issue_key"], "state": row["state"]}
                 db.execute("UPDATE workflow_jira_runs SET state='ready',launcher_path=? WHERE workflow_id=?", (path, workflow_id))
                 result = {"issueKey": row["issue_key"], "state": "ready"}
@@ -265,9 +273,10 @@ class JiraStore:
                 deliveries = [dict(r) for r in db.execute("SELECT node_id AS nodeId,attempt,status,reference,summary,recorded_at AS recordedAt FROM workflow_jira_deliveries WHERE workflow_id=? ORDER BY recorded_at,node_id,attempt", (row["workflow_id"],))]
                 waiting = db.execute("SELECT kind FROM workflow_advance_gates WHERE workflow_id=? AND status IN ('pending','held') ORDER BY created_at DESC LIMIT 1", (row["workflow_id"],)).fetchone()
                 termination = json.loads(row["termination_json"]) if row["termination_json"] else None
-                from jira_pool import rework_history
+                from jira_pool import rework_history, execution_history
                 reworks = rework_history(db, row["server_key"], row["issue_key"])
-                result.append({"reworkCount": len(reworks), "reworks": reworks, "workflowId": row["workflow_id"], "taskDefinitionId": row["task_definition_id"],
+                executions = execution_history(db, row["server_key"], row["issue_key"])
+                result.append({"retryCount": max(0, len(executions) - 1), "executions": executions, "reworkCount": len(reworks), "reworks": reworks, "workflowId": row["workflow_id"], "taskDefinitionId": row["task_definition_id"],
                     "name": row["name"], "groupId": row["group_id"], "issueKey": row["issue_key"], "claimState": row["state"],
                     "status": row["status"], "outcome": termination["outcome"] if termination else None,
                     "waitingFor": waiting["kind"] if waiting else None,
