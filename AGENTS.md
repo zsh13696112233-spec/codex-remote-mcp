@@ -58,6 +58,7 @@
 
 - 根包为 `com.codexflow.configcenter`，按 `web`、`application`、`domain`、`client` 分层；新增代码放入职责匹配的包中。
 - REST DTO 与 JPA 实体分离；跨服务 JSON 映射集中维护，不要把网关协议散落到控制器或前端。
+- 业务 SOP 提示词以配置中心数据库中的角色职责和步骤自定义要求为准，不在仓库维护提示词副本；排查历史运行时以该次运行的冻结快照为准。
 - 数据库结构只通过 `src/main/resources/db/migration/` 下新的 Flyway 迁移演进。不要修改已应用迁移来修补正式数据库，不要启用 Hibernate 自动建表；保持 `ddl-auto=validate`。
 - 运行记录和提交 JSON 是不可变快照。重试历史运行时使用原快照，使用最新配置运行时生成新快照和新 `workflowId`。
 - 正式环境行为以 MySQL 8 为准；测试使用 H2 MySQL 兼容模式，涉及 SQL/Flyway 的改动需考虑两者差异。

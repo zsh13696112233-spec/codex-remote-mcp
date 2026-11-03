@@ -16,7 +16,7 @@ class BranchMigrationCompatibilityTest {
             + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
     Flyway.configure().dataSource(url, "sa", "").target("29").load().migrate();
     var flyway = Flyway.configure().dataSource(url, "sa", "").load();
-    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(17);
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(18);
     try (var connection = DriverManager.getConnection(url, "sa", "");
         var statement = connection.createStatement()) {
       statement.executeUpdate(
@@ -60,7 +60,7 @@ class BranchMigrationCompatibilityTest {
       }
     }
     var flyway = Flyway.configure().dataSource(url, "sa", "").load();
-    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(1);
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(2);
     try (var c = DriverManager.getConnection(url, "sa", "");
         var q = c.createStatement();
         var r = q.executeQuery("SELECT id,jira_jql FROM codex_sop_sops ORDER BY id")) {
@@ -72,5 +72,39 @@ class BranchMigrationCompatibilityTest {
       assertThat(count).isEqualTo(4);
     }
     assertThat(flyway.migrate().migrationsExecuted).isZero();
+  }
+
+  @Test
+  void jiraPoolTimestampDefaultsAreExplicitAndApplicationValuesRemainAuthoritative()
+      throws Exception {
+    String url =
+        "jdbc:h2:mem:jira-defaults-"
+            + UUID.randomUUID()
+            + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
+    Flyway.configure().dataSource(url, "sa", "").load().migrate();
+    try (var c = DriverManager.getConnection(url, "sa", "");
+        var q = c.createStatement()) {
+      q.executeUpdate(
+          "INSERT INTO codex_jira_requests(id,task_definition_id,source,spec_json,state) VALUES('defaults','task','web','{}','pending')");
+      try (var r =
+          q.executeQuery(
+              "SELECT created_at,updated_at FROM codex_jira_requests WHERE id='defaults'")) {
+        assertThat(r.next()).isTrue();
+        assertThat(r.getTimestamp(1)).isNotNull();
+        assertThat(r.getTimestamp(2)).isNotNull();
+      }
+      q.executeUpdate(
+          "INSERT INTO codex_jira_requests(id,task_definition_id,source,spec_json,state,created_at,updated_at) VALUES('explicit','task','web','{}','pending','2026-01-02 03:04:05.123456','2026-01-02 04:05:06.234567')");
+      q.executeUpdate("UPDATE codex_jira_requests SET state='waiting' WHERE id='explicit'");
+      try (var r =
+          q.executeQuery(
+              "SELECT created_at,updated_at FROM codex_jira_requests WHERE id='explicit'")) {
+        assertThat(r.next()).isTrue();
+        assertThat(r.getTimestamp(1))
+            .isEqualTo(java.sql.Timestamp.valueOf("2026-01-02 03:04:05.123456"));
+        assertThat(r.getTimestamp(2))
+            .isEqualTo(java.sql.Timestamp.valueOf("2026-01-02 04:05:06.234567"));
+      }
+    }
   }
 }

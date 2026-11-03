@@ -335,6 +335,26 @@ final class DingTalkExecutionNotice {
     return result;
   }
 
+  /** 启动通知只展示冻结的工单编号和标题，不转发预约中的服务地址或账号。 */
+  static String jiraStart(JsonNode issue, boolean markdown) {
+    String key = issue.path("issueKey").asText();
+    if (key.isBlank()) return "";
+    String title = safe(issue.path("title").asText()).replaceAll("[\\p{Cntrl}\\s]+", " ").strip();
+    int length = title.codePointCount(0, title.length());
+    if (length > 200) title = title.substring(0, title.offsetByCodePoints(0, 200)) + "…（标题已截断）";
+    return "\nJira："
+        + key
+        + (title.isBlank() ? "" : "\n工单标题：" + (markdown ? startField(title) : title));
+  }
+
+  private static String startField(String value) {
+    return value
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replaceAll("([\\\\`*_{}\\[\\]()!])", "\\\\$1");
+  }
+
   private static boolean publicLink(String url) {
     try {
       URI uri = URI.create(url);

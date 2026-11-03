@@ -51,7 +51,7 @@ public class DingTalkProactiveNotificationService {
   }
 
   /** 网关接受工作流后激活绑定并尽力生成第一条进度消息。 */
-  public void submitted(String workflowId, String notice) {
+  public void submitted(String workflowId, String notice, JsonNode jiraIssue) {
     try {
       store.markSubmitted(workflowId);
       JsonNode snapshot = gateway.get("/workflows/" + workflowId);
@@ -60,7 +60,9 @@ public class DingTalkProactiveNotificationService {
           "工作流编号："
               + workflowId
               + "\n"
-              + DingTalkExecutionNotice.safe(snapshot.path("name").asText() + "：" + notice);
+              + DingTalkExecutionNotice.safe(snapshot.path("name").asText() + "：" + notice)
+              + DingTalkExecutionNotice.jiraStart(
+                  jiraIssue, "schedule".equals(binding.triggerSource()));
       if ("schedule".equals(binding.triggerSource())) {
         store.enqueueScheduledStart(workflowId, text);
         return;

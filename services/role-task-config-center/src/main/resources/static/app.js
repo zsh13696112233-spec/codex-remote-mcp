@@ -576,7 +576,7 @@ $("#content").addEventListener("click",async e=>{
       if(a==="edit-task")openTask(await api(`/api/task-definitions/${id}`));
       if(a.startsWith("delete-")&&confirm("确定删除？")){const path=a==="delete-role"?`roles/${id}`:`task-definitions/${id}`;await api(`/api/${path}`,{method:"DELETE"});toast("已删除");await render()}
       if(a==="copy-task"){await api(`/api/task-definitions/${id}/copy`,{method:"POST"});toast("已创建副本");await render()}
-      if(a==="run-task"){action.disabled=true;const r=await api(`/api/task-definitions/${id}/runs`,{method:"POST"});toast("任务已提交");window.open(r.monitorUrl,"_blank","noopener");action.disabled=false}
+      if(a==="run-task"){action.disabled=true;const r=await api(`/api/task-definitions/${id}/runs`,{method:"POST"});if(r.requestId){sessionStorage.setItem("jira-start:"+id,r.requestId);toast("正在查找 Jira 工单，可在领取中心查看进度");watchJiraStart(id,r.requestId)}else{toast("任务已提交");window.open(r.monitorUrl,"_blank","noopener");}action.disabled=false}
       if(a==="runs")showRuns(id,action.dataset.name);return;
     }
     const del=e.target.closest("[data-sop-delete]");
@@ -738,7 +738,7 @@ async function navigateToPage(b,retry=false){
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
   if(state.page==="schedules"){const url=new URL(location.href);url.searchParams.set("page","schedules");history.replaceState(null,"",url)}
   {const url=new URL(location.href);url.searchParams.set("page",state.page);history.replaceState(null,"",url)}
-  const map={jira:["Jira 任务下发情况",""],mcps:["MCP 管理",""],skills:["Skill 管理",""],groups:["分组管理","＋ 新建分组"],schedules:["定时任务管理","＋ 新建定时任务"],runs:["任务运行",""],machines:["机器管理",""],roles:["角色管理","＋ 新建角色"],sops:["SOP 工作流","＋ 新建 SOP"],tasks:["任务定义","＋ 新建任务"],runtime:["运行状态",""],dingtalk:["钉钉机器人",""],"dingtalk-targets":["钉钉通知对象",""]};
+  const map={jira:["Jira 领取中心",""],mcps:["MCP 管理",""],skills:["Skill 管理",""],groups:["分组管理","＋ 新建分组"],schedules:["定时任务管理","＋ 新建定时任务"],runs:["任务运行",""],machines:["机器管理",""],roles:["角色管理","＋ 新建角色"],sops:["SOP 工作流","＋ 新建 SOP"],tasks:["任务定义","＋ 新建任务"],runtime:["运行状态",""],dingtalk:["钉钉机器人",""],"dingtalk-targets":["钉钉通知对象",""]};
   [$("#title").textContent,$("#create").textContent]=map[state.page];
   $("#create").classList.toggle("hidden",["jira","runs","machines","skills","mcps","runtime","dingtalk","dingtalk-targets"].includes(state.page));
   await render();

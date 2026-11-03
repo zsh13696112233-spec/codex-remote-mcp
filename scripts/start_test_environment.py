@@ -1,4 +1,4 @@
-"""macOS 测试服务启动、停止和状态查询，不操作正式服务。"""
+"""macOS 测试服务启动、停止、重启和状态查询，不操作正式服务。"""
 import argparse
 import os
 from pathlib import Path
@@ -122,13 +122,18 @@ def start(name):
     print(f"{name}: 已启动 PID {process.pid}，端口 {port}；日志：{ROOT / 'logs' / (name + '.log')}", flush=True)
 
 
+def restart(name):
+    stop(name)
+    start(name)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('service', choices=PORTS, help='测试服务名称')
-    parser.add_argument('action', nargs='?', default='start', choices=('start', 'stop', 'status'))
+    parser.add_argument('action', nargs='?', default='start', choices=('start', 'stop', 'restart', 'status'))
     args = parser.parse_args()
     try:
-        {'start': start, 'stop': stop, 'status': status}[args.action](args.service)
+        {'start': start, 'stop': stop, 'restart': restart, 'status': status}[args.action](args.service)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'操作失败：{error}\n')
 

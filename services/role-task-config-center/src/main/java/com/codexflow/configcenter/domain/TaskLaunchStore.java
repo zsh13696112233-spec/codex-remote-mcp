@@ -50,6 +50,16 @@ public class TaskLaunchStore {
   }
 
   @Transactional
+  public LaunchReservation reserveBound(
+      String taskId, String source, tools.jackson.databind.node.ObjectNode binding) {
+    TaskDefinitionEntity task = requiredTaskForUpdate(taskId);
+    validateStartable(task);
+    requireStartSlot(task);
+    return new LaunchReservation(
+        task.id, workflowRuns.prepareBound(taskId, source, binding), task.notifyDingTalk);
+  }
+
+  @Transactional
   public List<LaunchReservation> reserveJiraBatch(String taskId, String token, int count) {
     if (count < 1 || count > 100) throw new IllegalArgumentException("批次数量无效。");
     TaskDefinitionEntity task = requiredTaskForUpdate(taskId);

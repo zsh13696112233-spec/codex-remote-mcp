@@ -71,7 +71,7 @@ def schema(version: int, *, jira: bool = False) -> dict[str, Any]:
             "type": "object", "additionalProperties": False,
             "required": ["status", "reference", "summary"],
             "properties": {
-                "status": {"type": "string", "enum": ["submitted", "completed", "blocked", "unknown", "not_applicable"]},
+                "status": {"type": "string", "enum": ["submitted", "completed", "not_submitted", "blocked", "unknown", "not_applicable"]},
                 "reference": {"type": "string", "maxLength": 1000},
                 "summary": {"type": "string", "maxLength": 2000},
             },
@@ -158,13 +158,26 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
     marker = hashlib.sha256(f"{workflow_id}:{node_id}".encode()).hexdigest()[:24]
     result = (
         "\n【平台正式步骤结果协议】最终按指定 JSON 结构返回，不以普通文字请求停止。"
-        "summary 为完整交接总结，先写本步结论、需要用户处理或确认的事项及未决风险，再写执行细节和证据；"
-        "不要把关键待办放在末尾，不重复平台按钮操作提示；"
+        "summary 为完整交接总结；summary、职责要求的总结文档和已获授权的 Jira 评论沿用 SOP 原有的业务结论和说明格式，"
+        "不套用统一的分段标题，不因此新增评论或业务操作。"
+        "审核步骤保留“审核结论：”开头，其他步骤沿用自身结论名称；"
+        "首句只写简短业务结论和本轮实际提交结果，不夹带工具、路径或排查过程。"
+        "涉及 SVN 等版本提交时，已提交须给出实际版本号；未提交、无需提交、提交结果待核实分别如实说明，"
+        "不把历史版本当作本轮提交，不从流程阻断推断未提交；不涉及提交的任务不硬加 SVN 状态。"
+        "业务结论按 SOP 和证据判断，保留通过、返工、验证受限等实际结论；尚未形成审核结论时说明未完成及原因，"
+        "不把流程阻断等同于审核不通过或返工，审核通过后提交或流转失败仍保留审核结论。"
+        "需要人工处理的事项紧接结论说明由谁处理、具体动作及所需确认结果或材料；"
+        "未确认处理人时写待指定，不猜测人员或职责，不把拟转交写成已接单，也不编造待办。"
+        "再按 SOP 原有格式写审核说明、受审版本、本轮提交回执、验证结果、未决风险及证据；"
+        "不要把关键待办放在末尾，不重复平台按钮操作提示。"
         "outcome 为 success（可以继续）、no_task（无待处理任务）"
         "或 blocked（必要条件不满足，无法继续）。提前结束必须用 reason 说明原因。"
         "遇阻时 reason 先简明说明阻碍，再明确需要用户提供的信息、授权或决定；没有需要用户处理的事项时如实说明，不编造要求。"
+        "必要阻断、非阻断的验证限制及其他任务的问题分开写；不影响当前步骤的问题不混列为恢复前提。"
+        "用户可见正文使用普通中文和业务步骤名称，不使用内部角色名、英文状态码或原始错误堆砌结论。"
         "自身可纠正的命令错误先修正，保留职责明确规定的非阻断项，不夸大为阻断。"
         "确认阻断后停止业务写入，允许在原授权内向已锁定的唯一 Jira 添加收尾评论；"
+        "本次为正式阻断收尾，说明本轮因阻断停止，补齐条件不会自动恢复本轮。"
         "先写入阻断评论并回查确认成功，之后必须在原授权内尝试转交负责人；评论未确认成功不得转交。"
         "负责人转交是 blocked 分支明确允许的收尾操作，不代表审核通过；其他业务写入停止。"
         "本阻断收尾规则优先于职责中的旧收尾规则，Jira 状态和处理角色保持不变，不得改为 Natural Person。"
@@ -183,9 +196,13 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
         "日志或总结文档无法写入或回读时在 summary 说明，不掩盖已确认的转交结果。"
         "无论转交成功与否最终仍返回 blocked，失败或结果不明说明待人工处理事项。"
         "jiraComment.status 仅表示评论结果，不因转交失败改写已确认成功的评论状态。"
-        "评论说明阻断步骤、原因、已完成事项、未执行事项、恢复条件；"
+        "Jira 阻断评论也以 SOP 的业务结论和本轮实际提交结果开头，再说明必要人工事项、阻断原因、"
+        "已完成事项、未执行事项及恢复条件，保留原审核说明格式。"
+        "评论先于负责人转交，只写评论发布时已核实的事实；已确认目标时写拟转交，尚未确认时写待核实，"
+        "不得提前宣称转交成功或把未来操作写成已经尝试；实际转交结果在最终 summary 和 jiraComment.detail 说明，"
+        "不为更新汇报格式修改或重复追加已有评论。"
         "不得泄露凭据、内部会话编号、执行机地址，不改变 Jira 状态和处理角色或创建新任务。"
-        f"评论去重标记为 SOP-STOP-{marker}，先查已有评论，存在该标记则复用；"
+        f"评论去重标记为 SOP-STOP-{marker}，新评论将标记独立放在正文末尾；先查已有评论，存在该标记则复用；"
         "提交结果不明先回查，无法确认时不要盲目重发。"
         "jiraComment.status 为 succeeded/failed/unknown/not_applicable，issueKey 为锁定编号，"
         "reference 为已确认评论编号或链接（没有则空字符串），detail 说明备注结果。"
@@ -231,6 +248,7 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
         result = result[:start] + (
             "本运行采用半自动人工等待。首次或再次发现业务阻碍时返回 blocked，由平台等待人工回复，"
             "本次不代表正式结束，禁止执行停止评论和负责人转交等阻断收尾，Jira 状态和处理角色保持不变。"
+            "说明等待人工处理、本轮尚未结束，不暗示回复消息或补齐条件即会自动恢复。"
             "本规则优先于历史角色职责中的立即停止收尾要求。jiraComment 使用 not_applicable，说明等待人工处理。"
         ) + result[end:]
         result = result.replace("备注失败或未知仍返回 blocked，由平台结束，不再执行下一步。", "等待期间不允许进入后续步骤；正式超时后平台另行授权阻断收尾。")

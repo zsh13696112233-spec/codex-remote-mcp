@@ -152,6 +152,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   @Scheduled(fixedDelay = 250)
   void scheduleEvents() {
     if (!isRunning() || !due(nextEventPollAt)) return;
+    store.finishJiraRequests(properties.getClientId());
     var bindings = store.pollable(properties.getClientId());
     int size = bindings.size();
     for (int visited = 0; visited < size && eventWorkers.available() > 0; visited++) {
@@ -283,6 +284,7 @@ class DingTalkBotCoordinator implements SmartLifecycle {
   }
 
   private void startOrReport(DingTalkModels.Message message) {
+    if (store.queueJira(properties.getClientId(), message)) return;
     DingTalkModels.StartReservation reservation =
         store.reserveStart(properties.getClientId(), message);
     String workflowId = reservation.workflowId();

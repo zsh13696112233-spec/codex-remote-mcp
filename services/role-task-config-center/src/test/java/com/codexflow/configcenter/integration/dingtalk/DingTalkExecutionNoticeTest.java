@@ -7,6 +7,35 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 class DingTalkExecutionNoticeTest {
+
+  @Test
+  void jiraStartShowsOnlyAvailableIssueFields() {
+    var issue = json.createObjectNode().put("title", "没有编号的标题");
+    assertThat(DingTalkExecutionNotice.jiraStart(issue, true)).isEmpty();
+    issue.put("issueKey", "TEST-1").remove("title");
+    assertThat(DingTalkExecutionNotice.jiraStart(issue, true)).isEqualTo("\nJira：TEST-1");
+    issue.put("title", " \n\t ");
+    assertThat(DingTalkExecutionNotice.jiraStart(issue, true)).isEqualTo("\nJira：TEST-1");
+  }
+
+  @Test
+  void jiraStartEscapesMarkdownAndHidesCredentialsAndInternalLinks() {
+    var issue =
+        json.createObjectNode()
+            .put("issueKey", "TEST-1")
+            .put("title", "修复 *筛选*\n[入口](http://jira.internal/a) <标签> token=secret-value");
+    assertThat(DingTalkExecutionNotice.jiraStart(issue, true))
+        .contains("修复 \\*筛选\\* \\[入口\\]", "&lt;标签&gt;", "已隐藏")
+        .doesNotContain("secret-value", "jira.internal", "<标签>");
+  }
+
+  @Test
+  void jiraStartClipsLongTitlesWithoutSplittingUnicode() {
+    var issue = json.createObjectNode().put("issueKey", "TEST-1").put("title", "😀".repeat(201));
+    assertThat(DingTalkExecutionNotice.jiraStart(issue, true))
+        .isEqualTo("\nJira：TEST-1\n工单标题：" + "😀".repeat(200) + "…（标题已截断）");
+  }
+
   private final ObjectMapper json = new ObjectMapper();
 
   private ObjectNode event(String method, String type) {

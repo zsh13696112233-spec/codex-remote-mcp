@@ -9,10 +9,36 @@ import tools.jackson.databind.JsonNode;
 /** 各组 Jira 领取、分配和交付台账，只经配置中心访问网关。 */
 @RestController
 public class JiraRunController {
+  @org.springframework.beans.factory.annotation.Autowired
+  private com.codexflow.configcenter.application.JiraPoolService pool;
+
   private final WorkflowRunService service;
 
   public JiraRunController(WorkflowRunService service) {
     this.service = service;
+  }
+
+  @GetMapping("/api/jira-requests/{id}")
+  public JsonNode request(@org.springframework.web.bind.annotation.PathVariable String id) {
+    java.util.UUID.fromString(id);
+    return pool.status(id);
+  }
+
+  @GetMapping("/api/jira-pool")
+  public JsonNode pool(
+      @RequestParam(defaultValue = "") String groupId,
+      @RequestParam(required = false) Long before,
+      @RequestParam(defaultValue = "") String project,
+      @RequestParam(defaultValue = "") String task,
+      @RequestParam(defaultValue = "") String state) {
+    if (!groupId.isEmpty()) java.util.UUID.fromString(groupId);
+    if (before != null && before < 1) throw new IllegalArgumentException("分页参数无效。");
+    return pool.board(groupId, before, project, task, state);
+  }
+
+  @GetMapping("/api/jira-runs/{workflowId}")
+  public JsonNode detail(@org.springframework.web.bind.annotation.PathVariable String workflowId) {
+    return service.jiraRunDetail(workflowId);
   }
 
   @GetMapping("/api/jira-runs")

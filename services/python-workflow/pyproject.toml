@@ -41,5 +41,6 @@ py-modules = [
   "workflow_jira",
   "jira_runtime",
   "jira_routes",
+  "jira_pool",
   "workflow_input_images",
 ]

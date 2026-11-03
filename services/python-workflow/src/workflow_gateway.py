@@ -76,6 +76,7 @@ class WorkflowGateway:
         self._schedule_lock = asyncio.Lock()
         self._machine_probe_task: asyncio.Task[None] | None = None
         self._sidecar_watchdog_task: asyncio.Task[None] | None = None
+        self._jira_pool_task = None
         self._jira_cleanup_task: asyncio.Task[None] | None = None
         self._supervisor_runtime: dict[str, dict[str, Any]] = {}
         self._machine_checks: dict[str, asyncio.Task[dict[str, Any]]] = {}
@@ -96,6 +97,8 @@ class WorkflowGateway:
         )
         if recovered:
             LOGGER.warning("网关启动时已将 %s 个遗留运行标记为失败。", len(recovered))
+        from jira_pool import recover
+        await _database_call(recover, self.store)
         await _database_call(self.store.recover_processing_chat_messages)
         try:
             imported = await _database_call(self.store.import_legacy_generated_images)
@@ -135,6 +138,9 @@ class WorkflowGateway:
             self._sidecar_watchdog_task.cancel()
             await asyncio.gather(self._sidecar_watchdog_task, return_exceptions=True)
             self._sidecar_watchdog_task = None
+        if self._jira_pool_task is not None:
+            self._jira_pool_task.cancel()
+            await asyncio.gather(self._jira_pool_task, return_exceptions=True)
         if self._jira_cleanup_task is not None:
             self._jira_cleanup_task.cancel()
             await asyncio.gather(self._jira_cleanup_task, return_exceptions=True)
@@ -521,6 +527,9 @@ class WorkflowGateway:
         """及时终止心跳过期的远程租约，并停止中央监督任务。"""
         while not self._closing:
             try:
+                if self._jira_pool_task is None or self._jira_pool_task.done():
+                    from jira_pool import tick
+                    self._jira_pool_task = asyncio.create_task(tick(self))
                 if self._jira_cleanup_task is None or self._jira_cleanup_task.done():
                     self._jira_cleanup_task = asyncio.create_task(self._cleanup_jira_accounts())
                 if time.monotonic() - self._last_resource_check >= 10:

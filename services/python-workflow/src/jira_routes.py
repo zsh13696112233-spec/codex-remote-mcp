@@ -81,6 +81,70 @@ async def jira_capacity(request):
 
 
 def jira_routes():
-    return [Route("/internal/v1/workflows/{workflow_id}/jira", internal_jira, methods=["GET", "POST"]),
+    return [Route('/jira-collections', jira_collection, methods=['POST']),
+            Route('/jira-collections/{request_id}', jira_collection, methods=['GET', 'DELETE']),
+            Route('/jira-reservations', jira_reservation, methods=['POST']),
+            Route('/jira-pool', jira_pool_board, methods=['GET']),
+            Route("/internal/v1/workflows/{workflow_id}/jira", internal_jira, methods=["GET", "POST"]),
             Route("/jira-runs", jira_runs, methods=["GET"]),
+            Route("/jira-runs/{workflow_id}", jira_run_detail, methods=["GET"]),
             Route("/jira-capacity", jira_capacity, methods=["POST"])]
+
+
+async def jira_collection(request):
+    from workflow_gateway import _database_call, _internal_error_response
+    import jira_pool
+    try:
+        store = request.app.state.gateway.store
+        request_id = request.path_params.get('request_id')
+        if request.method == 'DELETE':
+            await _database_call(jira_pool.cancel, store, request_id)
+            return JSONResponse({'cancelled': True})
+        if request.method == 'GET':
+            return JSONResponse(await _database_call(jira_pool.collection, store, request_id))
+        return JSONResponse(await _database_call(jira_pool.request_collection, store, await request.json()), status_code=202)
+    except (ValueError, KeyError, TypeError, RuntimeError) as error:
+        return _internal_error_response(ValueError('采集请求无效。') if isinstance(error, (KeyError, TypeError)) else error)
+
+
+async def jira_reservation(request):
+    from workflow_gateway import _database_call, _internal_error_response
+    import jira_pool
+    try:
+        body = await request.json()
+        value = await _database_call(jira_pool.reserve, request.app.state.gateway.store,
+            body['requestId'], body['reservationId'])
+        if value and not await jira_pool.verify_reservation(request.app.state.gateway, value):
+            return JSONResponse({'reservation': None, 'state': 'waiting_verification'})
+        return JSONResponse({'reservation': value})
+    except (ValueError, KeyError, TypeError, RuntimeError) as error:
+        return _internal_error_response(ValueError('预约请求无效。') if isinstance(error, (KeyError, TypeError)) else error)
+
+
+async def jira_pool_board(request):
+    from workflow_gateway import _database_call, _internal_error_response
+    from jira_pool import board
+    try:
+        before = request.query_params.get('before')
+        return JSONResponse(await _database_call(board, request.app.state.gateway.store,
+            request.query_params.get('groupId', ''), int(before) if before else None, 50,
+            request.query_params.get('project', ''), request.query_params.get('task', ''), request.query_params.get('state', '')))
+    except (ValueError, RuntimeError) as error:
+        return _internal_error_response(error)
+
+
+async def jira_run_detail(request):
+    import uuid
+    from workflow_gateway import _database_call, _internal_error_response
+    from jira_pool import execution_detail
+    try:
+        try:
+            workflow_id = str(uuid.UUID(request.path_params['workflow_id']))
+        except ValueError:
+            raise ValueError('运行编号无效。') from None
+        result = await _database_call(execution_detail, request.app.state.gateway.store, workflow_id)
+        if result is None:
+            return JSONResponse({'error': '未找到 Jira 运行记录。'}, status_code=404)
+        return JSONResponse(result)
+    except (ValueError, RuntimeError) as error:
+        return _internal_error_response(error)

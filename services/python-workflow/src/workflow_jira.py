@@ -96,18 +96,19 @@ def node_instruction(db, workflow_id):
             "不得读取、打印或更改账号配置，不使用其他已保存账号。"
             "若入口仍要求选择账号，报告平台入口异常，不自行换账号。"
             "先实际读取工单，再按职责进行具体修改；领取记录不代表 Jira 已被修改。"
-            "历史完成的工单只要仍符合查询条件就可能再次领取。按职责完成负责人转交后，必须重新读取工单，"
-            "确认实际负责人等于指定接收人且不再是本轮领取账号，才能报告交接成功；"
-            "接收人不明确、转交失败或回查无法确认时，按既有结果协议报告遇阻和待人工动作，不得报告交接成功或擅自选择接收人。"
+            "历史完成的工单只要仍符合查询条件就可能再次领取。"
+            "SOP 步骤之间由平台按依赖关系推进，不要求转交 Jira 负责人，不因缺少下一步骤的接收账号而阻断。"
+            "仅在当前步骤职责明确要求时转交 Jira 负责人，并回查实际负责人是否符合职责指定的接收人；"
+            "接收人可以与本轮领取账号相同。转交未完成或结果无法确认时如实说明，按职责处理，不擅自选择接收人或虚报交接成功。"
             "不得把工作流完成当成代码提交成功。最终 jiraDelivery.status 使用 submitted（已有提交凭证）、"
-            "completed（本步完成但未提交）、blocked（受阻）、unknown（提交结果不明）或 not_applicable。"
+            "completed（本步完成但未提交）、not_submitted（本步要求提交代码但明确未提交）、blocked（受阻）、unknown（提交结果不明）或 not_applicable。"
             "reference 填实际确认的提交号或交付链接；submitted 必须实际回查并有凭证，不能只凭已发出提交命令。summary 简述交付结果。\n")
 
 
 def validate_delivery(value):
     if not isinstance(value, dict) or set(value) != {"status", "reference", "summary"}:
         raise ValueError("Jira 交付结果格式无效。")
-    if not isinstance(value["status"], str) or value["status"] not in {"submitted", "completed", "blocked", "unknown", "not_applicable"}:
+    if not isinstance(value["status"], str) or value["status"] not in {"submitted", "completed", "not_submitted", "blocked", "unknown", "not_applicable"}:
         raise ValueError("Jira 交付状态无效。")
     for key, limit in (("reference", 1000), ("summary", 2000)):
         if not isinstance(value[key], str) or len(value[key]) > limit:
@@ -144,7 +145,7 @@ class JiraStore:
             allocation = db.execute("SELECT * FROM workflow_allocations WHERE workflow_id=?", (workflow_id,)).fetchone()
             if not allocation or not allocation["executor_id"]:
                 raise RuntimeError("尚未分配监督机和执行机。")
-            return {"config": spec["jira"], "supervisorId": allocation["supervisor_id"],
+            return {"reservation": spec.get("jiraReservation"), "config": spec["jira"], "supervisorId": allocation["supervisor_id"],
                     "executorId": allocation["executor_id"], "cwd": allocation["cwd"],
                     "state": row["state"], "issueKey": row["issue_key"],
                     "server": row["server_key"], "account": row["account_alias"],
@@ -177,6 +178,9 @@ class JiraStore:
                 candidates = payload.get("candidates")
                 if not isinstance(candidates, list) or len(candidates) > 1000 or any(not isinstance(k, str) or not ISSUE_KEY.fullmatch(k) for k in candidates):
                     raise ValueError("Jira 候选编号格式无效或超过 1000 项。")
+                binding = spec.get("jiraReservation")
+                if binding and (server != binding["server"] or candidates != [binding["issueKey"]]):
+                    raise ValueError("本轮只能领取已预约的工单。")
                 if spec.get("jiraRetryOf"):
                     previous = db.execute("SELECT j.* FROM workflow_jira_runs j JOIN workflow_task_bindings b USING(workflow_id) WHERE j.workflow_id=? AND b.task_definition_id=?",
                         (spec["jiraRetryOf"], spec.get("taskDefinitionId"))).fetchone()
@@ -193,18 +197,22 @@ class JiraStore:
                     return {"issueKey": None, "state": "no_task"}
                 selected = None
                 for key in dict.fromkeys(candidates):
+                    if db.execute("SELECT 1 FROM jira_pool_items WHERE server_key=? AND issue_key=? AND state='reserved'", (server, key)).fetchone():
+                        continue
                     previous = db.execute("SELECT w.status,c.workflow_id FROM jira_issue_claims c JOIN workflows w USING(workflow_id) WHERE c.server_key=? AND c.issue_key=?", (server, key)).fetchone()
-                    if previous:
+                    if previous and previous["workflow_id"] != workflow_id:
                         if previous["status"] not in {"completed", "failed", "cancelled"} or db.execute("SELECT 1 FROM workflow_machine_claims WHERE workflow_id=?", (previous["workflow_id"],)).fetchone():
                             continue
                         db.execute("DELETE FROM jira_issue_claims WHERE server_key=? AND issue_key=?", (server, key))
-                    db.execute("INSERT INTO jira_issue_claims VALUES(?,?,?)", (server, key, workflow_id))
+                    if not previous or previous["workflow_id"] != workflow_id:
+                        db.execute("INSERT INTO jira_issue_claims VALUES(?,?,?)", (server, key, workflow_id))
                     selected = key
                     break
                 if selected is None and payload["candidates"]:
                     # 当前查询页全部已领取；监督机应排除该页继续查询，而不是提前报告无任务。
                     return {"issueKey": None, "state": "contended"}
                 if selected:
+                    db.execute("UPDATE jira_pool_items SET state='consumed' WHERE server_key=? AND issue_key=? AND state='pending'", (server, selected))
                     db.execute("UPDATE workflow_jira_runs SET state='claimed',server_key=?,account_alias=?,credential_fingerprint=?,issue_key=?,claimed_at=? WHERE workflow_id=?", (server, account, fingerprint, selected, now, workflow_id))
                     db.execute("UPDATE workflows SET jira_context_json=? WHERE workflow_id=?", (json.dumps({"issueKey": selected, "developerStatus": "not_applicable", "developerName": ""}), workflow_id))
                 else:
@@ -257,7 +265,9 @@ class JiraStore:
                 deliveries = [dict(r) for r in db.execute("SELECT node_id AS nodeId,attempt,status,reference,summary,recorded_at AS recordedAt FROM workflow_jira_deliveries WHERE workflow_id=? ORDER BY recorded_at,node_id,attempt", (row["workflow_id"],))]
                 waiting = db.execute("SELECT kind FROM workflow_advance_gates WHERE workflow_id=? AND status IN ('pending','held') ORDER BY created_at DESC LIMIT 1", (row["workflow_id"],)).fetchone()
                 termination = json.loads(row["termination_json"]) if row["termination_json"] else None
-                result.append({"workflowId": row["workflow_id"], "taskDefinitionId": row["task_definition_id"],
+                from jira_pool import rework_history
+                reworks = rework_history(db, row["server_key"], row["issue_key"])
+                result.append({"reworkCount": len(reworks), "reworks": reworks, "workflowId": row["workflow_id"], "taskDefinitionId": row["task_definition_id"],
                     "name": row["name"], "groupId": row["group_id"], "issueKey": row["issue_key"], "claimState": row["state"],
                     "status": row["status"], "outcome": termination["outcome"] if termination else None,
                     "waitingFor": waiting["kind"] if waiting else None,

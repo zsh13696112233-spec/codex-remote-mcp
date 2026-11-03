@@ -73,6 +73,26 @@ class StopTest(unittest.TestCase):
         self.assertFalse(self.pid_file.exists())
 
 
+class RestartTest(unittest.TestCase):
+    def test_restart_cli_stops_before_start_for_each_service(self):
+        for name in module.PORTS:
+            with self.subTest(service=name):
+                calls = []
+                with patch('sys.argv', ['start_test_environment.py', name, 'restart']), patch.object(
+                    module, 'stop', side_effect=lambda service: calls.append(('stop', service))
+                ), patch.object(module, 'start', side_effect=lambda service: calls.append(('start', service))):
+                    module.main()
+                self.assertEqual(calls, [('stop', name), ('start', name)])
+
+    def test_stop_failure_never_starts_another_process(self):
+        with patch.object(module, 'stop', side_effect=RuntimeError('停止超时')), patch.object(
+            module, 'start'
+        ) as start:
+            with self.assertRaisesRegex(RuntimeError, '停止超时'):
+                module.restart('gateway')
+            start.assert_not_called()
+
+
 class PortCheckTest(unittest.TestCase):
     def test_recently_closed_connection_can_be_reused(self):
         with socket.socket() as server:

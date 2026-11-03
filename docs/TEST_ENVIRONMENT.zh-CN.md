@@ -14,7 +14,7 @@
 
 运行数据、日志、临时文件和本机凭据已加入 Git 忽略。VS Code 的本地启动配置使用此 worktree 的绝对路径；换机器后须调整 Spring 凭据导入和 VS Code 路径。
 
-## 启动与停止
+## 启动、停止与重启
 
 从本 worktree 根目录执行：
 
@@ -34,6 +34,14 @@ python3 scripts/start_test_environment.py config-center stop
 ```
 
 停止仅适用于该脚本记录的进程：核对 PID、测试端口及 worktree 工作目录后发送 SIGTERM，最多等待 30 秒，不自动强制结束。PID 过期且端口空闲时清理旧记录；记录与实际进程不符时拒绝停止。VS Code 启动的进程请在 VS Code 中停止。
+
+重启使用 `restart`，按顺序执行上述停止检查和启动逻辑；停止失败或超时则不启动新进程。服务已停止且端口空闲时直接启动。重启不自动构建 Java 包：
+
+```sh
+python3 scripts/start_test_environment.py gateway restart
+python3 scripts/start_test_environment.py console restart
+python3 scripts/start_test_environment.py config-center restart
+```
 
 端口被监听进程占用时脚本拒绝重复启动；端口预检允许复用已关闭连接的 TIME_WAIT 状态，正常停止后可立即重新启动。脚本当前只读借用原仓库已有 Python 虚拟环境的解释器和依赖，通过 `PYTHONPATH` 加载本 worktree 的源码，不写入该环境。Java 使用本 worktree 下打包产物；修改 Java 配置或代码后先使用 `mvnd -f services/<模块>/pom.xml -DskipTests package` 重新打包。
 

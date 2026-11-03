@@ -26,6 +26,7 @@ import tools.jackson.databind.node.ObjectNode;
 
 @SpringBootTest
 class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
+  @Autowired JiraRequestStore requests;
   @Autowired ConfigService config;
   @Autowired WorkflowRunStore runs;
   @Autowired TaskLaunchStore launches;
@@ -74,6 +75,22 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
                 false,
                 null,
                 false)));
+  }
+
+  @Test
+  void busyCheckReturnsRequestToWaitingAndAllowsNextCheck() {
+    String id =
+        requests.enqueue(task().path("id").asText(), "web", null).path("requestId").asText();
+    requests.checkFinished(id, false, true, "检查执行机忙。");
+    assertThat(requests.status(id).path("state").asText()).isEqualTo("waiting");
+    assertThat(requests.status(id).path("reason").asText()).isEqualTo("检查执行机忙。");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT check_state FROM codex_jira_requests WHERE id=?", String.class, id))
+        .isEqualTo("pending");
+    requests.checkFinished(id, false, false, "脚本首条非空输出必须为 TRUE 或 FALSE。");
+    assertThat(requests.status(id).path("state").asText()).isEqualTo("failed");
+    assertThat(requests.status(id).path("reason").asText()).contains("TRUE 或 FALSE");
   }
 
   @Test
@@ -226,14 +243,24 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
                     .put("workflowId", payload.path("workflowId").asText())
                     .put("status", "queued");
               });
-      assertThat(service.runScheduled(taskId, second.token()).path("batchCount").asInt())
-          .isEqualTo(3);
-      assertThat(runs.listRuns(taskId)).hasSize(3);
-      assertThat(runs.listRuns(taskId))
-          .allSatisfy(run -> assertThat(run.path("status").asText()).isEqualTo("queued"));
-      assertThatThrownBy(() -> launches.reserveJiraBatch(taskId, second.token(), 3))
+      var queuedRequest = service.runScheduled(taskId, second.token());
+      assertThat(queuedRequest.path("requestId").asText()).isNotBlank();
+      assertThat(runs.listRuns(taskId)).isEmpty();
+      requests.validate(queuedRequest.path("requestId").asText());
+      jdbc.update(
+          "UPDATE codex_task_schedules SET next_at=? WHERE id=?",
+          Instant.now().minusSeconds(1),
+          id);
+      var later =
+          schedules.claimDispatches(ZonedDateTime.now(ZoneId.of("Asia/Shanghai")), 100).stream()
+              .filter(d -> d.taskId().equals(taskId))
+              .findFirst()
+              .orElseThrow();
+      assertThat(service.runScheduled(taskId, later.token()).path("requestId").asText())
+          .isNotEqualTo(queuedRequest.path("requestId").asText());
+
+      assertThatThrownBy(() -> service.runScheduled(taskId, second.token()))
           .isInstanceOf(ConflictFailure.class);
-      assertThat(runs.listRuns(taskId)).hasSize(3);
     } finally {
       schedules.delete(id);
     }
@@ -270,5 +297,44 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
     } finally {
       schedules.delete(id);
     }
+  }
+
+  @Test
+  void poolFreezesBindingOnlyAfterCollectionAndReusesPreparedRun() {
+    String taskId = task().path("id").asText();
+    var request = requests.enqueue(taskId, "web", null);
+    String id = request.path("requestId").asText();
+    assertThat(runs.listRuns(taskId)).isEmpty();
+    assertThat(requests.enqueue(taskId, "web", null).path("requestId").asText()).isEqualTo(id);
+    String reservation = requests.reservation(id);
+    var binding =
+        tools.jackson.databind.node.JsonNodeFactory.instance
+            .objectNode()
+            .put("reservationId", reservation)
+            .put("issueKey", "TEST-1")
+            .put("title", "修复订单列表筛选异常")
+            .put("server", "http://jira.test")
+            .put("accountId", "bot");
+    var first = requests.prepare(id, binding);
+    assertThat(requests.prepare(id, binding).prepared().workflowId())
+        .isEqualTo(first.prepared().workflowId());
+    assertThat(first.prepared().payload().path("jiraReservation")).isEqualTo(binding);
+    var issue = requests.status(id).path("jiraIssue");
+    assertThat(issue.path("issueKey").asText()).isEqualTo("TEST-1");
+    assertThat(issue.path("title").asText()).isEqualTo("修复订单列表筛选异常");
+    assertThat(issue.size()).isEqualTo(2);
+    binding.put("title", "后续修改不影响本轮");
+    assertThat(
+            requests
+                .prepare(id, binding)
+                .prepared()
+                .payload()
+                .path("jiraReservation")
+                .path("title")
+                .asText())
+        .isEqualTo("修复订单列表筛选异常");
+    assertThat(runs.listRuns(taskId)).hasSize(1);
+    assertThat(runs.prepareRetry(first.prepared().workflowId()).payload().has("jiraReservation"))
+        .isFalse();
   }
 }

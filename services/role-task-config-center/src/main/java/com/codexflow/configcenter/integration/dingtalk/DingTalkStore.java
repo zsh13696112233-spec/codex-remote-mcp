@@ -28,6 +28,70 @@ class DingTalkStore {
   private final DingTalkTargetDirectory targetDirectory;
   private final ObjectMapper objectMapper;
 
+  @org.springframework.beans.factory.annotation.Autowired
+  private org.springframework.jdbc.core.JdbcTemplate jiraJdbc;
+
+  @org.springframework.beans.factory.annotation.Autowired
+  private com.codexflow.configcenter.domain.JiraRequestStore jiraRequests;
+
+  @Transactional
+  public boolean queueJira(String clientId, DingTalkModels.Message message) {
+    if (jiraRequests == null) return false;
+    var old =
+        jiraJdbc.queryForList(
+            "SELECT request_id FROM codex_jira_dingtalk_requests WHERE client_id=? AND message_id=?",
+            clientId,
+            message.messageId());
+    if (!old.isEmpty()) return true;
+    String taskId = taskBindings.jiraTaskNamed(message.content());
+    if (taskId == null) return false;
+    var request = jiraRequests.enqueue(taskId, "dingtalk", null);
+    jiraJdbc.update(
+        "INSERT INTO codex_jira_dingtalk_requests(client_id,message_id,request_id,message_json) VALUES(?,?,?,?)",
+        clientId,
+        message.messageId(),
+        request.path("requestId").asText(),
+        objectMapper.writeValueAsString(message));
+    enqueueReply("jira-query:" + message.messageId(), null, message, "正在查找 Jira 工单，找到任务并启动后将通知你。");
+    return true;
+  }
+
+  @Transactional
+  public void finishJiraRequests(String clientId) {
+    if (jiraRequests == null) return;
+    for (var row :
+        jiraJdbc.queryForList(
+            "SELECT * FROM codex_jira_dingtalk_requests WHERE client_id=? AND finished=FALSE",
+            clientId)) {
+      var request = jiraRequests.status(row.get("request_id").toString());
+      String state = request.path("state").asText();
+      if (!List.of("started", "empty", "failed", "cancelled").contains(state)) continue;
+      var message =
+          objectMapper.readValue(row.get("message_json").toString(), DingTalkModels.Message.class);
+      String workflowId = request.path("workflowId").asText(null);
+      if (state.equals("started")) {
+        ensureConversation(
+            clientId, workflowId, request.path("taskDefinitionId").asText(), message, "running");
+        taskBindings.acquireForRestart(request.path("taskDefinitionId").asText(), workflowId);
+        enqueueStartReply(
+            "jira-start:" + message.messageId(),
+            workflowId,
+            message,
+            "已领取 Jira 工单并启动任务。"
+                + DingTalkExecutionNotice.jiraStart(request.path("jiraIssue"), true));
+      } else
+        enqueueReply(
+            "jira-end:" + message.messageId(),
+            null,
+            message,
+            request.path("reason").asText("本次未启动任务。"));
+      jiraJdbc.update(
+          "UPDATE codex_jira_dingtalk_requests SET finished=TRUE,message_json='{}' WHERE client_id=? AND message_id=?",
+          clientId,
+          message.messageId());
+    }
+  }
+
   private static final String DEFAULT_DOCUMENT_CARD_TEMPLATE_ID =
       "35c2fa5f-c25c-4d4b-8abd-dd07c953b14d.schema";
 

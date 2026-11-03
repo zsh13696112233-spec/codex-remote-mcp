@@ -250,6 +250,15 @@ public class TaskScheduleStore {
     }
   }
 
+  public void consumeForJiraPool(String taskId, String token) {
+    int count =
+        jdbc.update(
+            "UPDATE codex_task_schedules SET resource_pending=FALSE,dispatch_pending=FALSE,dispatch_token=NULL,dispatch_expires_at=NULL WHERE task_definition_id=? AND enabled=TRUE AND dispatch_pending=TRUE AND dispatch_token=?",
+            taskId,
+            token);
+    if (count != 1) throw new ConflictFailure("定时配置已变更或本次触发已失效。");
+  }
+
   public void requireEnabled(String taskId) {
     requireEnabled(taskId, null);
   }

@@ -35,6 +35,48 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
 
   private String lastTaskName;
 
+  @Autowired com.codexflow.configcenter.domain.JiraRequestStore jiraRequests;
+
+  @Test
+  void jiraStartReplyUsesFrozenTitleAndIsNotDuplicated() {
+    String client = "jira-title-" + UUID.randomUUID();
+    String taskId = createTask(client);
+    jdbc.update(
+        "UPDATE codex_sop_sops SET dispatch_mode='group',jira_jql='project = TEST AND status = 10205 AND assignee = currentUser() AND \"处理角色\" = \"Planner\"',jira_account='bot' WHERE id=(SELECT sop_id FROM codex_sop_task_definitions WHERE id=?)",
+        taskId);
+    var start = message("jira-title-start-" + client);
+    assertThat(store.queueJira(client, start)).isTrue();
+    String requestId =
+        jdbc.queryForObject(
+            "SELECT request_id FROM codex_jira_dingtalk_requests WHERE client_id=? AND message_id=?",
+            String.class,
+            client,
+            start.messageId());
+    var binding =
+        objectMapper
+            .createObjectNode()
+            .put("reservationId", jiraRequests.reservation(requestId))
+            .put("issueKey", "TEST-1")
+            .put("title", "修复订单列表筛选异常")
+            .put("server", "http://jira.internal")
+            .put("accountId", "private-account");
+    String workflow = jiraRequests.prepare(requestId, binding).prepared().workflowId();
+    binding.put("title", "另一个标题");
+    jiraRequests.dispatched(requestId, false);
+    store.finishJiraRequests(client);
+    store.finishJiraRequests(client);
+    var rows =
+        jdbc.queryForList(
+            "SELECT payload_json FROM codex_sop_dingtalk_outbox WHERE workflow_id=? AND message_kind='monitor_reply'",
+            workflow);
+    assertThat(rows).hasSize(1);
+    var payload = objectMapper.readTree(rows.get(0).get("payload_json").toString());
+    assertThat(payload.path("text").asText())
+        .contains("工作流编号：" + workflow, "Jira：TEST-1", "工单标题：修复订单列表筛选异常")
+        .doesNotContain("另一个标题", "jira.internal", "private-account");
+    assertThat(payload.path("monitorUrl").asText()).endsWith("workflowId=" + workflow);
+  }
+
   @Test
   void monitorStartKeepsQuotesAndEnqueuesGroupMentionOnlyAfterDelivery() {
     String client = "monitor-" + UUID.randomUUID();

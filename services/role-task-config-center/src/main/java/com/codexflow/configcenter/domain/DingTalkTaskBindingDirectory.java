@@ -31,6 +31,19 @@ public class DingTalkTaskBindingDirectory {
     return new StartRoute("started", task.id, prepared.workflowId(), view(task), prepared);
   }
 
+  @Transactional(readOnly = true)
+  public String jiraTaskNamed(String name) {
+    var matches =
+        tasks.findNamedCandidates(name.trim()).stream()
+            .filter(t -> t.getName().equals(name.trim()))
+            .toList();
+    if (matches.size() != 1) return null;
+    var task = tasks.findById(matches.get(0).getId()).orElseThrow();
+    if (task.deleted || !task.enabled || task.sop.deleted || !task.sop.enabled)
+      throw new ConflictFailure("任务或 SOP 已停用。");
+    return task.sop.jiraJql == null ? null : task.id;
+  }
+
   @Transactional
   public StartRoute reserveNamed(String name) {
     var matches =

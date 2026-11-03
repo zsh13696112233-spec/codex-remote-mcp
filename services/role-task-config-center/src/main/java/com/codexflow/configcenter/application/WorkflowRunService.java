@@ -32,6 +32,9 @@ public class WorkflowRunService {
   private final ConcurrentHashMap<String, CompletableFuture<ObjectNode>> submissions =
       new ConcurrentHashMap<>();
 
+  @org.springframework.beans.factory.annotation.Autowired
+  private org.springframework.beans.factory.ObjectProvider<JiraPoolService> jiraPool;
+
   private final WorkflowRunStore store;
   private final TaskLaunchStore launches;
   private final GatewayClient gateway;
@@ -51,6 +54,8 @@ public class WorkflowRunService {
 
   /** 使用任务定义的最新配置创建并提交一次运行。 */
   public ObjectNode runLatest(String taskId) {
+    if (jiraPool != null && store.jiraSchedulingSpec(taskId) != null)
+      return jiraPool.getObject().enqueue(taskId, "web", null);
     return launchLatest(taskId, "web", "任务已从网页启动。");
   }
 
@@ -62,25 +67,13 @@ public class WorkflowRunService {
   public ObjectNode runScheduled(String taskId, String token) {
     ObjectNode preview = store.jiraSchedulingSpec(taskId);
     if (preview == null) return launchLatest(taskId, "schedule", "定时任务已启动。", token);
-    int count = jiraCapacity(preview);
-    if (count == 0) {
-      launches.deferSchedule(taskId, token);
-      return preview.removeAll().put("waitingResources", true).put("batchCount", 0);
-    }
-    if (store.notifyDingTalk(taskId)) dingtalkNotifications.validate(taskId);
-    var reservations = launches.reserveJiraBatch(taskId, token, count);
-    ObjectNode first = null;
-    RuntimeException failure = null;
-    for (var reservation : reservations) {
-      try {
-        ObjectNode result = submitReservation(reservation, "schedule", "定时 Jira 任务已启动。");
-        if (first == null) first = result;
-      } catch (RuntimeException error) {
-        if (failure == null) failure = error;
-      }
-    }
-    if (failure != null) throw failure;
-    return first.put("batchCount", reservations.size());
+    return jiraPool.getObject().enqueue(taskId, "schedule", token);
+  }
+
+  public boolean enqueueScheduledJira(String taskId, String token) {
+    if (jiraPool == null || store.jiraSchedulingSpec(taskId) == null) return false;
+    jiraPool.getObject().enqueue(taskId, "schedule", token);
+    return true;
   }
 
   /** 没有空闲机器时先等待资源，不执行原有检查脚本。 */
@@ -96,6 +89,11 @@ public class WorkflowRunService {
     if (!capacity.isIntegralNumber() || capacity.asInt() < 0 || capacity.asInt() > 100)
       throw new IllegalStateException("Jira 调度容量响应无效。");
     return capacity.asInt();
+  }
+
+  public JsonNode jiraRunDetail(String workflowId) {
+    java.util.UUID.fromString(workflowId);
+    return gateway.get("/jira-runs/" + workflowId);
   }
 
   public JsonNode jiraRuns(String groupId, Long before) {
@@ -385,7 +383,7 @@ public class WorkflowRunService {
     return submitReservation(reservation, source, notice);
   }
 
-  private ObjectNode submitReservation(
+  public ObjectNode submitReservation(
       TaskLaunchStore.LaunchReservation reservation, String source, String notice) {
     String taskId = reservation.taskDefinitionId();
     PreparedRun prepared = reservation.prepared();
@@ -398,7 +396,9 @@ public class WorkflowRunService {
       }
       submissionStarted = true;
       ObjectNode result = submitPrepared(prepared);
-      if (notificationReserved) dingtalkNotifications.submitted(prepared.workflowId(), notice);
+      if (notificationReserved)
+        dingtalkNotifications.submitted(
+            prepared.workflowId(), notice, prepared.payload().path("jiraReservation"));
       return result;
     } catch (RuntimeException error) {
       String status = store.runStatus(prepared.workflowId());

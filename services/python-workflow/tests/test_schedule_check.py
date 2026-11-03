@@ -87,13 +87,16 @@ class RemoteCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("failed", (await execute_check(gateway, body))["status"])
         self.assertEqual("review", gateway.store.machine_claims()["a"]["state"])
         client.request.reset_mock()
-        self.assertEqual("skipped", (await execute_check(gateway, body))["status"])
+        response = await execute_check(gateway, body)
+        self.assertEqual("skipped", response["status"])
+        self.assertTrue(response["retryable"])
         client.request.assert_not_called()
 
     async def test_remote_command_uses_script_parent_without_changing_registered_cwd(self):
         gateway, client, agent = self.fixture()
         response = await execute_check(gateway, {"agentId": "a", "groupId": "g", "scriptPath": "E:/check.bat"})
         self.assertEqual("skipped", response["status"])
+        self.assertNotIn("retryable", response)
         self.assertEqual(["fs/getMetadata", "command/exec"], [c.args[0] for c in client.request.call_args_list])
         self.assertEqual("E:\\", client.request.call_args_list[-1].args[1]["cwd"])
         self.assertEqual("E:/work", agent.cwd)

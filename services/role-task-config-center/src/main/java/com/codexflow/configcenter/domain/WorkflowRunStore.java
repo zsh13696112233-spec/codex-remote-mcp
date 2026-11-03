@@ -41,6 +41,11 @@ public class WorkflowRunStore {
 
   @Transactional
   public PreparedRun prepareLatest(String taskId, String triggerSource) {
+    return prepareBound(taskId, triggerSource, null);
+  }
+
+  @Transactional
+  public PreparedRun prepareBound(String taskId, String triggerSource, ObjectNode binding) {
     if (!java.util.Set.of("web", "schedule", "dingtalk").contains(triggerSource))
       throw new IllegalArgumentException("运行来源无效。");
     TaskDefinitionEntity task = findTask(taskId, false);
@@ -51,6 +56,7 @@ public class WorkflowRunStore {
     GroupService.same(task.groupId, task.sop.groupId);
     for (SopStepEntity step : task.sop.steps) GroupService.same(task.groupId, step.role.groupId);
     ObjectNode payload = workflowPayload(task, workflowId);
+    if (binding != null) payload.set("jiraReservation", binding.deepCopy());
     ObjectNode snapshot = taskSnapshot(task, payload);
     snapshot.put("groupName", groupName);
     return persistPrepared(task, null, payload, snapshot, triggerSource);
@@ -65,6 +71,7 @@ public class WorkflowRunStore {
     ObjectNode payload = (ObjectNode) json.read(source.submittedJson);
     String workflowId = UUID.randomUUID().toString();
     payload.put("workflowId", workflowId);
+    payload.remove("jiraReservation");
     if (payload.path("jira").isObject()) payload.put("jiraRetryOf", sourceWorkflowId);
     if (!payload.has("resultProtocolVersion")) payload.put("resultProtocolVersion", 1);
     payload.put("taskDefinitionId", source.taskDefinition.id);

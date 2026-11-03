@@ -145,7 +145,8 @@ async def execute_check(gateway, body):
     from workflow_store import utc_now
     operation_id = uuid.uuid4().hex
     if not await asyncio.to_thread(claim_check, gateway.store, agent_id, operation_id, utc_now()):
-        return result("skipped", "检查执行机正在处理其他任务或执行状态待核实，本次不执行检查。")
+        return {**result("skipped", "检查执行机正在处理其他任务或执行状态待核实，本次不执行检查。"),
+                "retryable": True}
     stopped = True
     async def run():
         nonlocal stopped

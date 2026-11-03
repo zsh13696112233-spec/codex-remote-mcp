@@ -97,6 +97,10 @@ def excluding_query(jql, keys):
     return "(" + jql[:split].strip() + ") AND key NOT IN (" + ",".join(keys) + ") " + jql[split:]
 
 
+def including_query(jql, key):
+    return excluding_query(jql, [key]).replace('AND key NOT IN (' + key + ')', 'AND key IN (' + key + ')')
+
+
 async def read_file(client, path):
     for parent in [*reversed(path.parents), path]:
         metadata = await client.request("fs/getMetadata", {"path": str(parent)})
@@ -134,6 +138,10 @@ if ($account.PSObject.Properties['token'] -and $account.token) {
 """
 
 
+class JiraCommandError(RuntimeError):
+    """命令已返回退出码；失败不等于仍在远程运行。"""
+
+
 async def powershell(client, code, cwd, *, cap=4096):
     result = await client.request("command/exec", {
         "command": [POWERSHELL, "-NoProfile", "-NonInteractive", "-EncodedCommand",
@@ -141,7 +149,9 @@ async def powershell(client, code, cwd, *, cap=4096):
         "cwd": cwd, "sandboxPolicy": {"type": "dangerFullAccess"},
         "timeoutMs": 30000, "outputBytesCap": cap,
     })
-    if not isinstance(result, dict) or type(result.get("exitCode")) is not int or result["exitCode"] != 0:
+    if isinstance(result, dict) and type(result.get("exitCode")) is int and result["exitCode"] not in {0, 124, 125}:
+        raise JiraCommandError("Jira 固定命令执行失败，请检查账号、CLI 及网络。")
+    if not isinstance(result, dict) or type(result.get("exitCode")) is not int or result["exitCode"] in {124, 125}:
         raise RuntimeError("Jira CLI 或运行账号准备失败，请检查远程 CLI、目录权限及网络；未自动重试命令。")
     output = result.get("stdout")
     if not isinstance(output, str):
@@ -245,6 +255,52 @@ def client_for(orchestrator, agent):
     return orchestrator._client_factory(agent.url, token=orchestrator._resolve_agent_token(agent), request_timeout_sec=40)
 
 
+def account_script(raw, alias):
+    data = base64.b64encode(json.dumps([alias, hashlib.sha256(raw).hexdigest()]).encode()).decode()
+    return ("$ErrorActionPreference='Stop'\ntry {\n"
+            "$a=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + data + "')) | ConvertFrom-Json\n"
+            "$bytes=[IO.File]::ReadAllBytes('C:\\Users\\admin\\.jira_cli\\config.json')\n"
+            "$sha=[Security.Cryptography.SHA256]::Create()\n"
+            "$digest=-join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })\n"
+            "$sha.Dispose()\nif ($digest -ne $a[1]) { throw 'changed' }\n"
+            "$cfg=[Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF) | ConvertFrom-Json\n"
+            "$account=$cfg.accounts.PSObject.Properties[$a[0]].Value\n")
+
+
+async def search_page(client, raw, alias, jql, cwd):
+    query = base64.b64encode(jql.encode()).decode()
+    code = (account_script(raw, alias) + AUTH_ARGUMENTS + "\n"
+            "$query=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + query + "'))\n"
+            "& jira_cli @authArgs --output json issue search $query 2>$null\n"
+            "exit $LASTEXITCODE\n} catch { exit 1 }")
+    output = await powershell(client, code, cwd, cap=1024 * 1024)
+    keys = issue_keys(output)
+    value = json.loads(output)
+    rows = value.get('items', value.get('issues', [])) if isinstance(value, dict) else value
+    return {key: next((str(r.get('summary') or r.get('fields', {}).get('summary') or '')[:1000]
+                      for r in rows if r['key'] == key), '') for key in keys}
+
+
+async def account_identity(client, raw, alias, cwd):
+    # 查询在监督机执行；中央不连接 Jira，也不持久化认证内容。
+    code = account_script(raw, alias) + r"""
+$headers=@{}
+if ($account.token) { $headers.Authorization='Bearer '+$account.token }
+else { $headers.Authorization='Basic '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($account.username+':'+$account.password)) }
+$user=Invoke-RestMethod -Uri ($account.baseUrl.TrimEnd('/')+'/rest/api/2/myself') -Headers $headers -TimeoutSec 20
+$id=$user.accountId
+if (-not $id) { $id=$user.key }
+if (-not $id) { $id=$user.name }
+if (-not $id) { exit 1 }
+[Console]::Out.WriteLine($id)
+} catch { exit 1 }
+"""
+    identity = await powershell(client, code, cwd)
+    if not identity or len(identity) > 256 or any(ord(c) < 32 for c in identity):
+        raise ValueError('无法确认 Jira 账号身份。')
+    return identity
+
+
 async def claim_next(store, orchestrator, workflow_id):
     context = await asyncio.to_thread(store.jira_context, workflow_id)
     if context["state"] in {"ready", "no_task"}:
@@ -260,25 +316,23 @@ async def claim_next(store, orchestrator, workflow_id):
             raw_config = await read_file(client, CONFIG_PATH)
             alias, account = account_from_config(raw_config, context["config"]["account"])
             fingerprint = hashlib.sha256(json.dumps([alias, account], sort_keys=True).encode()).hexdigest()
+            binding = context.get("reservation")
+            if binding:
+                identity = await account_identity(client, raw_config, alias, supervisor.cwd)
+                if account['baseUrl'] != binding['server'] or identity != binding['accountId']:
+                    raise ValueError('监督机 Jira 账号与采集账号不一致。')
+                candidates = await search_page(client, raw_config, alias, including_query(context['config']['jql'], binding['issueKey']), supervisor.cwd)
+                if binding['issueKey'] not in candidates:
+                    raise ValueError('已预约工单不再符合 SOP 查询条件，本轮不执行业务步骤。')
             excluded = []
             while True:
-                if context["issueKey"]:
+                if binding:
+                    keys = [binding["issueKey"]]
+                elif context["issueKey"]:
                     keys = [context["issueKey"]]
                 else:
                     query = excluding_query(context["config"]["jql"], excluded)
-                    data = base64.b64encode(json.dumps([alias, hashlib.sha256(raw_config).hexdigest(), "--output", "json", "issue", "search", query]).encode()).decode()
-                    code = ("$ErrorActionPreference='Stop'\ntry {\n"
-                            "$a=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + data + "')) | ConvertFrom-Json\n"
-                            "$bytes=[IO.File]::ReadAllBytes('C:\\Users\\admin\\.jira_cli\\config.json')\n"
-                            "$sha=[Security.Cryptography.SHA256]::Create()\n"
-                            "$digest=-join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })\n"
-                            "$sha.Dispose()\nif ($digest -ne $a[1]) { throw 'changed' }\n"
-                            "$cfg=[Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF) | ConvertFrom-Json\n"
-                            "$account=$cfg.accounts.PSObject.Properties[$a[0]].Value\n"
-                            "$queryArgs=@($a | Select-Object -Skip 2)\n"
-                            + AUTH_ARGUMENTS + "\n& jira_cli @authArgs @queryArgs 2>$null\n"
-                            "exit $LASTEXITCODE\n} catch { exit 1 }")
-                    keys = issue_keys(await powershell(client, code, supervisor.cwd, cap=1024 * 1024))
+                    keys = list(await search_page(client, raw_config, alias, query, supervisor.cwd))
                 result = await asyncio.to_thread(store.jira_update, workflow_id, "claim", {
                     "server": account["baseUrl"], "account": alias, "fingerprint": fingerprint, "candidates": keys})
                 if result["state"] != "contended":

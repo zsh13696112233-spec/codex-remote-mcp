@@ -556,6 +556,8 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
             initialize(connection)
             from workflow_allocation import initialize as initialize_allocations
             initialize_allocations(connection)
+            from jira_pool import initialize as initialize_pool
+            initialize_pool(connection)
             from workflow_jira import initialize as initialize_jira
             initialize_jira(connection)
         with self._connect() as connection:
@@ -723,11 +725,23 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
         jira = normalize_config(value.get("jira"))
         if jira and not grouped:
             raise ValueError("监督机统一领取 Jira 仅支持按组调度。")
+        binding = value.get("jiraReservation")
+        if binding is not None:
+            from workflow_jira import ISSUE_KEY, server_key
+            if (not jira or not isinstance(binding, dict) or set(binding) - {"title"} != {"reservationId", "issueKey", "server", "accountId"}
+                    or not isinstance(binding["reservationId"], str) or not re.fullmatch(r"[0-9a-f-]{36}", binding["reservationId"])
+                    or not isinstance(binding["issueKey"], str) or not ISSUE_KEY.fullmatch(binding["issueKey"])
+                    or not isinstance(binding["accountId"], str) or not 1 <= len(binding["accountId"]) <= 256):
+                raise ValueError("Jira 预约格式无效。")
+            if "title" in binding and (not isinstance(binding["title"], str) or len(binding["title"]) > 1000):
+                raise ValueError("Jira 工单标题必须是不超过 1000 个字符的文本。")
+            server_key(binding["server"])
         retry_of = value.get("jiraRetryOf")
         if retry_of is not None and (not jira or not isinstance(retry_of, str) or not 1 <= len(retry_of) <= 128 or retry_of == workflow_id):
             raise ValueError("Jira 重试来源无效。")
         return {
             **({"jira": jira} if jira else {}),
+            **({"jiraReservation": binding} if binding else {}),
             **({"jiraRetryOf": retry_of} if retry_of else {}),
             **({"waitPolicy": policy} if policy else {}),
             **({"dispatchMode": "group"} if grouped else {}),
@@ -833,6 +847,8 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                 connection.execute("INSERT INTO workflow_allocations(workflow_id,group_id) VALUES(?,?)", (spec["workflowId"], spec["groupId"]))
             if spec.get("jira"):
                 connection.execute("INSERT INTO workflow_jira_runs(workflow_id) VALUES(?)", (spec["workflowId"],))
+                from jira_pool import bind
+                bind(connection, spec)
             connection.execute("UPDATE workflows SET result_protocol_version=? WHERE workflow_id=?", (version, spec["workflowId"]))
             if spec.get("waitPolicy"):
                 connection.execute("UPDATE workflows SET wait_policy_json=? WHERE workflow_id=?", (json.dumps(spec["waitPolicy"]), spec["workflowId"]))
@@ -3182,6 +3198,9 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
             ).fetchone():
                 raise RuntimeError("工作流已结束，不能绑定新的步骤执行。")
             from workflow_resources import observe_execution
+            from jira_pool import record_rework
+            if snapshot.get("status") in {"running", "completed"}:
+                record_rework(connection, workflow_id, timestamp)
             observe_execution(connection, workflow_id, "node:" + node_id, snapshot)
             connection.execute(
                 """
@@ -3267,6 +3286,9 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                 for key in ("thread_id", "turn_id"):
                     if old[key] and snapshot.get(key) and old[key] != snapshot[key]:
                         raise RuntimeError("步骤执行版本已变化。")
+            if status in {"running", "completed"} and (old["job_id"] or snapshot.get("job_id")):
+                from jira_pool import record_rework
+                record_rework(connection, workflow_id, utc_now())
             outcome = None
             if status == "completed" and workflow["result_protocol_version"] in (1, 2, 3, 4, 5):
                 from workflow_outcomes import validate
@@ -3534,7 +3556,7 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
         with self._connect() as connection:
             claims = {row["agent_id"]: {"workflowId": row["workflow_id"], "state": row["state"], "acquiredAt": row["acquired_at"]}
                     for row in connection.execute("SELECT * FROM workflow_machine_claims")}
-            claims.update({row["agent_id"]: {"workflowId": None, "state": row["state"], "acquiredAt": row["acquired_at"], "kind": "schedule_check"}
+            claims.update({row["agent_id"]: {"workflowId": None, "state": row["state"], "acquiredAt": row["acquired_at"], "kind": "jira_collection" if row["operation_id"].startswith("jira") else "schedule_check"}
                            for row in connection.execute("SELECT * FROM machine_check_claims")})
             return claims
 
