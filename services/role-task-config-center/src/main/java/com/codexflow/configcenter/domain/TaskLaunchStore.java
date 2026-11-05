@@ -91,6 +91,7 @@ public class TaskLaunchStore {
   /** 按历史快照创建重试运行，并占用来源任务的运行槽。 */
   @Transactional
   public LaunchReservation reserveRetry(String sourceWorkflowId) {
+    workflowRuns.lockConfiguration();
     TaskRunEntity source =
         runs.findById(sourceWorkflowId)
             .orElseThrow(() -> new NotFoundFailure("找不到运行记录：" + sourceWorkflowId));

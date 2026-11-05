@@ -41,6 +41,18 @@ def serial_workflow() -> dict:
 
 
 class WorkflowStoreTests(unittest.TestCase):
+    def test_dispatch_preserves_frozen_advance_mode_including_legacy_default(self):
+        for mode in (None, "automatic", "semi_automatic"):
+            with self.subTest(mode=mode):
+                spec = serial_workflow()
+                spec["workflowId"] = "mode-" + str(mode)
+                if mode is not None:
+                    spec["advanceMode"] = mode
+                self.store.create_workflow(spec)
+                node = self.store.prepare_node_dispatch(spec["workflowId"], "a")
+                self.assertEqual(node["advanceMode"], mode or "automatic")
+                self.assertEqual(node["prompt"], "只写一个 a")
+
     def test_supervisor_failure_closes_steps_and_rejects_late_results(self):
         self.store.create_workflow(serial_workflow())
         self.store.prepare_node_dispatch("serial-demo", "a")

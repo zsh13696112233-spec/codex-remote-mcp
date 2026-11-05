@@ -65,6 +65,7 @@ async function loadBase(page=state.page){
   else if(page==="sops"){
     const [roles,sops]=await Promise.all([api("/api/roles"),api("/api/sops"),loadRuntime()]);
     state.roles=roles;state.sops=sops;
+    state.jiraAccounts=(await api("/api/jira-accounts")).accounts;
   }else if(page==="dingtalk"){
     [state.tasks,state.dingtalkTargets]=await Promise.all([api("/api/task-definitions"),api("/api/dingtalk/targets")]);
   }else if(page==="dingtalk-targets")state.tasks=await api("/api/task-definitions");
@@ -181,6 +182,7 @@ async function render({reload=true}={}){
   $("#sopPicker").hidden=page!=="sops";
   if(state.page==="groups"){await renderGroups();return}
   if(state.page==="schedules"){await renderSchedules();return}
+  if(state.page==="jira-accounts"){await renderJiraAccounts();return}
   if(state.page==="jira"){await renderJiraRuns();return}
   if(state.page==="runs"){await renderRunCatalog();return}
   if(state.page==="machines"){await renderMachines();return}
@@ -276,7 +278,7 @@ async function openTask(x={enabled:true}){
 }
 function showTaskForm(x){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=taskRequirements(x);f.additionalNotes.value="";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");const selectedTarget=x.dingtalkTarget||state.dingtalkTargets.find(t=>t.id===x.dingtalkTargetId),selectedType=selectedTarget?.targetType||"NONE",typeInput=f.querySelector(`[name="dingtalkTargetType"][value="${selectedType}"]`);if(typeInput)typeInput.checked=true;syncTaskDingTalkTargetFields(f,x.dingtalkTargetId||"");f.blockedNotificationGroupId.innerHTML=blockedGroupOptions(x.blockedNotificationGroupId);f.blockedNotificationGroupId.value=x.blockedNotificationGroupId||"";f.notifyDingTalk.checked=x.notifyDingTalk===true;f.enabled.checked=x.enabled!==false;bindGroupForm(f,x,id=>{const old=f.sopId.value;f.sopId.innerHTML='<option value="">请选择同组 SOP</option>'+state.sops.filter(s=>s.groupId===id&&(s.enabled||s.id===x.sopId)).map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");f.sopId.value=[...f.sopId.options].some(o=>o.value===old)?old:""});$("#taskDialog").showModal()}
 
-function blankSop(){return{jiraEnabled:false,jiraJql:"",jiraProject:"",jiraStatus:"待办",jiraAccount:"",groupId:concreteGroup(),id:"",name:"",description:"",dispatchMode:"group",supervisorAgentId:"",supervisorTimeoutSec:7200,advanceMode:"automatic",dingtalkShowExecutionDetails:false,defaultStepModel:"gpt-6.1-sol",defaultStepReasoningEffort:null,enabled:true,steps:[]}}
+function blankSop(){return{jiraEnabled:false,jiraJql:"",jiraProject:"",jiraStatus:"待办",jiraConnectionId:"",jiraAccount:"",groupId:concreteGroup(),id:"",name:"",description:"",dispatchMode:"group",supervisorAgentId:"",supervisorTimeoutSec:7200,advanceMode:"automatic",dingtalkShowExecutionDetails:false,defaultStepModel:"gpt-6.1-sol",defaultStepReasoningEffort:null,enabled:true,steps:[]}}
 function jiraFieldsFromQuery(query){
   const match=/^\s*project\s*=\s*("(?:\\["\\]|[^"\\])*"|'(?:\\['\\]|[^'\\])*'|[\w-]+)(?:\s+AND\s+status\s*=\s*("(?:\\["\\]|[^"\\])*"|'(?:\\['\\]|[^'\\])*'|[\w-]+))?(?:\s+AND\s+assignee\s*=\s*currentUser\(\s*\))?(?:\s+AND\s+"处理角色"\s*=\s*"Planner")?\s*$/i.exec(query||"");
   if(!match)return null;
@@ -303,10 +305,10 @@ function validateSopJira(d){
 function normalizeStep(s){const permissionProfile=s.permissionProfile||(s.writeEnabled===true?"workspace_write":"read_only");return{...s,_clientId:s._clientId||uid(),displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",permissionProfile,writeEnabled:permissionProfile!=="read_only",modelOverride:s.modelOverride||null,reasoningEffortOverride:s.reasoningEffortOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
 function setDraft(sop){
   const jiraFields=jiraFieldsFromQuery(sop.jira?.jql);
-  const copy={...blankSop(),...sop,jiraEnabled:!!sop.jira,jiraJql:sop.jira?.jql||"",jiraProject:jiraFields?.project||"",jiraStatus:jiraFields?.status||"待办",jiraAccount:sop.jira?.account||"",dispatchMode:"group",legacyFixed:!!sop.id&&sop.dispatchMode!=="group",supervisorAgentId:"",steps:(sop.steps||[]).map(s=>normalizeStep({...s,agentId:"",workingDirectory:""}))};
+  const copy={...blankSop(),...sop,jiraEnabled:!!sop.jira,jiraJql:sop.jira?.jql||"",jiraProject:jiraFields?.project||"",jiraStatus:jiraFields?.status||"待办",jiraAccount:sop.jira?.account||"",jiraConnectionId:sop.jira?.connectionId||"",dispatchMode:"group",legacyFixed:!!sop.id&&sop.dispatchMode!=="group",supervisorAgentId:"",steps:(sop.steps||[]).map(s=>normalizeStep({...s,agentId:"",workingDirectory:""}))};
   state.sop.draft=copy;state.sop.selectedNodeId=copy.steps[0]?._clientId||null;state.sop.tab="workflow";state.sop.baseline=draftFingerprint(copy);
 }
-function sopPayload(d=state.sop.draft){return{jira:d.jiraEnabled?{jql:sopJiraQuery(d),account:(d.jiraAccount||"").trim()}:null,groupId:d.groupId,name:d.name.trim(),description:(d.description||"").trim(),dispatchMode:"group",supervisorTimeoutSec:Number(d.supervisorTimeoutSec),advanceMode:d.advanceMode||"automatic",dingtalkShowExecutionDetails:d.dingtalkShowExecutionDetails===true,defaultStepModel:d.defaultStepModel,defaultStepReasoningEffort:d.defaultStepReasoningEffort||null,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,reasoningEffortOverride:s.reasoningEffortOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
+function sopPayload(d=state.sop.draft){return{jira:d.jiraEnabled?{jql:sopJiraQuery(d),connectionId:d.jiraConnectionId||""}:null,groupId:d.groupId,name:d.name.trim(),description:(d.description||"").trim(),dispatchMode:"group",supervisorTimeoutSec:Number(d.supervisorTimeoutSec),advanceMode:d.advanceMode||"automatic",dingtalkShowExecutionDetails:d.dingtalkShowExecutionDetails===true,defaultStepModel:d.defaultStepModel,defaultStepReasoningEffort:d.defaultStepReasoningEffort||null,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,reasoningEffortOverride:s.reasoningEffortOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
 function draftFingerprint(d=state.sop.draft){return d?JSON.stringify(sopPayload(d)):""}
 function isSopDirty(){return !!state.sop.draft&&draftFingerprint()!==state.sop.baseline}
 function confirmDiscard(){return !isSopDirty()||confirm("当前工作流有未保存的修改，确定放弃吗？")}
@@ -390,8 +392,8 @@ function workflowInspectorHtml(){
     <div data-effort-control="workflow">${effortControlHtml()}</div>
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，遇阻先讨论）</option></select></label>
     <p class="meta">启动时自动选择空闲监督机和本组执行机；本次全部步骤在同一台执行机、同一工作目录执行。</p>${d.legacyFixed?'<p class="meta">此 SOP 仍保存着旧机器设置，点击保存后，新运行改用分组调度。历史运行快照保持原样。</p>':''}
-    <label class="check"><input data-sop-field="jiraEnabled" type="checkbox" ${d.jiraEnabled?"checked":""}> 监督机统一领取 Jira</label>
-    ${d.jiraEnabled?`${d.jiraJql&&!jiraFieldsFromQuery(d.jiraJql)?'<p class="meta">此 SOP 的旧查询无法自动转换，请填写项目名称后保存。已有运行保持原设置。</p>':''}<label>Jira 项目名称 *<input data-sop-field="jiraProject" maxlength="1000" value="${esc(d.jiraProject||'')}" placeholder="例如：产品研发（也可填写项目编号）"><small>填写 Jira 中实际的项目名称或编号，只领取该 Jira 登录账号负责、符合所填状态且处理角色为 Planner 的工单。</small></label><label>Jira 状态 *<input data-sop-field="jiraStatus" maxlength="1000" value="${esc(d.jiraStatus??'待办')}" placeholder="例如：待办、Open 或状态编号"><small>默认待办；请填写该项目实际使用的状态名称或编号。待办对应编号 10205。</small></label><label>Jira账号<input data-sop-field="jiraAccount" maxlength="128" value="${esc(d.jiraAccount||'')}" placeholder="只有一个账号时可留空"><small>填写 Jira CLI 中已有的账号别名；账号凭据由监督机传给本轮执行机。</small></label>`:''}
+    <label class="check"><input data-sop-field="jiraEnabled" type="checkbox" ${d.jiraEnabled?"checked":""}> 中央统一领取 Jira</label>
+    ${d.jiraEnabled?`${d.jiraJql&&!jiraFieldsFromQuery(d.jiraJql)?'<p class="meta">此 SOP 的旧查询无法自动转换，请填写项目名称后保存。已有运行保持原设置。</p>':''}<label>Jira 项目名称 *<input data-sop-field="jiraProject" maxlength="1000" value="${esc(d.jiraProject||'')}" placeholder="例如：产品研发（也可填写项目编号）"><small>填写 Jira 中实际的项目名称或编号，只领取该 Jira 登录账号负责、符合所填状态且处理角色为 Planner 的工单。</small></label><label>Jira 状态 *<input data-sop-field="jiraStatus" maxlength="1000" value="${esc(d.jiraStatus??'待办')}" placeholder="例如：待办、Open 或状态编号"><small>默认待办；请填写该项目实际使用的状态名称或编号。待办对应编号 10205。</small></label><label>Jira 账号<select data-sop-field="jiraConnectionId" required>${jiraAccountOptions(d.groupId,d.jiraConnectionId)}</select><small>选择本组已启用且检测通过的账号；旧 SOP 需手动绑定。</small></label>`:''}
     <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="43200" value="${d.supervisorTimeoutSec}"><small>最多 43200 秒（12 小时），保存后用于新运行。</small></label>
     <label class="check"><input data-sop-field="dingtalkShowExecutionDetails" type="checkbox" ${d.dingtalkShowExecutionDetails?"checked":""}> 钉钉显示思考过程和工具调用</label>
     <p class="meta">关闭后仍发送进度说明、步骤结果和确认通知。修改仅对新运行生效。</p>
@@ -738,7 +740,7 @@ async function navigateToPage(b,retry=false){
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
   if(state.page==="schedules"){const url=new URL(location.href);url.searchParams.set("page","schedules");history.replaceState(null,"",url)}
   {const url=new URL(location.href);url.searchParams.set("page",state.page);history.replaceState(null,"",url)}
-  const map={jira:["Jira 领取中心",""],mcps:["MCP 管理",""],skills:["Skill 管理",""],groups:["分组管理","＋ 新建分组"],schedules:["定时任务管理","＋ 新建定时任务"],runs:["任务运行",""],machines:["机器管理",""],roles:["角色管理","＋ 新建角色"],sops:["SOP 工作流","＋ 新建 SOP"],tasks:["任务定义","＋ 新建任务"],runtime:["运行状态",""],dingtalk:["钉钉机器人",""],"dingtalk-targets":["钉钉通知对象",""]};
+  const map={"jira-accounts":["Jira 账号管理","＋ 新增账号"],jira:["Jira 领取中心",""],mcps:["MCP 管理",""],skills:["Skill 管理",""],groups:["分组管理","＋ 新建分组"],schedules:["定时任务管理","＋ 新建定时任务"],runs:["任务运行",""],machines:["机器管理",""],roles:["角色管理","＋ 新建角色"],sops:["SOP 工作流","＋ 新建 SOP"],tasks:["任务定义","＋ 新建任务"],runtime:["运行状态",""],dingtalk:["钉钉机器人",""],"dingtalk-targets":["钉钉通知对象",""]};
   [$("#title").textContent,$("#create").textContent]=map[state.page];
   $("#create").classList.toggle("hidden",["jira","runs","machines","skills","mcps","runtime","dingtalk","dingtalk-targets"].includes(state.page));
   await render();
@@ -750,7 +752,7 @@ async function navigateToPage(b,retry=false){
   }finally{setSyncWait(false);navigationPending=false}
 }
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>navigateToPage(b));
-$("#create").onclick=()=>state.page==="groups"?editGroup():state.page==="roles"?openRole():state.page==="sops"?startNewSop():state.page==="tasks"?openTask():state.page==="schedules"?openSchedule().catch(e=>toast(e.message)):null;
+$("#create").onclick=()=>state.page==="jira-accounts"?editJiraAccount():state.page==="groups"?editGroup():state.page==="roles"?openRole():state.page==="sops"?startNewSop():state.page==="tasks"?openTask():state.page==="schedules"?openSchedule().catch(e=>toast(e.message)):null;
 $("#refresh").onclick=async()=>{if(state.page==="sops"&&!confirmDiscard())return;try{if(state.page==="sops"){effortCatalogs.clear();const id=state.sop.draft?.id;await loadGroups();renderGroupFilter();await loadBase();if(id&&state.sops.some(s=>s.id===id))setDraft(await api(`/api/sops/${id}`));else if(visibleSops().length)setDraft(visibleSops()[0]);else state.sop.draft=null;renderSopWorkspace()}else await render()}catch(e){toast(e.message)}};
 window.addEventListener("beforeunload",e=>{if(isSopDirty()){e.preventDefault();e.returnValue=""}});
 setInterval(refreshAgentRuntimeStatuses,10000);

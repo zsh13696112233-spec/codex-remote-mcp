@@ -27,6 +27,7 @@ import tools.jackson.databind.node.ObjectNode;
 @SpringBootTest
 class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
   @Autowired JiraRequestStore requests;
+  @Autowired JiraCollectionService collections;
   @Autowired ConfigService config;
   @Autowired WorkflowRunStore runs;
   @Autowired TaskLaunchStore launches;
@@ -34,11 +35,54 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
   @Autowired JdbcTemplate jdbc;
   @Autowired com.codexflow.configcenter.application.WorkflowRunService service;
 
+  @Test
+  void independentCollectionIncludesEnabledTasksWithoutScheduleAndCreatesNoLaunch() {
+    var task = task();
+    var taskId = task.path("id").asText();
+    var before = jdbc.queryForObject("SELECT COUNT(*) FROM codex_jira_requests", Integer.class);
+    var captured =
+        new java.util.concurrent.atomic.AtomicReference<tools.jackson.databind.JsonNode>();
+    when(groupGateway.post(eq("/jira-polling"), any()))
+        .thenAnswer(
+            call -> {
+              captured.set(call.getArgument(1));
+              return task.objectNode();
+            });
+    collections.synchronize();
+    assertThat(
+            captured
+                .get()
+                .path("tasks")
+                .valueStream()
+                .anyMatch(row -> row.path("taskDefinitionId").asText().equals(taskId)))
+        .isTrue();
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM codex_jira_requests", Integer.class))
+        .isEqualTo(before);
+    jdbc.update("UPDATE codex_sop_task_definitions SET enabled=FALSE WHERE id=?", taskId);
+    collections.synchronize();
+    assertThat(
+            captured
+                .get()
+                .path("tasks")
+                .valueStream()
+                .anyMatch(row -> row.path("taskDefinitionId").asText().equals(taskId)))
+        .isFalse();
+  }
+
   private ObjectNode task() {
     return task("project = TEST AND status = 待办 AND assignee = currentUser()");
   }
 
   private ObjectNode task(String query) {
+    when(groupGateway.get("/jira-accounts/" + GROUP))
+        .thenReturn(
+            tools.jackson.databind.node.JsonNodeFactory.instance
+                .objectNode()
+                .put("id", GROUP)
+                .put("groupId", GROUP)
+                .put("enabled", true)
+                .put("testStatus", "passed")
+                .put("executorAlias", "bot"));
     String role =
         jdbc.queryForObject(
             "SELECT id FROM codex_sop_roles ORDER BY created_at LIMIT 1", String.class);
@@ -61,7 +105,7 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
                 false,
                 null,
                 "group",
-                new JiraDispatchRequest(query, "bot")));
+                new JiraDispatchRequest(query, "bot", GROUP)));
     assertThat(sop.path("jira").path("account").asText()).isEqualTo("bot");
     return config.createTask(
         grouped(
@@ -75,22 +119,6 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
                 false,
                 null,
                 false)));
-  }
-
-  @Test
-  void busyCheckReturnsRequestToWaitingAndAllowsNextCheck() {
-    String id =
-        requests.enqueue(task().path("id").asText(), "web", null).path("requestId").asText();
-    requests.checkFinished(id, false, true, "检查执行机忙。");
-    assertThat(requests.status(id).path("state").asText()).isEqualTo("waiting");
-    assertThat(requests.status(id).path("reason").asText()).isEqualTo("检查执行机忙。");
-    assertThat(
-            jdbc.queryForObject(
-                "SELECT check_state FROM codex_jira_requests WHERE id=?", String.class, id))
-        .isEqualTo("pending");
-    requests.checkFinished(id, false, false, "脚本首条非空输出必须为 TRUE 或 FALSE。");
-    assertThat(requests.status(id).path("state").asText()).isEqualTo("failed");
-    assertThat(requests.status(id).path("reason").asText()).contains("TRUE 或 FALSE");
   }
 
   @Test
@@ -108,10 +136,12 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
         "UPDATE codex_sop_sops SET jira_jql='project = CHANGED',jira_account='other' WHERE id=?",
         task.path("sopId").asText());
     var retry = runs.prepareRetry(first.workflowId());
+    assertThat(first.payload().path("jiraDeliveryVersion").asInt()).isEqualTo(3);
+    assertThat(retry.payload().path("jiraDeliveryVersion").asInt()).isEqualTo(3);
     assertThat(retry.payload().path("jira").path("jql").asText())
         .isEqualTo(
             "project = TEST AND status = 10205 AND assignee = currentUser() AND \"处理角色\" = \"Planner\"");
-    assertThat(retry.payload().path("jira").path("account").asText()).isEqualTo("bot");
+    assertThat(retry.payload().path("jira").path("connectionId").asText()).isEqualTo(GROUP);
     assertThat(retry.payload().path("jiraRetryOf").asText()).isEqualTo(first.workflowId());
     assertThat(first.payload().has("supervisorAgentId")).isFalse();
     assertThat(first.payload().path("nodes").get(0).has("cwd")).isFalse();
@@ -300,6 +330,64 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
   }
 
   @Test
+  void legacyScheduledRequestWaitingForCheckCanPrepareWithoutChangingSnapshot() {
+    var task = task();
+    String taskId = task.path("id").asText();
+    String rule =
+        (String)
+            schedules
+                .save(
+                    null,
+                    new TaskScheduleRequest(
+                        "历史检查",
+                        task.path("sopId").asText(),
+                        taskId,
+                        "interval",
+                        null,
+                        5,
+                        true,
+                        GROUP))
+                .get("id");
+    try {
+      jdbc.update(
+          "UPDATE codex_task_schedules SET check_enabled=TRUE,check_agent_id='busy-machine',next_at=? WHERE id=?",
+          Instant.now().minusSeconds(1),
+          rule);
+      var dispatch =
+          schedules.claimDispatches(ZonedDateTime.now(ZoneId.of("Asia/Shanghai")), 100).stream()
+              .filter(d -> d.taskId().equals(taskId))
+              .findFirst()
+              .orElseThrow();
+      String id = requests.enqueue(taskId, "schedule", dispatch.token()).path("requestId").asText();
+      jdbc.update(
+          "UPDATE codex_jira_requests SET state='waiting',check_state='pending',reason='检查执行机忙。' WHERE id=?",
+          id);
+      String snapshot =
+          jdbc.queryForObject(
+              "SELECT schedule_json FROM codex_jira_requests WHERE id=?", String.class, id);
+      requests.validate(id);
+      String reservation = requests.reservation(id);
+      var binding =
+          tools.jackson.databind.node.JsonNodeFactory.instance
+              .objectNode()
+              .put("reservationId", reservation)
+              .put("issueKey", "TEST-1")
+              .put("server", "http://jira.test")
+              .put("accountId", "bot");
+      var prepared = requests.prepare(id, binding);
+      assertThat(prepared.prepared().payload().path("jiraReservation").path("issueKey").asText())
+          .isEqualTo("TEST-1");
+      assertThat(
+              jdbc.queryForObject(
+                  "SELECT schedule_json FROM codex_jira_requests WHERE id=?", String.class, id))
+          .isEqualTo(snapshot);
+      assertThat(runs.listRuns(taskId)).hasSize(1);
+    } finally {
+      schedules.delete(rule);
+    }
+  }
+
+  @Test
   void poolFreezesBindingOnlyAfterCollectionAndReusesPreparedRun() {
     String taskId = task().path("id").asText();
     var request = requests.enqueue(taskId, "web", null);
@@ -334,7 +422,7 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
                 .asText())
         .isEqualTo("修复订单列表筛选异常");
     assertThat(runs.listRuns(taskId)).hasSize(1);
-    assertThat(runs.prepareRetry(first.prepared().workflowId()).payload().has("jiraReservation"))
-        .isFalse();
+    assertThat(runs.prepareRetry(first.prepared().workflowId()).payload().path("jiraReservation"))
+        .isEqualTo(first.prepared().payload().path("jiraReservation"));
   }
 }

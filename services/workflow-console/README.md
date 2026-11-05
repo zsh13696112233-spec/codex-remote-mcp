@@ -49,18 +49,18 @@ Java 根包为 `com.codexflow.console`，Web 控制器、异常映射和
 
 当前 `codex/test-environment` 分支默认使用测试端口 `18090` 和测试网关 `18080`，监听 `0.0.0.0`，支持可信内网访问；目录及启动方式见[独立测试环境](../../docs/TEST_ENVIRONMENT.zh-CN.md)。
 
-本项目 macOS 使用 `mvnd`，Windows 使用 `mvn`。下方 PowerShell 示例用于 Windows；macOS 启动、测试、打包和格式化均使用 `mvnd`，路径使用 `/`。
+本地开发统一使用 macOS 和 `mvnd`，以下命令在终端执行。
 
 从仓库根目录执行：
 
-```powershell
-Set-Location .\services\workflow-console
+```sh
+cd services/workflow-console
 
-$env:CODEX_GATEWAY_URL = "http://127.0.0.1:18080"
-$env:SERVER_ADDRESS = "0.0.0.0"
-$env:SERVER_PORT = "18090"
+export CODEX_GATEWAY_URL="http://127.0.0.1:18080"
+export SERVER_ADDRESS="0.0.0.0"
+export SERVER_PORT="18090"
 
-mvn spring-boot:run
+mvnd spring-boot:run
 ```
 
 查看指定任务：
@@ -73,11 +73,11 @@ URL 没有 `workflowId` 时，页面只显示任务编号输入框，不展示�
 
 ## 打包运行
 
-```powershell
-mvn package
+```sh
+mvnd package
 
-$env:CODEX_GATEWAY_URL = "http://127.0.0.1:18080"
-java -jar .\target\workflow-console-0.1.0.jar
+export CODEX_GATEWAY_URL="http://127.0.0.1:18080"
+java -jar target/workflow-console-0.1.0.jar
 ```
 
 ## 环境变量

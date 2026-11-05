@@ -51,7 +51,8 @@ public class JiraRequestStore {
             taskId);
     if (rows.isEmpty()) throw new ConflictFailure("定时规则已停止。");
     var row = rows.get(0);
-    // 调度游标和检查状态不是配置版本。
+    // 调度游标和历史检查状态不是配置版本。保留旧检查配置列参与快照比较，
+    // 避免升级后使已有待派发请求失效；这些列不再控制执行。
     for (String key :
         List.of(
             "next_at",
@@ -66,41 +67,9 @@ public class JiraRequestStore {
   }
 
   @Transactional
-  public ObjectNode checkPayload(String id) {
-    var request = jdbc.queryForMap("SELECT * FROM codex_jira_requests WHERE id=? FOR UPDATE", id);
-    if (!"schedule".equals(request.get("source")) || "passed".equals(request.get("check_state")))
-      return null;
-    var rows =
-        jdbc.queryForList(
-            "SELECT * FROM codex_task_schedules WHERE task_definition_id=? AND enabled=TRUE",
-            request.get("task_definition_id"));
-    if (rows.isEmpty()) throw new ConflictFailure("定时规则已停止。");
-    var rule = rows.get(0);
-    if (!Boolean.TRUE.equals(rule.get("check_enabled"))) return null;
-    if (!"pending".equals(request.get("check_state"))) {
-      state(id, "failed", "执行前检查中断或未通过，本批不再派发。");
-      throw new ConflictFailure("执行前检查未通过。");
-    }
-    jdbc.update("UPDATE codex_jira_requests SET check_state='checking' WHERE id=?", id);
-    return json.newObject()
-        .put("agentId", rule.get("check_agent_id").toString())
-        .put("groupId", json.read(request.get("spec_json").toString()).path("groupId").asText())
-        .put("scriptPath", rule.get("check_script_path").toString())
-        .put("arguments", rule.get("check_arguments").toString())
-        .put("timeoutSeconds", ((Number) rule.get("check_timeout_seconds")).intValue());
-  }
-
-  @Transactional
-  public void checkFinished(String id, boolean passed, boolean retryable, String reason) {
-    jdbc.update(
-        "UPDATE codex_jira_requests SET check_state=? WHERE id=?",
-        passed ? "passed" : retryable ? "pending" : "failed",
-        id);
-    if (!passed) state(id, retryable ? "waiting" : "failed", reason);
-  }
-
-  @Transactional
   public ObjectNode enqueue(String taskId, String source, String token) {
+    jdbc.queryForObject(
+        "SELECT id FROM codex_group_write_lock WHERE id=1 FOR UPDATE", Integer.class);
     ObjectNode value = spec(taskId);
     String scheduleValue = null;
     if (source.equals("schedule")) {

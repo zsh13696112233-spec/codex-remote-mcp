@@ -318,48 +318,30 @@ async def claim_next(store, orchestrator, workflow_id):
     context = await asyncio.to_thread(store.jira_context, workflow_id)
     if context["state"] in {"ready", "no_task"}:
         return {"issueKey": context["issueKey"], "state": context["state"]}
-    supervisor = orchestrator.get_agent(context["supervisorId"])
     executor = orchestrator.get_agent(context["executorId"])
     if not executor.allow_write:
-        raise PermissionError("执行机未授权写入，无法接收本轮 Jira 入口。")
-    if context.get("launcherPath") and context.get("accountSource", "transferred") != "local":
-        raise ValueError("历史 Jira 账号下发尚未完成，请结束本轮后重新运行。")
+        raise PermissionError("执行机未授权写入，无法准备 Jira 入口。")
+    binding = context.get('reservation')
+    if not binding or context['state'] != 'claimed' or not context['config'].get('connectionId'):
+        raise ValueError('中央尚未确认固定工单，请使用已绑定账号的最新配置运行。')
+    alias = binding['accountAlias']
+    expected = base64.b64encode(json.dumps([binding['server'], binding['accountId']]).encode()).decode()
+    verification = """
+$expected=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('""" + expected + """')) | ConvertFrom-Json
+if ($account.baseUrl.TrimEnd('/') -ne $expected[0]) { throw 'server mismatch' }
+$headers=@{}
+if ($account.PSObject.Properties['token'] -and $account.token) { $headers.Authorization='Bearer '+$account.token }
+else { $headers.Authorization='Basic '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($account.username+':'+$account.password)) }
+$user=Invoke-RestMethod -Uri ($account.baseUrl.TrimEnd('/')+'/rest/api/2/myself') -Headers $headers -TimeoutSec 20 -MaximumRedirection 0
+$id=$null
+foreach ($field in @('accountId','key','name')) { if ($user.PSObject.Properties[$field] -and $user.$field) { $id=$user.$field; break } }
+if ($id -cne $expected[1]) { throw 'identity mismatch' }
+"""
     try:
-        async with client_for(orchestrator, supervisor) as client:
-            raw_config = await read_file(client, CONFIG_PATH)
-            alias, account = account_from_config(raw_config, context["config"]["account"])
-            fingerprint = hashlib.sha256(json.dumps([alias, account], sort_keys=True).encode()).hexdigest()
-            binding = context.get("reservation")
-            if binding:
-                identity = await account_identity(client, raw_config, alias, supervisor.cwd)
-                if account['baseUrl'] != binding['server'] or identity != binding['accountId']:
-                    raise ValueError('监督机 Jira 账号与采集账号不一致。')
-                candidates = await search_page(client, raw_config, alias, including_query(context['config']['jql'], binding['issueKey']), supervisor.cwd)
-                if binding['issueKey'] not in candidates:
-                    raise ValueError('已预约工单不再符合 SOP 查询条件，本轮不执行业务步骤。')
-            excluded = []
-            while True:
-                if binding:
-                    keys = [binding["issueKey"]]
-                elif context["issueKey"]:
-                    keys = [context["issueKey"]]
-                else:
-                    query = excluding_query(context["config"]["jql"], excluded)
-                    keys = list(await search_page(client, raw_config, alias, query, supervisor.cwd))
-                result = await asyncio.to_thread(store.jira_update, workflow_id, "claim", {
-                    "server": account["baseUrl"], "account": alias, "fingerprint": fingerprint, "candidates": keys})
-                if result["state"] != "contended":
-                    break
-                unseen = [key for key in keys if key not in excluded]
-                if not unseen or len(excluded) + len(unseen) > 1000:
-                    raise ValueError("Jira 查询候选过多或分页未前进，请缩小 SOP 查询条件；本轮未派发步骤。")
-                excluded.extend(unseen)
-        if result["state"] == "no_task":
-            return result
         async with client_for(orchestrator, executor) as client:
             code = ("$runId='" + run_directory(workflow_id) + "'\n" + DIRECTORY_SCRIPT
                     + "\ntry {\n$accountAlias='" + alias.replace("'", "''") + "'\n"
-                    + LOCAL_ACCOUNT + INITIALIZE_SCRIPT + "\n} catch { exit 1 }")
+                    + LOCAL_ACCOUNT + verification + INITIALIZE_SCRIPT + "\n} catch { exit 1 }")
             directory = PureWindowsPath(await powershell(client, code, executor.cwd))
             if not directory.is_absolute() or directory.name != run_directory(workflow_id) or directory.parent.name != "CodexFlowJira":
                 raise ValueError("执行机返回的 Jira 运行目录无效。")
@@ -367,7 +349,7 @@ async def claim_next(store, orchestrator, workflow_id):
             staged = await asyncio.to_thread(store.jira_update, workflow_id, "stage", {"launcherPath": launcher_path, "accountSource": "local"})
             if staged["state"] == "ready":
                 return staged
-            content = b"\xef\xbb\xbf" + local_launcher(alias, account["readOnly"]).encode()
+            content = b"\xef\xbb\xbf" + local_launcher(alias, False).encode()
             path = directory / "jira.ps1"
             await client.request("fs/writeFile", {"path": str(path), "dataBase64": base64.b64encode(content).decode()})
             if await read_file(client, path) != content:
@@ -378,7 +360,7 @@ async def claim_next(store, orchestrator, workflow_id):
         raise
     except Exception:
         # 远程 RPC / CLI 异常可包含文件正文或命令参数，禁止穿透到工具结果与日志。
-        raise RuntimeError("监督机 Jira 领取或入口下发失败，请检查 CLI、配置、执行机连接和授权；未启动业务步骤。") from None
+        raise RuntimeError("执行机 Jira 入口准备失败，请核对本地账号服务地址、实际身份、CLI、连接和授权；未启动业务步骤。") from None
 
 
 async def cleanup(orchestrator, agent_id, workflow_id, launcher_path=None):

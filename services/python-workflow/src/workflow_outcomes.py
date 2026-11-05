@@ -60,7 +60,7 @@ SCHEMA_V4 = copy.deepcopy(SCHEMA_V3)
 SCHEMA_V4["properties"]["documents"] = SEMI_DOCUMENTS_SCHEMA
 
 
-def schema(version: int, *, jira: bool = False) -> dict[str, Any]:
+def schema(version: int, *, jira: bool = False, delivery_version: int = 1) -> dict[str, Any]:
     if type(version) is not int or version not in (1, 2, 3, 4, 5):
         raise ValueError("步骤结果协议版本无效。")
     result = {1: SCHEMA_V1, 2: SCHEMA, 3: SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V4}[version]
@@ -76,15 +76,24 @@ def schema(version: int, *, jira: bool = False) -> dict[str, Any]:
                 "summary": {"type": "string", "maxLength": 2000},
             },
         }
+    if jira and delivery_version >= 2:
+        from workflow_jira import DELIVERY_FIELDS
+        result["properties"]["jiraDelivery"]["properties"].update(copy.deepcopy(DELIVERY_FIELDS))
+        result["properties"]["jiraDelivery"]["required"] += list(DELIVERY_FIELDS)
+    if jira and delivery_version >= 3:
+        from workflow_jira import COMPLETION_STATUSES
+        result["properties"]["jiraDelivery"]["properties"]["status"]["enum"] += list(COMPLETION_STATUSES)
     return result
 
 
-def validate(value: Any, version: int = VERSION, *, jira: bool = False) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != set(schema(version, jira=jira)["required"]):
+def validate(value: Any, version: int = VERSION, *, jira: bool = False, delivery_version: int = 1) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != set(schema(version, jira=jira, delivery_version=delivery_version)["required"]):
         raise ValueError("步骤业务结果格式无效。")
     if jira:
-        from workflow_jira import validate_delivery
-        validate_delivery(value["jiraDelivery"])
+        from workflow_jira import COMPLETION_STATUSES, validate_delivery
+        validate_delivery(value["jiraDelivery"], delivery_version)
+        if value["jiraDelivery"]["status"] in COMPLETION_STATUSES and value["outcome"] != "success":
+            raise ValueError("无需提交或审核返工的交接完成回执必须对应步骤正常结束。")
     for key, limit in (("summary", 20000), ("reason", 2000)):
         if not isinstance(value[key], str) or len(value[key]) > limit:
             raise ValueError("步骤业务结果文本无效或超过容量限制。")
@@ -135,7 +144,7 @@ def validate(value: Any, version: int = VERSION, *, jira: bool = False) -> dict[
     return value
 
 
-def parse(text: str, version: int = VERSION, *, jira: bool = False) -> dict[str, Any]:
+def parse(text: str, version: int = VERSION, *, jira: bool = False, delivery_version: int = 1) -> dict[str, Any]:
     value = json.loads(text)
     developer = value.get("jiraDeveloper") if isinstance(value, dict) else None
     normalized = (
@@ -147,14 +156,14 @@ def parse(text: str, version: int = VERSION, *, jira: bool = False) -> dict[str,
     )
     if normalized:
         developer["status"] = "unavailable"
-    value = validate(value, version, jira=jira)
+    value = validate(value, version, jira=jira, delivery_version=delivery_version)
     if normalized:
         # 原始回答保留在执行事件中；日志不包含业务正文或账号。
         logging.getLogger(__name__).warning("阻断结果开发人状态已规范化：not_applicable -> unavailable。")
     return value
 
 
-def instruction(workflow_id: str, node_id: str, capture_document: bool | None, version: int = VERSION, *, defer_blocked: bool = False) -> str:
+def instruction(workflow_id: str, node_id: str, capture_document: bool | None, version: int = VERSION, *, defer_blocked: bool = False, advance_mode: str | None = None) -> str:
     marker = hashlib.sha256(f"{workflow_id}:{node_id}".encode()).hexdigest()[:24]
     result = (
         "\n【平台正式步骤结果协议】最终按指定 JSON 结构返回，不以普通文字请求停止。"
@@ -227,6 +236,29 @@ def instruction(workflow_id: str, node_id: str, capture_document: bool | None, v
            "已经因业务必要条件判定 blocked 的，不因开发人读取失败改变该决定；不得选择钉钉群、人员或发送通知。" if version in (2, 3, 4, 5) else "")
         + ("" if version in (3, 4, 5) else "document 沿用主文档要求。" if capture_document else "document 必须为 null，不采集主文档。")
     )
+
+    if advance_mode == "automatic":
+        result = (
+            "\n【全自动执行与结束条件】默认持续完成当前步骤。工具报错、测试条件未准备、验证未完成、"
+            "证据缺失或工作量较大，均不能单独作为阻断理由；不能认定完成不等于不能继续执行。"
+            "遇到问题先在原授权内检查原因，实际修正调用、查询必要信息、准备测试条件、修复并重测，"
+            "或采用满足同一验证目标的可行替代方式，不以建议重试或请求重新执行代替实际操作。"
+            "问题解决后立即继续当前步骤剩余工作；局部受阻时先完成不受影响的独立必要工作。"
+            "不机械重试确定性错误，不无限重试，不绕过权限；写入结果不明先查询实际状态，"
+            "已成功不重复执行，仍无法确认不盲目重发，可继续只读核验。"
+            "只有实际证据证明必要工作在当前授权和可用手段下无法继续，且独立必要工作已完成，"
+            "才可认定真实阻断；明确权限拒绝等无需无意义重试。保留 SOP 的硬性停止条件、"
+            "权限边界、非阻断事项和合法交接标准，不降低证据标准，不把审核未通过、验证受限"
+            "或未提交代码自动等同于流程阻断。"
+            "阻断 reason 说明受阻的必要工作、实际错误、已执行的处理及结果、可行替代方式为何不可用"
+            "和最小外部恢复条件；不存在可行替代方式时说明检查依据，不编造尝试。"
+            "最终输出前检查是否仍有可执行的必要工作：有则继续调用工具。最终 JSON 仅用于步骤结束，"
+            "不必在每次遇到问题时选择结果；禁止以‘验证未完成，需补齐后重新执行’为由结束。"
+            "以上处理均发生在正式阻断之前，不授权恢复已结束的工作流。\n"
+        ) + result
+        result = result.replace("或 blocked（必要条件不满足，无法继续）", "或 blocked（已按上述条件确认真实阻断，无法继续）")
+        result = result.replace("确认阻断后停止业务写入", "【仅在确认真实阻断后执行以下收尾】确认阻断后停止业务写入")
+        result = result.replace("本阻断收尾规则优先于职责中的旧收尾规则，", "本阻断收尾规则仅在真实阻断成立后优先于职责中的旧收尾动作，不覆盖职责的自主处理要求、阻断判定及权限约束；")
 
     if version == 3:
         result += (

@@ -240,7 +240,7 @@ class WaitStore:
                 return
             original = json.loads(gate["business_result_json"])
             jira = connection.execute("SELECT 1 FROM workflow_jira_runs WHERE workflow_id=?", (workflow_id,)).fetchone() is not None
-            result = validate(result, workflow["result_protocol_version"], jira=jira)
+            result = validate(result, workflow["result_protocol_version"], jira=jira, delivery_version=self.get_spec(workflow_id).get("jiraDeliveryVersion", 1))
             if result["outcome"] != "blocked" or result["jiraComment"]["issueKey"] != original["jiraComment"]["issueKey"]:
                 raise ValueError("收尾结果不能改变阻断决定或工单身份。")
             original.update(summary=result["summary"], jiraComment=result["jiraComment"])

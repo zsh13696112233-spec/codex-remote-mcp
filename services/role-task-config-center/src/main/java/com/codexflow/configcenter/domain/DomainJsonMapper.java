@@ -63,6 +63,7 @@ class DomainJsonMapper {
       var jira = result.putObject("jira");
       jira.put("jql", sop.jiraJql);
       jira.put("account", sop.jiraAccount);
+      jira.put("connectionId", sop.jiraConnectionId);
     }
     result.put("supervisorAgentId", sop.supervisorAgentId);
     result.put("failurePolicy", sop.failurePolicy);

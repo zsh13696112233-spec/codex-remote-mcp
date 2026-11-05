@@ -313,6 +313,8 @@ public class ConfigService {
     sop.dispatchMode = mode;
     if (body.jira() != null && !"group".equals(mode))
       throw new IllegalArgumentException("监督机统一领取 Jira 仅支持按组调度。");
+    sop.jiraConnectionId = body.jira() == null ? null : body.jira().connectionId();
+    if (body.jira() != null) groups.requireJira(sop.jiraConnectionId, body.groupId());
     sop.jiraJql = body.jira() == null ? null : normalizeNullable(body.jira().jql());
     sop.jiraAccount =
         body.jira() == null || body.jira().account() == null ? "" : body.jira().account().trim();
@@ -534,6 +536,7 @@ public class ConfigService {
   }
 
   private void assignSop(SopEntity s, String id, boolean validateExisting) {
+    if (validateExisting && s.jiraConnectionId != null) groups.requireJira(s.jiraConnectionId, id);
     groups.require(id);
     if (s.groupId != null && !s.groupId.equals(id) && tasks.existsBySopIdAndDeletedFalse(s.id))
       throw new ConflictFailure("SOP 已被有效任务引用，请先解除引用后再改组。");

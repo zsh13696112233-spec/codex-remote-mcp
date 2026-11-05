@@ -39,14 +39,6 @@ public class GatewayClient {
     return exchange("POST", path, body);
   }
 
-  public JsonNode checkSchedule(JsonNode body) {
-    return exchange(
-        "POST",
-        "/schedule-checks",
-        body,
-        Duration.ofSeconds(body.path("timeoutSeconds").asInt(60) + 20));
-  }
-
   public JsonNode put(String path, JsonNode body) {
     return exchange("PUT", path, body);
   }

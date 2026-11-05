@@ -56,28 +56,12 @@ def protect_existing_executions(db: sqlite3.Connection) -> None:
                        (row["workflow_id"], *execution))
 
 
+# 保留旧检查/采集占用：移除入口不代表远程命令已停止。
 def claimed(db: sqlite3.Connection, agent_id: str, workflow_id: str | None = None) -> bool:
     return db.execute("SELECT 1 FROM machine_check_claims WHERE agent_id=?", (agent_id,)).fetchone() is not None or db.execute(
         "SELECT 1 FROM workflow_machine_claims WHERE agent_id=? AND workflow_id IS NOT ?",
         (agent_id, workflow_id),
     ).fetchone() is not None
-
-
-def claim_check(store: "WorkflowStore", agent_id: str, operation_id: str, timestamp: str) -> bool:
-    with store._connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        if claimed(db, agent_id) or installation_busy(db, agent_id):
-            return False
-        db.execute("INSERT INTO machine_check_claims VALUES(?,?,?,'occupied')", (agent_id, operation_id, timestamp))
-        return True
-
-
-def finish_check(store: "WorkflowStore", operation_id: str, stopped: bool) -> None:
-    with store._connect() as db:
-        if stopped:
-            db.execute("DELETE FROM machine_check_claims WHERE operation_id=?", (operation_id,))
-        else:
-            db.execute("UPDATE machine_check_claims SET state='review' WHERE operation_id=?", (operation_id,))
 
 
 def installation_busy(db: sqlite3.Connection, agent_id: str) -> bool:

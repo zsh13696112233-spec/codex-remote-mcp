@@ -36,7 +36,7 @@ python scripts/compact_workflow_events.py --db /absolute/path/workflows.db --bef
 
 移除部署中的 `FEISHU_*` 环境变量，并在飞书管理端停用对应应用或撤销凭据。此次升级不删除历史业务数据：5 张飞书专属表及其中的数据保留，新程序不再映射或访问这些表。V5、V6、V17 等已发布 Flyway 脚本保持原样，保证旧版本和空库均可升级。不要手工删除这些脚本或清除 Flyway 记录；如以后需要清理旧表，另行安排数据保留与新的数据库迁移。
 
-从源码构建配置中心时使用 `mvn -f services/role-task-config-center/pom.xml clean package`，避免旧编译目录中的飞书类进入新包。
+从源码构建配置中心时使用 `mvnd -f services/role-task-config-center/pom.xml clean package`，避免旧编译目录中的飞书类进入新包。
 
 ## 二、机器角色和服务清单
 
@@ -199,42 +199,46 @@ Windows 从仓库根目录执行 `scripts/start_workflow_gateway.ps1`。Linux/ma
 
 ### 4. 启动监控中心 `8090`
 
-```powershell
-Set-Location .\services\workflow-console
+在 Mac 上从仓库根目录打开独立终端执行：
 
-$env:CODEX_GATEWAY_URL = "http://127.0.0.1:8080"
-$env:SERVER_ADDRESS = "0.0.0.0"
-$env:SERVER_PORT = "8090"
+```sh
+cd services/workflow-console
 
-mvn spring-boot:run
+export CODEX_GATEWAY_URL="http://127.0.0.1:8080"
+export SERVER_ADDRESS="0.0.0.0"
+export SERVER_PORT="8090"
+
+mvnd spring-boot:run
 ```
 
-正式部署可以先执行 `mvn package`，再运行：
+正式部署可以先执行 `mvnd package`，再运行：
 
-```powershell
-java -jar .\target\workflow-console-0.1.0.jar
+```sh
+java -jar target/workflow-console-0.1.0.jar
 ```
 
 ### 5. 启动配置中心 `8091`
 
-```powershell
-Set-Location .\services\role-task-config-center
+在 Mac 上从仓库根目录打开独立终端执行：
 
-$env:MYSQL_URL = "jdbc:mysql://127.0.0.1:3306/codex_config?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai"
-$env:MYSQL_USERNAME = "codex"
-$env:MYSQL_PASSWORD = "请从密钥系统注入"
-$env:CODEX_GATEWAY_URL = "http://127.0.0.1:8080"
-$env:WORKFLOW_MONITOR_URL = "http://127.0.0.1:8090"
-$env:SERVER_ADDRESS = "0.0.0.0"
-$env:SERVER_PORT = "8091"
+```sh
+cd services/role-task-config-center
 
-mvn spring-boot:run
+export MYSQL_URL="jdbc:mysql://127.0.0.1:3306/codex_config?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai"
+export MYSQL_USERNAME="codex"
+export MYSQL_PASSWORD="请从密钥系统注入"
+export CODEX_GATEWAY_URL="http://127.0.0.1:8080"
+export WORKFLOW_MONITOR_URL="http://127.0.0.1:8090"
+export SERVER_ADDRESS="0.0.0.0"
+export SERVER_PORT="8091"
+
+mvnd spring-boot:run
 ```
 
-正式部署可以先执行 `mvn package`，再运行：
+正式部署可以先执行 `mvnd package`，再运行：
 
-```powershell
-java -jar .\target\role-task-config-center-0.1.0.jar
+```sh
+java -jar target/role-task-config-center-0.1.0.jar
 ```
 
 ## 六、中央网页登记

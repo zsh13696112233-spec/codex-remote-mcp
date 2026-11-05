@@ -382,8 +382,9 @@ class JiraRuntimeTests(unittest.IsolatedAsyncioTestCase):
         def update(_, operation, payload):
             operations.append((operation, payload))
             return {"issueKey": "TEST-1", "state": "ready" if operation == "ready" else "claimed"}
-        store = SimpleNamespace(jira_context=lambda _: {"state": "waiting_claim", "supervisorId": "s", "executorId": "e", "issueKey": None,
-                "config": {"jql": "project = TEST", "account": selected_alias}},
+        store = SimpleNamespace(jira_context=lambda _: {"state": "claimed", "supervisorId": "s", "executorId": "e", "issueKey": "TEST-1",
+                "reservation": {"server":"http://jira.test","accountId":"bot","accountAlias":alias},
+                "config": {"jql": "project = TEST", "connectionId": "central"}},
             jira_update=update)
         agent = SimpleNamespace(enabled=True, allow_full_access=True, allow_write=True, cwd=r"C:\work", url="ws://fixture")
         orchestrator = SimpleNamespace(get_agent=lambda _: agent, _client_factory=lambda *a, **kw: client, _resolve_agent_token=lambda _: None)

@@ -20,6 +20,9 @@ class SopEntity extends Timestamped {
   @Column(name = "jira_account", nullable = false, length = 128)
   String jiraAccount = "";
 
+  @Column(name = "jira_connection_id", length = 36)
+  String jiraConnectionId;
+
   @jakarta.persistence.Column(name = "group_id", length = 36)
   String groupId;
 

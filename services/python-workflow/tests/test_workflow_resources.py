@@ -158,16 +158,15 @@ class ResourceTests(unittest.TestCase):
         self.assertEqual(self.store.machine_claims(), {})
         self.assertIn("组内没有", self.store.get_workflow("pooled")["allocation"]["waitingReason"])
 
-    def test_scheduled_check_and_workflow_exclude_each_other(self):
-        from workflow_resources import claim_check, finish_check
+    def test_legacy_check_claim_still_blocks_workflow(self):
         self.create("a")
-        self.assertTrue(claim_check(self.store, "e1", "check", "now"))
+        with self.store._connect() as db:
+            db.execute("INSERT INTO machine_check_claims VALUES('e1','check','now','occupied')")
         self.assertIsNone(self.store.claim_next_workflow("s1"))
-        finish_check(self.store, "check", False)
+        with self.store._connect() as db:
+            db.execute("UPDATE machine_check_claims SET state='review' WHERE operation_id='check'")
         self.assertIsNone(self.store.claim_next_workflow("s1"))
-        finish_check(self.store, "check", True)
-        self.assertIsNotNone(self.store.claim_next_workflow("s1"))
-        self.assertFalse(claim_check(self.store, "e1", "check-again", "now"))
+        self.assertEqual(self.store.machine_claims()['e1']['state'], 'review')
 
     def test_sidecar_can_only_read_current_pair_even_across_groups(self):
         from workflow_store import utc_now

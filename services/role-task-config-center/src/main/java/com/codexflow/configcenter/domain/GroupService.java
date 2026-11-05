@@ -37,6 +37,19 @@ public class GroupService {
     throw new ConflictFailure("所选分组不存在，请刷新分组列表。");
   }
 
+  public JsonNode requireJira(String id, String groupId) {
+    if (id == null || id.isBlank()) throw new ConflictFailure("旧 Jira 配置未绑定中央账号，请先编辑 SOP 选择账号。");
+    validateId(id);
+    JsonNode account = gateway.get("/jira-accounts/" + id);
+    same(groupId, account.path("groupId").asText());
+    if (!account.path("enabled").asBoolean()
+        || !"passed".equals(account.path("testStatus").asText()))
+      throw new ConflictFailure("请选择本组已启用且检测通过的 Jira 账号。");
+    if (account.path("executorAlias").asText().isBlank())
+      throw new ConflictFailure("请重新检测 Jira 账号，自动映射执行机 Jira 账号。");
+    return account;
+  }
+
   public static void validateId(String id) {
     if (id == null
         || !id.matches(

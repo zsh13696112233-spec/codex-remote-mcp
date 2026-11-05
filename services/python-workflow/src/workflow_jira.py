@@ -1,4 +1,4 @@
-"""Jira 领取台账。凭据仅经过运行时，不进入中央运行库。"""
+"""Jira 领取台账。运行上下文不携带 Token。"""
 
 import hashlib
 import json
@@ -17,9 +17,17 @@ def compatible_agent(agent):
 def normalize_config(value):
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != {"jql", "account"}:
-        raise ValueError("Jira 配置必须包含查询条件和账号别名。")
+    if not isinstance(value, dict) or set(value) not in ({"jql", "account"}, {"jql", "connectionId"}):
+        raise ValueError("Jira 配置必须包含查询条件和中央账号引用。")
+    if "connectionId" in value:
+        import uuid
+        try:
+            uuid.UUID(value["connectionId"])
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("请选择中央 Jira 账号。") from None
     for key, limit in (("jql", 4000), ("account", 128)):
+        if key not in value:
+            continue
         if not isinstance(value[key], str) or len(value[key]) > limit or any(ord(c) < 32 for c in value[key]):
             raise ValueError("Jira 查询条件或账号别名无效。")
     if not value["jql"].strip():
@@ -76,11 +84,19 @@ def initialize(db):
     # 已存在的 Jira 表不会因 CREATE TABLE IF NOT EXISTS 自动增加新列。
     # 网关与本机 MCP 可能同时初始化，在写事务内检查并升级。
     db.execute("BEGIN IMMEDIATE")
+    delivery_columns = {row[1] for row in db.execute("PRAGMA table_info(workflow_jira_deliveries)")}
+    for column in ("submission_type", "commits_json"):
+        if column not in delivery_columns:
+            db.execute(f"ALTER TABLE workflow_jira_deliveries ADD COLUMN {column} TEXT")
     columns = {row[1] for row in db.execute("PRAGMA table_info(workflow_jira_runs)")}
+    if "delivery_version" not in columns:
+        db.execute("ALTER TABLE workflow_jira_runs ADD COLUMN delivery_version INTEGER NOT NULL DEFAULT 1")
     if "account_source" not in columns:
         db.execute("ALTER TABLE workflow_jira_runs ADD COLUMN account_source TEXT NOT NULL DEFAULT 'transferred'")
     if "cleanup_attempted_at" not in columns:
         db.execute("ALTER TABLE workflow_jira_runs ADD COLUMN cleanup_attempted_at TEXT")
+    from jira_history_review import initialize as initialize_history_reviews
+    initialize_history_reviews(db)
 
 
 def node_instruction(db, workflow_id):
@@ -89,7 +105,23 @@ def node_instruction(db, workflow_id):
         return ""
     if row["state"] != "ready":
         raise RuntimeError("监督机尚未领取工单并完成入口准备，不能启动步骤。")
-    return ("\n【本轮 Jira 任务，优先于角色中自行领取任务的要求】\n"
+    version = delivery_version(db, workflow_id)
+    extra = ("\n交付回执额外返回 submissionType 和 commits。仅本轮实际提交并回查确认后，"
+             "submissionType 为 full（必要验证通过）或 limited（符合职责的验证受限提交条件），"
+             "commits 为 [{repository:仓库业务名称, revision:实际提交编号}]，支持多个仓库及编号。"
+             "受限原因写入 summary。未提交时 submissionType 为 null、commits 为 []。"
+             "仓库仅用客户端、服务端等业务名称，不填地址或凭据；不得把更新版本、历史提交或交付链接当成本轮提交编号。"
+             "阻断不得提交；分类不改变职责的提交准入标准。\n" if version >= 2 else "")
+    if version >= 3:
+        extra += ("交付状态增加 completed_no_submission（明确无需新增提交）和 rework_required（审核不通过，已交返工）。"
+                  "只有核实当前无待提交业务改动、无需新增提交且已完成职责要求的必要交接，才能使用 completed_no_submission；"
+                  "summary 必须说明依据及仍需人工补验的范围，不代表修复验收通过。"
+                  "仅修复步骤结束、代码留待后续审核或提交，应继续使用 completed，不得提前声明无需提交。"
+                  "审核明确不通过且返工交接已完成时使用 rework_required，并在 summary 写明未通过原因；"
+                  "不得将审核失败当作验证受限通过，也不得为获得分类而改变 Jira 流转或提交准入标准。"
+                  "这两类回执的步骤 outcome 为 success，表示本步骤交接完成，不改变依赖执行及人工确认规则；"
+                  "提交失败、要求提交却未提交、交接失败或结果不明须如实按原规则报告，不能使用这两类。\n")
+    return extra + ("\n【本轮 Jira 任务，优先于角色中自行领取任务的要求】\n"
             f"本轮唯一工单：{row['issue_key']}。所有步骤只处理此工单，不重新搜索或领取其他工单。\n"
             f"通过 PowerShell 调用本轮专属入口 {json.dumps(row['launcher_path'], ensure_ascii=False)}，"
             f"参数与 jira_cli 相同，例如 issue get {row['issue_key']}。"
@@ -107,17 +139,118 @@ def node_instruction(db, workflow_id):
             "reference 填实际确认的提交号或交付链接；submitted 必须实际回查并有凭证，不能只凭已发出提交命令。summary 简述交付结果。\n")
 
 
-def validate_delivery(value):
-    if not isinstance(value, dict) or set(value) != {"status", "reference", "summary"}:
+DELIVERY_FIELDS = {
+    "submissionType": {"type": ["string", "null"], "enum": ["full", "limited", None]},
+    "commits": {"type": "array", "maxItems": 100, "items": {
+        "type": "object", "additionalProperties": False, "required": ["repository", "revision"],
+        "properties": {"repository": {"type": "string", "minLength": 1, "maxLength": 160},
+                       "revision": {"type": "string", "minLength": 1, "maxLength": 160}}}},
+}
+
+
+DELIVERY_STATUSES = ("submitted", "completed", "not_submitted", "blocked", "unknown", "not_applicable")
+COMPLETION_STATUSES = ("completed_no_submission", "rework_required")
+
+
+def validate_delivery(value, version=1):
+    if not isinstance(value, dict) or set(value) != ({"status", "reference", "summary"} | (set(DELIVERY_FIELDS) if version >= 2 else set())):
         raise ValueError("Jira 交付结果格式无效。")
-    if not isinstance(value["status"], str) or value["status"] not in {"submitted", "completed", "not_submitted", "blocked", "unknown", "not_applicable"}:
+    if not isinstance(value["status"], str) or value["status"] not in DELIVERY_STATUSES + (COMPLETION_STATUSES if version >= 3 else ()):
         raise ValueError("Jira 交付状态无效。")
     for key, limit in (("reference", 1000), ("summary", 2000)):
         if not isinstance(value[key], str) or len(value[key]) > limit:
             raise ValueError("Jira 交付结果文本无效。")
+    if value["status"] in COMPLETION_STATUSES and not value["summary"].strip():
+        raise ValueError("无需提交或审核返工必须说明具体依据。")
     if value["status"] == "submitted" and not value["reference"].strip():
         raise ValueError("已提交必须提供实际提交凭证。")
+    if version >= 2:
+        kind, commits = value["submissionType"], value["commits"]
+        if not isinstance(commits, list) or len(commits) > 100:
+            raise ValueError("提交清单格式无效。")
+        if value["status"] == "submitted":
+            if kind not in ("full", "limited") or not commits:
+                raise ValueError("已提交必须提供验证类型和实际提交编号。")
+        elif kind is not None or commits:
+            raise ValueError("未提交回执不能填写提交类型或编号。")
+        for commit in commits:
+            if not isinstance(commit, dict) or set(commit) != {"repository", "revision"}:
+                raise ValueError("提交编号格式无效。")
+            for text in commit.values():
+                if not isinstance(text, str) or not text.strip() or len(text) > 160 or any(ord(c) < 32 for c in text):
+                    raise ValueError("仓库名称或提交编号无效。")
     return value
+
+
+def delivery_version(db, workflow_id):
+    return db.execute("SELECT delivery_version FROM workflow_jira_runs WHERE workflow_id=?", (workflow_id,)).fetchone()[0]
+
+
+def execution_result(db, workflow_id):
+    from workflow_monitor import public_text
+    row = db.execute("SELECT w.status,w.termination_json,j.delivery_version FROM workflows w JOIN workflow_jira_runs j USING(workflow_id) WHERE workflow_id=?", (workflow_id,)).fetchone()
+    if row is None:
+        return None
+    if row['delivery_version'] == 1 or row['status'] == 'completed':
+        review = db.execute('SELECT * FROM workflow_jira_history_reviews WHERE workflow_id=?', (workflow_id,)).fetchone()
+        if review is not None and (row['delivery_version'] == 1 or review['status'] in COMPLETION_STATUSES):
+            return {'status': review['status'],
+                    'commits': [{k: public_text(v) for k, v in c.items()} for c in json.loads(review['commits_json'])],
+                    'recorded': True, 'source': 'manual_review' if review['status'] in COMPLETION_STATUSES else 'historical_review',
+                    'note': public_text(review['note']), 'reviewedAt': review['reviewed_at'],
+                    'developers': [public_text(v) for v in json.loads(review['developers_json'])],
+                    'developerSource': review['developer_source']}
+    deliveries = db.execute("SELECT node_id,attempt,status,submission_type,commits_json,summary FROM workflow_jira_deliveries WHERE workflow_id=? ORDER BY recorded_at,node_id,attempt", (workflow_id,)).fetchall()
+    commits, seen = [], set()
+    for d in deliveries:
+        for commit in json.loads(d['commits_json'] or '[]'):
+            key = (commit['repository'], commit['revision'])
+            if key not in seen:
+                seen.add(key)
+                commits.append({k: public_text(v) for k,v in commit.items()})
+    latest = {}
+    for d in deliveries:
+        if d['node_id'] not in latest or d['attempt'] >= latest[d['node_id']]['attempt']:
+            latest[d['node_id']] = d
+    unresolved = any(d['status'] == 'unknown' for d in latest.values())
+    status = None
+    termination = json.loads(row['termination_json'] or '{}')
+    if row['delivery_version'] >= 2 and row['status'] in ('completed', 'failed') and termination.get('outcome') != 'no_task':
+        submitted = [d for d in deliveries if d['status'] == 'submitted']
+        if termination.get('outcome') == 'blocked' and not submitted and not unresolved:
+            status = 'blocked'
+        elif row['status'] == 'completed' and submitted and commits and not unresolved:
+            status = 'limited_submitted' if any(d['submission_type'] == 'limited' for d in submitted) else 'fully_submitted'
+        else:
+            status = 'abnormal'
+    note = None
+    if row['delivery_version'] >= 3 and row['status'] == 'completed' and not termination.get('outcome'):
+        latest_statuses = {d['status'] for d in latest.values()}
+        if 'unknown' in latest_statuses:
+            status = 'abnormal'
+        elif 'rework_required' in latest_statuses:
+            status = 'rework_required'
+            note = '；'.join(d['summary'] for d in latest.values() if d['status'] == 'rework_required')
+        elif latest_statuses & {'not_submitted', 'blocked'}:
+            status = 'abnormal'
+        elif not submitted and not commits:
+            nodes = db.execute('SELECT node_id,depends_on_json FROM workflow_nodes WHERE workflow_id=?', (workflow_id,)).fetchall()
+            node_ids = {n['node_id'] for n in nodes}
+            dependencies = {dep for n in nodes for dep in json.loads(n['depends_on_json'])}
+            leaves = node_ids - dependencies
+            if (leaves and node_ids == set(latest)
+                    and latest_statuses <= {'completed', 'not_applicable', 'completed_no_submission'}
+                    and all(latest[n]['status'] == 'completed_no_submission' for n in leaves)):
+                status = 'completed_no_submission'
+                note = '；'.join(latest[n]['summary'] for n in sorted(leaves))
+    if row['delivery_version'] >= 2 and row['status'] == 'cancelled':
+        import zlib
+        events = db.execute("SELECT payload_json,payload_zlib FROM workflow_events WHERE workflow_id=? AND event_type='workflow.cancelled'", (workflow_id,))
+        manual = any(json.loads(zlib.decompress(e['payload_zlib']) if e['payload_zlib'] else e['payload_json']).get('reason') in ('user_requested', 'chat_control') for e in events)
+        if not manual:
+            status = 'abnormal'
+    return {'status': status, 'commits': commits, 'recorded': row['delivery_version'] >= 2,
+            **({'note': public_text(note)} if note else {})}
 
 
 class JiraStore:
@@ -142,19 +275,20 @@ class JiraStore:
         spec = self.get_spec(workflow_id)
         if not spec.get("jira"):
             raise ValueError("本运行未启用监督机统一领取 Jira。")
+        binding = spec.get("jiraReservation")
         with self._connect() as db:
             row = db.execute("SELECT * FROM workflow_jira_runs WHERE workflow_id=?", (workflow_id,)).fetchone()
             allocation = db.execute("SELECT * FROM workflow_allocations WHERE workflow_id=?", (workflow_id,)).fetchone()
             if not allocation or not allocation["executor_id"]:
                 raise RuntimeError("尚未分配监督机和执行机。")
-            return {"reservation": spec.get("jiraReservation"), "config": spec["jira"], "supervisorId": allocation["supervisor_id"],
+            return {"reservation": binding, "config": spec["jira"], "supervisorId": allocation["supervisor_id"],
                     "executorId": allocation["executor_id"], "cwd": allocation["cwd"],
                     "state": row["state"], "issueKey": row["issue_key"],
                     "server": row["server_key"], "account": row["account_alias"],
                     "fingerprint": row["credential_fingerprint"], "launcherPath": row["launcher_path"],
                     "accountSource": row["account_source"]}
 
-    def jira_update(self, workflow_id, operation, payload, *, sidecar_supervisor_id=None, lease_token=None):
+    def jira_update(self, workflow_id, operation, payload, *, sidecar_supervisor_id=None, lease_token=None, central_verified=False):
         from workflow_store import utc_now
         if not isinstance(payload, dict) or not isinstance(operation, str):
             raise ValueError("Jira 请求必须是对象。")
@@ -173,6 +307,8 @@ class JiraStore:
                 raise RuntimeError("运行尚未取得机器，不能领取 Jira。")
             now = utc_now()
             if operation == "claim":
+                if spec.get("jira", {}).get("connectionId") and row["state"] == "waiting_claim" and not central_verified:
+                    raise ValueError("工单必须由中央网关完成启动前核验。")
                 server = server_key(payload.get("server"))
                 account, fingerprint = payload.get("account"), payload.get("fingerprint")
                 if (not isinstance(account, str) or not 1 <= len(account) <= 128
@@ -284,6 +420,7 @@ class JiraStore:
                     "supervisorAgentId": row["supervisor_id"], "executorAgentId": row["executor_id"],
                     "supervisorRemark": row["supervisor_remark"] or "", "executorRemark": row["executor_remark"] or "",
                     "workingDirectory": row["cwd"], "createdAt": row["created_at"],
+                    "executionResult": execution_result(db, row["workflow_id"]),
                     "claimedAt": row["claimed_at"], "finishedAt": row["finished_at"], "deliveries": deliveries,
                     "resourceState": "occupied" if db.execute("SELECT 1 FROM workflow_machine_claims WHERE workflow_id=?", (row["workflow_id"],)).fetchone() else "released"})
             return {"items": result, "nextCursor": rows[limit - 1]["cursor"] if len(rows) > limit else None}

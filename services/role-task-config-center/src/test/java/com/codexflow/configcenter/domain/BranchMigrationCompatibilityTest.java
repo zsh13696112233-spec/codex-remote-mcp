@@ -16,7 +16,7 @@ class BranchMigrationCompatibilityTest {
             + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
     Flyway.configure().dataSource(url, "sa", "").target("29").load().migrate();
     var flyway = Flyway.configure().dataSource(url, "sa", "").load();
-    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(18);
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(19);
     try (var connection = DriverManager.getConnection(url, "sa", "");
         var statement = connection.createStatement()) {
       statement.executeUpdate(
@@ -60,13 +60,16 @@ class BranchMigrationCompatibilityTest {
       }
     }
     var flyway = Flyway.configure().dataSource(url, "sa", "").load();
-    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(2);
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(3);
     try (var c = DriverManager.getConnection(url, "sa", "");
         var q = c.createStatement();
-        var r = q.executeQuery("SELECT id,jira_jql FROM codex_sop_sops ORDER BY id")) {
+        var r =
+            q.executeQuery(
+                "SELECT id,jira_jql,jira_connection_id FROM codex_sop_sops ORDER BY id")) {
       int count = 0;
       while (r.next()) {
         count++;
+        assertThat(r.getString(3)).isNull();
         assertThat(r.getString(2)).isEqualTo(r.getString(1).equals("planner-3") ? null : planner);
       }
       assertThat(count).isEqualTo(4);

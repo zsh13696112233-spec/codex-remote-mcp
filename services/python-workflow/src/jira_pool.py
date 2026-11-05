@@ -1,4 +1,4 @@
-"""运行创建前的 Jira 采集、待办及预约。凭据不落中央数据库。"""
+"""运行创建前的 Jira 采集、待办及预约。凭据仅由中央账号管理读取。"""
 import asyncio
 import json
 import uuid
@@ -25,12 +25,15 @@ def initialize(db):
       state TEXT NOT NULL DEFAULT 'pending', reservation_id TEXT UNIQUE, workflow_id TEXT,
       UNIQUE(request_id,issue_key)
     );
+    CREATE INDEX IF NOT EXISTS idx_jira_collection_poll ON jira_collections(source,task_id,created_at);
     CREATE INDEX IF NOT EXISTS idx_jira_pool_issue ON jira_pool_items(server_key,issue_key,state);
     ''')
 
     db.execute('BEGIN IMMEDIATE')
     if 'people_json' not in {r[1] for r in db.execute('PRAGMA table_info(jira_pool_items)')}:
         db.execute('ALTER TABLE jira_pool_items ADD COLUMN people_json TEXT')
+    if 'candidate_queued_at' not in {r[1] for r in db.execute('PRAGMA table_info(jira_pool_items)')}:
+        db.execute('ALTER TABLE jira_pool_items ADD COLUMN candidate_queued_at TEXT')
     db.commit()
 
 def validate_people(value):
@@ -54,6 +57,80 @@ def validate_people(value):
         raise ValueError('人员采集时间无效。') from None
 
 
+def sync_polling(store, body):
+    """配置中心每 30 秒同步启用任务；只创建采集，不授予运行资格。"""
+    from datetime import datetime, timezone
+    from workflow_store import utc_now
+    if not isinstance(body, dict) or set(body) != {'tasks'} or not isinstance(body['tasks'], list):
+        raise ValueError('采集任务列表无效。')
+    tasks = {}
+    for item in body['tasks']:
+        task = str(uuid.UUID(item['taskDefinitionId']))
+        group = str(uuid.UUID(item['groupId']))
+        config = normalize_config(item['jira'])
+        if not config or not config.get('connectionId') or task in tasks:
+            raise ValueError('采集任务配置无效或重复。')
+        name = item['name']
+        if not isinstance(name, str) or len(name) > 1000:
+            raise ValueError('任务名称无效。')
+        tasks[task] = (group, json.dumps(config, sort_keys=True), name)
+    now = utc_now()
+    with store._connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        for row in db.execute("SELECT * FROM jira_collections WHERE source='poll' AND (state IN ('waiting','collecting') OR (state='ready' AND EXISTS (SELECT 1 FROM jira_pool_items p WHERE p.request_id=jira_collections.request_id AND p.state='pending')))").fetchall():
+            target = tasks.get(row['task_id'])
+            if not target or target[:2] != (row['group_id'], row['config_json']):
+                db.execute("UPDATE jira_collections SET state='cancelled',reason='任务已停用或查询配置已变化。' WHERE request_id=?", (row['request_id'],))
+                db.execute("UPDATE jira_pool_items SET state='cancelled' WHERE request_id=? AND state='pending'", (row['request_id'],))
+        for task, (group, config, name) in tasks.items():
+            last = db.execute("SELECT * FROM jira_collections WHERE task_id=? AND source='poll' AND state<>'cancelled' ORDER BY created_at DESC LIMIT 1", (task,)).fetchone()
+            if last and (last['state'] in ('waiting', 'collecting') or
+                    (datetime.now(timezone.utc) - datetime.fromisoformat(last['created_at'])).total_seconds() < 30):
+                continue
+            db.execute("INSERT INTO jira_collections(request_id,task_id,group_id,name,source,config_json,state,created_at) VALUES(?,?,?,?,'poll',?,'waiting',?)",
+                       (str(uuid.uuid4()), task, group, name, config, now))
+    return {'synchronized': len(tasks)}
+
+
+def materialize_dispatch(db, row):
+    """启动请求仅复制触发后完成的采集快照，绝不自行查询 Jira。"""
+    from jira_accounts import usable
+    account = usable(db, json.loads(row['config_json']).get('connectionId'), row['group_id'])
+    latest = db.execute("SELECT * FROM jira_collections WHERE source='poll' AND task_id=? AND group_id=? AND config_json=? AND state='ready' AND finished_at>=? AND account_id=? AND account_alias=? ORDER BY finished_at DESC LIMIT 1",
+                        (row['task_id'], row['group_id'], row['config_json'], row['created_at'], account['identity'], account['executor_alias'])).fetchone()
+    if not latest:
+        return
+    db.execute("UPDATE jira_collections SET state='ready',server_key=?,account_id=?,account_alias=?,count=?,finished_at=? WHERE request_id=?",
+               (latest['server_key'], latest['account_id'], latest['account_alias'], latest['count'], latest['finished_at'], row['request_id']))
+    for item in db.execute("SELECT * FROM jira_pool_items WHERE request_id=? AND state IN ('pending','consumed')", (latest['request_id'],)).fetchall():
+        state = 'pending' if issue_available(db, item['server_key'], item['issue_key']) else 'consumed'
+        db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state,people_json) VALUES(?,?,?,?,?,?)',
+                   (row['request_id'], item['server_key'], item['issue_key'], item['title'], state, item['people_json']))
+
+
+def publish_poll(db, row, server, found):
+    from workflow_store import utc_now
+    now = utc_now()
+    # 完整成功后才撤销候选；预约、运行及历史不变。
+    for item in db.execute("SELECT p.id,p.issue_key FROM jira_pool_items p JOIN jira_collections c USING(request_id) WHERE c.task_id=? AND c.config_json=? AND p.state='pending' AND c.request_id<>?",
+                           (row['task_id'], row['config_json'], row['request_id'])).fetchall():
+        if item['issue_key'] not in found:
+            db.execute("UPDATE jira_pool_items SET state='invalid' WHERE id=?", (item['id'],))
+    # 自动采集只保留每个任务/工单的当前候选，复用 ID 保持分页和等待时间稳定。
+    # 每次采集的结果/数量仍保留；派发和运行使用独立的不可变快照。
+    for issue, (title, people_json) in found.items():
+        old = db.execute("SELECT p.*,c.finished_at FROM jira_pool_items p JOIN jira_collections c USING(request_id) WHERE c.source='poll' AND c.task_id=? AND p.server_key=? AND p.issue_key=? ORDER BY p.id DESC LIMIT 1",
+                         (row['task_id'], server, issue)).fetchone()
+        state = 'pending' if issue_available(db, server, issue) else 'consumed'
+        queued_at = (old['candidate_queued_at'] or old['finished_at']) if old and old['state'] == 'pending' else now
+        if old:
+            db.execute('UPDATE jira_pool_items SET request_id=?,title=?,state=?,people_json=?,candidate_queued_at=? WHERE id=?',
+                       (row['request_id'], title, state, people_json, queued_at, old['id']))
+        else:
+            db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state,people_json,candidate_queued_at) VALUES(?,?,?,?,?,?,?)',
+                       (row['request_id'], server, issue, title, state, people_json, queued_at))
+
+
 def request_collection(store, body):
     from workflow_store import utc_now
     request_id = str(uuid.UUID(body['requestId']))
@@ -73,8 +150,13 @@ def request_collection(store, body):
             if (old['task_id'], old['group_id'], old['config_json'], old['source']) != (body['taskDefinitionId'], body['groupId'], encoded, body['source']):
                 raise ValueError('采集请求编号已用于其他配置。')
         else:
+            from jira_accounts import usable
+            usable(db, config.get("connectionId"), body["groupId"])
             db.execute('''INSERT INTO jira_collections(request_id,task_id,group_id,name,source,config_json,state,created_at)
                 VALUES(?,?,?,?,?,?,'waiting',?)''', (request_id, body['taskDefinitionId'], body['groupId'], name, body['source'], encoded, utc_now()))
+        current = db.execute('SELECT * FROM jira_collections WHERE request_id=?', (request_id,)).fetchone()
+        if current['state'] == 'waiting':
+            materialize_dispatch(db, current)
     return collection(store, request_id)
 
 
@@ -103,8 +185,13 @@ def reserve(store, request_id, reservation_id):
         db.execute('BEGIN IMMEDIATE')
         old = db.execute('SELECT * FROM jira_pool_items WHERE reservation_id=?', (reservation_id,)).fetchone()
         batch = db.execute('SELECT * FROM jira_collections WHERE request_id=?', (request_id,)).fetchone()
-        if not batch or batch['state'] != 'ready':
+        if not batch or batch['state'] != 'ready' or batch['source'] == 'poll':
             raise ValueError('采集尚未完成或来源已失效。')
+        from jira_accounts import usable
+        if not old or old['state'] != 'bound':
+            account = usable(db, json.loads(batch['config_json']).get('connectionId'), batch['group_id'])
+            if batch['account_alias'] != account['executor_alias']:
+                raise ValueError('执行机 Jira 账号映射已变化，请重新触发采集。')
         if old and old['state'] not in {'reserved','bound'}:
             raise ValueError('预约已失效。')
         if old and old['request_id'] != request_id:
@@ -122,19 +209,33 @@ def reserve(store, request_id, reservation_id):
             return None
         return {'reservationId': reservation_id, 'issueKey': old['issue_key'], 'title': old['title'],
                 'server': old['server_key'], 'accountId': batch['account_id'],
+                'connectionId': json.loads(batch['config_json']).get('connectionId'), 'accountAlias': batch['account_alias'],
                 **({'people': json.loads(old['people_json'])} if old['people_json'] else {})}
 
 
 def bind(db, spec):
     """与工作流创建使用同一事务；预约同时成为既有领取锁。"""
     binding = spec.get('jiraReservation')
-    if not binding:
+    if not spec['jira'].get('connectionId'):
+        return  # 历史存储契约；网关拒绝新增旧格式运行。
+    from jira_accounts import usable
+    account = usable(db, spec['jira'].get('connectionId'), spec.get('groupId'))
+    if spec.get('jiraRetryOf'):
+        from workflow_allocation import decode
+        source = db.execute('SELECT w.spec_json,w.spec_zlib FROM workflows w JOIN workflow_task_bindings b USING(workflow_id) WHERE w.workflow_id=? AND b.task_definition_id=?', (spec['jiraRetryOf'], spec.get('taskDefinitionId'))).fetchone()
+        original = decode(source) if source else {}
+        if not binding or original.get('jiraReservation') != binding or original.get('jira') != spec['jira']:
+            raise ValueError('重试必须沿用原运行的账号和固定工单快照。')
         return
-    item = db.execute('''SELECT p.*,c.task_id,c.group_id,c.config_json,c.account_id FROM jira_pool_items p
+    if not binding:
+        raise ValueError('新 Jira 运行必须先预约工单。')
+    item = db.execute('''SELECT p.*,c.task_id,c.group_id,c.config_json,c.account_id,c.account_alias FROM jira_pool_items p
         JOIN jira_collections c USING(request_id) WHERE reservation_id=?''', (binding['reservationId'],)).fetchone()
     if (not item or item['state'] != 'reserved' or item['task_id'] != spec.get('taskDefinitionId')
             or item['group_id'] != spec.get('groupId') or json.loads(item['config_json']) != spec['jira'] or item['issue_key'] != binding['issueKey']
             or item['server_key'] != binding['server'] or item['account_id'] != binding['accountId']
+            or binding.get('connectionId') != account['id'] or binding.get('accountAlias') != item['account_alias']
+            or item['account_alias'] != account['executor_alias']
             or ('title' in binding and item['title'] != binding['title'])
             or ('people' in binding and json.loads(item['people_json'] or 'null') != binding['people'])):
         raise ValueError('工单预约与提交快照不一致。')
@@ -160,73 +261,67 @@ def cancel(store, request_id):
 
 
 async def collect(gateway, request_id):
-    from workflow_resources import finish_check
+    await asyncio.to_thread(collect_sync, gateway.store, request_id)
+
+
+def collect_sync(store, request_id):
     from workflow_store import utc_now
-    from jira_runtime import client_for, read_file, CONFIG_PATH, account_from_config, search_page, account_identity, excluding_query
-    with gateway.store._connect() as db:
+    from jira_accounts import usable
+    from jira_http import JiraClient, JiraHttpError
+    from jira_runtime import excluding_query
+    with store._connect() as db:
+        db.execute('BEGIN IMMEDIATE')
         row = db.execute("SELECT * FROM jira_collections WHERE request_id=? AND state='waiting'", (request_id,)).fetchone()
         if not row:
             return
-        row = dict(row)
-        # 同时触发的同一任务共用一次已完整完成的查询，各来源仍单独保存执行额度。
-        shared = db.execute('''SELECT * FROM jira_collections WHERE task_id=? AND config_json=?
-            AND state='ready' AND finished_at>=? ORDER BY finished_at DESC LIMIT 1''', (row['task_id'],row['config_json'],row['created_at'])).fetchone()
-        if shared:
-            db.execute("UPDATE jira_collections SET state='ready',finished_at=?,server_key=?,account_id=?,account_alias=?,count=? WHERE request_id=? AND state='waiting'",
-                (shared['finished_at'],shared['server_key'],shared['account_id'],shared['account_alias'],shared['count'],request_id))
-            for item in db.execute('SELECT * FROM jira_pool_items WHERE request_id=?', (shared['request_id'],)).fetchall():
-                state = 'pending' if issue_available(db,item['server_key'],item['issue_key']) else 'consumed'
-                db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state,people_json) VALUES(?,?,?,?,?,?)', (request_id,item['server_key'],item['issue_key'],item['title'],state,item['people_json']))
+        if row['source'] != 'poll':
+            materialize_dispatch(db, row)
             return
-    selected = await acquire_supervisor(gateway, 'jira:' + request_id)
-    if not selected:
-        return
-    key, agent = selected
-    stopped = True
+        db.execute("UPDATE jira_collections SET state='collecting' WHERE request_id=?", (request_id,))
     try:
-        with gateway.store._connect() as db:
-            if not db.execute("UPDATE jira_collections SET state='collecting',agent_id=? WHERE request_id=? AND state='waiting'", (key, request_id)).rowcount:
-                return
         config = json.loads(row['config_json'])
-        async with client_for(gateway.orchestrator, agent) as client:
-            raw = await read_file(client, CONFIG_PATH)
-            alias, account = account_from_config(raw, config['account'])
-            stopped = False
-            identity = await account_identity(client, raw, alias, agent.cwd)
-            stopped = True
-            found = {}
-            assignees = {}
-            while True:
-                stopped = False
-                page = await search_page(client, raw, alias, excluding_query(config['jql'], list(found)), agent.cwd, people=assignees)
-                stopped = True
-                if not page:
-                    break
-                if any(key in found for key in page) or len(found) + len(page) > 1000:
-                    raise ValueError('采集超过 1000 项或分页未前进，请缩小 SOP 查询范围。')
-                found.update(page)
-            from jira_runtime import collect_people
-            stopped = False
-            people = await collect_people(client, raw, alias, agent.cwd, assignees) if found else {}
-            stopped = True
-        with gateway.store._connect() as db:
+        with store._connect() as db:
+            account = dict(usable(db, config.get('connectionId'), row['group_id']))
+        client = JiraClient(account['server'], account['token'])
+        if client.identity() != account['identity']:
+            raise ValueError('Jira 实际账号与检测身份不一致。')
+        with store._connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            if not db.execute("UPDATE jira_collections SET state='ready',server_key=?,account_id=?,account_alias=?,count=?,finished_at=? WHERE request_id=? AND state='collecting'", (account['baseUrl'], identity, alias, len(found), utc_now(), request_id)).rowcount:
+            current = usable(db, account['id'], row['group_id'])
+            if current['version'] != account['version']:
+                raise ValueError('采集期间账号发生变化，请重新触发。')
+            shared = db.execute("SELECT * FROM jira_collections WHERE source='poll' AND config_json=? AND state='ready' AND finished_at>=? AND account_id=? AND account_alias=? ORDER BY finished_at DESC LIMIT 1",
+                                (row['config_json'],row['created_at'],account['identity'],account['executor_alias'])).fetchone()
+            if shared:
+                if db.execute("UPDATE jira_collections SET state='ready',server_key=?,account_id=?,account_alias=?,count=?,finished_at=? WHERE request_id=? AND state='collecting'",
+                              (account['server'],account['identity'],account['executor_alias'],shared['count'],shared['finished_at'],request_id)).rowcount:
+                    shared_items = db.execute('SELECT * FROM jira_pool_items WHERE request_id=?', (shared['request_id'],)).fetchall()
+                    publish_poll(db, row, account['server'], {item['issue_key']: (item['title'], item['people_json']) for item in shared_items})
                 return
-            for issue, title in found.items():
-                state = 'pending' if issue_available(db, account['baseUrl'], issue) else 'consumed'
-                db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state,people_json) VALUES(?,?,?,?,?,?)', (request_id, account['baseUrl'], issue, title, state, json.dumps(people[issue]) if issue in people else None))
-    except Exception as error:
-        from jira_runtime import JiraCommandError
-        if isinstance(error, (JiraCommandError, ValueError)):
-            stopped = True
-        # 远程错误可能包含凭据或命令，页面仅接收固定分类。
-        with gateway.store._connect() as db:
-            db.execute("UPDATE jira_collections SET state='failed',reason=?,finished_at=? WHERE request_id=? AND state='collecting'", ('采集失败，请核对监督机、账号和 Jira 查询；执行状态不明时保留机器占用。', utc_now(), request_id))
-        import logging
-        logging.getLogger(__name__).warning('Jira 采集失败，异常类型=%s', type(error).__name__)
-    finally:
-        await asyncio.to_thread(finish_check, gateway.store, 'jira:' + request_id, stopped)
+        try:
+            field = client.developer_field()
+        except JiraHttpError:
+            field = None  # 人员展示信息不可用不改变工单派发资格。
+        found = {}
+        while True:
+            page = client.search(excluding_query(config['jql'], list(found)), field)
+            if not page:
+                break
+            if any(key in found for key in page) or len(found) + len(page) > 1000:
+                raise ValueError('采集超过 1000 项或分页未前进，请缩小 SOP 查询范围。')
+            found.update(page)
+        with store._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current = usable(db, account['id'], row['group_id'])
+            if current['version'] != account['version']:
+                raise ValueError('采集期间账号发生变化，请重新触发。')
+            if not db.execute("UPDATE jira_collections SET state='ready',server_key=?,account_id=?,account_alias=?,count=?,finished_at=? WHERE request_id=? AND state='collecting'",
+                              (account['server'],account['identity'],account['executor_alias'],len(found),utc_now(),request_id)).rowcount:
+                return
+            publish_poll(db, row, account['server'], {issue: (title, json.dumps(people)) for issue, (title, people) in found.items()})
+    except (ValueError, JiraHttpError) as error:
+        with store._connect() as db:
+            db.execute("UPDATE jira_collections SET state='failed',reason=?,finished_at=? WHERE request_id=? AND state='collecting'", (str(error),utc_now(),request_id))
 
 
 def board(store, group_id='', before=None, limit=50, project='', task='', state=''):
@@ -244,8 +339,8 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
             MIN(p.id) OVER issue AS issue_id,
             MAX(c.finished_at) OVER issue AS collected_at,
             MIN(CASE WHEN p.state IN ('pending','reserved') AND c.state='ready'
-                THEN COALESCE(c.finished_at,c.created_at) END) OVER issue AS queued_at,
-            FIRST_VALUE(p.title) OVER (PARTITION BY p.server_key,p.issue_key ORDER BY p.id DESC) AS latest_title,
+                THEN COALESCE(p.candidate_queued_at,c.finished_at,c.created_at) END) OVER issue AS queued_at,
+            FIRST_VALUE(p.title) OVER (PARTITION BY p.server_key,p.issue_key ORDER BY c.finished_at DESC,p.id DESC) AS latest_title,
             FIRST_VALUE(p.people_json) OVER (PARTITION BY p.server_key,p.issue_key
                 ORDER BY COALESCE(json_extract(p.people_json,'$.collectedAt'),c.finished_at) DESC,p.id DESC) AS latest_people,
             ROW_NUMBER() OVER (PARTITION BY p.server_key,p.issue_key ORDER BY
@@ -255,7 +350,7 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
                     WHEN p.state='reserved' AND c.state='ready' THEN 1
                     WHEN p.state='pending' AND c.state='ready' THEN 2
                     WHEN p.state<>'consumed' THEN 3 ELSE 4
-                END,p.id DESC) AS position
+                END,c.finished_at DESC,p.id DESC) AS position
         FROM jira_pool_items p JOIN jira_collections c USING(request_id)
         LEFT JOIN workflows w ON w.workflow_id=p.workflow_id
         WINDOW issue AS (PARTITION BY p.server_key,p.issue_key)
@@ -319,7 +414,7 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
             item['stop_pending'] = bool(item['stop_pending'])
             item['sources'] = [dict(source) for source in db.execute('''SELECT taskId,groupId,name FROM (
                 SELECT c.task_id AS taskId,c.group_id AS groupId,c.name,
-                    ROW_NUMBER() OVER (PARTITION BY c.task_id,c.group_id ORDER BY p.id DESC) AS position
+                    ROW_NUMBER() OVER (PARTITION BY c.task_id,c.group_id ORDER BY c.finished_at DESC,p.id DESC) AS position
                 FROM jira_pool_items p JOIN jira_collections c USING(request_id)
                 WHERE p.server_key=? AND p.issue_key=? AND (?='' OR c.group_id=?)
             ) WHERE position=1 ORDER BY name,taskId,groupId''',
@@ -328,6 +423,8 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
             item['reworkCount'] = len(item['reworks'])
             item['executions'] = execution_history(db, row['server_key'], row['issue_key'])
             item['retryCount'] = max(0, len(item['executions']) - 1)
+            from workflow_jira import execution_result
+            item['executionResult'] = execution_result(db, item['workflow_id'])
             items.append(item)
         return {'projects': [dict(r) for r in projects], 'items': items, 'collections': [dict(r) for r in collections],
                 'nextCursor': rows[limit - 1]['id'] if len(rows) > limit else None}
@@ -335,14 +432,17 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
 
 async def tick(gateway):
     with gateway.store._connect() as db:
-        rows = db.execute("SELECT request_id FROM jira_collections WHERE state='waiting' ORDER BY created_at LIMIT 10").fetchall()
+        rows = db.execute("SELECT request_id FROM jira_collections WHERE state='waiting' AND source='poll' ORDER BY created_at LIMIT 10").fetchall()
     for row in rows:
         await collect(gateway, row['request_id'])
 
 
 def recover(store):
     with store._connect() as db:
-        db.execute("UPDATE jira_collections SET state='failed',reason='采集过程因服务重启中断，请核实机器状态后重新触发。' WHERE state='collecting'")
+        db.execute('BEGIN IMMEDIATE')
+        db.execute("UPDATE jira_collections SET state='cancelled',reason='旧来源未绑定中央账号，请使用最新配置重新触发。' WHERE state IN ('waiting','collecting','ready') AND json_extract(config_json,'$.connectionId') IS NULL")
+        db.execute("UPDATE jira_pool_items SET state='cancelled' WHERE state IN ('pending','reserved') AND request_id IN (SELECT request_id FROM jira_collections WHERE state='cancelled')")
+        db.execute("UPDATE jira_collections SET state='failed',reason='采集过程因服务重启中断，请重新触发。' WHERE state='collecting'")
 
 
 def record_rework(db, workflow_id, timestamp):
@@ -412,6 +512,8 @@ def execution_history(db, server, issue):
             entry['reworkNumber'] = None
             entry['kind'] = 'first' if tracked and not executions else 'execution' if tracked else 'legacy'
         entry['retryNumber'] = len(executions)
+        from workflow_jira import execution_result
+        entry['executionResult'] = execution_result(db, entry['workflowId'])
         executions.append(entry)
     return executions
 
@@ -423,68 +525,50 @@ def rework_history(db, server, issue):
         WHERE server_key=? AND issue_key=? AND previous_workflow_id IS NOT NULL ORDER BY started_at''', (server, issue))]
 
 
-async def acquire_supervisor(gateway, operation_id):
-    from workflow_gateway import SIDECAR_LEASE_TIMEOUT_SEC
-    from workflow_jira import compatible_agent
-    from workflow_resources import claim_check
-    from workflow_store import utc_now
-    rows = await asyncio.to_thread(gateway.registry.rows)
-    for key, row in rows.items():
-        agent = gateway.registry.config_from_row(key, row)
-        if (row['test_status'] != 'passed' or not agent.enabled or not agent.allow_write
-                or 'supervisor' not in agent.capabilities or not compatible_agent(agent)):
-            continue
-        state = (await asyncio.to_thread(gateway.store.sidecar_status, key, timeout_sec=SIDECAR_LEASE_TIMEOUT_SEC)
-                 if agent.orchestration_mode == 'remote_sidecar' else gateway._supervisor_runtime.get(key, {}))
-        if state.get('connectionStatus') != 'online':
-            continue
-        if await asyncio.to_thread(claim_check, gateway.store, key, operation_id, utc_now()):
-            return key, agent
-    return None
+def verify_issue(store, config, group, binding, *, existing=False):
+    from jira_accounts import usable
+    from jira_http import JiraClient
+    from jira_runtime import including_query
+    with store._connect() as db:
+        account = dict(usable(db, config.get('connectionId'), group, existing=existing))
+    if account['id'] != binding.get('connectionId') or account['server'] != binding['server'] or account['identity'] != binding['accountId']:
+        raise ValueError('Jira 账号与冻结身份不一致。')
+    client = JiraClient(account['server'], account['token'])
+    if client.identity() != binding['accountId']:
+        raise ValueError('Jira 实际账号与冻结身份不一致。')
+    if binding['issueKey'] not in client.search(including_query(config['jql'], binding['issueKey'])):
+        raise ValueError('固定工单已不符合查询条件，本轮停止，不更换工单。')
 
 
 async def verify_reservation(gateway, binding):
-    """排队后重新核验单张工单，成功后 Java 才创建运行。"""
-    from workflow_resources import finish_check
-    from jira_runtime import client_for, read_file, CONFIG_PATH, account_from_config, account_identity, search_page, including_query
     with gateway.store._connect() as db:
-        row = db.execute('''SELECT p.*,c.config_json FROM jira_pool_items p JOIN jira_collections c USING(request_id)
-            WHERE reservation_id=?''', (binding['reservationId'],)).fetchone()
-        if row['state'] == 'bound':
-            return True
-    operation = 'jira-verify:' + binding['reservationId']
-    selected = await acquire_supervisor(gateway, operation)
-    if not selected:
-        return False
-    _, agent = selected
-    stopped = True
-    try:
-        config = json.loads(row['config_json'])
-        async with client_for(gateway.orchestrator, agent) as client:
-            raw = await read_file(client, CONFIG_PATH)
-            alias, account = account_from_config(raw, config['account'])
-            stopped = False
-            identity = await account_identity(client, raw, alias, agent.cwd)
-            stopped = True
-            if account['baseUrl'] != binding['server'] or identity != binding['accountId']:
-                raise ValueError('监督机账号与采集身份不一致。')
-            stopped = False
-            page = await search_page(client, raw, alias, including_query(config['jql'], binding['issueKey']), agent.cwd)
-            stopped = True
-        if binding['issueKey'] not in page:
-            with gateway.store._connect() as db:
-                db.execute("UPDATE jira_pool_items SET state='invalid',reservation_id=NULL WHERE reservation_id=? AND state='reserved'", (binding['reservationId'],))
-            return False
+        row = db.execute('SELECT p.state,c.config_json,c.group_id,p.request_id FROM jira_pool_items p JOIN jira_collections c USING(request_id) WHERE reservation_id=?', (binding['reservationId'],)).fetchone()
+    if row['state'] == 'bound':
         return True
-    except Exception as error:
-        from jira_runtime import JiraCommandError
-        if isinstance(error, (JiraCommandError, ValueError)):
-            stopped = True
-        import logging
-        logging.getLogger(__name__).warning('Jira 派发核验失败，异常类型=%s', type(error).__name__)
-        raise RuntimeError('工单核验失败，请核对监督机账号及连接；未创建运行。') from None
-    finally:
-        await asyncio.to_thread(finish_check, gateway.store, operation, stopped)
+    try:
+        await asyncio.to_thread(verify_issue, gateway.store, json.loads(row['config_json']), row['group_id'], binding)
+    except ValueError:
+        cancel(gateway.store, row['request_id'])
+        raise
+    return True
+
+
+def prepare_run(store, spec):
+    import hashlib
+    if not spec.get('jira'):
+        return
+    context = store.jira_context(spec['workflowId'])
+    if context['state'] != 'waiting_claim':
+        return
+    binding = context['reservation']
+    if not binding:
+        raise ValueError('历史 Jira 快照缺少中央预约，请使用最新配置运行。')
+    verify_issue(store, spec['jira'], spec['groupId'], binding, existing=True)
+    result = store.jira_update(spec['workflowId'], 'claim', {'server': binding['server'], 'account': binding['accountAlias'],
+        'fingerprint': hashlib.sha256(json.dumps([binding['connectionId'],binding['accountId'],binding['server'],binding['accountAlias']]).encode()).hexdigest(),
+        'candidates': [binding['issueKey']]}, central_verified=True)
+    if result['state'] != 'claimed':
+        raise ValueError('固定工单已被其他运行占用，本轮停止。')
 
 
 def execution_detail(store, workflow_id):
@@ -504,6 +588,7 @@ def execution_detail(store, workflow_id):
         for delivery in deliveries:
             for key in ('reference', 'summary'):
                 delivery[key] = public_text(delivery[key])
-        return {'workflowId': workflow_id, 'status': row['status'], 'summary': public_text(row['response']),
+        from workflow_jira import execution_result
+        return {'executionResult': execution_result(db, workflow_id), 'workflowId': workflow_id, 'status': row['status'], 'summary': public_text(row['response']),
                 'reason': public_text(termination.get('reason')), 'steps': steps, 'deliveries': deliveries,
                 'allocation': allocation_snapshot(db, workflow_id), 'resources': resource_snapshot(db, workflow_id)}

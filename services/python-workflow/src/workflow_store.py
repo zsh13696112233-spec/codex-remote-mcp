@@ -558,6 +558,8 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
             initialize_allocations(connection)
             from jira_pool import initialize as initialize_pool
             initialize_pool(connection)
+            from jira_accounts import initialize as initialize_accounts
+            initialize_accounts(connection)
             from workflow_jira import initialize as initialize_jira
             initialize_jira(connection)
         with self._connect() as connection:
@@ -725,10 +727,13 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
         jira = normalize_config(value.get("jira"))
         if jira and not grouped:
             raise ValueError("监督机统一领取 Jira 仅支持按组调度。")
+        delivery_version = value.get("jiraDeliveryVersion", 1)
+        if type(delivery_version) is not int or delivery_version not in (1, 2, 3) or (not jira and "jiraDeliveryVersion" in value):
+            raise ValueError("Jira 交付协议版本无效。")
         binding = value.get("jiraReservation")
         if binding is not None:
             from workflow_jira import ISSUE_KEY, server_key
-            if (not jira or not isinstance(binding, dict) or set(binding) - {"title", "people"} != {"reservationId", "issueKey", "server", "accountId"}
+            if (not jira or not isinstance(binding, dict) or set(binding) - {"title", "people", "connectionId", "accountAlias"} != {"reservationId", "issueKey", "server", "accountId"}
                     or not isinstance(binding["reservationId"], str) or not re.fullmatch(r"[0-9a-f-]{36}", binding["reservationId"])
                     or not isinstance(binding["issueKey"], str) or not ISSUE_KEY.fullmatch(binding["issueKey"])
                     or not isinstance(binding["accountId"], str) or not 1 <= len(binding["accountId"]) <= 256):
@@ -739,11 +744,15 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                 from jira_pool import validate_people
                 validate_people(binding["people"])
             server_key(binding["server"])
+            if jira.get("connectionId") and (binding.get("connectionId") != jira["connectionId"]
+                    or not isinstance(binding.get("accountAlias"), str) or not 1 <= len(binding["accountAlias"]) <= 128
+                    or any(ord(c) < 32 for c in binding["accountAlias"])):
+                raise ValueError("Jira 预约账号快照无效。")
         retry_of = value.get("jiraRetryOf")
         if retry_of is not None and (not jira or not isinstance(retry_of, str) or not 1 <= len(retry_of) <= 128 or retry_of == workflow_id):
             raise ValueError("Jira 重试来源无效。")
         return {
-            **({"jira": jira} if jira else {}),
+            **({"jira": jira, "jiraDeliveryVersion": delivery_version} if jira else {}),
             **({"jiraReservation": binding} if binding else {}),
             **({"jiraRetryOf": retry_of} if retry_of else {}),
             **({"waitPolicy": policy} if policy else {}),
@@ -849,7 +858,7 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
             if grouped:
                 connection.execute("INSERT INTO workflow_allocations(workflow_id,group_id) VALUES(?,?)", (spec["workflowId"], spec["groupId"]))
             if spec.get("jira"):
-                connection.execute("INSERT INTO workflow_jira_runs(workflow_id) VALUES(?)", (spec["workflowId"],))
+                connection.execute("INSERT INTO workflow_jira_runs(workflow_id,delivery_version) VALUES(?,?)", (spec["workflowId"], spec.get("jiraDeliveryVersion", 1)))
                 from jira_pool import bind
                 bind(connection, spec)
             connection.execute("UPDATE workflows SET result_protocol_version=? WHERE workflow_id=?", (version, spec["workflowId"]))
@@ -3155,7 +3164,9 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
         spec = self.get_spec(row["workflow_id"])
         return {
             "resultProtocolVersion": spec.get("resultProtocolVersion", 0),
+            "advanceMode": spec.get("advanceMode", "automatic"),
             "jiraEnabled": bool(spec.get("jira")),
+            "jiraDeliveryVersion": spec.get("jiraDeliveryVersion", 1),
             "waitPolicy": spec.get("waitPolicy"),
             "workflowId": row["workflow_id"],
             "nodeId": row["node_id"],
@@ -3297,7 +3308,7 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                 from workflow_outcomes import validate
                 try:
                     jira = connection.execute("SELECT issue_key FROM workflow_jira_runs WHERE workflow_id=?", (workflow_id,)).fetchone()
-                    outcome = validate(snapshot.get("businessResult"), workflow["result_protocol_version"], jira=jira is not None)
+                    outcome = validate(snapshot.get("businessResult"), workflow["result_protocol_version"], jira=jira is not None, delivery_version=self.get_spec(workflow_id).get("jiraDeliveryVersion", 1))
                     if jira is not None and outcome["jiraComment"]["issueKey"].strip() != jira["issue_key"]:
                         raise ValueError("步骤返回的工单与本轮领取编号不一致。")
                 except (ValueError, TypeError, KeyError):
@@ -3307,8 +3318,8 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                 if outcome is not None:
                     if jira is not None:
                         delivery = outcome["jiraDelivery"]
-                        connection.execute("INSERT INTO workflow_jira_deliveries VALUES(?,?,?,?,?,?,?) ON CONFLICT(workflow_id,node_id,attempt) DO NOTHING",
-                            (workflow_id, node_id, old["attempt_count"], delivery["status"], delivery["reference"], delivery["summary"], utc_now()))
+                        connection.execute("INSERT INTO workflow_jira_deliveries (workflow_id,node_id,attempt,status,reference,summary,recorded_at,submission_type,commits_json) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(workflow_id,node_id,attempt) DO NOTHING",
+                            (workflow_id, node_id, old["attempt_count"], delivery["status"], delivery["reference"], delivery["summary"], utc_now(), delivery.get("submissionType"), json.dumps(delivery.get("commits", []), ensure_ascii=False)))
                     snapshot = {**snapshot, "response": outcome["summary"]}
                     if outcome["outcome"] == "blocked":
                         status = "failed"

@@ -130,6 +130,8 @@ class AgentRegistry:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
                     if db.execute(f"SELECT 1 FROM {table} WHERE group_id=? LIMIT 1", (group_id,)).fetchone():
                         raise ValueError(f"分组仍有 {label} 包收录，不能删除。")
+            if db.execute("SELECT 1 FROM jira_accounts WHERE group_id=? AND deleted_at IS NULL", (group_id,)).fetchone():
+                raise ValueError("分组仍有 Jira 账号，不能删除。")
             if db.execute("SELECT 1 FROM registered_agents WHERE group_id=? AND deleted_at IS NULL", (group_id,)).fetchone():
                 raise ValueError("分组内仍有机器，不能删除。")
             db.execute("UPDATE agent_groups SET deleted_at=? WHERE id=?",

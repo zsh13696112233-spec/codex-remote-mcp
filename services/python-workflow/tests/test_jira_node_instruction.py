@@ -8,9 +8,9 @@ class JiraNodeInstructionTests(unittest.TestCase):
     def test_step_handoff_does_not_require_a_different_jira_assignee(self):
         with sqlite3.connect(":memory:") as db:
             db.row_factory = sqlite3.Row
-            db.execute("CREATE TABLE workflow_jira_runs (workflow_id, state, issue_key, launcher_path)")
-            db.execute("INSERT INTO workflow_jira_runs VALUES (?, ?, ?, ?)",
-                       ("handoff", "ready", "TEST-1", r"C:\work\jira.ps1"))
+            db.execute("CREATE TABLE workflow_jira_runs (workflow_id, state, issue_key, launcher_path, delivery_version)")
+            db.execute("INSERT INTO workflow_jira_runs VALUES (?, ?, ?, ?, ?)",
+                       ("handoff", "ready", "TEST-1", r"C:\work\jira.ps1", 1))
             prompt = node_instruction(db, "handoff")
 
         self.assertIn("本轮唯一工单：TEST-1", prompt)

@@ -1,7 +1,7 @@
 const groupUrl=new URL(location.href);
 if(groupUrl.searchParams.get('groupId')==='unassigned'){groupUrl.searchParams.delete('groupId');history.replaceState(null,'',groupUrl)}
 const groupState={selected:groupUrl.searchParams.get('groupId')||'',items:[],error:''};
-const groupedPages=['roles','sops','tasks','schedules','runs','jira','machines','skills','mcps'];
+const groupedPages=['roles','sops','tasks','schedules','runs','jira','jira-accounts','machines','skills','mcps'];
 function concreteGroup(){return groupState.items.some(g=>g.id===groupState.selected)?groupState.selected:''}
 function groupMatches(x){return !groupState.selected||(groupState.selected==='unassigned'?!x.groupId:x.groupId===groupState.selected)}
 function visibleSops(){return state.sops.filter(groupMatches)}

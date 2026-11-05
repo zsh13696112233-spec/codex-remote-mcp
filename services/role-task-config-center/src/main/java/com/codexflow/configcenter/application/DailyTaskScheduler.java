@@ -17,21 +17,17 @@ class DailyTaskScheduler {
 
   private final TaskScheduleStore schedules;
   private final WorkflowRunService workflowRuns;
-  private final ScheduleCheckService checks;
   private final BoundedWork launches = new BoundedWork("scheduled-task", 4, 16);
   private final BoundedWork reconciliation = new BoundedWork("workflow-reconciliation", 1, 1);
   private final BoundedWork scopeSync = new BoundedWork("workflow-scope-upgrade", 1, 1);
 
-  DailyTaskScheduler(
-      TaskScheduleStore schedules, WorkflowRunService workflowRuns, ScheduleCheckService checks) {
-    this.checks = checks;
+  DailyTaskScheduler(TaskScheduleStore schedules, WorkflowRunService workflowRuns) {
     this.schedules = schedules;
     this.workflowRuns = workflowRuns;
   }
 
   @Scheduled(fixedDelay = 30_000)
   void tick() {
-    schedules.expireChecks();
     int available = launches.available();
     if (available == 0) return;
     for (var dispatch : schedules.claimDispatches(ZonedDateTime.now(ZONE), available)) {
@@ -63,7 +59,6 @@ class DailyTaskScheduler {
     try {
       if (workflowRuns.enqueueScheduledJira(taskId, dispatch.token())) return;
       if (workflowRuns.deferScheduledForResources(taskId, dispatch.token())) return;
-      if (!checks.passes(dispatch)) return;
       workflowRuns.runScheduled(taskId, dispatch.token());
     } catch (RuntimeException error) {
       schedules.abandonDispatch(dispatch);

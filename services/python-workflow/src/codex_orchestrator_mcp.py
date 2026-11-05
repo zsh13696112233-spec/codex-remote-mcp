@@ -358,6 +358,7 @@ class Job:
     capture_document: bool = field(default=False, repr=False)
     result_protocol_version: int | None = field(default=None, repr=False)
     jira_enabled: bool = field(default=False, repr=False)
+    jira_delivery_version: int = field(default=1, repr=False)
     input_images: list[dict[str, Any]] = field(default_factory=list, repr=False)
     input_image_paths: list[str] = field(default_factory=list, repr=False)
     execution_stopped: bool = field(default=True, repr=False)
@@ -1286,7 +1287,7 @@ class Orchestrator:
                         from workflow_outcomes import SCHEMA as OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4, parse as parse_outcome
                         if job.status == "completed" and (job.jira_enabled or job.output_schema in (OUTCOME_SCHEMA, SCHEMA_V1, SCHEMA_V3, SCHEMA_V4)):
                             try:
-                                value = parse_outcome(job.response or "", job.result_protocol_version or (1 if job.output_schema == SCHEMA_V1 else 4 if job.output_schema == SCHEMA_V4 else 3 if job.output_schema == SCHEMA_V3 else 2), jira=job.jira_enabled)
+                                value = parse_outcome(job.response or "", job.result_protocol_version or (1 if job.output_schema == SCHEMA_V1 else 4 if job.output_schema == SCHEMA_V4 else 3 if job.output_schema == SCHEMA_V3 else 2), jira=job.jira_enabled, delivery_version=job.jira_delivery_version)
                                 job.business_result = value
                                 job.response = value["summary"]
                             except (ValueError, KeyError, TypeError) as error:
@@ -1950,8 +1951,8 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
             document_options["output_schema"] = DOCUMENT_SCHEMA
         if node.get("resultProtocolVersion") in (1, 2, 3, 4, 5):
             from workflow_outcomes import schema, instruction
-            node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"), node["resultProtocolVersion"], defer_blocked=bool(node.get("waitPolicy")))
-            document_options["output_schema"] = schema(node["resultProtocolVersion"], jira=node.get("jiraEnabled", False))
+            node["prompt"] += instruction(workflow_id, node_id, node.get("captureDocument"), node["resultProtocolVersion"], defer_blocked=bool(node.get("waitPolicy")), advance_mode=node.get("advanceMode"))
+            document_options["output_schema"] = schema(node["resultProtocolVersion"], jira=node.get("jiraEnabled", False), delivery_version=node.get("jiraDeliveryVersion", 1))
         job = await orchestrator.dispatch(
             **document_options,
             agent_id=node["agentId"],
@@ -1969,6 +1970,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
         job.capture_document = bool(node.get("captureDocument"))
         job.result_protocol_version = node.get("resultProtocolVersion")
         job.jira_enabled = node.get("jiraEnabled", False)
+        job.jira_delivery_version = node.get("jiraDeliveryVersion", 1)
     except Exception as error:
         store.sync_node_job(
             workflow_id,

@@ -62,17 +62,25 @@ public class WorkflowRunStore {
     return persistPrepared(task, null, payload, snapshot, triggerSource);
   }
 
+  public void lockConfiguration() {
+    groups.lock();
+  }
+
   /** 从指定历史运行的不可变快照创建一条重试记录。 */
   @Transactional
   public PreparedRun prepareRetry(String sourceWorkflowId) {
+    groups.lock();
     TaskRunEntity source = findRun(sourceWorkflowId);
     if (source.groupId == null) throw new ConflictFailure("旧运行未归组，请使用已归组任务的最新配置运行。");
     groups.require(source.groupId);
     ObjectNode payload = (ObjectNode) json.read(source.submittedJson);
     String workflowId = UUID.randomUUID().toString();
     payload.put("workflowId", workflowId);
-    payload.remove("jiraReservation");
-    if (payload.path("jira").isObject()) payload.put("jiraRetryOf", sourceWorkflowId);
+
+    if (payload.path("jira").isObject()) {
+      groups.requireJira(payload.path("jira").path("connectionId").asText(), source.groupId);
+      payload.put("jiraRetryOf", sourceWorkflowId);
+    }
     if (!payload.has("resultProtocolVersion")) payload.put("resultProtocolVersion", 1);
     payload.put("taskDefinitionId", source.taskDefinition.id);
     ObjectNode snapshot = (ObjectNode) json.read(source.snapshotJson);
@@ -352,7 +360,11 @@ public class WorkflowRunStore {
     root.put("resultProtocolVersion", "automatic".equals(task.sop.advanceMode) ? 3 : 5);
     root.put("taskDefinitionId", task.id);
     if (task.sop.jiraJql != null) {
-      root.putObject("jira").put("jql", task.sop.jiraJql).put("account", task.sop.jiraAccount);
+      root.put("jiraDeliveryVersion", 3);
+      groups.requireJira(task.sop.jiraConnectionId, task.groupId);
+      root.putObject("jira")
+          .put("jql", task.sop.jiraJql)
+          .put("connectionId", task.sop.jiraConnectionId);
     }
     root.put("groupId", task.groupId);
     root.put("name", task.name);

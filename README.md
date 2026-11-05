@@ -17,17 +17,17 @@ Python 工作流网关（8080）── 主监督 App Server（4500）
 任务运行监控中心（8090）
 ```
 
-中央 Python 网关与本机兼容 MCP 使用同一 SQLite 工作流运行库；阶段 B 的远程 Sidecar 只使用带机器认证的中央内部 API，不读取 SQLite，也不配置数据库账号。配置中心另外使用 MySQL 保存角色、SOP、任务定义和运行快照。
+中央 Python 网关与本机兼容 MCP 使用同一 SQLite 工作流运行库；远程 Sidecar 只使用带机器认证的中央内部 API，不读取 SQLite，也不配置数据库账号。配置中心另外使用 MySQL 保存角色、SOP、任务定义和运行快照。
 
-网关支持本机和远程多个主监督 app-server。每个主监督固定容量为 `1`：同一主监督的工作流按 `created_at + workflowId` 排队，不同主监督可以并行。远程主监督由 Sidecar 每 5 秒上报权威心跳，20 秒未收到心跳即离线；本机兼容模式继续使用轻量连接探测。配置中心在 SOP 主监督建议列表中显示在线空闲、在线忙碌、离线或状态未知。配置中心根据已登记的主监督筛选同组执行机；保存和提交都需要网关在线并校验能力、分组，提交时额外要求启用且检测通过。步骤执行机和工作目录不要求一致，空目录继承执行机默认值。
+网关支持本机和远程多个主监督，每台同时运行一个工作流。新 SOP 按分组自动分配全局监督机和组内执行机，整项运行固定执行机及工作目录，分配时核对机器状态、模型和权限。固定机器配置仅用于历史兼容。调度与占用规则见 [Python 工作流服务](services/python-workflow/README.md#分组调度与整项机器占用)。
 
-配置中心可选接入一个全局钉钉机器人，使用官方 Java SDK 主动建立长连接，无需公网入站端口。所有能接触机器人的用户均可发送 `@机器人 任务定义名称` 启动任务，后续通过 `工作流ID + 问题` 或引用任务消息对话，回答在提问会话中 @ 提问人。启动不带图片，后续对话可以将原图交给 Codex；等待期间原执行者可按用户明确要求参考图片修订产物与交接总结。同一任务定义仍只允许一个未结束运行。通知对象仅用于已启用主动通知的网页、定时运行，允许多个任务使用同一对象；钉钉启动在启动会话按顺序发送普通进度消息和最终结果，工具调用与可读思考摘要由 SOP 的钉钉展示开关控制，不额外推送给配置对象。部署要求和限制见 [钉钉统一入口升级说明](docs/DINGTALK_UNIFIED_ENTRY_UPGRADE.zh-CN.md)。
+配置中心可选接入一个全局钉钉机器人，使用官方 Java SDK 主动建立长连接，无需公网入站端口。所有能接触机器人的用户均可发送 `@机器人 任务定义名称` 启动任务，后续通过 `工作流ID + 问题` 或引用任务消息对话，回答在提问会话中 @ 提问人。启动不带图片，后续对话可以将原图交给 Codex；等待期间原执行者可按用户明确要求参考图片修订产物与交接总结。普通任务同一时间只允许一个未结束运行；Jira 任务可并行处理不同工单，仍受机器独占和工单领取锁约束。通知对象仅用于已启用主动通知的网页、定时运行，允许多个任务使用同一对象；钉钉启动在启动会话按顺序发送普通进度消息和最终结果，工具调用与可读思考摘要由 SOP 的钉钉展示开关控制，不额外推送给配置对象。部署要求和限制见 [钉钉统一入口升级说明](docs/DINGTALK_UNIFIED_ENTRY_UPGRADE.zh-CN.md)。
 
 ## 等待期间的讨论与结果交接
 
 新提交的半自动 SOP 不设倒计时，每一步成功后必须手动确认进入下一步，最后一步必须确认结束；遇阻一直等待人工重新执行或终止任务。收到任务消息后继续保持等待，由当前步骤原执行者在原会话中回答。用户明确要求修改、采纳方案或整理进结果时，执行者可在原权限内修改工作目录文件，并保存完整最新版交接总结；解释、假设和备选方案不改变总结。
 
-成功步骤点击“进入下一步”后交接最新版结果，最后一步点击“确认结束”；遇阻卡片点击“重新执行”只处理当前步骤。卡片“终止任务”按人工取消处理。所有步骤共享实际工作目录由使用者保证，通过文字总结交接，不新增目录校验或文件传输。累计文件交接模式已移除，历史附件仍可读取。
+成功步骤点击“进入下一步”后交接最新版结果，最后一步点击“确认结束”；遇阻卡片点击“重新执行”只处理当前步骤。卡片“终止任务”按人工取消处理。分组模式固定整项运行的执行机和目录，通过文件及文字总结交接；历史固定机器模式的目录共享由使用者保证。历史附件仍可读取。
 
 聊天不再触发停止、跳过、返工或继续，“确认执行”“确认继续”等文字也不操作流程。停止可通过等待卡片或配置中心取消运行，按原快照重试仍创建新工作流。非等待期间保留独立任务助手的只读查询和咨询。
 
@@ -89,22 +89,18 @@ Copy-Item .\config\workflow-service.example.json .\config\workflow-service.json
 
 本机主监督保留 `local_db` 执行方式：统一配置 `machine_defaults.orchestration_mode=local_db`，本机编排进程运行 `services/python-workflow/src/codex_orchestrator_mcp.py`，与网关读取同一服务配置及同一 SQLite。无需机器清单环境变量。
 
-启动 8091 后，在“机器管理”建立分组、登记 IP／端口／能力并手动检测，随后在 SOP 中选择同组机器。本机与远程均使用文字总结交接，业务文件直接在共用工作目录中读写。
+启动 8091 后，在“机器管理”建立分组、登记 IP／端口／能力并手动检测，随后创建本组 SOP，由平台在运行时分配机器。本机与远程均使用文字总结交接，业务文件直接在共用工作目录中读写。
 
 ### 3. 启动两个 Java Web 应用
 
-本项目 macOS 使用 `mvnd`，Windows 使用 `mvn`。下方 PowerShell 示例用于 Windows；macOS 启动、测试、打包和格式化时使用 `mvnd`，路径使用 `/`。
+本地开发使用 macOS 和 `mvnd`，在两个终端分别启动：
 
-```powershell
-cd .\services\workflow-console
-mvn spring-boot:run
+```sh
+mvnd -f services/workflow-console/pom.xml spring-boot:run
 ```
 
-另一个终端：
-
-```powershell
-cd .\services\role-task-config-center
-mvn spring-boot:run
+```sh
+mvnd -f services/role-task-config-center/pom.xml spring-boot:run
 ```
 
 默认访问地址：
@@ -121,9 +117,9 @@ mvn spring-boot:run
 - 根 README 维护项目概览、快速启动和统一测试入口；模块 README 维护对应功能、接口、配置和当前限制。部署与升级步骤放在 `docs/`。
 - [AGENTS.md](AGENTS.md) 维护 AI 修改仓库时的工作流程、架构约束、安全要求和交付检查。功能、接口或配置变化时更新对应 README；工作规则变化时更新 AGENTS。详细说明只维护一处，其他位置使用链接，关键约束可以简短重复。
 
-## 跨机器会话记录
+## 会话记录
 
-`history/` 只保存 Markdown 会话总结，并随 Git 提交，用于 macOS 与 Windows 之间交接。只有用户明确要求总结或写入 history 时才生成记录，不自动总结；复现代码放在模块测试目录或 `scripts/`，不放在 history。换电脑前提交并推送，另一台电脑同步同一分支后，先读取最新的日期命名总结，再核对当前分支和代码。命名、内容与读取规则见 [AGENTS.md](AGENTS.md#跨机器会话交接)。
+项目仅在 macOS 上开发。`history/` 保存按需生成的 Markdown 会话总结，用于后续会话恢复上下文；只有用户明确要求时才创建。续接先检查工作区，再读取最新总结并核对当前代码，不自动拉取、提交或推送。详细规则见 [AGENTS.md](AGENTS.md#开发环境与会话续接)。
 
 ## 测试与格式化
 
@@ -131,16 +127,7 @@ mvn spring-boot:run
 
 Python（从仓库根目录）：
 
-优先检查并使用当前机器已有的根目录 `.venv`，不要假定操作系统、Python 小版本或依赖一定已安装。若未以 editable 方式安装本模块，显式设置 `PYTHONPATH`，避免测试找不到 `src` 中的模块。Windows 示例：
-
-```powershell
-$env:PYTHONPATH = "$PWD\services\python-workflow\src"
-.\.venv\Scripts\python.exe -m unittest discover `
-  -s services/python-workflow/tests `
-  -t services/python-workflow -v
-```
-
-macOS/Linux（从仓库根目录）：
+使用根目录已有的 `.venv`；未以 editable 方式安装模块时显式设置 `PYTHONPATH`：
 
 ```sh
 PYTHONPATH=services/python-workflow/src .venv/bin/python -m unittest discover \
@@ -153,13 +140,7 @@ PYTHONPATH=services/python-workflow/src .venv/bin/python -m unittest discover \
 uv run --project services/python-workflow python -m unittest discover -s services/python-workflow/tests -t services/python-workflow -v
 ```
 
-长任务集成验证需要可用的本地环境，同样优先使用根目录虚拟环境。Windows：
-
-```powershell
-.\.venv\Scripts\python.exe scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
-```
-
-macOS/Linux：
+长任务集成验证需要可用的本地环境，同样优先使用根目录虚拟环境：
 
 ```sh
 .venv/bin/python scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
@@ -171,20 +152,11 @@ macOS/Linux：
 uv run --project services/python-workflow python scripts/verify_long_job.py --delay-sec 3 --wait-sec 1
 ```
 
-Java 命令按当前操作系统选择：macOS 使用 `mvnd`，Windows 使用 `mvn`；不要把另一台电脑的命令直接照搬到当前环境。
-
-macOS（从仓库根目录）：
+Java 测试（从仓库根目录）：
 
 ```sh
 mvnd -f services/workflow-console/pom.xml test
 mvnd -f services/role-task-config-center/pom.xml test
-```
-
-Windows（从仓库根目录）：
-
-```powershell
-mvn -f services/workflow-console/pom.xml test
-mvn -f services/role-task-config-center/pom.xml test
 ```
 
 Java 构建会在 `validate` 阶段检查格式。两个模块统一使用 `fmt-maven-plugin 2.29`（内含 `google-java-format 1.28.0`），已验证格式检查可在 JDK 25.0.2 下执行；编译目标仍为 Java 17，无需跳过格式检查。仅格式化实际修改过的 Java 模块；macOS：
@@ -192,13 +164,6 @@ Java 构建会在 `validate` 阶段检查格式。两个模块统一使用 `fmt-
 ```sh
 mvnd -f services/workflow-console/pom.xml fmt:format
 mvnd -f services/role-task-config-center/pom.xml fmt:format
-```
-
-Windows：
-
-```powershell
-mvn -f services/workflow-console/pom.xml fmt:format
-mvn -f services/role-task-config-center/pom.xml fmt:format
 ```
 
 不要为了通过格式检查而格式化整个仓库或改动无关文件。需要真实 MySQL、Codex app-server 或远程执行机的测试，如果环境不可用，应明确说明未运行原因，不能声称已验证。

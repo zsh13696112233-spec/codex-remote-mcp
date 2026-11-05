@@ -24,6 +24,20 @@ public class JiraRunController {
     return pool.status(id);
   }
 
+  @GetMapping({"/api/jira-statistics", "/api/jira-statistics/items"})
+  public JsonNode statistics(
+      @RequestParam(defaultValue = "") String groupId,
+      @RequestParam(defaultValue = "") String project,
+      @RequestParam(defaultValue = "") String category,
+      @RequestParam(defaultValue = "") String developer,
+      @RequestParam(required = false) Long before,
+      jakarta.servlet.http.HttpServletRequest request) {
+    if (!groupId.isEmpty()) java.util.UUID.fromString(groupId);
+    if (before != null && before < 1) throw new IllegalArgumentException("分页参数无效。");
+    return pool.statistics(
+        groupId, project, category, developer, before, request.getRequestURI().endsWith("/items"));
+  }
+
   @GetMapping("/api/jira-pool")
   public JsonNode pool(
       @RequestParam(defaultValue = "") String groupId,

@@ -65,6 +65,29 @@ public class JiraPoolService {
     return result;
   }
 
+  public JsonNode statistics(
+      String group, String project, String category, String developer, Long before, boolean items) {
+    ObjectNode result =
+        (ObjectNode)
+            gateway.get(
+                "/jira-statistics"
+                    + (items ? "/items" : "")
+                    + "?groupId="
+                    + encode(group)
+                    + "&project="
+                    + encode(project)
+                    + "&category="
+                    + encode(category)
+                    + "&developer="
+                    + encode(developer)
+                    + (before == null ? "" : "&before=" + before));
+    for (JsonNode item : result.path("items")) {
+      if (item.hasNonNull("workflowId"))
+        ((ObjectNode) item).put("monitorUrl", runs.monitorUrl(item.path("workflowId").asText()));
+    }
+    return result;
+  }
+
   private static String encode(String value) {
     return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8);
   }
@@ -97,7 +120,7 @@ public class JiraPoolService {
         return;
       }
       if (!state.equals("ready")) {
-        requests.state(id, "waiting", "正在查找任务或等待采集机器。");
+        requests.state(id, "waiting", "等待独立采集更新工单池。");
         return;
       }
       if (!request.hasNonNull("reservationId")) {
@@ -113,21 +136,6 @@ public class JiraPoolService {
                 .asInt()
             == 0) {
           requests.state(id, "waiting", "工单已采集，等待空闲机器。");
-          return;
-        }
-      }
-      ObjectNode check = requests.checkPayload(id);
-      if (check != null) {
-        JsonNode checked = gateway.checkSchedule(check);
-        boolean passed = checked.path("status").asText().equals("passed");
-        boolean retryable =
-            checked.path("status").asText().equals("skipped")
-                && checked.path("retryable").asBoolean(false);
-        String reason = checked.path("reason").asText();
-        if (reason.isBlank() || reason.length() > 512) reason = "执行前检查未通过，本批不派发。";
-        requests.checkFinished(id, passed, retryable, reason);
-        if (!passed) {
-          if (!retryable) gateway.delete("/jira-collections/" + id);
           return;
         }
       }

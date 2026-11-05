@@ -4,6 +4,28 @@ from workflow_outcomes import instruction
 
 
 class OutcomeInstructionTests(unittest.TestCase):
+    def test_automatic_resolves_problems_before_terminal_cleanup(self):
+        for version in (1, 2, 3):
+            with self.subTest(version=version):
+                prompt = instruction("w", "n", False, version, advance_mode="automatic")
+                self.assertLess(prompt.index("最终输出前检查"), prompt.index("【仅在确认真实阻断后"))
+                for text in ("不能认定完成不等于不能继续执行", "实际修正调用", "不无限重试",
+                             "已成功不重复执行", "不降低证据标准", "不授权恢复已结束的工作流",
+                             "不覆盖职责的自主处理要求、阻断判定及权限约束", "最小外部恢复条件",
+                             "评论未确认成功不得转交", "存在该标记则复用"):
+                    self.assertIn(text, prompt)
+                self.assertNotIn("blocked（必要条件不满足", prompt)
+
+    def test_semi_automatic_and_closing_keep_existing_instructions(self):
+        for version in (1, 2, 4, 5):
+            for waiting in (False, True):
+                with self.subTest(version=version, waiting=waiting):
+                    original = instruction("w", "n", True, version, defer_blocked=waiting)
+                    semi = instruction("w", "n", True, version, defer_blocked=waiting,
+                                       advance_mode="semi_automatic")
+                    self.assertEqual(original, semi)
+                    self.assertNotIn("【全自动执行与结束条件】", semi)
+
     def test_sop_conclusion_and_submission_report_survive_all_prompt_branches(self):
         for version in (1, 2, 3, 4, 5):
             for capture in (False, True):

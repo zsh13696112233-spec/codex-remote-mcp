@@ -17,14 +17,14 @@
 
 Windows 使用根目录已有虚拟环境：
 
-```powershell
-$env:PYTHONPATH="$PWD/services/python-workflow/src;$PWD/services/python-workflow"
-.venv/Scripts/python.exe -m unittest tests.test_workflow_consultation tests.test_workflow_gateway tests.test_workflow_store -q
+```sh
+export PYTHONPATH="$PWD/services/python-workflow/src:$PWD/services/python-workflow"
+.venv/bin/python -m unittest tests.test_workflow_consultation tests.test_workflow_gateway tests.test_workflow_store -q
 node --test services/workflow-console/src/test/js/consultation.test.cjs
-mvn -f services/role-task-config-center/pom.xml -Dtest=DingTalkBotCoordinatorTest test
+mvnd -f services/role-task-config-center/pom.xml -Dtest=DingTalkBotCoordinatorTest test
 ```
 
-macOS 使用 `.venv/bin/python`、冒号分隔 `PYTHONPATH` 和 `mvnd`，具体入口见根 README。
+统一测试入口见根 README。
 
 可选无账号隔离协议验收：将 `CONSULTATION_TEST_CODEX` 设为本机 Codex 可执行文件绝对路径，运行 `tests.test_consultation_app_server`。该用例使用临时工作区和空配置，仅验证只读沙箱响应及外部工具清单，不调用模型，不证明完整咨询或实际操作系统写入拦截已通过。
 

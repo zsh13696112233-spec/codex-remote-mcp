@@ -31,6 +31,20 @@ class JiraPoolServiceTest {
   }
 
   @Test
+  void statisticsEncodesFiltersAndLinksSelectedResultOnly() {
+    var result = node();
+    result.putArray("items").addObject().put("workflowId", "final");
+    when(gateway.get(
+            "/jira-statistics/items?groupId=&project=TEST&category=passed&developer=A%26B&before=7"))
+        .thenReturn(result);
+    when(runs.monitorUrl("final")).thenReturn("/monitor?workflowId=final");
+    var actual = service.statistics("", "TEST", "passed", "A&B", 7L, true);
+    assertEquals(
+        "/monitor?workflowId=final", actual.path("items").get(0).path("monitorUrl").asText());
+    verifyNoInteractions(requests, workflows);
+  }
+
+  @Test
   void boardAddsMonitorLinksForEveryHistoricalExecutionEvenWhenQueuedAgain() {
     var result = node();
     var item = result.putArray("items").addObject();
@@ -56,51 +70,42 @@ class JiraPoolServiceTest {
   }
 
   @Test
-  void noIssuesDoesNotCreateRunOrExecuteCheck() {
+  void noIssuesDoesNotCreateRun() {
     setup(0);
     service.advance("r");
     verify(requests).state("r", "empty", "没有待分配工单。");
     verify(requests, never()).prepare(any(), any());
-    verify(requests, never()).checkPayload(any());
     verifyNoInteractions(workflows);
   }
 
   @Test
-  void waitsForCapacityBeforeCheckOrReservation() {
+  void waitsForCapacityBeforeReservation() {
     setup(2);
     when(gateway.post(eq("/jira-capacity"), any())).thenReturn(node().put("capacity", 0));
     service.advance("r");
     verify(requests).state(eq("r"), eq("waiting"), anyString());
-    verify(requests, never()).checkPayload(any());
     verify(requests, never()).reservation(any());
   }
 
   @Test
-  void busyCheckMachineKeepsCollectionPendingWithoutStartingRun() {
-    setup(2).put("source", "schedule");
+  void scheduledIssueWithCapacityIsReservedAndSubmittedDirectly() {
+    setup(1).put("source", "schedule");
     when(gateway.post(eq("/jira-capacity"), any())).thenReturn(node().put("capacity", 1));
-    when(requests.checkPayload("r")).thenReturn(node());
-    when(gateway.checkSchedule(any()))
-        .thenReturn(
-            node().put("status", "skipped").put("retryable", true).put("reason", "检查执行机忙。"));
+    when(requests.reservation("r")).thenReturn("reservation");
+    when(gateway.post(eq("/jira-reservations"), any()))
+        .thenReturn(node().set("reservation", node().put("issueKey", "TEST-1")));
+    when(gateway.get("/jira-collections/r")).thenReturn(node().put("pending", 0));
+    var prepared =
+        new TaskLaunchStore.LaunchReservation("task", new PreparedRun("run", node()), false);
+    when(requests.prepare(eq("r"), any())).thenReturn(prepared);
     service.advance("r");
-    verify(requests).checkFinished("r", false, true, "检查执行机忙。");
-    verify(gateway, never()).delete(any());
-    verify(requests, never()).reservation(any());
-    verifyNoInteractions(workflows);
-  }
-
-  @Test
-  void falseCheckResultStopsBatchAndPreservesReason() {
-    setup(2).put("source", "schedule");
-    when(gateway.post(eq("/jira-capacity"), any())).thenReturn(node().put("capacity", 1));
-    when(requests.checkPayload("r")).thenReturn(node());
-    when(gateway.checkSchedule(any()))
-        .thenReturn(node().put("status", "skipped").put("reason", "条件不满足，已跳过本次。"));
-    service.advance("r");
-    verify(requests).checkFinished("r", false, false, "条件不满足，已跳过本次。");
-    verify(gateway).delete("/jira-collections/r");
-    verify(requests, never()).reservation(any());
+    verify(workflows).submitReservation(eq(prepared), eq("schedule"), anyString());
+    verify(requests).dispatched("r", false);
+    verify(gateway).post(eq("/jira-collections"), any());
+    verify(gateway).post(eq("/jira-capacity"), any());
+    verify(gateway).post(eq("/jira-reservations"), any());
+    verify(gateway).get("/jira-collections/r");
+    verifyNoMoreInteractions(gateway);
   }
 
   @Test

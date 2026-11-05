@@ -81,7 +81,13 @@ async def jira_capacity(request):
 
 
 def jira_routes():
-    return [Route('/jira-collections', jira_collection, methods=['POST']),
+    return [Route('/jira-statistics', jira_statistics, methods=['GET']),
+            Route('/jira-statistics/items', jira_statistics, methods=['GET']),
+            Route('/jira-polling', jira_polling, methods=['POST']),
+            Route('/jira-accounts', jira_accounts, methods=['GET', 'POST']),
+            Route('/jira-accounts/{account_id}', jira_accounts, methods=['GET', 'PUT', 'DELETE']),
+            Route('/jira-accounts/{account_id}/test', jira_accounts, methods=['POST']),
+            Route('/jira-collections', jira_collection, methods=['POST']),
             Route('/jira-collections/{request_id}', jira_collection, methods=['GET', 'DELETE']),
             Route('/jira-reservations', jira_reservation, methods=['POST']),
             Route('/jira-pool', jira_pool_board, methods=['GET']),
@@ -146,5 +152,50 @@ async def jira_run_detail(request):
         if result is None:
             return JSONResponse({'error': '未找到 Jira 运行记录。'}, status_code=404)
         return JSONResponse(result)
+    except (ValueError, RuntimeError) as error:
+        return _internal_error_response(error)
+
+
+async def jira_accounts(request):
+    import jira_accounts as accounts
+    from workflow_gateway import _database_call, _internal_error_response
+    try:
+        store = request.app.state.gateway.store
+        identifier = request.path_params.get('account_id')
+        if request.method == 'GET':
+            if identifier:
+                with store._connect() as db:
+                    return JSONResponse(accounts.public(accounts.get(db, identifier)))
+            return JSONResponse(await _database_call(accounts.listing, store, request.query_params.get('groupId')))
+        if request.method == 'DELETE':
+            return JSONResponse(await _database_call(accounts.delete, store, identifier, int(request.query_params.get('version', '0'))))
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError('请求体必须是对象。')
+        if request.url.path.endswith('/test'):
+            return JSONResponse(await _database_call(accounts.detect, store, identifier, body.get('version')))
+        return JSONResponse(await _database_call(accounts.save, store, identifier, body), status_code=201 if identifier is None else 200)
+    except (ValueError, RuntimeError) as error:
+        return _internal_error_response(error)
+
+
+async def jira_polling(request):
+    from workflow_gateway import _database_call, _internal_error_response
+    from jira_pool import sync_polling
+    try:
+        return JSONResponse(await _database_call(sync_polling, request.app.state.gateway.store, await request.json()))
+    except (ValueError, KeyError, TypeError, AttributeError, RuntimeError) as error:
+        return _internal_error_response(ValueError('采集任务配置无效。') if isinstance(error, (KeyError, TypeError, AttributeError)) else error)
+
+
+async def jira_statistics(request):
+    from workflow_gateway import _database_call, _internal_error_response
+    from jira_statistics import statistics
+    try:
+        q = request.query_params
+        return JSONResponse(await _database_call(statistics, request.app.state.gateway.store,
+            q.get('groupId', ''), q.get('project', ''), items=request.url.path.endswith('/items'),
+            category=q.get('category', ''), developer=q.get('developer', ''),
+            before=int(q['before']) if 'before' in q else None))
     except (ValueError, RuntimeError) as error:
         return _internal_error_response(error)

@@ -136,10 +136,11 @@ class WaitService:
                 agent_id=target["agentId"], thread_id=target["threadId"], cwd=cwd, model=target["model"],
                 prompt=prompt, write=target["write"], permission_profile=target["permissionProfile"],
                 reasoning_effort=target.get("reasoningEffort"), timeout_sec=target["timeoutSec"],
-                output_schema=schema(target["resultProtocolVersion"], jira=target.get("jiraEnabled", False)), event_callback=event)
+                output_schema=schema(target["resultProtocolVersion"], jira=target.get("jiraEnabled", False), delivery_version=target.get("jiraDeliveryVersion", 1)), event_callback=event)
             job.capture_document = target["captureDocument"] and not closing
             job.result_protocol_version = target["resultProtocolVersion"]
             job.jira_enabled = target.get("jiraEnabled", False)
+            job.jira_delivery_version = target.get("jiraDeliveryVersion", 1)
             await db(gateway.store.set_wait_job, workflow_id, gate_id, job.job_id, job.turn_id)
             if not closing:
                 await db(gateway.store.update_node_actual_prompt, workflow_id, target["nodeId"], job.prompt)

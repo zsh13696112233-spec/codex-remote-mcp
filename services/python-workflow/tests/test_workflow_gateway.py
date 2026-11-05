@@ -23,6 +23,15 @@ class GatewayCommandLineTests(unittest.TestCase):
 
         self.assertEqual(args.host, "0.0.0.0")
 
+    def test_retired_schedule_check_endpoint_is_not_available(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "agents.json")
+            config.write_text(json.dumps({"agents": {"local": {"url": "ws://127.0.0.1:1", "cwd": "/work"}}}), encoding="utf-8")
+            app = fixture_app(config_path=config, db_path=Path(directory, "workflows.db"))
+            with TestClient(app) as client:
+                response = client.post("/schedule-checks", json={})
+            self.assertEqual(response.status_code, 404)
+
 
 class SupervisorPromptTests(unittest.TestCase):
     def test_visible_updates_are_written_for_nontechnical_users(self) -> None:

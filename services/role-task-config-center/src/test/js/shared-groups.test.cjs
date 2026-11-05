@@ -12,7 +12,7 @@ function fixture(search='') {
   const navButtons=['roles','groups','skills'].map(page=>({...element(),dataset:{page}}));
   const document={querySelector(selector){if(!nodes.has(selector))nodes.set(selector,element());return nodes.get(selector)},querySelectorAll(selector){return selector==='nav button'?navButtons:[]},addEventListener(){},createElement:element};
   const context=vm.createContext({document,window:{addEventListener(){}},location:{search,href:'http://localhost/'+search},history:{replaceState(){}},URL,URLSearchParams,HTMLElement:class {},console,queueMicrotask(){},setInterval(){},setTimeout(){},confirm(){return false},fetch(){throw Error('Unexpected network request')}});
-  for(const name of ['groups.js','machines.js','run-catalog.js','task-schedules.js','skills.js','app.js']) {
+  for(const name of ['groups.js','machines.js','run-catalog.js','task-schedules.js','skills.js','jira-accounts.js','app.js']) {
     let script=fs.readFileSync(path.join(__dirname,'../../main/resources/static',name),'utf8');
     if(name==='app.js')script=script.slice(0,script.indexOf('const initialPage='))+script.slice(script.indexOf('const effortCatalogs ='));
     vm.runInContext(script,context,{filename:name});
@@ -31,10 +31,10 @@ function jiraFixture(jira=null){
 
 test('Jira status defaults to pending and is editable after reload',()=>{
   const {run}=jiraFixture();
-  run("Object.assign(state.sop.draft,{jiraEnabled:true,jiraProject:' 产品研发 A ',jiraAccount:' bot '})");
+  run("Object.assign(state.sop.draft,{jiraEnabled:true,jiraProject:' 产品研发 A ',jiraConnectionId:'central'})");
   assert.equal(run('validateSop()'),'');
   assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner"');
-  assert.equal(run('sopPayload().jira.account'),'bot');
+  assert.equal(run('sopPayload().jira.connectionId'),'central');
   const html=run('workflowInspectorHtml()');
   assert.match(html,/data-sop-field="jiraProject"/);
   assert.match(html,/data-sop-field="jiraStatus"/);

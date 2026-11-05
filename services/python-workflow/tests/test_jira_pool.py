@@ -16,7 +16,8 @@ class PoolTests(unittest.TestCase):
         self.store = WorkflowStore(Path(self.tmp.name) / 'test.db')
         self.task = str(uuid.uuid4())
         self.group = str(uuid.uuid4())
-        self.config = {'jql': 'project = TEST', 'account': 'bot'}
+        from tests.test_jira_accounts import seed_account
+        self.config = {'jql': 'project = TEST', 'connectionId': seed_account(self.store, self.group)}
 
     def batch(self, keys, source='schedule'):
         request = str(uuid.uuid4())
@@ -25,7 +26,7 @@ class PoolTests(unittest.TestCase):
         request_collection(self.store, body)
         self.assertEqual(request_collection(self.store, body)['requestId'], request)
         with self.store._connect() as db:
-            db.execute("UPDATE jira_collections SET state='ready',server_key='http://jira.test',account_id='bot',count=? WHERE request_id=?", (len(keys), request))
+            db.execute("UPDATE jira_collections SET state='ready',server_key='http://jira.test',account_id='bot',account_alias='bot',count=? WHERE request_id=?", (len(keys), request))
             for key in keys:
                 db.execute("INSERT INTO jira_pool_items(request_id,server_key,issue_key,title) VALUES(?,'http://jira.test',?,'标题')", (request, key))
         return request
@@ -37,7 +38,7 @@ class PoolTests(unittest.TestCase):
         self.bind_run(request, 'detail', 'completed')
         with self.store._connect() as db:
             db.execute("UPDATE workflows SET response=? WHERE workflow_id='detail'", ('验证受限，需人工补验 Bearer secret',))
-            db.execute("INSERT INTO workflow_jira_deliveries VALUES('detail','step',1,'submitted','r25864','需人工补验',?)", (utc_now(),))
+            db.execute("INSERT INTO workflow_jira_deliveries (workflow_id,node_id,attempt,status,reference,summary,recorded_at) VALUES('detail','step',1,'submitted','r25864','需人工补验',?)", (utc_now(),))
         result = execution_detail(self.store, 'detail')
         self.assertIn('需人工补验', result['summary'])
         self.assertNotIn('secret', result['summary'])
@@ -62,6 +63,25 @@ class PoolTests(unittest.TestCase):
         first = reserve(self.store, a, identifier)
         self.assertEqual(first, reserve(WorkflowStore(self.store.path), a, identifier))
         self.assertIsNone(reserve(self.store, b, str(uuid.uuid4())))
+
+    def test_mapping_change_blocks_pending_dispatch_but_keeps_bound_snapshot(self):
+        request = self.batch(['TEST-1', 'TEST-2'])
+        frozen = reserve(self.store, request, str(uuid.uuid4()))
+        self.workflow('frozen')
+        with self.store._connect() as db:
+            bind(db, {'workflowId': 'frozen', 'jiraReservation': frozen,
+                      'taskDefinitionId': self.task, 'groupId': self.group, 'jira': self.config})
+        pending = reserve(self.store, request, str(uuid.uuid4()))
+        with self.store._connect() as db:
+            db.execute("UPDATE jira_accounts SET username='new-login',executor_alias='new-login' WHERE id=?",
+                       (self.config['connectionId'],))
+        self.assertEqual(reserve(self.store, request, frozen['reservationId']), frozen)
+        with self.assertRaisesRegex(ValueError, '映射已变化'):
+            reserve(self.store, request, pending['reservationId'])
+        with self.store._connect() as db:
+            with self.assertRaisesRegex(ValueError, '快照不一致'):
+                bind(db, {'workflowId': 'pending', 'jiraReservation': pending,
+                          'taskDefinitionId': self.task, 'groupId': self.group, 'jira': self.config})
 
     def test_existing_pool_schema_adds_nullable_people_column(self):
         request = self.batch(['TEST-1'])
@@ -307,7 +327,7 @@ class PoolTests(unittest.TestCase):
                     record_rework(db, name, f'2026-11-03T0{index}:00:00+00:00')
                     record_rework(db, name, f'2026-11-03T0{index}:01:00+00:00')
                 if index == 1:
-                    db.execute("INSERT INTO workflow_jira_deliveries VALUES(?, 'a', 0, 'not_applicable', '', '审核结论：返工', ?)",
+                    db.execute("INSERT INTO workflow_jira_deliveries (workflow_id,node_id,attempt,status,reference,summary,recorded_at) VALUES(?, 'a', 0, 'not_applicable', '', '审核结论：返工', ?)",
                                (name, utc_now()))
         # Other Jira servers and issue keys must not contribute to this issue's total.
         for name, server, issue in [('other-server', 'http://other.test', 'TEST-1'),
@@ -471,7 +491,7 @@ class PoolTests(unittest.TestCase):
         with self.store._connect() as db:
             db.execute("UPDATE workflows SET status='completed',finished_at=? WHERE workflow_id='old'",(utc_now(),))
             db.execute("UPDATE workflow_nodes SET job_id='job' WHERE workflow_id='old'")
-            db.execute("INSERT INTO workflow_jira_deliveries VALUES('old','a',1,'not_submitted','','提交前检查失败',?)",(utc_now(),))
+            db.execute("INSERT INTO workflow_jira_deliveries (workflow_id,node_id,attempt,status,reference,summary,recorded_at) VALUES('old','a',1,'not_submitted','','提交前检查失败',?)",(utc_now(),))
         self.workflow('new')
         with self.store._connect() as db:
             record_rework(db,'new',utc_now())
@@ -482,11 +502,78 @@ class PoolTests(unittest.TestCase):
         with self.store._connect() as db:
             db.execute("UPDATE workflows SET status='failed',finished_at=? WHERE workflow_id='old'",(utc_now(),))
             db.execute("UPDATE workflow_nodes SET job_id='job' WHERE workflow_id='old'")
-            db.execute("INSERT INTO workflow_jira_deliveries VALUES('old','a',1,'unknown','','结果未知',?)",(utc_now(),))
+            db.execute("INSERT INTO workflow_jira_deliveries (workflow_id,node_id,attempt,status,reference,summary,recorded_at) VALUES('old','a',1,'unknown','','结果未知',?)",(utc_now(),))
         self.workflow('new')
         with self.store._connect() as db:
             record_rework(db,'new',utc_now())
             self.assertEqual(rework_history(db,'http://jira.test','TEST-1'),[])
+
+
+    def test_cross_group_accounts_share_one_issue_mutex(self):
+        first=self.batch(['TEST-1'])
+        other_group=str(uuid.uuid4())
+        from tests.test_jira_accounts import seed_account
+        self.group=other_group
+        self.config={**self.config,'connectionId':seed_account(self.store,other_group)}
+        second=self.batch(['TEST-1'])
+        self.assertIsNotNone(reserve(self.store,first,str(uuid.uuid4())))
+        self.assertIsNone(reserve(self.store,second,str(uuid.uuid4())))
+
+    def test_disabled_account_prevents_reservation_and_binding(self):
+        request=self.batch(['TEST-1'])
+        binding=reserve(self.store,request,str(uuid.uuid4()))
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_accounts SET enabled=0 WHERE id=?',(self.config['connectionId'],))
+        with self.assertRaisesRegex(ValueError,'未启用'):
+            reserve(self.store,request,binding['reservationId'])
+        with self.store._connect() as db, self.assertRaisesRegex(ValueError,'未启用'):
+            bind(db, {'jira':self.config,'groupId':self.group,'jiraReservation':binding})
+
+    def test_account_delete_checks_compressed_active_snapshot(self):
+        from jira_accounts import delete, AccountConflict
+        import zlib
+        self.workflow('active')
+        with self.store._connect() as db:
+            db.execute('UPDATE workflows SET spec_json=?,spec_zlib=? WHERE workflow_id=?',('{}',zlib.compress(json.dumps({'jira':self.config}).encode()),'active'))
+        with self.assertRaisesRegex(AccountConflict,'未完成运行'):
+            delete(self.store,self.config['connectionId'],1)
+
+    def test_restart_cancels_legacy_sources_without_deleting_history(self):
+        from jira_pool import recover
+        request=self.batch(['TEST-1'])
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_collections SET config_json=? WHERE request_id=?',(json.dumps({'jql':'project=TEST','account':'bot'}),request))
+        recover(self.store)
+        self.assertEqual(collection(self.store,request)['state'],'cancelled')
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT state FROM jira_pool_items WHERE request_id=?',(request,)).fetchone()[0],'cancelled')
+
+    def test_central_start_claim_is_authorized_idempotent_and_uses_frozen_alias(self):
+        from unittest.mock import patch
+        from jira_pool import prepare_run
+        from jira_http import JiraClient
+        request = self.batch(['TEST-1'])
+        binding = reserve(self.store, request, str(uuid.uuid4()))
+        self.workflow('central')
+        spec = {'workflowId':'central','taskDefinitionId':self.task,'groupId':self.group,
+                'jira':self.config,'jiraReservation':binding}
+        with self.store._connect() as db:
+            db.execute("UPDATE workflow_jira_runs SET issue_key=NULL WHERE workflow_id='central'")
+            db.execute("INSERT INTO workflow_allocations(workflow_id,group_id,supervisor_id,executor_id,cwd) VALUES('central',?,'s','e','C:/work')",(self.group,))
+            db.execute("INSERT INTO workflow_machine_claims VALUES('e','central',?,'occupied')",(utc_now(),))
+            bind(db,spec)
+            db.execute("UPDATE jira_accounts SET enabled=0,executor_alias='renamed' WHERE id=?",(self.config['connectionId'],))
+        with patch.object(self.store,'get_spec',return_value=spec):
+            with self.assertRaisesRegex(ValueError,'中央网关'):
+                self.store.jira_update('central','claim',{})
+            with patch.object(JiraClient,'identity',return_value='bot'), patch.object(JiraClient,'search',return_value={'TEST-1':('',{})}) as search:
+                prepare_run(self.store,spec)
+                prepare_run(self.store,spec)
+                search.assert_called_once()
+            context=self.store.jira_context('central')
+        self.assertEqual(context['state'],'claimed')
+        self.assertEqual(context['account'],'bot')
+        self.assertEqual(context['issueKey'],'TEST-1')
 
 
 if __name__ == '__main__':
@@ -505,23 +592,31 @@ class CollectionTests(unittest.IsolatedAsyncioTestCase):
         self.client=AsyncMock()
         self.client.__aenter__.return_value=self.client
         self.request=str(uuid.uuid4())
-        request_collection(self.store,{'requestId':self.request,'taskDefinitionId':str(uuid.uuid4()),'groupId':str(uuid.uuid4()),'source':'schedule','name':'测试','jira':{'jql':'project = TEST AND assignee = currentUser()','account':'bot'}})
+        from tests.test_jira_accounts import seed_account
+        self.group = str(uuid.uuid4())
+        self.connection = seed_account(self.store, self.group, 'user-1')
+        from jira_pool import sync_polling
+        sync_polling(self.store, {'tasks': [{'taskDefinitionId': str(uuid.uuid4()), 'groupId': self.group, 'name': '测试', 'jira': {'jql': 'project = TEST AND assignee = currentUser()', 'connectionId': self.connection}}]})
+        with self.store._connect() as db:
+            self.request = db.execute("SELECT request_id FROM jira_collections WHERE source='poll'").fetchone()[0]
 
     async def test_complete_pages_only_and_identity_saved_without_credentials(self):
-        from unittest.mock import patch, AsyncMock
+        from unittest.mock import patch
         from jira_pool import collect
-        with patch('jira_pool.acquire_supervisor',AsyncMock(return_value=('s',self.agent))), patch('jira_runtime.client_for',return_value=self.client), patch('jira_runtime.read_file',AsyncMock(return_value=b'{}')), patch('jira_runtime.account_from_config',return_value=('bot',{'baseUrl':'http://jira.test','token':'not-persisted'})), patch('jira_runtime.account_identity',AsyncMock(return_value='user-1')), patch('jira_runtime.search_page',AsyncMock(side_effect=[{'TEST-1':'标题'},{}])), patch('jira_runtime.collect_people',AsyncMock(return_value={})):
+        from jira_http import JiraClient, people
+        with patch.object(JiraClient, 'identity', return_value='user-1'), patch.object(JiraClient, 'developer_field', return_value=None), patch.object(JiraClient, 'search', side_effect=[{'TEST-1':('标题',people({},None))},{}]):
             await collect(self.gateway,self.request)
         self.assertEqual(collection(self.store,self.request)['state'],'ready')
         with self.store._connect() as db:
             row=dict(db.execute('SELECT * FROM jira_collections').fetchone())
         self.assertEqual(row['account_id'],'user-1')
-        self.assertNotIn('not-persisted',str(row))
+        self.assertNotIn('fixture-secret',str(row))
 
     async def test_failure_after_first_page_does_not_publish_partial_candidates(self):
-        from unittest.mock import patch, AsyncMock
+        from unittest.mock import patch
         from jira_pool import collect
-        with patch('jira_pool.acquire_supervisor',AsyncMock(return_value=('s',self.agent))), patch('jira_runtime.client_for',return_value=self.client), patch('jira_runtime.read_file',AsyncMock(return_value=b'{}')), patch('jira_runtime.account_from_config',return_value=('bot',{'baseUrl':'http://jira.test'})), patch('jira_runtime.account_identity',AsyncMock(return_value='user-1')), patch('jira_runtime.search_page',AsyncMock(side_effect=[{'TEST-1':'标题'},RuntimeError('remote')])):
+        from jira_http import JiraClient, JiraHttpError, people
+        with patch.object(JiraClient,'identity',return_value='user-1'), patch.object(JiraClient,'developer_field',return_value=None), patch.object(JiraClient,'search',side_effect=[{'TEST-1':('标题',people({},None))},JiraHttpError('连接失败')]):
             await collect(self.gateway,self.request)
         self.assertEqual(collection(self.store,self.request)['state'],'failed')
         self.assertEqual(collection(self.store,self.request)['pending'],0)

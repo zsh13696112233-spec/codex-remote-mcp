@@ -308,10 +308,63 @@ test('execution records show only current blocking and machine summary',()=>{
   assert.match(html,/查看本轮过程/);
   assert.doesNotMatch(html,/本轮结果|交付|步骤总结|机器详情|旧阻断隐藏|结束说明隐藏|本轮阻断原因|<details/);
 });
-test('pool personnel escapes names and renders missing values',()=>{
-  const ctx=context();ctx.row={issue_key:'TEST-1',sources:[],people:{developers:['<甲>','乙'],assignee:'',collectedAt:'now'}};
+test('pool shows developers and missing values but hides assignee',()=>{
+  const ctx=context();ctx.row={issue_key:'TEST-1',sources:[],people:{developers:['<甲>','乙'],assignee:'隐藏的负责人',collectedAt:'隐藏的人员采集时间'}};
   const html=vm.runInContext('jiraPoolRowHtml(row)',ctx);
-  assert.match(html,/开发人：&lt;甲&gt;、乙/);assert.match(html,/负责人：未获取/);
+  assert.match(html,/&lt;甲&gt;、乙/);assert.doesNotMatch(html,/负责人|隐藏的负责人|隐藏的人员采集时间/);
   delete ctx.row.people;
-  assert.match(vm.runInContext('jiraPoolRowHtml(row)',ctx),/开发人：未获取/);
+  assert.match(vm.runInContext('jiraPoolRowHtml(row)',ctx),/未获取/);
+});
+
+test('pool timestamps split date and clock consistently',()=>{
+  const ctx=context();
+  for(const value of ['2026/11/3 17:11:34','2026/11/3 22:28:06']) {
+    ctx.value=value;
+    assert.equal(vm.runInContext('jiraPoolTimeHtml(value)',ctx),`<span class="jira-pool-time">${value.replace(' ','<br>')}</span>`);
+  }
+});
+
+test('new delivery states and multiple revision labels render safely',()=>{
+  const ctx=context();
+  ctx.row={status:'completed',executionResult:{status:'limited_submitted',recorded:true,commits:[{repository:'客户端',revision:'r42'},{repository:'<服务端>',revision:'<r7>'}]}};
+  assert.equal(vm.runInContext('jiraRunStatus(row)',ctx),'受限提交');
+  assert.equal(vm.runInContext('jiraStatusKind(row)',ctx),'waiting');
+  const html=vm.runInContext('jiraCommitHtml(row)',ctx);
+  assert.match(html,/客户端 r42/);
+  assert.match(html,/&lt;服务端&gt; &lt;r7&gt;/);
+  for(const [status,label] of [['fully_submitted','完整提交'],['blocked','阻断结束'],['abnormal','异常']]){
+    ctx.row.executionResult.status=status;
+    assert.equal(vm.runInContext('jiraRunStatus(row)',ctx),label);
+  }
+  ctx.row.status='running';ctx.row.executionResult.status=null;
+  assert.equal(vm.runInContext('jiraRunStatus(row)',ctx),'正在执行');
+});
+
+test('historical review is explicit and unknown results are not submissions',()=>{
+  const ctx=context();
+  ctx.row={status:'completed',executionResult:{source:'historical_review',status:'unknown',commits:[]}};
+  assert.equal(vm.runInContext('jiraRunStatus(row)',ctx),'历史结果未确认');
+  assert.match(vm.runInContext('jiraCommitHtml(row)',ctx),/历史核对/);
+  assert.doesNotMatch(vm.runInContext('jiraCommitHtml(row)',ctx),/r\d+/);
+});
+
+test('manual no submission completion is green and explicitly attributed',()=>{
+  const ctx=context();
+  ctx.row={status:'completed',executionResult:{source:'manual_review',status:'completed_no_submission',commits:[],note:'待补验 <说明>'}};
+  assert.equal(vm.runInContext('jiraRunStatus(row)',ctx),'正常结束（无提交）');
+  assert.equal(vm.runInContext('jiraStatusKind(row)',ctx),'success');
+  assert.match(vm.runInContext('jiraCommitHtml(row)',ctx),/人工核对/);
+  const detail=vm.runInContext('jiraExecutionDetailHtml({},row)',ctx);
+  assert.match(detail,/jira-status success/);
+  assert.match(detail,/待补验 &lt;说明&gt;/);
+});
+
+test('review rework uses orange label and shows its formal reason',()=>{
+ const ctx=context();
+ ctx.row={status:'completed',executionResult:{status:'rework_required',commits:[],note:'界面回归失败 <返工>'}};
+ assert.equal(vm.runInContext('jiraRunStatus(row)',ctx),'审核不通过（待返工）');
+ assert.equal(vm.runInContext('jiraStatusKind(row)',ctx),'waiting');
+ const html=vm.runInContext('jiraExecutionDetailHtml({},row)',ctx);
+ assert.match(html,/结果说明：界面回归失败 &lt;返工&gt;/);
+ assert.match(html,/jira-status waiting/);
 });

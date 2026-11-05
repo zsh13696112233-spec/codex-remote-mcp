@@ -168,6 +168,7 @@
 .jira-table strong { color:#465568; font-size:13px; }
 .jira-table td>span:not(.jira-status),.jira-table small { display:block; }
 .jira-table small { margin-top:4px; font-size:11px; color:#8791a3; }
+.jira-table .jira-pool-time { white-space:nowrap; overflow-wrap:normal; }
 .jira-table .jira-warning { color:#a56620; }
 .jira-status { display:inline-block; padding:3px 8px; border-radius:6px; background:#f0f2f6; color:#737c8e; }
 .jira-status.success { background:#eaf7f0; color:#16825d; }
@@ -234,12 +235,25 @@
 .jira-catalog .empty { padding:40px 20px; min-height:140px; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:8px; }
 .jira-empty strong { color:#737c8e; font-size:13px; font-weight:500; }
 .jira-empty span { font-size:12px; color:#9aa2b1; }
-.jira-pool-table { min-width:900px; }
+.jira-pool-table { min-width:1200px; }
 .jira-collection-table { min-width:760px; }
 .jira-pool-table th:nth-child(n),.jira-collection-table th:nth-child(n) { width:auto; }
-.jira-pool-table th:first-child { width:25%; }
-.jira-pool-table th:nth-child(2) { width:20%; }
-.jira-pool-table th:last-child { width:12%; }
+.jira-pool-table th:first-child { width:24%; }
+.jira-pool-table th:nth-child(2) { width:9%; }
+.jira-pool-table th:nth-child(3) { width:10%; }
+.jira-pool-table th:nth-child(4) { width:10%; }
+.jira-pool-table th:nth-child(5) { width:12%; }
+.jira-pool-table th:nth-child(6) { width:12%; }
+.jira-pool-table th:nth-child(7) { width:10%; }
+.jira-pool-table th:nth-child(8) { width:6%; }
+.jira-pool-table th:last-child { width:7%; }
+.jira-pool-table .jira-issue-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; line-height:1.65; margin-top:4px; }
+.jira-pool-commits { display:flex; flex-direction:column; align-items:center; gap:5px; }
+.jira-pool-commits>span { display:inline-flex; align-items:baseline; gap:7px; max-width:100%; }
+.jira-pool-commits .jira-repository { color:#8791a3; font-size:11px; }
+.jira-pool-commits code { color:#596177; font-size:12px; font-variant-numeric:tabular-nums; }
+.jira-pool-table .jira-pool-time { font-variant-numeric:tabular-nums; line-height:1.65; }
+.jira-pool-table .jira-status { white-space:normal; line-height:1.5; }
 .jira-collection-table th:first-child { width:26%; }
 .jira-collection-table th:last-child { width:10%; }
 .jira-pool-table td:first-child,.jira-pool-table th:first-child,.jira-collection-table td:first-child,.jira-collection-table th:first-child { text-align:left; padding-left:18px; }
@@ -270,9 +284,9 @@
 .jira-execution-empty { color:#a0a5b1; font-size:11px; }
 #jiraBlockedReason { width:min(760px,94vw); padding:28px; border:1px solid #e8e9f0; border-radius:16px; box-shadow:0 20px 70px #25223e26; }
 #jiraBlockedReason::backdrop { background:#22203845; backdrop-filter:blur(2px); }
-#jiraBlockedReason h2 { font-size:13px; font-weight:500; color:#8791a3; margin-bottom:24px; }
-.jira-execution-heading { display:flex; align-items:center; justify-content:space-between; gap:20px; }
-.jira-execution-issue { color:var(--p); font-size:12px; font-weight:600; letter-spacing:.3px; }
+#jiraBlockedReason h2 { font-size:18px; font-weight:600; color:#384356; margin-bottom:18px; }
+.jira-execution-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px 16px; }
+.jira-execution-issue { color:var(--p); font-size:14px; font-weight:600; letter-spacing:.3px; }
 .jira-execution-heading h3 { margin:0; font-size:15px; font-weight:600; color:#384356; }
 .jira-execution-heading .jira-status { flex-shrink:0; font-size:12px; padding:5px 9px; }
 .jira-execution-times { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:16px 0; padding:12px 14px; background:#f7f8fb; border-radius:9px; }
@@ -291,3 +305,83 @@
 .jira-execution-summary { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; font-size:12px; color:#9298a7; }
 .jira-execution-records { display:grid; gap:14px; list-style:none; padding:0; margin:0; }
 .jira-execution-records>li { padding:20px; border:1px solid #e8e9f0; border-radius:10px; }
+.jira-execution-machines { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:0 14px; margin:18px 0; }
+.jira-execution-machines span { display:block; margin-bottom:7px; color:#9298a7; font-size:11px; }
+.jira-execution-machines strong { color:#596177; font-size:12px; font-weight:500; overflow-wrap:anywhere; }
+.jira-execution-commits { display:flex; align-items:flex-start; gap:16px; padding:14px; margin-top:18px; border-top:1px solid #eeeff5; font-size:12px; }
+.jira-execution-commits>span { flex-shrink:0; color:#8791a3; line-height:1.8; }
+.jira-execution-commits>div { display:flex; flex-wrap:wrap; gap:6px; min-width:0; }
+.jira-execution-commits small { padding:3px 8px; border-radius:5px; background:#f5f4fa; color:#625b7a; font-size:12px; overflow-wrap:anywhere; }
+#jiraBlockedReason .jira-execution-process { display:flex; width:fit-content; margin:16px 0 0 auto; padding:8px 12px; border:1px solid #e4e1f0; border-radius:8px; background:#f8f7fd; }
+#jiraBlockedReason .jira-execution-process:hover { background:#eeedf9; text-decoration:none; }
+#jiraBlockedReason .jira-execution-process:focus-visible { outline:2px solid var(--p); outline-offset:2px; }
+@media(max-width:500px) { .jira-execution-machines { grid-template-columns:1fr; } .jira-execution-commits { flex-direction:column; gap:8px; } }
+
+
+/* Jira accounts use the same cards and empty state as the role catalog. */
+.content.jira-account-content { grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr)); }
+.jira-account-note { grid-column:1/-1; margin:0; color:#7a8293; font-size:13px; }
+.jira-account-card .role-card-heading { padding-right:0; }
+.jira-account-facts { display:grid; grid-template-columns:112px minmax(0,1fr); gap:10px 12px; margin:0; font-size:13px; line-height:1.6; }
+.jira-account-facts dt { color:#8791a3; }
+.jira-account-facts dd { margin:0; color:#494f62; overflow-wrap:anywhere; }
+.jira-account-check { margin-top:auto; padding-top:4px; }
+.jira-account-check p { margin:8px 0 0; color:#a54618; font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
+.jira-account-card .role-card-footer { margin-top:0; }
+.jira-account-card .actions { width:100%; flex-wrap:wrap; }
+.jira-account-card .role-delete { margin-left:auto; }
+#jiraAccountDialog { width:min(520px,94vw); }
+#jiraAccountDialog [data-account-error]:empty { display:none; }
+#jiraAccountDialog [data-account-error] { color:#b42318; font-size:13px; }
+
+/* Jira 结果统计独立布局，不继承运行台账的固定列宽。 */
+#jiraStatistics .jira-stats-note { margin:12px 0; color:#8791a3; font-size:12px; line-height:1.8; }
+#jiraStatistics .jira-stats-updated { margin:12px 0 16px; color:#8791a3; font-size:12px; }
+.jira-stats-metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; margin:0 0 28px; }
+.jira-stat-card { min-width:0; padding:20px 22px; border:1px solid #e8e9f0; border-radius:12px; background:#f8f9fc; color:#465568; }
+.jira-stat-card>span { display:block; font-size:13px; font-weight:500; }
+.jira-stat-card>strong { display:block; margin:12px 0 8px; font-size:32px; line-height:1.2; font-weight:650; font-variant-numeric:tabular-nums; letter-spacing:-.6px; }
+.jira-stat-card>small { display:block; color:#8791a3; font-size:12px; line-height:1.5; }
+.jira-stat-card.is-passed { background:#f2faf7; border-color:#dbede4; color:#278262; }
+.jira-stat-card.is-rate { background:#f5f3fd; border-color:#e7e1f7; color:var(--p); }
+.jira-stat-card.is-blocked { background:#fff8f2; border-color:#f2e5d8; color:#a66b2c; }
+#jiraStatistics [data-stat-category] { border:0; background:transparent; color:var(--p); padding:3px 6px; border-radius:5px; font:inherit; font-weight:600; cursor:pointer; font-variant-numeric:tabular-nums; }
+#jiraStatistics [data-stat-category]:hover { background:#eeeaf8; text-decoration:underline; text-underline-offset:4px; }
+#jiraStatistics [data-stat-category]:focus-visible { outline:2px solid var(--p); outline-offset:4px; }
+#jiraStatistics .jira-stat-card [data-stat-category] { padding:0; color:inherit; font:inherit; }
+#jiraStatistics h3 { margin:26px 0 14px; color:#465568; font-size:15px; font-weight:600; }
+#jiraStatistics .jira-table { min-width:660px; table-layout:auto; font-size:13px; }
+#jiraStatistics .jira-table th { width:auto; font-size:12px; }
+#jiraStatistics .jira-table th:first-child,#jiraStatistics .jira-table td:first-child { text-align:left; padding-left:20px; }
+#jiraStatistics .jira-table td { padding-top:12px; padding-bottom:12px; }
+#jiraStatistics .jira-stats-group-table { table-layout:fixed; }
+#jiraStatistics .jira-stats-group-table th:first-child { width:18%; }
+#jiraStatistics .jira-stats-group-table td { vertical-align:top; line-height:26px; font-variant-numeric:tabular-nums; }
+#jiraStatistics .jira-stats-group-table [data-stat-category] { padding:0 6px; line-height:26px; }
+#jiraStatistics .jira-table .jira-stat-percent { display:block; margin:2px 0 0; color:#9aa1b0; font-size:11px; line-height:16px; }
+#jiraStatsDetails { width:min(1100px,92vw); max-width:92vw; max-height:85dvh; padding:28px; border:1px solid #e8e9f0; overflow-y:auto; }
+#jiraStatsDetails::backdrop { background:#22203845; backdrop-filter:blur(2px); }
+#jiraStatsDetails h2 { margin:0 0 22px; color:#384356; }
+.jira-stats-detail-toolbar { display:flex; align-items:flex-end; flex-wrap:wrap; gap:12px 20px; margin-bottom:20px; }
+.jira-stats-detail-toolbar label { margin:0; width:200px; color:#596177; font-size:12px; font-weight:500; }
+.jira-stats-detail-toolbar select { min-width:0; color:#465568; font-size:13px; }
+.jira-stats-detail-updated { margin-left:auto; align-self:center; color:#8791a3; font-size:12px; }
+#jiraStatsDetails button:not(.dialog-close) { font-size:13px; color:#596177; }
+#jiraStatsDetails button:disabled { opacity:.45; cursor:not-allowed; }
+#jiraStatistics .jira-stats-detail-table { min-width:900px; table-layout:fixed; }
+#jiraStatistics .jira-stats-detail-table th:first-child { width:34%; }
+#jiraStatistics .jira-stats-detail-table th:nth-child(2) { width:12%; }
+#jiraStatistics .jira-stats-detail-table th:nth-child(3) { width:10%; }
+#jiraStatistics .jira-stats-detail-table th:nth-child(4) { width:14%; }
+#jiraStatistics .jira-stats-detail-table th:nth-child(5) { width:17%; }
+#jiraStatistics .jira-stats-detail-table th:nth-child(6) { width:13%; }
+#jiraStatsDetails .jira-execution-process { margin-top:0; gap:4px; white-space:nowrap; }
+#jiraStatsDetails footer { border-top:1px solid #eeeff5; padding-top:18px; margin-top:22px; }
+#jiraStatsMore { margin-right:auto; }
+@media(max-width:600px) {
+  #jiraStatsDetails { padding:20px; }
+  .jira-stats-detail-toolbar label { width:100%; }
+  .jira-stats-detail-updated { margin-left:0; flex:1; }
+}
+@media(max-width:1100px) { .jira-stats-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; } }
+@media(max-width:600px) { .jira-stat-card { padding:16px; } .jira-stat-card>strong { font-size:26px; } .jira-stat-card>small { font-size:11px; } }

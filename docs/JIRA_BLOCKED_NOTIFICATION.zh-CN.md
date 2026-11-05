@@ -35,7 +35,7 @@ SELECT version, description, success FROM flyway_schema_history WHERE version = 
 
 MySQL 的 DDL 可能已部分提交：任务群字段、模板表及默认行、人员映射表可能已存在。只清除失败记录后重启会再次遇到字段或表重复，新增 V38 也不能越过失败的 V37。停止配置中心并备份后，先核对实际表结构、迁移记录和是否存在业务数据，再制定恢复步骤。仅在确认是无业务数据的开发环境且用户明确授权后，才可清理本次失败产生的对象和 V37 失败记录；不要清库、清除其他迁移记录或关闭 Flyway 校验。
 
-恢复完成后，Windows 从仓库根目录执行 `mvn -f services/role-task-config-center/pom.xml clean test`（macOS 用 `mvnd`），再启动配置中心，避免继续使用 `target/classes` 中的旧脚本。H2 不复现 MySQL 的隐式零日期规则，仍需目标 MySQL 验证。
+恢复完成后，在 Mac 上从仓库根目录执行 `mvnd -f services/role-task-config-center/pom.xml clean test`，再启动配置中心，避免继续使用 `target/classes` 中的旧脚本。H2 不复现 MySQL 的隐式零日期规则，仍需目标 MySQL 验证。
 
 ### 通知投递恢复
 

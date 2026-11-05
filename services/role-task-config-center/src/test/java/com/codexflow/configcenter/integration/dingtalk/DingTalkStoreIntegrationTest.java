@@ -44,6 +44,18 @@ class DingTalkStoreIntegrationTest extends com.codexflow.configcenter.GroupedFix
     jdbc.update(
         "UPDATE codex_sop_sops SET dispatch_mode='group',jira_jql='project = TEST AND status = 10205 AND assignee = currentUser() AND \"处理角色\" = \"Planner\"',jira_account='bot' WHERE id=(SELECT sop_id FROM codex_sop_task_definitions WHERE id=?)",
         taskId);
+    jdbc.update(
+        "UPDATE codex_sop_sops SET jira_connection_id=? WHERE id=(SELECT sop_id FROM codex_sop_task_definitions WHERE id=?)",
+        GROUP,
+        taskId);
+    org.mockito.Mockito.when(groupGateway.get("/jira-accounts/" + GROUP))
+        .thenReturn(
+            objectMapper
+                .createObjectNode()
+                .put("groupId", GROUP)
+                .put("enabled", true)
+                .put("testStatus", "passed")
+                .put("executorAlias", "bot"));
     var start = message("jira-title-start-" + client);
     assertThat(store.queueJira(client, start)).isTrue();
     String requestId =

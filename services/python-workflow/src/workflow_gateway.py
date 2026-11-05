@@ -161,6 +161,8 @@ class WorkflowGateway:
 
     async def submit(self, raw_spec: dict[str, Any]) -> dict[str, Any]:
         spec = WorkflowStore.normalize_spec(raw_spec)
+        if spec.get("jira") and not spec["jira"].get("connectionId"):
+            raise ValueError("旧 Jira 快照未绑定中央账号，请使用已绑定账号的最新配置。")
         if spec.get("dispatchMode") == "group":
             snapshot = await _database_call(self.store.create_workflow, spec)
             await self._schedule_pending()
@@ -625,6 +627,8 @@ class WorkflowGateway:
         job = None
         prepared_execution = False
         try:
+            from jira_pool import prepare_run
+            await _database_call(prepare_run, self.store, spec)
             while True:
                 job = None
                 prepared_execution = False
@@ -910,11 +914,11 @@ class WorkflowGateway:
     @staticmethod
     def _jira_supervisor_prompt() -> str:
         return (
-            "本运行由监督机统一领取 Jira。开始或恢复调度时，先调用 Codex Orchestrator MCP 的 "
+            "本运行由中央确认唯一 Jira 工单。开始或恢复调度时，先调用 Codex Orchestrator MCP 的 "
             "jira_claim_next 工具，参数为 workflow_id（本工作流编号）。重复调用复用原工单。"
             "这是 MCP 工具，不是终端命令，不要用 PowerShell 或 Jira CLI 查找或替代它。"
             "工具未显示时先通过当前环境的工具发现能力查找；仍不可用则明确报告领取工具未开放，"
-            "不得绕过领取或反复尝试派发步骤。平台负责查询、去重领取并下发同一账号。"
+            "不得绕过领取或反复尝试派发步骤。平台负责查询、去重领取并准备执行机本地账号入口，不下发认证凭据。"
             "不要自行读取账号文件，不要在消息或命令中传递令牌。每轮只领取一个工单。"
             "返回 no_task 时结束本轮；ready 后才能派发步骤。失败时报告实际领取错误。"
             "业务详情读取与修改只由执行机完成。\n"
@@ -1781,14 +1785,6 @@ async def agent_models(request: Request) -> Response:
         return _error_response(error, 503)
 
 
-async def schedule_check(request: Request) -> Response:
-    from schedule_check import execute_check
-    try:
-        return JSONResponse(await execute_check(request.app.state.gateway, await request.json()))
-    except ValueError as error:
-        return _error_response(error, 400)
-
-
 async def manage_machines(request: Request) -> Response:
     gateway = request.app.state.gateway
     registry = gateway.registry
@@ -1983,7 +1979,12 @@ def _sidecar_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 items = value["documents"]
                 version = 4 if isinstance(items, list) and any(isinstance(item, dict) and "primary" in item for item in items) else 3
         # v4/v5 字段相同，空文档清单的 v3/v4/v5 结构相同；存储层仍以运行冻结版本校验。
-        result["businessResult"] = validate(value, version, jira=isinstance(value, dict) and "jiraDelivery" in value)
+        from workflow_jira import COMPLETION_STATUSES
+        delivery = value.get("jiraDelivery") if isinstance(value, dict) else None
+        delivery_version = 1
+        if isinstance(delivery, dict):
+            delivery_version = 3 if delivery.get("status") in COMPLETION_STATUSES else 2 if "commits" in delivery else 1
+        result["businessResult"] = validate(value, version, jira=isinstance(value, dict) and "jiraDelivery" in value, delivery_version=delivery_version)
     return result
 
 
@@ -2312,7 +2313,6 @@ def create_app(
             Route("/agents", manage_machines, methods=["POST"]),
             Route("/agents/validate", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}/models", agent_models, methods=["GET"]),
-            Route("/schedule-checks", schedule_check, methods=["POST"]),
             Route("/agents/{agent_id}/test", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}/remark", manage_machines, methods=["PUT"]),
             Route("/agents/{agent_id}", manage_machines, methods=["PUT", "DELETE"]),

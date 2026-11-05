@@ -98,13 +98,14 @@ description: 在需要生成销售报表时使用。
 
 按根 README 设置 `PYTHONPATH` 并使用已有 `.venv`：
 
-```powershell
-.venv/Scripts/python.exe -m unittest tests.test_skills tests.test_workflow_service_config -v
-mvn -f services/role-task-config-center/pom.xml test -Dtest=SkillControllerTest
+```sh
+export PYTHONPATH="$PWD/services/python-workflow/src:$PWD/services/python-workflow"
+.venv/bin/python -m unittest tests.test_skills tests.test_workflow_service_config -v
+mvnd -f services/role-task-config-center/pom.xml test -Dtest=SkillControllerTest
 node --test services/role-task-config-center/src/test/js/skills.test.cjs
 ```
 
-真实协议测试需显式设置 `SKILL_TEST_CODEX` 为本机 Codex 可执行文件绝对路径，再运行 `tests.test_skill_app_server`；测试仅创建临时目录，验证真实文件接口、Skill 识别及无第三方依赖脚本，不创建模型会话、不读取部署凭据。默认测试集跳过此项。macOS 使用 `.venv/bin/python` 和 `mvnd`。
+真实协议测试需显式设置 `SKILL_TEST_CODEX` 为本机 Codex 可执行文件绝对路径，再运行 `tests.test_skill_app_server`；测试仅创建临时目录，验证真实文件接口、Skill 识别及无第三方依赖脚本，不创建模型会话、不读取部署凭据。默认测试集跳过此项。
 
 `python -m tests.preview_skills` 启动 127.0.0.1:18191 的一次性 UI 验收环境，使用临时数据库和内存执行机；它不是生产启动入口。浏览器访问 `/?page=skills`。关闭进程后数据丢弃。
 

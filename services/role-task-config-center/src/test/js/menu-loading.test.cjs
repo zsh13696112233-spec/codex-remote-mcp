@@ -13,7 +13,7 @@ function fixture(){
 for(const [page,paths] of [
   ['roles',['/api/roles']],
   ['tasks',['/api/task-definitions']],
-  ['sops',['/api/roles','/api/sops','runtime']],
+  ['sops',['/api/roles','/api/sops','runtime','/api/jira-accounts']],
   ['dingtalk',['/api/task-definitions','/api/dingtalk/targets']],
   ['dingtalk-targets',['/api/task-definitions']],
 ])test(`${page} only loads its own dependencies`,async()=>{
