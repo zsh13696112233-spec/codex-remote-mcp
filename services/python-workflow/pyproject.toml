@@ -44,5 +44,6 @@ py-modules = [
   "jira_pool",
   "jira_accounts",
   "jira_http",
+  "jira_issue_details",
   "workflow_input_images",
 ]

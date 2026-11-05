@@ -64,7 +64,7 @@ class JiraClient:
 
     def search(self, jql, field=None):
         value = self.request('search', {'jql': jql, 'startAt': 0, 'maxResults': 100,
-                                      'fields': ['summary', 'assignee'] + ([field] if field else [])})
+                                      'fields': ['summary', 'assignee', 'issuetype', 'priority'] + ([field] if field else [])})
         if (not isinstance(value, dict) or not isinstance(value.get('issues'), list)
                 or value.get('startAt') != 0 or type(value.get('total')) is not int
                 or value['total'] < len(value['issues']) or (not value['issues'] and value['total'])):
@@ -79,7 +79,7 @@ class JiraClient:
             title = fields.get('summary')
             if not isinstance(title, str):
                 raise JiraHttpError('Jira 工单标题格式无效。')
-            result[issue['key']] = (title[:1000], people(fields, field))
+            result[issue['key']] = (title[:1000], people(fields, field), issue_details(fields))
         return result
 
 
@@ -98,3 +98,12 @@ def people(fields, field):
     name = name.strip() if isinstance(name, str) and len(name) <= 160 else ''
     return {'developers': names, 'developerStatus': status, 'assignee': name,
             'assigneeStatus': 'resolved' if name else 'unavailable', 'collectedAt': utc_now()}
+
+
+def issue_details(fields):
+    result = {}
+    for key, field in (('issueType', 'issuetype'), ('priority', 'priority')):
+        value = fields.get(field)
+        name = value.get('name') if isinstance(value, dict) else None
+        result[key] = name.strip() if isinstance(name, str) and 0 < len(name.strip()) <= 160 else None
+    return result

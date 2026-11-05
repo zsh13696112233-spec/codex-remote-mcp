@@ -198,10 +198,11 @@ class HttpTests(unittest.TestCase):
 
     def test_search_requests_all_personnel_fields_once(self):
         client = JiraClient('http://jira.test', 'fixture')
-        with patch.object(client, 'request', return_value={'issues':[{'key':'TEST-1','fields':{'summary':'标题','assignee':{'displayName':'甲'},'customfield_1':None}}], 'total':1,'startAt':0}) as request:
+        with patch.object(client, 'request', return_value={'issues':[{'key':'TEST-1','fields':{'summary':'标题','assignee':{'displayName':'甲'},'customfield_1':None,'issuetype':{'name':'sub-bug'},'priority':{'name':'P4'}}}], 'total':1,'startAt':0}) as request:
             result = client.search('project=TEST', 'customfield_1')
         self.assertEqual(result['TEST-1'][1]['assignee'], '甲')
-        self.assertEqual(request.call_args.args[1]['fields'], ['summary','assignee','customfield_1'])
+        self.assertEqual(result['TEST-1'][2], {'issueType':'sub-bug', 'priority':'P4'})
+        self.assertEqual(request.call_args.args[1]['fields'], ['summary','assignee','issuetype','priority','customfield_1'])
 
     def test_redirects_are_not_followed(self):
         from jira_http import NoRedirect

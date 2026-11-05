@@ -156,10 +156,10 @@ function poolFixture() {
   const ctx=context({URLSearchParams,state:{page:'jira'},groupState:{selected:'g'},$:id=>elements[id],api:async()=>result});
   return {ctx,elements,result,run:code=>vm.runInContext(code,ctx)};
 }
-test('pool renders merged sources with current run link and latest collection time',async()=>{
+test('pool renders merged sources with Jira issue link and latest collection time',async()=>{
   const h=poolFixture();
   h.result.items=[{issue_key:'TEST-1',title:'<工单>',state:'bound',workflow_id:'run',run_status:'running',
-    collected_at:'最近采集时间',started_at:'原执行时间',monitorUrl:'/monitor?workflowId=run',
+    server_key:'http://log.youkia.com:8084',collected_at:'最近采集时间',started_at:'原执行时间',monitorUrl:'/monitor?workflowId=run',
     sources:[{name:'<来源一>',groupId:'one'},{name:'来源二',groupId:'two'}],retryCount:1,
     reworks:[{startedAt:'上次时间',reason:'<返工原因>'}]}];
   await h.run('loadJiraPool()');
@@ -172,7 +172,8 @@ test('pool renders merged sources with current run link and latest collection ti
   assert.match(html,/原执行时间/);
   assert.match(html,/&lt;来源一&gt;/);
   assert.match(html,/来源二/);
-  assert.match(html,/href="\/monitor\?workflowId=run"/);
+  assert.match(html,/href="http:\/\/log\.youkia\.com:8084\/browse\/TEST-1"/);
+  assert.doesNotMatch(html,/href="\/monitor/);
   assert.match(html,/正在执行/);
   assert.doesNotMatch(html,/&lt;返工原因&gt;/);
   assert.doesNotMatch(html,/已由其他来源处理|尚未开始|未创建运行|已等待/);
@@ -367,4 +368,72 @@ test('review rework uses orange label and shows its formal reason',()=>{
  const html=vm.runInContext('jiraExecutionDetailHtml({},row)',ctx);
  assert.match(html,/结果说明：界面回归失败 &lt;返工&gt;/);
  assert.match(html,/jira-status waiting/);
+});
+
+test('pool duration retains the latest execution while queued and never sums rounds',()=>{
+  const ctx=context();
+  ctx.row={issue_key:'TEST-1',sources:[],state:'pending',executions:[
+    {status:'completed',startedAt:'2026-11-05T00:00:00Z',finishedAt:'2026-11-05T01:00:00Z'},
+    {status:'completed',startedAt:'2026-11-05T02:00:00Z',finishedAt:'2026-11-06T03:02:59Z'}
+  ]};
+  assert.equal(vm.runInContext('jiraPoolDuration(row)',ctx),'1502 分钟');
+  assert.match(vm.runInContext('jiraPoolRowHtml(row)',ctx),/<td>1502 分钟<\/td>/);
+});
+test('pool duration includes waiting and updates in whole minutes until ended',()=>{
+  let now=Date.parse('2026-11-05T02:00:59Z');
+  const ctx=context({Date:class extends Date {static now(){return now}}});
+  ctx.row={executions:[{status:'running',waitingFor:'blocked',startedAt:'2026-11-05T02:00:00Z'}]};
+  assert.equal(vm.runInContext('jiraPoolDuration(row)',ctx),'0 分钟');
+  now+=120000;
+  assert.equal(vm.runInContext('jiraPoolDuration(row)',ctx),'2 分钟');
+  for(const status of ['completed','failed','cancelled']) {
+    Object.assign(ctx.row.executions[0],{status,finishedAt:'2026-11-05T02:01:30Z'});
+    assert.equal(vm.runInContext('jiraPoolDuration(row)',ctx),'1 分钟');
+  }
+});
+test('pool duration distinguishes no execution from missing or invalid historical times',()=>{
+  const ctx=context();
+  for(const row of [{},{executions:[]}]) {
+    ctx.row=row;assert.equal(vm.runInContext('jiraPoolDuration(row)',ctx),'尚未运行');
+  }
+  for(const execution of [
+    {status:'running'},
+    {status:'completed',startedAt:'2026-11-05T02:00:00Z'},
+    {status:'running',startedAt:'invalid'},
+    {status:'completed',startedAt:'2026-11-05T02:00:00Z',finishedAt:'invalid'},
+    {status:'completed',startedAt:'2026-11-05T02:00:00Z',finishedAt:'2026-11-05T01:00:00Z'}
+  ]) {
+    ctx.row={executions:[execution]};assert.equal(vm.runInContext('jiraPoolDuration(row)',ctx),'未记录');
+  }
+});
+
+
+test('pool Jira link works before execution and retains context path while process links stay on monitor',()=>{
+  const ctx=context();
+  ctx.row={issue_key:'ZJSG-10845',server_key:'https://jira.example.test/jira/',sources:[],state:'pending'};
+  assert.match(vm.runInContext('jiraPoolRowHtml(row)',ctx),/href="https:\/\/jira\.example\.test\/jira\/browse\/ZJSG-10845" target="_blank" rel="noopener"/);
+  ctx.row.executions=[{retryNumber:0,status:'completed',monitorUrl:'/monitor?workflowId=run'}];
+  assert.match(vm.runInContext('jiraExecutionListHtml(row)',ctx),/href="\/monitor\?workflowId=run"/);
+  for(const server of [undefined,'javascript:alert(1)']) {
+    ctx.row.server_key=server;
+    assert.doesNotMatch(vm.runInContext('jiraPoolRowHtml(row)',ctx),/<a href=/);
+  }
+});
+
+test('pool displays escaped issue type and priority with explicit missing values',()=>{
+  const ctx=context();
+  ctx.row={issue_key:'TEST-1',sources:[],issueType:'<sub-bug>',priority:'<P4>'};
+  assert.match(vm.runInContext('jiraPoolRowHtml(row)',ctx),/&lt;sub-bug&gt; \/ &lt;P4&gt;<\/span>/);
+  ctx.row.issueType=null;ctx.row.priority=null;
+  assert.match(vm.runInContext('jiraPoolRowHtml(row)',ctx),/未获取 \/ 未获取<\/span>/);
+});
+
+test('background refresh replaces missing issue details after backfill',async()=>{
+  const h=poolFixture();
+  h.result.items=[{issue_key:'TEST-1',sources:[],state:'pending',issueType:null,priority:null}];
+  await h.run('loadJiraPool()');
+  assert.match(h.elements['#poolItems'].innerHTML,/<th>类型 \/ 优先级<\/th>/);
+  Object.assign(h.result.items[0],{issueType:'sub-bug',priority:'P4'});
+  await h.run('loadJiraPool(null,{background:true})');
+  assert.match(h.elements['#poolItems'].innerHTML,/<img src="jira-sub-bug.png" width="16" height="16" alt="sub-bug" title="sub-bug"> \/ P4<\/span>/);
 });

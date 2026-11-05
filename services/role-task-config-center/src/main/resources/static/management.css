@@ -235,23 +235,28 @@
 .jira-catalog .empty { padding:40px 20px; min-height:140px; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:8px; }
 .jira-empty strong { color:#737c8e; font-size:13px; font-weight:500; }
 .jira-empty span { font-size:12px; color:#9aa2b1; }
-.jira-pool-table { min-width:1200px; }
+.jira-pool-table { min-width:1440px; }
 .jira-collection-table { min-width:760px; }
 .jira-pool-table th:nth-child(n),.jira-collection-table th:nth-child(n) { width:auto; }
-.jira-pool-table th:first-child { width:24%; }
-.jira-pool-table th:nth-child(2) { width:9%; }
-.jira-pool-table th:nth-child(3) { width:10%; }
-.jira-pool-table th:nth-child(4) { width:10%; }
-.jira-pool-table th:nth-child(5) { width:12%; }
-.jira-pool-table th:nth-child(6) { width:12%; }
+.jira-pool-table th { white-space:nowrap; overflow-wrap:normal; }
+.jira-pool-table th:first-child { width:18%; }
+.jira-pool-table th:nth-child(2) { width:8%; }
+.jira-pool-table th:nth-child(3) { width:8%; }
+.jira-pool-table th:nth-child(4) { width:9%; }
+.jira-pool-table th:nth-child(5) { width:9%; }
+.jira-pool-table th:nth-child(6) { width:10%; }
 .jira-pool-table th:nth-child(7) { width:10%; }
-.jira-pool-table th:nth-child(8) { width:6%; }
-.jira-pool-table th:last-child { width:7%; }
+.jira-pool-table th:nth-child(8) { width:9%; }
+.jira-pool-table th:nth-child(9) { width:7%; }
+.jira-pool-table th:nth-child(10) { width:6%; }
+.jira-pool-table th:last-child { width:6%; }
 .jira-pool-table .jira-issue-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; line-height:1.65; margin-top:4px; }
 .jira-pool-commits { display:flex; flex-direction:column; align-items:center; gap:5px; }
 .jira-pool-commits>span { display:inline-flex; align-items:baseline; gap:7px; max-width:100%; }
 .jira-pool-commits .jira-repository { color:#8791a3; font-size:11px; }
 .jira-pool-commits code { color:#596177; font-size:12px; font-variant-numeric:tabular-nums; }
+.jira-type-priority { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
+.jira-type-priority img { flex-shrink:0; }
 .jira-pool-table .jira-pool-time { font-variant-numeric:tabular-nums; line-height:1.65; }
 .jira-pool-table .jira-status { white-space:normal; line-height:1.5; }
 .jira-collection-table th:first-child { width:26%; }

@@ -604,7 +604,7 @@ class CollectionTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
         from jira_pool import collect
         from jira_http import JiraClient, people
-        with patch.object(JiraClient, 'identity', return_value='user-1'), patch.object(JiraClient, 'developer_field', return_value=None), patch.object(JiraClient, 'search', side_effect=[{'TEST-1':('标题',people({},None))},{}]):
+        with patch.object(JiraClient, 'identity', return_value='user-1'), patch.object(JiraClient, 'developer_field', return_value=None), patch.object(JiraClient, 'search', side_effect=[{'TEST-1':('标题',people({},None),{'issueType':None,'priority':None})},{}]):
             await collect(self.gateway,self.request)
         self.assertEqual(collection(self.store,self.request)['state'],'ready')
         with self.store._connect() as db:
@@ -616,7 +616,7 @@ class CollectionTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
         from jira_pool import collect
         from jira_http import JiraClient, JiraHttpError, people
-        with patch.object(JiraClient,'identity',return_value='user-1'), patch.object(JiraClient,'developer_field',return_value=None), patch.object(JiraClient,'search',side_effect=[{'TEST-1':('标题',people({},None))},JiraHttpError('连接失败')]):
+        with patch.object(JiraClient,'identity',return_value='user-1'), patch.object(JiraClient,'developer_field',return_value=None), patch.object(JiraClient,'search',side_effect=[{'TEST-1':('标题',people({},None),{'issueType':None,'priority':None})},JiraHttpError('连接失败')]):
             await collect(self.gateway,self.request)
         self.assertEqual(collection(self.store,self.request)['state'],'failed')
         self.assertEqual(collection(self.store,self.request)['pending'],0)

@@ -34,6 +34,10 @@ def initialize(db):
         db.execute('ALTER TABLE jira_pool_items ADD COLUMN people_json TEXT')
     if 'candidate_queued_at' not in {r[1] for r in db.execute('PRAGMA table_info(jira_pool_items)')}:
         db.execute('ALTER TABLE jira_pool_items ADD COLUMN candidate_queued_at TEXT')
+    columns = {r[1] for r in db.execute('PRAGMA table_info(jira_pool_items)')}
+    for column in ('details_json', 'details_checked_at'):
+        if column not in columns:
+            db.execute(f'ALTER TABLE jira_pool_items ADD COLUMN {column} TEXT')
     db.commit()
 
 def validate_people(value):
@@ -104,8 +108,8 @@ def materialize_dispatch(db, row):
                (latest['server_key'], latest['account_id'], latest['account_alias'], latest['count'], latest['finished_at'], row['request_id']))
     for item in db.execute("SELECT * FROM jira_pool_items WHERE request_id=? AND state IN ('pending','consumed')", (latest['request_id'],)).fetchall():
         state = 'pending' if issue_available(db, item['server_key'], item['issue_key']) else 'consumed'
-        db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state,people_json) VALUES(?,?,?,?,?,?)',
-                   (row['request_id'], item['server_key'], item['issue_key'], item['title'], state, item['people_json']))
+        db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state,people_json,details_json) VALUES(?,?,?,?,?,?,?)',
+                   (row['request_id'], item['server_key'], item['issue_key'], item['title'], state, item['people_json'], item['details_json']))
 
 
 def publish_poll(db, row, server, found):
@@ -118,7 +122,7 @@ def publish_poll(db, row, server, found):
             db.execute("UPDATE jira_pool_items SET state='invalid' WHERE id=?", (item['id'],))
     # 自动采集只保留每个任务/工单的当前候选，复用 ID 保持分页和等待时间稳定。
     # 每次采集的结果/数量仍保留；派发和运行使用独立的不可变快照。
-    for issue, (title, people_json) in found.items():
+    for issue, (title, people_json, details_json) in found.items():
         old = db.execute("SELECT p.*,c.finished_at FROM jira_pool_items p JOIN jira_collections c USING(request_id) WHERE c.source='poll' AND c.task_id=? AND p.server_key=? AND p.issue_key=? ORDER BY p.id DESC LIMIT 1",
                          (row['task_id'], server, issue)).fetchone()
         state = 'pending' if issue_available(db, server, issue) else 'consumed'
@@ -129,6 +133,8 @@ def publish_poll(db, row, server, found):
         else:
             db.execute('INSERT INTO jira_pool_items(request_id,server_key,issue_key,title,state,people_json,candidate_queued_at) VALUES(?,?,?,?,?,?,?)',
                        (row['request_id'], server, issue, title, state, people_json, queued_at))
+        db.execute('UPDATE jira_pool_items SET details_json=?,details_checked_at=? WHERE server_key=? AND issue_key=?',
+                   (details_json, now, server, issue))
 
 
 def request_collection(store, body):
@@ -296,7 +302,7 @@ def collect_sync(store, request_id):
                 if db.execute("UPDATE jira_collections SET state='ready',server_key=?,account_id=?,account_alias=?,count=?,finished_at=? WHERE request_id=? AND state='collecting'",
                               (account['server'],account['identity'],account['executor_alias'],shared['count'],shared['finished_at'],request_id)).rowcount:
                     shared_items = db.execute('SELECT * FROM jira_pool_items WHERE request_id=?', (shared['request_id'],)).fetchall()
-                    publish_poll(db, row, account['server'], {item['issue_key']: (item['title'], item['people_json']) for item in shared_items})
+                    publish_poll(db, row, account['server'], {item['issue_key']: (item['title'], item['people_json'], item['details_json']) for item in shared_items})
                 return
         try:
             field = client.developer_field()
@@ -318,7 +324,7 @@ def collect_sync(store, request_id):
             if not db.execute("UPDATE jira_collections SET state='ready',server_key=?,account_id=?,account_alias=?,count=?,finished_at=? WHERE request_id=? AND state='collecting'",
                               (account['server'],account['identity'],account['executor_alias'],len(found),utc_now(),request_id)).rowcount:
                 return
-            publish_poll(db, row, account['server'], {issue: (title, json.dumps(people)) for issue, (title, people) in found.items()})
+            publish_poll(db, row, account['server'], {issue: (title, json.dumps(people), json.dumps(details)) for issue, (title, people, details) in found.items()})
     except (ValueError, JiraHttpError) as error:
         with store._connect() as db:
             db.execute("UPDATE jira_collections SET state='failed',reason=?,finished_at=? WHERE request_id=? AND state='collecting'", (str(error),utc_now(),request_id))
@@ -341,6 +347,10 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
             MIN(CASE WHEN p.state IN ('pending','reserved') AND c.state='ready'
                 THEN COALESCE(p.candidate_queued_at,c.finished_at,c.created_at) END) OVER issue AS queued_at,
             FIRST_VALUE(p.title) OVER (PARTITION BY p.server_key,p.issue_key ORDER BY c.finished_at DESC,p.id DESC) AS latest_title,
+            FIRST_VALUE(p.details_json) OVER (PARTITION BY p.server_key,p.issue_key
+                ORDER BY (json_extract(p.details_json,'$.issueType') IS NOT NULL
+                    OR json_extract(p.details_json,'$.priority') IS NOT NULL) DESC,
+                    (p.details_json IS NOT NULL) DESC,p.details_checked_at DESC,p.id DESC) AS latest_details,
             FIRST_VALUE(p.people_json) OVER (PARTITION BY p.server_key,p.issue_key
                 ORDER BY COALESCE(json_extract(p.people_json,'$.collectedAt'),c.finished_at) DESC,p.id DESC) AS latest_people,
             ROW_NUMBER() OVER (PARTITION BY p.server_key,p.issue_key ORDER BY
@@ -367,7 +377,7 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
         LEFT JOIN workflows w ON w.workflow_id=claim.workflow_id
         WHERE r.position=1
     ), board_items AS (
-        SELECT r.issue_id AS id,r.request_id,r.server_key,r.issue_key,r.latest_title AS title,r.latest_people AS people_json,
+        SELECT r.issue_id AS id,r.request_id,r.server_key,r.issue_key,r.latest_title AS title,r.latest_people AS people_json,r.latest_details AS details_json,
             CASE WHEN w.workflow_id IS NOT NULL THEN 'bound' ELSE r.state END AS state,
             r.reservation_id,w.workflow_id,r.name,r.group_id,r.task_id,r.created_at,r.finished_at,
             r.collected_at,r.queued_at,r.source,w.status AS run_status,w.finished_at AS run_finished_at,
@@ -405,6 +415,9 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
         items = []
         for row in rows[:limit]:
             item = dict(row)
+            item.update(json.loads(item.pop('details_json') or '{}'))
+            item.setdefault('issueType', None)
+            item.setdefault('priority', None)
             people_value = item.pop('people_json')
             if people_value:
                 item['people'] = json.loads(people_value)
@@ -435,6 +448,8 @@ async def tick(gateway):
         rows = db.execute("SELECT request_id FROM jira_collections WHERE state='waiting' AND source='poll' ORDER BY created_at LIMIT 10").fetchall()
     for row in rows:
         await collect(gateway, row['request_id'])
+    from jira_issue_details import backfill
+    await asyncio.to_thread(backfill, gateway.store)
 
 
 def recover(store):

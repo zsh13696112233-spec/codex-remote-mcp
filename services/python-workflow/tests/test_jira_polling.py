@@ -29,7 +29,7 @@ class PollingTests(unittest.TestCase):
             db.execute("UPDATE jira_collections SET created_at='2020-01-01T00:00:00+00:00' WHERE source='poll'")
 
     def collect(self, identifier, keys=('TEST-1',)):
-        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'developer_field', return_value=None), patch.object(JiraClient, 'search', side_effect=[{key: ('标题', people({}, None)) for key in keys}, {}]) as search:
+        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'developer_field', return_value=None), patch.object(JiraClient, 'search', side_effect=[{key: ('标题', people({}, None), {'issueType': None, 'priority': None}) for key in keys}, {}]) as search:
             collect_sync(self.store, identifier)
         return search.call_count
 
@@ -121,7 +121,7 @@ class PollingTests(unittest.TestCase):
         binding = reserve(self.store, ready['requestId'], str(uuid.uuid4()))
         self.due()
         next_poll = self.sync()
-        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'developer_field', return_value=None), patch.object(JiraClient, 'search', side_effect=[{'TEST-1': ('新标题', people({}, None))}, {}]):
+        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'developer_field', return_value=None), patch.object(JiraClient, 'search', side_effect=[{'TEST-1': ('新标题', people({}, None), {'issueType': None, 'priority': None})}, {}]):
             collect_sync(self.store, next_poll)
         self.assertEqual(reserve(self.store, ready['requestId'], binding['reservationId']), binding)
         self.assertEqual(board(self.store)['items'][0]['title'], '新标题')
@@ -153,3 +153,144 @@ class PollingTests(unittest.TestCase):
         collect_sync(self.store, first)
         self.assertEqual(collection(self.store, first)['state'], 'failed')
         self.assertEqual(collection(self.store, first)['pending'], 0)
+
+    def test_details_are_collected_and_shared_without_changing_reservation(self):
+        request = self.dispatch()
+        identifier = self.sync()
+        details = {'issueType': 'sub-bug', 'priority': 'P4'}
+        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'developer_field', return_value=None), patch.object(JiraClient, 'search', side_effect=[{'TEST-1': ('标题', people({}, None), details)}, {}]):
+            collect_sync(self.store, identifier)
+        ready = self.dispatch(request['requestId'])
+        binding = reserve(self.store, ready['requestId'], str(uuid.uuid4()))
+        item = board(self.store)['items'][0]
+        self.assertEqual((item['issueType'], item['priority']), ('sub-bug', 'P4'))
+        self.assertNotIn('issueType', binding)
+        self.assertEqual(reserve(self.store, ready['requestId'], binding['reservationId']), binding)
+
+    def old_details(self, keys=('TEST-1',)):
+        self.collect(self.sync(), keys)
+        self.sync([])  # Historical issues no longer qualify for automatic collection.
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_pool_items SET details_json=NULL,details_checked_at=NULL')
+            return [tuple(r) for r in db.execute('SELECT id,state,workflow_id,people_json,candidate_queued_at FROM jira_pool_items')]
+
+    def test_backfill_covers_inactive_history_and_missing_issues_without_touching_state(self):
+        from jira_issue_details import backfill
+        before = self.old_details(('TEST-1', 'TEST-2'))
+        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'search', side_effect=[{'TEST-1': ('标题', {}, {'issueType':'sub-bug','priority':'P4'})}, {}]) as search:
+            backfill(self.store)
+        self.assertTrue(all('project = TEST' not in call.args[0] for call in search.call_args_list))
+        items = {r['issue_key']: r for r in board(self.store)['items']}
+        self.assertEqual(items['TEST-1']['issueType'], 'sub-bug')
+        self.assertEqual(items['TEST-1']['priority'], 'P4')
+        self.assertIsNone(items['TEST-2']['priority'])
+        with self.store._connect() as db:
+            after = [tuple(r) for r in db.execute('SELECT id,state,workflow_id,people_json,candidate_queued_at FROM jira_pool_items')]
+            self.assertEqual(before, after)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM workflows').fetchone()[0], 0)
+        self.store = WorkflowStore(self.store.path)
+        with patch.object(JiraClient, 'search') as search:
+            backfill(self.store)
+        search.assert_not_called()
+
+    def test_backfill_failure_is_logged_and_deferred_without_hiding_missing_data(self):
+        from jira_issue_details import backfill
+        self.old_details()
+        with patch.object(JiraClient, 'identity', side_effect=JiraHttpError('无法连接 Jira。')), self.assertLogs('jira_issue_details', level='WARNING'):
+            backfill(self.store)
+        with self.store._connect() as db:
+            row = db.execute('SELECT details_json,details_checked_at FROM jira_pool_items').fetchone()
+            self.assertIsNone(row[0])
+            self.assertIsNotNone(row[1])
+        with patch.object(JiraClient, 'identity') as identity:
+            backfill(self.store)
+        identity.assert_not_called()
+
+    def test_backfill_handles_server_page_limit_and_does_not_overwrite_new_poll(self):
+        from jira_issue_details import backfill
+        self.old_details(('TEST-1', 'TEST-2'))
+        calls = []
+        def search(jql):
+            calls.append(jql)
+            key = 'TEST-1' if len(calls) == 1 else 'TEST-2'
+            if len(calls) == 2:
+                with self.store._connect() as db:
+                    db.execute('UPDATE jira_pool_items SET details_json=? WHERE issue_key=?', ('{"issueType":"新类型","priority":"P1"}', 'TEST-1'))
+            return {key: ('标题', {}, {'issueType':'sub-bug','priority':'P4'})}
+        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'search', side_effect=search):
+            backfill(self.store)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn('TEST-1', calls[1])
+        items = {r['issue_key']: r for r in board(self.store)['items']}
+        self.assertEqual(items['TEST-1']['priority'], 'P1')
+        self.assertEqual(items['TEST-2']['priority'], 'P4')
+
+    def test_old_schema_adds_details_columns_without_rewriting_history(self):
+        self.old_details()
+        with self.store._connect() as db:
+            db.execute('ALTER TABLE jira_pool_items DROP COLUMN details_json')
+            db.execute('ALTER TABLE jira_pool_items DROP COLUMN details_checked_at')
+        self.store = WorkflowStore(self.store.path)
+        item = board(self.store)['items'][0]
+        self.assertEqual(item['issue_key'], 'TEST-1')
+        self.assertIsNone(item['issueType'])
+
+    def test_backfill_tries_other_same_group_accounts_and_rejects_changed_credentials(self):
+        from jira_issue_details import backfill
+        self.old_details()
+        seed_account(self.store, self.task['groupId'])
+        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'search', side_effect=[{}, {'TEST-1': ('标题', {}, {'issueType':'sub-bug','priority':'P4'})}]):
+            backfill(self.store)
+        self.assertEqual(board(self.store)['items'][0]['priority'], 'P4')
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_pool_items SET details_json=NULL,details_checked_at=NULL')
+        def changed(jql):
+            with self.store._connect() as db:
+                db.execute('UPDATE jira_accounts SET enabled=0,version=version+1')
+            return {'TEST-1': ('标题', {}, {'issueType':'sub-bug','priority':'P4'})}
+        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'search', side_effect=changed), self.assertLogs('jira_issue_details', level='WARNING'):
+            backfill(self.store)
+        self.assertIsNone(board(self.store)['items'][0]['priority'])
+
+    def test_backfill_batches_all_history_and_ignores_other_group_accounts(self):
+        from jira_issue_details import backfill
+        self.old_details(tuple('TEST-'+str(i) for i in range(1, 52)))
+        def search(jql):
+            import re
+            return {key: ('标题', {}, {'issueType':'bug','priority':'P4'}) for key in re.findall(r'"(TEST-\d+)"', jql)}
+        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'search', side_effect=search) as query:
+            backfill(self.store)
+            backfill(self.store)
+        self.assertEqual(query.call_count, 2)
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM jira_pool_items WHERE details_json IS NOT NULL').fetchone()[0], 51)
+            db.execute('UPDATE jira_pool_items SET details_json=NULL,details_checked_at=NULL')
+            db.execute('UPDATE jira_accounts SET group_id=?', (str(uuid.uuid4()),))
+        with patch.object(JiraClient, 'identity') as identity:
+            backfill(self.store)
+        identity.assert_not_called()
+
+    def test_gateway_tick_backfills_even_without_enabled_collection_tasks(self):
+        import asyncio
+        from types import SimpleNamespace
+        from jira_pool import tick
+        self.old_details()
+        with patch.object(JiraClient, 'identity', return_value='bot'), patch.object(JiraClient, 'search', return_value={'TEST-1': ('标题', {}, {'issueType':'sub-bug','priority':'P4'})}):
+            asyncio.run(tick(SimpleNamespace(store=self.store)))
+        self.assertEqual(board(self.store)['items'][0]['priority'], 'P4')
+
+    def test_invalid_or_absent_display_fields_are_nullable(self):
+        from jira_http import issue_details
+        for value in (None, {}, {'name':''}, {'name':1}, {'name':'x'*161}):
+            self.assertEqual(issue_details({'issuetype':value,'priority':value}), {'issueType':None,'priority':None})
+
+    def test_missing_details_from_another_source_do_not_hide_known_values(self):
+        request = self.dispatch()
+        self.collect(self.sync())
+        self.dispatch(request['requestId'])
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_pool_items SET details_json=?,details_checked_at=? WHERE request_id=?',
+                       ('{"issueType":"sub-bug","priority":"P4"}', '2026-01-01T00:00:00+00:00', request['requestId']))
+            db.execute('UPDATE jira_pool_items SET details_json=?,details_checked_at=? WHERE request_id<>?',
+                       ('{"issueType":null,"priority":null}', '2026-02-01T00:00:00+00:00', request['requestId']))
+        self.assertEqual(board(self.store)['items'][0]['priority'], 'P4')
