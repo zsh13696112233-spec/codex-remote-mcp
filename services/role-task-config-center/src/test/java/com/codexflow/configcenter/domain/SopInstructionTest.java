@@ -57,6 +57,7 @@ class SopInstructionTest extends GroupedFixtureSupport {
     var first = runs.prepareLatest(task);
     String original = first.payload().path("nodes").get(0).path("prompt").asText();
     assertThat(original).containsOnlyOnce("角色原始职责").contains("任务目标标记", "补充标记", "期望输出");
+    assertThat(original).containsOnlyOnce("【用户提示词】").contains("【用户提示词】\n角色原始职责");
     entities.flush();
     jdbc.update("update codex_sop_roles set duty = ? where id = ?", "角色新版职责", role);
     entities.clear();
@@ -65,7 +66,10 @@ class SopInstructionTest extends GroupedFixtureSupport {
     config.updateSop(sop, json.treeToValue(body, SopSaveRequest.class));
     entities.flush();
     entities.clear();
-    assertThat(prompt(task)).containsOnlyOnce("步骤专用要求").doesNotContain("角色新版职责");
+    assertThat(prompt(task))
+        .containsOnlyOnce("步骤专用要求")
+        .contains("【用户提示词】\n步骤专用要求")
+        .doesNotContain("角色新版职责");
     for (String value : new String[] {"  角色新版职责  ", "   "}) {
       step.put("instruction", value);
       config.updateSop(sop, json.treeToValue(body, SopSaveRequest.class));

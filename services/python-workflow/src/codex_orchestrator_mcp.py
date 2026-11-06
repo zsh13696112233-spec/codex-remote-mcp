@@ -1941,7 +1941,7 @@ async def dispatch_node(workflow_id: str, node_id: str) -> dict[str, Any]:
     try:
         from workflow_documents import SCHEMA as DOCUMENT_SCHEMA, INSTRUCTION as DOCUMENT_INSTRUCTION
         node["prompt"] += (
-            "\n过程说明只记录有实质变化的业务信息，不逐条播报读取规范、校验配置、查询、"
+            "\n【平台提示词】\n过程说明只记录有实质变化的业务信息，不逐条播报读取规范、校验配置、查询、"
             "写文件或回查等内部操作，不周期性报告仍在处理。"
             "必要的阻断原因、未验证项和实际业务结论必须在正式结果中完整保留。\n"
         )

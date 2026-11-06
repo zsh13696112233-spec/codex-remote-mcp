@@ -424,7 +424,7 @@ public class WorkflowRunStore {
         + step.displayName
         + "\n\n你的角色：\n"
         + step.role.name
-        + "\n\n本步骤执行要求：\n"
+        + "\n\n本步骤执行要求：\n【用户提示词】\n"
         + (step.instruction.isBlank() ? step.role.duty : step.instruction)
         + "\n\n期望输出：\n"
         + step.expectedOutput
