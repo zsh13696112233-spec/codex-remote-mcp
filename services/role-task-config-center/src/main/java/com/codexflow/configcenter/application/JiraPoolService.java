@@ -45,8 +45,20 @@ public class JiraPoolService {
   }
 
   public JsonNode board(String group, Long before, String project, String task, String state) {
+    return board(group, before, project, task, state, "");
+  }
+
+  public JsonNode board(
+      String group, Long before, String project, String task, String state, String sopId) {
+    if (!sopId.isEmpty()) java.util.UUID.fromString(sopId);
     String filters =
-        "&project=" + encode(project) + "&task=" + encode(task) + "&state=" + encode(state);
+        "&project="
+            + encode(project)
+            + "&task="
+            + encode(task)
+            + "&state="
+            + encode(state)
+            + (sopId.isEmpty() ? "" : "&sopId=" + sopId);
     ObjectNode result =
         (ObjectNode)
             gateway.get(
@@ -67,6 +79,18 @@ public class JiraPoolService {
 
   public JsonNode statistics(
       String group, String project, String category, String developer, Long before, boolean items) {
+    return statistics(group, project, category, developer, before, items, "");
+  }
+
+  public JsonNode statistics(
+      String group,
+      String project,
+      String category,
+      String developer,
+      Long before,
+      boolean items,
+      String sopId) {
+    if (!sopId.isEmpty()) java.util.UUID.fromString(sopId);
     ObjectNode result =
         (ObjectNode)
             gateway.get(
@@ -80,6 +104,7 @@ public class JiraPoolService {
                     + encode(category)
                     + "&developer="
                     + encode(developer)
+                    + (sopId.isEmpty() ? "" : "&sopId=" + sopId)
                     + (before == null ? "" : "&before=" + before));
     for (JsonNode item : result.path("items")) {
       if (item.hasNonNull("workflowId"))

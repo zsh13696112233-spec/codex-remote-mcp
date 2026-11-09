@@ -278,34 +278,46 @@ async function openTask(x={enabled:true}){
 }
 function showTaskForm(x){const f=$("#taskForm");f.reset();f.id.value=x.id||"";f.name.value=x.name||"";f.objective.value=taskRequirements(x);f.additionalNotes.value="";f.sopId.innerHTML=state.sops.filter(s=>s.enabled||s.id===x.sopId).map(s=>`<option value="${s.id}" ${s.id===x.sopId?"selected":""}>${esc(s.name)}</option>`).join("");const selectedTarget=x.dingtalkTarget||state.dingtalkTargets.find(t=>t.id===x.dingtalkTargetId),selectedType=selectedTarget?.targetType||"NONE",typeInput=f.querySelector(`[name="dingtalkTargetType"][value="${selectedType}"]`);if(typeInput)typeInput.checked=true;syncTaskDingTalkTargetFields(f,x.dingtalkTargetId||"");f.blockedNotificationGroupId.innerHTML=blockedGroupOptions(x.blockedNotificationGroupId);f.blockedNotificationGroupId.value=x.blockedNotificationGroupId||"";f.notifyDingTalk.checked=x.notifyDingTalk===true;f.enabled.checked=x.enabled!==false;bindGroupForm(f,x,id=>{const old=f.sopId.value;f.sopId.innerHTML='<option value="">请选择同组 SOP</option>'+state.sops.filter(s=>s.groupId===id&&(s.enabled||s.id===x.sopId)).map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");f.sopId.value=[...f.sopId.options].some(o=>o.value===old)?old:""});$("#taskDialog").showModal()}
 
-function blankSop(){return{jiraEnabled:false,jiraJql:"",jiraProject:"",jiraStatus:"待办",jiraConnectionId:"",jiraAccount:"",groupId:concreteGroup(),id:"",name:"",description:"",dispatchMode:"group",supervisorAgentId:"",supervisorTimeoutSec:7200,advanceMode:"automatic",dingtalkShowExecutionDetails:false,defaultStepModel:"gpt-6.1-sol",defaultStepReasoningEffort:null,enabled:true,steps:[]}}
+function blankSop(){return{jiraEnabled:false,jiraJql:"",jiraProject:"",jiraStatus:"待办",jiraRoles:"Planner",jiraIssueType:"sub-bug",jiraConnectionId:"",jiraAccount:"",groupId:concreteGroup(),id:"",name:"",description:"",dispatchMode:"group",supervisorAgentId:"",supervisorTimeoutSec:7200,advanceMode:"automatic",dingtalkShowExecutionDetails:false,defaultStepModel:"gpt-6.1-sol",defaultStepReasoningEffort:null,enabled:true,steps:[]}}
 function jiraFieldsFromQuery(query){
-  const match=/^\s*project\s*=\s*("(?:\\["\\]|[^"\\])*"|'(?:\\['\\]|[^'\\])*'|[\w-]+)(?:\s+AND\s+status\s*=\s*("(?:\\["\\]|[^"\\])*"|'(?:\\['\\]|[^'\\])*'|[\w-]+))?(?:\s+AND\s+assignee\s*=\s*currentUser\(\s*\))?(?:\s+AND\s+"处理角色"\s*=\s*"Planner")?\s*$/i.exec(query||"");
+  const atom=String.raw`"(?:\\["\\]|[^"\\])*"|'(?:\\['\\]|[^'\\])*'|[\p{L}\p{N}_-]+`;
+  const selection=String.raw`=\s*(?:${atom})|IN\s*\(\s*(?:${atom})(?:\s*,\s*(?:${atom}))*\s*\)`;
+  const pattern=String.raw`^\s*project\s*=\s*(${atom})(?:\s+AND\s+status\s*(${selection}))?(?:\s+AND\s+assignee\s*=\s*currentUser\(\s*\))?(?:\s+AND\s+"处理角色"\s*(=\s*(?:${atom})|IN\s*\(\s*(?:${atom})(?:\s*,\s*(?:${atom}))*\s*\)))?(?:\s+AND\s+issuetype\s*(${selection}))?\s*$`;
+  const match=new RegExp(pattern,'iu').exec(query||'');
   if(!match)return null;
   const decode=value=>/^['"]/.test(value)?value.slice(1,-1).replace(/\\(["'\\])/g,'$1'):value;
-  const status=match[2]?decode(match[2]):"待办";
-  return {project:decode(match[1]),status:status==="10205"?"待办":status};
+  const statusValues=match[2]?match[2].replace(/^(?:=\s*|IN\s*\(\s*)/i,''):null;
+  const status=statusValues?[...statusValues.matchAll(new RegExp(atom,'gu'))].map(m=>decode(m[0])).map(v=>v==='10205'?'待办':v).join(', '):'待办';
+  const roleValues=match[3]?match[3].replace(/^(?:=\s*|IN\s*\(\s*)/i,'').replace(/\)\s*$/,''):null;
+  const roles=roleValues?[...roleValues.matchAll(new RegExp(atom,'gu'))].map(m=>decode(m[0])).join(', '):'Planner';
+  return {project:decode(match[1]),status:status==="10205"?"待办":status,roles,issueType:match[4]?[...match[4].replace(/^(?:=\s*|IN\s*\(\s*)/i,'').matchAll(new RegExp(atom,'gu'))].map(m=>decode(m[0])).join(', '):''};
 }
+function jiraRoleValues(value){return [...new Set((value??'Planner').split(/[,，]/).map(v=>v.trim()).filter(Boolean))]}
 function sopJiraQuery(d){
   const project=(d.jiraProject||"").trim();
   const quote=value=>'"'+value.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"';
-  const status=(d.jiraStatus||"").trim();
-  return 'project = '+quote(project)+' AND status = '+(status==="待办"||status==="10205"?'10205':quote(status))+' AND assignee = currentUser() AND "处理角色" = "Planner"';
+  const statuses=[...new Set((d.jiraStatus||'').split(/[,，]/).map(v=>v.trim()).filter(Boolean).map(v=>v==='待办'||v==='10205'?'10205':quote(v)))];
+  const status=statuses.length===1?'= '+statuses[0]:'IN ('+statuses.join(', ')+')';
+  const roles=jiraRoleValues(d.jiraRoles),issueType=(d.jiraIssueType||'').trim();
+  return 'project = '+quote(project)+' AND status '+status+' AND assignee = currentUser() AND "处理角色" '+(roles.length===1?'= '+quote(roles[0]):'IN ('+roles.map(quote).join(', ')+')')+(issueType?' AND issuetype = '+quote(issueType):'');
 }
 function validateSopJira(d){
+  if(d.jiraEnabled&&/[,，]/.test(d.jiraIssueType||''))return "工单类型只能选择一个，请重新选择。";
   if(!d.jiraEnabled)return "";
   const project=(d.jiraProject||"").trim();
   if(/[\u0000-\u001f]/.test(d.jiraProject||""))return "Jira 项目名称不能包含换行或控制字符。";
-  if(!project)return "请填写 Jira 项目名称。";
+  if(!project)return "请选择 Jira 项目。";
   if(/[\u0000-\u001f]/.test(d.jiraStatus||""))return "Jira 状态不能包含换行或控制字符。";
-  if(!(d.jiraStatus||"").trim())return "请填写 Jira 状态。";
+  if(!(d.jiraStatus||'').split(/[,，]/).some(v=>v.trim()))return "请选择 Jira 状态。";
+  if(/[\u0000-\u001f]/.test((d.jiraRoles||'')+(d.jiraIssueType||'')))return "处理角色和工单类型不能包含换行或控制字符。";
+  if(!jiraRoleValues(d.jiraRoles).length)return "请选择至少一个处理角色。";
   if(sopJiraQuery(d).length>4000)return "Jira 项目名称或状态过长，请缩短后重试。";
   return "";
 }
 function normalizeStep(s){const permissionProfile=s.permissionProfile||(s.writeEnabled===true?"workspace_write":"read_only");return{...s,_clientId:s._clientId||uid(),displayName:s.displayName||"",instruction:s.instruction||"",expectedOutput:s.expectedOutput||DEFAULT_EXPECTED_OUTPUT,executorType:s.executorType||"local",agentId:s.agentId||"",workingDirectory:s.workingDirectory||"",permissionProfile,writeEnabled:permissionProfile!=="read_only",modelOverride:s.modelOverride||null,reasoningEffortOverride:s.reasoningEffortOverride||null,timeoutSec:s.timeoutSec||1800,skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}}
 function setDraft(sop){
   const jiraFields=jiraFieldsFromQuery(sop.jira?.jql);
-  const copy={...blankSop(),...sop,jiraEnabled:!!sop.jira,jiraJql:sop.jira?.jql||"",jiraProject:jiraFields?.project||"",jiraStatus:jiraFields?.status||"待办",jiraAccount:sop.jira?.account||"",jiraConnectionId:sop.jira?.connectionId||"",dispatchMode:"group",legacyFixed:!!sop.id&&sop.dispatchMode!=="group",supervisorAgentId:"",steps:(sop.steps||[]).map(s=>normalizeStep({...s,agentId:"",workingDirectory:""}))};
+  const copy={...blankSop(),...sop,jiraEnabled:!!sop.jira,jiraJql:sop.jira?.jql||"",jiraProject:jiraFields?.project||"",jiraStatus:jiraFields?.status||"待办",jiraRoles:jiraFields?.roles??"Planner",jiraIssueType:jiraFields?.issueType??"sub-bug",jiraAccount:sop.jira?.account||"",jiraConnectionId:sop.jira?.connectionId||"",dispatchMode:"group",legacyFixed:!!sop.id&&sop.dispatchMode!=="group",supervisorAgentId:"",steps:(sop.steps||[]).map(s=>normalizeStep({...s,agentId:"",workingDirectory:""}))};
   state.sop.draft=copy;state.sop.selectedNodeId=copy.steps[0]?._clientId||null;state.sop.tab="workflow";state.sop.baseline=draftFingerprint(copy);
 }
 function sopPayload(d=state.sop.draft){return{jira:d.jiraEnabled?{jql:sopJiraQuery(d),connectionId:d.jiraConnectionId||""}:null,groupId:d.groupId,name:d.name.trim(),description:(d.description||"").trim(),dispatchMode:"group",supervisorTimeoutSec:Number(d.supervisorTimeoutSec),advanceMode:d.advanceMode||"automatic",dingtalkShowExecutionDetails:d.dingtalkShowExecutionDetails===true,defaultStepModel:d.defaultStepModel,defaultStepReasoningEffort:d.defaultStepReasoningEffort||null,enabled:d.enabled!==false,steps:d.steps.map(s=>({id:s.id||undefined,displayName:(s.displayName||"").trim(),roleId:s.roleId,instruction:(s.instruction||"").trim(),expectedOutput:(s.expectedOutput||DEFAULT_EXPECTED_OUTPUT).trim(),permissionProfile:s.permissionProfile||"read_only",writeEnabled:(s.permissionProfile||"read_only")!=="read_only",modelOverride:s.modelOverride||null,reasoningEffortOverride:s.reasoningEffortOverride||null,timeoutSec:Number(s.timeoutSec),skills:[...(s.skills||[])],mcps:[...(s.mcps||[])]}))}}
@@ -325,6 +337,7 @@ function syncDirtyUi(){
 }
 
 function renderSopWorkspace(){
+  queueMicrotask(()=>loadSopJiraOptions());
   sopSelectionVersion++;
   $("#content").className="content sop-content";
   renderSopPicker();
@@ -393,7 +406,7 @@ function workflowInspectorHtml(){
     <label>步骤流转方式<select data-sop-field="advanceMode"><option value="automatic" ${d.advanceMode==="automatic"?"selected":""}>全自动（完成后立即继续）</option><option value="semi_automatic" ${d.advanceMode==="semi_automatic"?"selected":""}>半自动（等待确认，遇阻先讨论）</option></select></label>
     <p class="meta">启动时自动选择空闲监督机和本组执行机；本次全部步骤在同一台执行机、同一工作目录执行。</p>${d.legacyFixed?'<p class="meta">此 SOP 仍保存着旧机器设置，点击保存后，新运行改用分组调度。历史运行快照保持原样。</p>':''}
     <label class="check"><input data-sop-field="jiraEnabled" type="checkbox" ${d.jiraEnabled?"checked":""}> 中央统一领取 Jira</label>
-    ${d.jiraEnabled?`${d.jiraJql&&!jiraFieldsFromQuery(d.jiraJql)?'<p class="meta">此 SOP 的旧查询无法自动转换，请填写项目名称后保存。已有运行保持原设置。</p>':''}<label>Jira 项目名称 *<input data-sop-field="jiraProject" maxlength="1000" value="${esc(d.jiraProject||'')}" placeholder="例如：产品研发（也可填写项目编号）"><small>填写 Jira 中实际的项目名称或编号，只领取该 Jira 登录账号负责、符合所填状态且处理角色为 Planner 的工单。</small></label><label>Jira 状态 *<input data-sop-field="jiraStatus" maxlength="1000" value="${esc(d.jiraStatus??'待办')}" placeholder="例如：待办、Open 或状态编号"><small>默认待办；请填写该项目实际使用的状态名称或编号。待办对应编号 10205。</small></label><label>Jira 账号<select data-sop-field="jiraConnectionId" required>${jiraAccountOptions(d.groupId,d.jiraConnectionId)}</select><small>选择本组已启用且检测通过的账号；旧 SOP 需手动绑定。</small></label>`:''}
+    ${d.jiraEnabled?sopJiraOptionsHtml(d):''}
     <label>主监督最长时间（秒）<input data-sop-field="supervisorTimeoutSec" type="number" min="10" max="43200" value="${d.supervisorTimeoutSec}"><small>最多 43200 秒（12 小时），保存后用于新运行。</small></label>
     <label class="check"><input data-sop-field="dingtalkShowExecutionDetails" type="checkbox" ${d.dingtalkShowExecutionDetails?"checked":""}> 钉钉显示思考过程和工具调用</label>
     <p class="meta">关闭后仍发送进度说明、步骤结果和确认通知。修改仅对新运行生效。</p>
@@ -604,12 +617,14 @@ $("#content").addEventListener("submit",async e=>{
 });
 $("#content").addEventListener("input",e=>{
   if(e.target.matches("[data-person-search]")){state.dingtalkPersonSearch=e.target.value;refreshDirectoryPeople();return}
+  if(e.target.dataset.jiraSelect||e.target.dataset.jiraChoice)return;
   const sopField=e.target.dataset.sopField;
   if(sopField&&state.sop.draft){updateField(e.target,state.sop.draft,sopField);const title=document.querySelector(".canvas-toolbar strong");if(sopField==="name"&&title)title.textContent=e.target.value||"未命名工作流";if(sopField==="supervisorAgentId")updateAgentRuntimeUi();syncDirtyUi();return}
   const nodeField=e.target.dataset.nodeField,step=selectedStep();
   if(nodeField&&step){updateField(e.target,step,nodeField);const card=document.querySelector(`[data-node-id="${step._clientId}"]`);if(card&&nodeField==="displayName")card.querySelector(".node-role strong").textContent=e.target.value||roleById(step.roleId)?.name||"未命名节点";if(card&&nodeField==="instruction")card.querySelector(".node-body>p").textContent=e.target.value||"尚未填写执行说明";syncDirtyUi()}
 });
 $("#content").addEventListener("change",async e=>{
+  if(handleSopJiraChange(e))return;
   if(e.target.matches("[data-target-enabled]")){const card=e.target.closest("[data-target-id]"),target=state.dingtalkTargets.find(x=>x.id===card?.dataset.targetId);if(target?.targetType==="PERSON"){const previous=target.enabled;e.target.disabled=true;try{const saved=await api(`/api/dingtalk/targets/${target.id}`,{method:"PUT",body:JSON.stringify({displayName:target.displayName,enabled:e.target.checked})});Object.assign(target,saved);toast("人员启用状态已自动保存")}catch(x){e.target.checked=previous;toast(x.message)}finally{e.target.disabled=!target.available}return}}
   if(e.target.dataset.sopField||e.target.dataset.nodeField)queueMicrotask(refreshEffortControls);
   const sf=e.target.dataset.sopField;if(sf&&state.sop.draft){updateField(e.target,state.sop.draft,sf);if(sf==="groupId"||sf==="advanceMode"||sf==="jiraEnabled"){renderSopWorkspace();return}syncDirtyUi();return}

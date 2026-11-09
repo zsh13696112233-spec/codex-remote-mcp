@@ -431,6 +431,10 @@ SQLite 自动增量增加可空 `jira_pool_items.people_json`。可选 `people` 
 
 ### Jira 提交分类与编号
 
+运行结果接口提供独立的 `executionResult.flowStatus`（`passed/blocked/cancelled/no_task`，未结束为空）和 `submissionStatus`（`full/limited/none/unknown`）。正常完成流程计通过，业务验收不合格但必要交接已完成也计通过；失败及系统中断计阻断，人工取消和无任务单列。提交记录不完整时保持未确认，不能倒推无提交。领取中心以流程结果为主标签，已提交后再阻断仍保留凭证。
+
+以下交付协议和人工核对说明针对旧 `executionResult.status` 兼容字段，不覆盖新的流程大类。普通 `completed` 和审核返工回执不会否定流程完成事实。平台提示词不强制通用 SOP 使用 Bug 审核标题或 SVN 汇报格式，职责和必要交付仍以冻结的 SOP 为准。
+
 新 Jira 运行冻结 `jiraDeliveryVersion=3`，原步骤结果协议和流程控制不变；历史交付协议 1/2 保持原规则，按原快照重试不升级。步骤交付回执增加 `submissionType`（`full` / `limited` / `null`）及 `commits: [{repository, revision}]`。已提交必须有实际回查的本轮编号，仓库使用业务名称；更新版本、历史提交、文档链接不算本轮提交。未提交时类型为空、清单为空，受限原因写入原交付说明。
 
 中央按正式结果保存各次回执，SQLite 增量增加可空字段，旧记录不回填。现有工单池、执行记录、运行历史及详情返回 `executionResult: {status, commits, recorded}`；最终分类为 `fully_submitted`（完整提交）、`limited_submitted`（受限提交）、`completed_no_submission`（正常结束，无提交）、`rework_required`（审核不通过，待返工）、`blocked`（阻断结束）、`abnormal`（异常），未结束或特殊状态为 null。正常结束且全部提交验证通过为完整提交，存在受限提交为受限提交；阻断须无提交，凭证矛盾或结果不明归异常并保留已确认凭证。人工取消和无任务独立展示。
@@ -455,12 +459,28 @@ SQLite 自动增量增加可空 `jira_pool_items.people_json`。可选 `people` 
 
 ### Jira 结果统计
 
-领取中心新增“结果统计”页签，按分组和项目查看累计工单结果、通过率与开发人通过数量。统计范围为已采集工单，按 Jira 服务和编号去重；最后已结束的实际执行决定结果，新一轮执行中保留上次结果。完整提交、受限提交和“正常结束（无提交）”（正式结果或人工核对）均计入流程处理通过总数、通过率及开发人通过数量，异常、取消、未确认历史及尚无最终结果单列，不从文字猜测结果。各占比以去重工单总数为分母。开发人使用对应结果的冻结人员记录，缺失列为“开发人未获取”；名称相同暂合并，不使用后来采集的人名追溯修改归属。统计数字可查看分页明细与本轮过程；统计页每 10 秒更新，失败保留已有结果。
+结果统计支持分组、项目和 SOP 筛选。全部视图按 Jira 服务和编号去重，采用最后一轮已结束的实际业务执行；选定 SOP 后仅采用该流程最后一轮结果。新一轮执行中保留上轮结果并标注重新处理，未执行单列。开发人使用该轮冻结人员记录，不用当前人员追溯改写；统计页每 10 秒更新，失败保留已有结果。
 
-只读接口为配置中心 `GET /api/jira-statistics` 和 `/api/jira-statistics/items`，代理中央网关的同名无 `/api` 接口。共同筛选 `groupId`、`project`；明细另支持 `category`、`developer`、`before`，每页 50 条。汇总返回 `summary/groups/developers/generatedAt`，各层统计中的 `noSubmission` 单列正常结束无提交数量，`passed=full+limited+noSubmission`，`other` 排除这三类及阻断；“通过”明细包含这三类，明细返回 `items/nextCursor/generatedAt`。无需数据迁移或历史补写；升级中央网关和配置中心并刷新浏览器。
+只读接口为配置中心 `GET /api/jira-statistics` 和 `/api/jira-statistics/items`，代理中央网关同名接口。共同筛选 `groupId/project/sopId`；明细另支持 `category/developer/before`，每页 50 条。汇总返回 `summary/groups/developers/generatedAt`，`passed` 按流程正常完成统计，`blocked` 包含业务遇阻和系统异常。人工取消、无任务和待处理等计入 `other`。`rateDenominator=passed+blocked`，流程通过率为 `passed/rateDenominator`，零分母显示“—”；提交细分占比仍以全部工单为分母。
+
+通过大类细分为 `full/limited/noSubmission/submissionUnknown`，四项合计为通过数。明细包含 `flowStatus/submissionStatus/sopId/sopName`；`category=passed/blocked/other` 按新口径筛选，提交子类使用 `fully_submitted/limited_submitted/completed_no_submission/submission_unknown`。审核返工不再单独占用流程结果类别。接口返回 `sops` 筛选选项及 `sopMetadataPending`，提示历史 SOP 信息尚不完整；缺失归属进入整体统计，不猜测归入某个 SOP。
 
 开发人统计的 `total` 为当前筛选范围内该开发人的全部去重工单，包含通过、阻断和其他结果；无通过工单的开发人也展示。尚无结束结果的工单采用最近采集的开发人，已有结束结果仍按该轮人员记录归属。总数可点击查看该人员全部结果分类的工单；开发人表同时展示阻断数量，点击仅查看该人员最后结果为阻断的工单。
 
+
+### SOP 来源与历史升级
+
+采集同步和新运行载荷携带可选 `sopId/sopName`。SQLite 增量增加采集批次的 SOP 字段、`jira_polling_scopes` 当前范围表和 `workflow_sop_context` 冻结运行归属表。`/workflow-task-bindings` 兼容原请求，新增 `sopContexts`（以本批 workflowId 为键的 SOP 编号和名称）；补充来源仅为配置中心不可变运行快照，同一 SOP 编号重复登记幂等，名称不同仍保留首次登记名称并确认成功；不同 SOP 编号的冲突拒绝。不创建不存在的运行、不修改旧快照。
+
+历史 SOP 归属登记仅以网关 `/workflow-task-bindings` 返回的 `sopRegisteredWorkflowIds` 为确认依据：列表仅包含已持久化 SOP 归属的运行。提交尚未落库时不确认，后续后台继续补齐；旧网关未返回确认列表时保留 SOP 待登记标记，不根据运行状态推断成功，历史提交快照保持不变。
+
+`GET /jira-pool`、`/jira-runs` 增加 `sopId` 筛选，筛选先于分页。工单池继续每张 Jira 一行，返回历史 `sources`、最近有效完整采集的 `currentSources`、关联运行的 `currentSop` 和 `jiraStatus`（实际读取的编号、名称、时间）。失败保留上次成功范围并显示更新失败；停用后不再列为待处理。Jira 状态表示最近读取结果，不代表实时查询，也不自动触发执行。人工直接进入验收不要求平台修复记录，仍受完整查询条件和工单占用锁约束。
+
+选择具体 SOP 时，工单列表、状态筛选及项目汇总采用该 SOP 的运行结果；执行时间、提交记录、`executions/executionCount/retryCount` 仅包含该 SOP 的执行，采集记录与来源也限定在该 SOP。没有执行过的工单不借用其他 SOP 的结果。Jira 状态仍取跨 SOP 最新采集值。`occupiedByOtherSop` 单独表示其他流程正在占用工单（包括结束后停止待核实），只提示不可领取，不覆盖当前 SOP 的结果。全部 SOP 模式保留跨流程视图；游标始终使用工单首次入池 ID，筛选先于状态汇总和分页。此变更不修改领取锁、历史快照或业务状态。
+
+未指定 SOP 时，`executionCount` 为累计实际执行轮数；每轮 `executionNumber` 为总轮次，`sopRetryNumber` 为同一 Jira 服务、编号和 SOP 的重试编号（首次为 0）。历史 SOP 不明时局部重试编号为空，同一运行内步骤重跑不加轮次。未指定 SOP 时 `retryCount` 保留跨 SOP 的原语义；每轮 `executionNumber/retryNumber` 保留全局编号，`sopRetryNumber` 提供 SOP 内编号，页面使用 SOP 内编号。
+
+升级先发布中央网关及本机 MCP／远程 Sidecar 共享执行代码，再发布配置中心（Flyway V49）并刷新页面。配置中心沿用归属同步任务，按批发送冻结快照中的 SOP 并独立记录同步标记，可断点续接；历史采集身份不从当前任务倒推。升级不修改 Jira、账号、业务 SOP 或运行快照，不重发历史通知。
 
 ### 工单池类型与优先级
 
@@ -469,3 +489,9 @@ SQLite 自动增量增加可空 `jira_pool_items.people_json`。可选 `people` 
 中央 SQLite 自动增量添加 `jira_pool_items.details_json` 和 `details_checked_at`，已有数据保留。网关后台按同分组、同 Jira 服务的可用中央账号，每轮最多补齐 50 张旧工单，按编号查询而非原 JQL，因此已完成、来源任务已停用或不再符合原条件的工单也会处理。一个账号查询不到时尝试同组同服务的其他可用账号；没有可用账号时保持待补齐。分页全部成功且账号版本未变后才保存，不覆盖期间正常采集写入的字段。
 
 已删除或所有可用账号均不可见的工单记录为空值，不重复查询；以后再次进入正常采集时仍可更新。连接、查询或账号核验失败记录日志，未补齐记录至少延后 5 分钟再处理，其他批次仍可推进；补齐进度持久保存，重启后继续。此流程仅补充工单池展示字段，不改写人员、领取状态、运行快照或实际 Jira。更新并重启 8080 网关和 8091 配置中心后，现存工单由后台逐批补齐，无需更新 8090 或远程执行机，也无需 MySQL 迁移。
+
+### Jira 下拉选项
+
+账号检测成功后读取 Jira 可访问项目列表，返回 `projectCount/optionsMessage`；项目元数据读取失败不冒充认证失败，账号保持检测通过并明确提示读取失败。SOP 使用 `GET /jira-accounts/{id}/options?project=&issueType=&refresh=false` 按需读取，浏览器通过配置中心同名 `/api` 接口代理。无项目参数返回 `projects: [{id,key,name}]`；指定项目返回 `project/issueTypes/statuses/roles/rolesError`，候选值为 `{id,name}`。项目类型来自 `project/{key}`，状态来自 `project/{key}/statuses`，处理角色来自分页 `issue/createmeta/{key}/issuetypes/{id}` 中名称为“处理角色”的字段 `allowedValues`，不从历史工单推测候选值。`issueType` 为单个类型编号或名称；未指定类型时合并适用类型的候选集合；角色读取部分失败时返回明确 `rolesError`，不把部分结果当作完整列表。原类型不属于新项目时仍返回可选类型并提示重新选择。
+
+实测当前 Jira 支持项目、类型和状态编号查询，处理角色选项编号不能直接用于 JQL，因此角色仍按官方候选名称保存。分页未完成、响应异常或权限不足都明确报错，不返回认证头、凭据或原始响应。只有未删除、启用且检测通过的账号可读取选项。SQLite 自动新增 `jira_account_options`，按账号版本、项目、类型缓存十分钟，刷新参数绕过缓存；外部读取后再次核对账号版本，防止改密钥或停用期间写入过期结果。缓存仅保存过滤后的候选信息，不含凭据；失败不覆盖旧缓存，用户可手动重试。已有配置与运行快照不因读取选项而改变。

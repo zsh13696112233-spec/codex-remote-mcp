@@ -130,7 +130,7 @@ test('retry details distinguish explicit non-submission and escape reasons',()=>
   const ctx=context();
   ctx.row={name:'任务',issueKey:'TEST-1',status:'running',claimState:'ready',createdAt:'now',retryCount:2,executions:[{retryNumber:0},{retryNumber:1,startedAt:'today',reason:'<script>缺少权限</script>'}],deliveries:[{status:'not_submitted',summary:'提交前阻断',recordedAt:'now'}]};
   const html=vm.runInContext('jiraDetailHtml(row)',ctx);
-  assert.match(html,/重试 2 次/);
+  assert.match(html,/累计执行 2 轮/);
   assert.match(html,/&lt;script&gt;缺少权限/);
   assert.match(html,/要求提交但未提交/);
   assert.doesNotMatch(html,/<script>/);
@@ -160,14 +160,14 @@ test('pool renders merged sources with Jira issue link and latest collection tim
   const h=poolFixture();
   h.result.items=[{issue_key:'TEST-1',title:'<工单>',state:'bound',workflow_id:'run',run_status:'running',
     server_key:'http://log.youkia.com:8084',collected_at:'最近采集时间',started_at:'原执行时间',monitorUrl:'/monitor?workflowId=run',
-    sources:[{name:'<来源一>',groupId:'one'},{name:'来源二',groupId:'two'}],retryCount:1,
+    executionCount:2,sources:[{name:'<来源一>',groupId:'one'},{name:'来源二',groupId:'two'}],retryCount:1,
     reworks:[{startedAt:'上次时间',reason:'<返工原因>'}]}];
   await h.run('loadJiraPool()');
   const html=h.elements['#poolItems'].innerHTML;
   assert.equal((html.match(/<tr>/g)||[]).length,2);
   assert.match(html,/<th>最近采集<\/th>/);
-  assert.match(html,/<th>重试次数<\/th>/);
-  assert.match(html,/<td>1 次<\/td>/);
+  assert.match(html,/<th>执行轮数<\/th>/);
+  assert.match(html,/<td>2 轮<\/td>/);
   assert.match(html,/最近采集时间/);
   assert.match(html,/原执行时间/);
   assert.match(html,/&lt;来源一&gt;/);
@@ -214,7 +214,7 @@ test('pool uses a single view action and lists every execution inside the dialog
   assert.equal((html.match(/data-pool-executions=/g)||[]).length,1);
   assert.match(html,/data-pool-executions="42"/);
   assert.match(html,/>查看<\/button>/);
-  assert.match(html,/<td>3 次<\/td>/);
+  assert.match(html,/<td>4 轮<\/td>/);
   assert.doesNotMatch(html,/首次执行|第 1 次重试|隐藏原因|共 4 条/);
   const list=vm.runInContext('jiraExecutionListHtml(row)',ctx);
   assert.match(list,/共 4 条/);
@@ -230,7 +230,7 @@ test('pool uses a single view action and lists every execution inside the dialog
   assert.match(vm.runInContext('jiraPoolRowHtml(row)',ctx),/暂无记录/);
 });
 test('execution dialog separates trigger reason from current blocking and keeps selection during polling',async()=>{
-  const h=poolFixture(),body={innerHTML:'',querySelectorAll:()=>[]},dialog={open:false,scrollTop:150,querySelector:()=>body,showModal(){this.open=true},close(){this.open=false}};
+  const h=poolFixture(),body={markup:'',scrollTop:0,get innerHTML(){return this.markup},set innerHTML(value){this.markup=value;this.scrollTop=0},querySelectorAll:()=>[]},dialog={open:false,scrollTop:0,querySelector:()=>body,showModal(){this.open=true},close(){this.open=false}};
   h.elements['#jiraBlockedReason']=dialog;
   h.result.items=[{id:42,issue_key:'TEST-1',title:'工单',state:'bound',sources:[],executions:[
     {workflowId:'retry1',kind:'rework',retryNumber:1,status:'failed',outcome:'blocked',startedAt:'start',finishedAt:'end',
@@ -242,16 +242,19 @@ test('execution dialog separates trigger reason from current blocking and keeps 
   assert.doesNotMatch(body.innerHTML,/上轮&lt;原因&gt;|触发本轮返工/);
   assert.match(body.innerHTML,/本轮阻断原因<\/dt><dd>本轮&lt;阻断&gt;/);
   assert.match(body.innerHTML,/href="\/monitor\?workflowId=retry1"/);
+  body.scrollTop=150;
   h.result.items[0].executions[0].reason='更新后的原因';
   await h.run('loadJiraPool(null,{background:true})');
   assert.equal(dialog.open,true);
-  assert.equal(dialog.scrollTop,150);
+  assert.equal(body.scrollTop,150);
+  assert.equal(dialog.scrollTop,0);
   assert.match(body.innerHTML,/更新后的原因/);
   h.result.items[0].executions.push({workflowId:'retry2',kind:'rework',retryNumber:2,status:'completed'});
   await h.run('loadJiraPool(null,{background:true})');
   assert.match(body.innerHTML,/共 2 条/);
   assert.match(body.innerHTML,/第 2 次重试/);
-  assert.equal(dialog.scrollTop,150);
+  assert.equal(body.scrollTop,150);
+  assert.equal(dialog.scrollTop,0);
   h.result.items[0].executions[0].reason='';
   await h.run('loadJiraPool(null,{background:true})');
   assert.match(body.innerHTML,/未记录具体原因，请查看运行过程/);
@@ -436,4 +439,53 @@ test('background refresh replaces missing issue details after backfill',async()=
   Object.assign(h.result.items[0],{issueType:'sub-bug',priority:'P4'});
   await h.run('loadJiraPool(null,{background:true})');
   assert.match(h.elements['#poolItems'].innerHTML,/<img src="jira-sub-bug.png" width="16" height="16" alt="sub-bug" title="sub-bug"> \/ P4<\/span>/);
+});
+
+test('flow result wins over business rework and records show SOP-local retries',()=>{
+ const ctx=context();
+ ctx.row={status:'completed',executionResult:{flowStatus:'passed',status:'rework_required'}};
+ assert.equal(vm.runInContext('jiraRunStatus(row)',ctx),'流程通过');
+ assert.equal(vm.runInContext('jiraStatusKind(row)',ctx),'success');
+ ctx.execution={executionNumber:2,sopName:'验收',sopRetryNumber:0,retryNumber:1};
+ assert.equal(vm.runInContext('jiraExecutionLabel(execution)',ctx),'验收 · 首次执行');
+ ctx.execution.sopRetryNumber=1;
+ assert.equal(vm.runInContext('jiraExecutionLabel(execution)',ctx),'验收 · 第 1 次重试');
+});
+
+test('selected SOP hides redundant column but retains cross-SOP occupancy warning',()=>{
+ const ctx=context();
+ ctx.row={issue_key:'TEST-1',workflow_id:'repair',run_status:'completed',currentSop:{sopName:'修复'},
+   executionResult:{flowStatus:'passed'},occupiedByOtherSop:{sopName:'<验收>'},executions:[],sources:[]};
+ const scoped=vm.runInContext('jiraPoolRowHtml(row,true)',ctx);
+ assert.doesNotMatch(scoped,/jira-sop-cell|最近执行|历史来源/);
+ assert.match(scoped,/正在由&lt;验收&gt;处理，暂不可领取/);
+ assert.match(vm.runInContext('jiraPoolRowHtml(row)',ctx),/jira-sop-cell/);
+});
+
+test('single-SOP group defaults to scoped data and preserves explicit all-SOP selection',async()=>{
+ const h=poolFixture(),urls=[];
+ h.elements['#poolSop']={value:'',innerHTML:''};
+ h.result.sops=[{sopId:'repair',sopName:'修复'}];
+ h.result.items=[{issue_key:'TEST-1',sources:[]}];
+ h.ctx.api=async url=>{urls.push(url);return h.result};
+ await h.run('loadJiraPool()');
+ assert.equal(urls.length,2);
+ assert.match(urls[1],/sopId=repair/);
+ assert.equal(h.elements['#poolSop'].value,'repair');
+ assert.doesNotMatch(h.elements['#poolItems'].innerHTML,/SOP 流程 \/ 来源/);
+ h.run("poolFilters.sopId=''");
+ await h.run('loadJiraPool(null)');
+ assert.equal(urls.length,3);
+ assert.match(h.elements['#poolItems'].innerHTML,/SOP 流程 \/ 来源/);
+});
+test('all groups and multiple SOPs retain the all-SOP default',async()=>{
+ for(const allGroups of [true,false]) {
+  const h=poolFixture();
+  h.result.sops=allGroups?[{sopId:'one'}]:[{sopId:'one'},{sopId:'two'}];
+  if(allGroups)h.ctx.groupState.selected='';
+  let calls=0;h.ctx.api=async()=>{calls++;return h.result};
+  await h.run('loadJiraPool()');
+  assert.equal(calls,1);
+  assert.equal(h.run('poolFilters.sopId'),'');
+ }
 });

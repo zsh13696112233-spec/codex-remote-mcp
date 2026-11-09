@@ -28,6 +28,9 @@ class TaskRunEntity {
   @Column(name = "runtime_scope_registered", nullable = false)
   boolean runtimeScopeRegistered;
 
+  @Column(name = "runtime_sop_registered", nullable = false)
+  boolean runtimeSopRegistered;
+
   /** 本次运行来源的任务定义；历史查询需要任务信息，因此采用立即加载。 */
   @ManyToOne(fetch = FetchType.EAGER, optional = false)
   @JoinColumn(name = "task_definition_id")

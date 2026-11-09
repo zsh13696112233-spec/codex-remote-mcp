@@ -31,6 +31,117 @@ class PoolTests(unittest.TestCase):
                 db.execute("INSERT INTO jira_pool_items(request_id,server_key,issue_key,title) VALUES(?,'http://jira.test',?,'标题')", (request, key))
         return request
 
+    def test_reservation_cannot_be_bound_to_a_different_sop(self):
+        request = self.batch(['TEST-1'])
+        sop = str(uuid.uuid4())
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_collections SET sop_id=?,sop_name=? WHERE request_id=?', (sop, '修复', request))
+        reservation = reserve(self.store, request, str(uuid.uuid4()))
+        self.workflow('mismatched')
+        spec = {'workflowId':'mismatched', 'jiraReservation':reservation,
+                'taskDefinitionId':self.task, 'groupId':self.group, 'jira':self.config,
+                'sopId':str(uuid.uuid4()), 'sopName':'验收'}
+        with self.store._connect() as db:
+            with self.assertRaisesRegex(ValueError, '快照不一致'):
+                bind(db, spec)
+            spec.update(sopId=sop, sopName='修复')
+            bind(db, spec)
+
+    def test_sop_registration_confirms_only_persisted_runs_after_submission(self):
+        context = {'sopId': str(uuid.uuid4()), 'sopName': '验收'}
+        contexts = {'legacy-retry': context, 'missing': context}
+        ids = list(contexts)
+        self.assertEqual(self.store.register_task_bindings(self.task, ids, contexts), [])
+        self.workflow('legacy-retry')
+        frozen = self.store.get_spec('legacy-retry')
+        for _ in range(2):
+            self.assertEqual(self.store.register_task_bindings(self.task, ids, contexts), ['legacy-retry'])
+        self.assertEqual(self.store.get_spec('legacy-retry'), frozen)
+        renamed = {'legacy-retry': dict(context, sopName='改名')}
+        self.assertEqual(self.store.register_task_bindings(self.task, ['legacy-retry'], renamed), ['legacy-retry'])
+        with self.store._connect() as db:
+            self.assertEqual(db.execute("SELECT sop_name FROM workflow_sop_context WHERE workflow_id='legacy-retry'").fetchone()[0], '验收')
+        self.assertEqual(self.store.get_spec('legacy-retry'), frozen)
+        self.workflow('another')
+        conflicting = {'another': context, 'legacy-retry': dict(context, sopId=str(uuid.uuid4()))}
+        with self.assertRaisesRegex(ValueError, '不能修改'):
+            self.store.register_task_bindings(self.task, list(conflicting), conflicting)
+        with self.store._connect() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM workflow_sop_context WHERE workflow_id='another'").fetchone())
+
+    def test_board_sop_scope_keeps_own_result_while_other_sop_runs(self):
+        repair, acceptance = str(uuid.uuid4()), str(uuid.uuid4())
+        requests = []
+        for name, sop, status in [('repair', repair, 'completed'), ('acceptance', acceptance, 'running')]:
+            request = self.batch(['TEST-1'])
+            self.bind_run(request, name, status)
+            requests.append(request)
+            self.store.register_task_bindings(self.task, [name], {name: {'sopId': sop, 'sopName': name}})
+            with self.store._connect() as db:
+                db.execute('UPDATE jira_collections SET sop_id=?,sop_name=? WHERE request_id=?', (sop, name, request))
+                db.execute("UPDATE workflows SET created_at=?,finished_at=? WHERE workflow_id=?",
+                           ('2026-01-01' if name == 'repair' else '2026-01-02', '2026-01-02' if name == 'repair' else None, name))
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_pool_items SET details_json=?,details_checked_at=? WHERE request_id=?',
+                       (json.dumps({'jiraStatus': {'name': '验收'}}), '2026-01-03', requests[1]))
+        all_items = board(self.store)['items']
+        result = board(self.store, sop_id=repair)
+        item = result['items'][0]
+        self.assertEqual(item['workflow_id'], 'repair')
+        self.assertEqual(item['run_status'], 'completed')
+        self.assertEqual(item['executionResult']['flowStatus'], 'passed')
+        self.assertEqual(item['occupiedByOtherSop']['sopId'], acceptance)
+        self.assertEqual(item['executionCount'], 1)
+        self.assertEqual(item['retryCount'], 0)
+        self.assertEqual([e['workflowId'] for e in item['executions']], ['repair'])
+        self.assertEqual(item['jiraStatus']['name'], '验收')
+        self.assertEqual(item['id'], all_items[0]['id'])
+        self.assertTrue(all(c['sopId'] == repair for c in result['collections']))
+        self.assertTrue(all(c['sopId'] == repair for c in item['sources']))
+        self.assertEqual(board(self.store, sop_id=repair, state='running')['items'], [])
+        self.assertEqual(board(self.store, sop_id=repair, state='completed')['items'][0]['workflow_id'], 'repair')
+        self.assertEqual(result['projects'][0]['running'], 0)
+        self.assertEqual(all_items[0]['workflow_id'], 'acceptance')
+        self.assertEqual(all_items[0]['executionCount'], 2)
+        accepted = board(self.store, sop_id=acceptance)['items'][0]
+        self.assertEqual(accepted['workflow_id'], 'acceptance')
+        self.assertIsNone(accepted['occupiedByOtherSop'])
+        self.assertEqual(len(accepted['executions']), 1)
+        self.assertEqual(board(self.store, sop_id=str(uuid.uuid4()))['items'], [])
+        # 第三个 SOP 只有采集记录，不能借用修复或验收的运行结果。
+        collected_only = str(uuid.uuid4())
+        request = self.batch(['TEST-1'])
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_collections SET sop_id=?,sop_name=? WHERE request_id=?',
+                       (collected_only, '待执行流程', request))
+        candidate = board(self.store, sop_id=collected_only)['items'][0]
+        self.assertIsNone(candidate['workflow_id'])
+        self.assertIsNone(candidate['executionResult'])
+        self.assertEqual(candidate['executionCount'], 0)
+        self.assertEqual(candidate['executions'], [])
+        self.assertEqual(candidate['state'], 'pending')
+        self.assertEqual(candidate['occupiedByOtherSop']['sopId'], acceptance)
+        with self.store._connect() as db:
+            db.execute("UPDATE workflows SET status='completed' WHERE workflow_id='acceptance'")
+        self.assertIsNone(board(self.store, sop_id=repair)['items'][0]['occupiedByOtherSop'])
+        self.assertEqual(board(self.store, sop_id=repair, before=item['id'])['items'], [])
+
+    def test_frozen_sop_backfill_is_idempotent_and_retry_is_per_sop(self):
+        repair, acceptance = str(uuid.uuid4()), str(uuid.uuid4())
+        for index, sop in enumerate((repair, acceptance, repair)):
+            name = 'round-' + str(index)
+            self.bind_run(self.batch(['TEST-1']), name, 'completed')
+            context = {name: {'sopId': sop, 'sopName': '修复' if sop == repair else '验收'}}
+            original = self.store.get_spec(name)
+            self.store.register_task_bindings(self.task, [name], context)
+            self.store.register_task_bindings(self.task, [name], context)
+            self.assertEqual(self.store.get_spec(name), original)
+        item = board(self.store)['items'][0]
+        self.assertEqual(item['executionCount'], 3)
+        self.assertEqual([e['sopRetryNumber'] for e in item['executions']], [0, 0, 1])
+        with self.assertRaisesRegex(ValueError, '不能修改'):
+            self.store.register_task_bindings(self.task, ['round-0'], {'round-0': {'sopId': acceptance, 'sopName': '验收'}})
+
     def test_execution_detail_is_public_and_missing_is_explicit(self):
         from jira_pool import execution_detail
         self.assertIsNone(execution_detail(self.store, 'missing'))
@@ -416,7 +527,7 @@ class PoolTests(unittest.TestCase):
         scoped = board(self.store, group_id=other_group, task='另一任务', state='running')
         self.assertEqual(len(scoped['items']), 1)
         self.assertEqual(scoped['items'][0]['workflow_id'], 'owner')
-        self.assertEqual(scoped['items'][0]['sources'], [{'taskId': other_task, 'groupId': other_group, 'name': '另一任务'}])
+        self.assertEqual(scoped['items'][0]['sources'], [{'taskId': other_task, 'groupId': other_group, 'name': '另一任务', 'sopId': None, 'sopName': None}])
         self.assertEqual(scoped['projects'][0]['running'], 1)
         self.assertEqual(board(self.store, group_id=self.group, task='另一任务')['items'], [])
 

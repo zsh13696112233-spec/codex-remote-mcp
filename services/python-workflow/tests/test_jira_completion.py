@@ -26,6 +26,21 @@ class CompletionTests(unittest.TestCase):
     def result(self):
         return execution_result(self.db, 'run')
 
+    def test_flow_pass_is_independent_of_business_verdict(self):
+        for delivery in ('completed', 'rework_required', 'unknown'):
+            self.db.execute("UPDATE workflow_jira_deliveries SET status=?", (delivery,))
+            result = self.result()
+            self.assertEqual(result['flowStatus'], 'passed')
+            self.assertEqual(result['submissionStatus'], 'unknown' if delivery == 'unknown' else 'none')
+
+    def test_flow_wait_failure_and_no_task_are_not_passed(self):
+        self.db.execute("UPDATE workflows SET status='running'")
+        self.assertIsNone(self.result()['flowStatus'])
+        self.db.execute("UPDATE workflows SET status='failed'")
+        self.assertEqual(self.result()['flowStatus'], 'blocked')
+        self.db.execute("UPDATE workflows SET status='completed',termination_json=?", (json.dumps({'outcome': 'no_task'}),))
+        self.assertEqual(self.result()['flowStatus'], 'no_task')
+
     def test_explicit_final_confirmation_and_old_versions(self):
         self.assertEqual(self.result()['status'], 'completed_no_submission')
         self.assertIn('交接完成', self.result()['note'])

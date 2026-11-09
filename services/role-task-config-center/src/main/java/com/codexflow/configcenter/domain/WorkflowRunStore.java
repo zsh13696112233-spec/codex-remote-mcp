@@ -241,6 +241,22 @@ public class WorkflowRunStore {
     return runs.pendingScopes(taskId, PageRequest.of(0, 200));
   }
 
+  @Transactional(readOnly = true)
+  public ObjectNode frozenSopContexts(List<String> ids) {
+    ObjectNode result = json.newObject();
+    for (var run : runs.findAllById(ids)) {
+      var snapshot = json.read(run.snapshotJson);
+      var sop = snapshot.path("sop");
+      String id = snapshot.path("sopId").asText("");
+      String name = snapshot.path("sopName").asText("");
+      if (id.isEmpty()) id = sop.path("id").asText("");
+      if (name.isEmpty()) name = sop.path("name").asText("");
+      if (!id.isEmpty() && !name.isEmpty())
+        result.putObject(run.workflowId).put("sopId", id).put("sopName", name);
+    }
+    return result;
+  }
+
   /** 仅检查其他历史运行；当前待提交运行会随提交原子登记，不应阻塞自身。 */
   @Transactional(readOnly = true)
   public boolean hasPendingRuntimeHistory(String taskId, String workflowId) {
@@ -256,6 +272,11 @@ public class WorkflowRunStore {
   @Transactional
   public void markRuntimeScopes(List<String> ids) {
     runs.markScopes(ids);
+  }
+
+  @Transactional
+  public void markRuntimeSopScopes(List<String> confirmedIds) {
+    if (!confirmedIds.isEmpty()) runs.markSopScopes(confirmedIds);
   }
 
   @Transactional
@@ -359,6 +380,8 @@ public class WorkflowRunStore {
     root.put("workflowId", workflowId);
     root.put("resultProtocolVersion", "automatic".equals(task.sop.advanceMode) ? 3 : 5);
     root.put("taskDefinitionId", task.id);
+    root.put("sopId", task.sop.id);
+    root.put("sopName", task.sop.name);
     if (task.sop.jiraJql != null) {
       root.put("jiraDeliveryVersion", 3);
       groups.requireJira(task.sop.jiraConnectionId, task.groupId);

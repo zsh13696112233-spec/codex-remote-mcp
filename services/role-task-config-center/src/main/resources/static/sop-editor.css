@@ -89,3 +89,12 @@
 
 .agent-supervisor-choice .agent-choice-address{padding-left:16px}
 .agent-picker>input{text-overflow:ellipsis}
+
+.jira-sop-options { display:grid; gap:12px; min-width:0; }
+.jira-option-field>span { display:block; margin-bottom:6px; }
+.jira-option-multi { border:1px solid #dce0e9; border-radius:6px; background:#fff; }
+.jira-option-multi summary { padding:9px 12px; cursor:pointer; overflow-wrap:anywhere; }
+.jira-option-multi>div { max-height:220px; overflow:auto; padding:4px 12px 10px; border-top:1px solid #eceef3; }
+.jira-option-multi>div>label { display:flex; flex-direction:row; align-items:center; gap:8px; padding:6px 0; margin:0; }
+.jira-option-multi input[type="checkbox"] { width:auto; flex:none; }
+.jira-options-actions { display:flex; align-items:center; justify-content:space-between; gap:8px; }

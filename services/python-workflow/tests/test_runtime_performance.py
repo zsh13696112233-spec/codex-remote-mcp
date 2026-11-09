@@ -328,6 +328,11 @@ class RuntimePerformanceTests(unittest.TestCase):
         self.assertGreater(events["nextCursor"], 0)
         response = client.post("/workflow-task-bindings", json={"taskDefinitionId": "task", "workflowIds": ["one"]})
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"registered": True, "sopRegisteredWorkflowIds": []})
+        context = {"sopId": "00000000-0000-4000-8000-000000000001", "sopName": "验收"}
+        response = client.post("/workflow-task-bindings", json={"taskDefinitionId": "task",
+            "workflowIds": ["one", "missing"], "sopContexts": {"one": context, "missing": context}})
+        self.assertEqual(response.json(), {"registered": True, "sopRegisteredWorkflowIds": ["one"]})
         self.assertEqual(client.post("/workflow-statuses", json={"workflowIds": ["one"]}).json(),
                          {"statuses": {"one": "queued"}, "terminations": {"one": None}})
         self.assertEqual(client.post("/workflow-statuses", json={"workflowIds": []}).status_code, 400)

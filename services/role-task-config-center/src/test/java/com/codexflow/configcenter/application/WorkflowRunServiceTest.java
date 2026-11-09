@@ -156,6 +156,10 @@ class WorkflowRunServiceTest {
             org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
     verify(launches, never()).release(WORKFLOW_ID);
 
+    when(gateway.post(
+            org.mockito.ArgumentMatchers.eq("/workflow-task-bindings"),
+            org.mockito.ArgumentMatchers.any()))
+        .thenReturn(objectMapper.createObjectNode().put("registered", true));
     when(store.pendingRuntimeScopeTasks()).thenReturn(List.of("task-1"));
     when(store.pendingRuntimeScopes("task-1")).thenReturn(List.of("older"));
     org.mockito.Mockito.doAnswer(
@@ -189,12 +193,17 @@ class WorkflowRunServiceTest {
   void backgroundScopeSyncProcessesOneBatchPerTaskAndRetriesFailuresIndependently() {
     List<String> batch =
         java.util.stream.IntStream.range(0, 200).mapToObj(i -> "old-" + i).toList();
+    when(gateway.post(
+            org.mockito.ArgumentMatchers.eq("/workflow-task-bindings"),
+            org.mockito.ArgumentMatchers.any()))
+        .thenReturn(objectMapper.createObjectNode().put("registered", true));
     when(store.pendingRuntimeScopeTasks()).thenReturn(List.of("task-1", "task-2"));
     when(store.pendingRuntimeScopes("task-1")).thenReturn(batch);
     when(store.pendingRuntimeScopes("task-2")).thenReturn(List.of("other"));
     ObjectNode request = objectMapper.createObjectNode().put("taskDefinitionId", "task-1");
     var ids = request.putArray("workflowIds");
     batch.forEach(ids::add);
+    request.putNull("sopContexts");
     when(gateway.post("/workflow-task-bindings", request))
         .thenThrow(new GatewayFailure(502, "temporarily unavailable"))
         .thenReturn(objectMapper.createObjectNode().put("registered", true));
@@ -209,6 +218,28 @@ class WorkflowRunServiceTest {
 
     verify(store).markRuntimeScopes(batch);
     verify(store, org.mockito.Mockito.times(2)).pendingRuntimeScopes("task-1");
+  }
+
+  @Test
+  void sopRegistrationUsesOnlyExplicitConfirmedIds() {
+    when(store.pendingRuntimeScopeTasks()).thenReturn(List.of("task"));
+    when(store.pendingRuntimeScopes("task")).thenReturn(List.of("one", "two"));
+    ObjectNode response = objectMapper.createObjectNode().put("registered", true);
+    response.putArray("sopRegisteredWorkflowIds").add("one");
+    when(gateway.post(
+            org.mockito.ArgumentMatchers.eq("/workflow-task-bindings"),
+            org.mockito.ArgumentMatchers.any()))
+        .thenReturn(response);
+    service.synchronizeRuntimeScopes();
+    verify(store).markRuntimeSopScopes(List.of("one"));
+    org.mockito.Mockito.clearInvocations(store);
+    response.putArray("sopRegisteredWorkflowIds").add("outside");
+    service.synchronizeRuntimeScopes();
+    verify(store, never()).markRuntimeSopScopes(org.mockito.ArgumentMatchers.any());
+    verify(store, never()).markRuntimeScopes(org.mockito.ArgumentMatchers.any());
+    response.remove("sopRegisteredWorkflowIds");
+    service.synchronizeRuntimeScopes();
+    verify(store).markRuntimeSopScopes(List.of());
   }
 
   @Test

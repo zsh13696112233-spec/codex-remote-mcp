@@ -64,7 +64,7 @@ class JiraClient:
 
     def search(self, jql, field=None):
         value = self.request('search', {'jql': jql, 'startAt': 0, 'maxResults': 100,
-                                      'fields': ['summary', 'assignee', 'issuetype', 'priority'] + ([field] if field else [])})
+                                      'fields': ['summary', 'assignee', 'issuetype', 'priority', 'status'] + ([field] if field else [])})
         if (not isinstance(value, dict) or not isinstance(value.get('issues'), list)
                 or value.get('startAt') != 0 or type(value.get('total')) is not int
                 or value['total'] < len(value['issues']) or (not value['issues'] and value['total'])):
@@ -101,7 +101,15 @@ def people(fields, field):
 
 
 def issue_details(fields):
-    result = {}
+    from workflow_store import utc_now
+    status = fields.get('status')
+    name = status.get('name') if isinstance(status, dict) else None
+    identifier = status.get('id') if isinstance(status, dict) else None
+    if not isinstance(identifier, str) or not 1 <= len(identifier) <= 128:
+        identifier = None
+    result = {'jiraStatus': None}
+    if isinstance(name, str) and 0 < len(name.strip()) <= 160:
+        result['jiraStatus'] = {'id': identifier, 'name': name.strip(), 'checkedAt': utc_now()}
     for key, field in (('issueType', 'issuetype'), ('priority', 'priority')):
         value = fields.get(field)
         name = value.get('name') if isinstance(value, dict) else None

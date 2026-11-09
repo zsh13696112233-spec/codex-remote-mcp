@@ -30,7 +30,7 @@ test('blocked-only developers remain visible with a filtered detail button',asyn
  const h=fixture();h.ctx.api=async()=>({...result,developers:[{developer:'乙',total:2,full:0,limited:0,noSubmission:0,passed:0,blocked:2}]});
  await h.run('loadJiraStatistics()');
  const html=h.nodes['#jiraStatsBody'].innerHTML;
- assert.match(html,/<th>通过总数<\/th><th>阻断<\/th>/);
+ assert.match(html,/<th>流程通过总数<\/th><th>阻断<\/th>/);
  assert.match(html,/data-stat-category="blocked" data-stat-group="" data-stat-developer="乙">2<\/button>/);
 });
 
@@ -40,7 +40,7 @@ test('manual completion detail is green and remains a separate category',async()
  for(const k of ['#jiraStatsItems','#jiraStatsCategory','#jiraStatsDetailRefresh','#jiraStatsMore'])h.nodes[k]={innerHTML:''};
  h.ctx.api=async()=>({items:[{issueKey:'TEST-1',title:'已有修复',groupIds:[],developer:'甲',status:'completed_no_submission',finishedAt:'today'}],nextCursor:null,generatedAt:'now'});
  await h.run("showJiraStatItems({category:'completed_no_submission'})");
- assert.match(h.nodes['#jiraStatsItems'].innerHTML,/jira-status success">正常结束（无提交）/);
+ assert.match(h.nodes['#jiraStatsItems'].innerHTML,/jira-status success">通过无提交/);
  assert.match(h.nodes['#jiraStatsItems'].innerHTML,/value="completed_no_submission" selected/);
 });
 
@@ -50,19 +50,29 @@ test('manual completion contributes to total and developer passes with its own c
  h.ctx.api=async()=>({summary:counts,groups:[{groupId:'group',...counts}],developers:[{developer:'甲',...counts}],generatedAt:'now'});
  await h.run('loadJiraStatistics()');
  const html=h.nodes['#jiraStatsBody'].innerHTML;
- assert.match(html,/75.0%/);
+ assert.match(html,/100.0%/);
  assert.match(html,/data-stat-category="passed" data-stat-group="" data-stat-developer="">3<\/button>/);
  assert.match(html,/data-stat-category="passed" data-stat-group="" data-stat-developer="甲">3<\/button>/);
  assert.match(html,/data-stat-category="completed_no_submission" data-stat-group="group" data-stat-developer="">1<\/button>/);
  assert.match(html,/data-stat-category="completed_no_submission" data-stat-group="" data-stat-developer="甲">1<\/button>/);
 });
 
-test('review rework detail is orange with an independent filter',async()=>{
+test('legacy rework remains readable without a business-verdict filter',async()=>{
  const h=fixture();
  h.nodes['#jiraStatsDetails']={open:true};
  for(const k of ['#jiraStatsItems','#jiraStatsCategory','#jiraStatsDetailRefresh','#jiraStatsMore'])h.nodes[k]={innerHTML:''};
  h.ctx.api=async()=>({items:[{issueKey:'TEST-1',title:'回归失败',groupIds:[],developer:'甲',status:'rework_required',finishedAt:'today'}],nextCursor:null,generatedAt:'now'});
  await h.run("showJiraStatItems({category:'rework_required'})");
  assert.match(h.nodes['#jiraStatsItems'].innerHTML,/jira-status waiting">审核不通过（待返工）/);
- assert.match(h.nodes['#jiraStatsItems'].innerHTML,/value="rework_required" selected/);
+ assert.doesNotMatch(h.nodes['#jiraStatsItems'].innerHTML,/value="rework_required"/);
+});
+
+test('flow pass rate excludes pending and cancellation and sends SOP filter',async()=>{
+ const h=fixture();let url;
+ h.run("jiraStatsSop='selected-sop'");
+ h.ctx.api=async u=>{url=u;return {summary:{total:10,passed:2,blocked:1},groups:[],developers:[],generatedAt:'now'}};
+ await h.run('loadJiraStatistics()');
+ assert.match(url,/sopId=selected-sop/);
+ assert.match(h.nodes['#jiraStatsBody'].innerHTML,/66.7%/);
+ assert.doesNotMatch(h.nodes['#jiraStatsBody'].innerHTML,/NaN/);
 });

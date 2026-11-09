@@ -28,6 +28,7 @@ public class JiraRunController {
   public JsonNode statistics(
       @RequestParam(defaultValue = "") String groupId,
       @RequestParam(defaultValue = "") String project,
+      @RequestParam(defaultValue = "") String sopId,
       @RequestParam(defaultValue = "") String category,
       @RequestParam(defaultValue = "") String developer,
       @RequestParam(required = false) Long before,
@@ -35,7 +36,13 @@ public class JiraRunController {
     if (!groupId.isEmpty()) java.util.UUID.fromString(groupId);
     if (before != null && before < 1) throw new IllegalArgumentException("分页参数无效。");
     return pool.statistics(
-        groupId, project, category, developer, before, request.getRequestURI().endsWith("/items"));
+        groupId,
+        project,
+        category,
+        developer,
+        before,
+        request.getRequestURI().endsWith("/items"),
+        sopId);
   }
 
   @GetMapping("/api/jira-pool")
@@ -43,11 +50,12 @@ public class JiraRunController {
       @RequestParam(defaultValue = "") String groupId,
       @RequestParam(required = false) Long before,
       @RequestParam(defaultValue = "") String project,
+      @RequestParam(defaultValue = "") String sopId,
       @RequestParam(defaultValue = "") String task,
       @RequestParam(defaultValue = "") String state) {
     if (!groupId.isEmpty()) java.util.UUID.fromString(groupId);
     if (before != null && before < 1) throw new IllegalArgumentException("分页参数无效。");
-    return pool.board(groupId, before, project, task, state);
+    return pool.board(groupId, before, project, task, state, sopId);
   }
 
   @GetMapping("/api/jira-runs/{workflowId}")
@@ -58,7 +66,8 @@ public class JiraRunController {
   @GetMapping("/api/jira-runs")
   public JsonNode list(
       @RequestParam(defaultValue = "") String groupId,
-      @RequestParam(required = false) Long before) {
-    return service.jiraRuns(groupId, before);
+      @RequestParam(required = false) Long before,
+      @RequestParam(defaultValue = "") String sopId) {
+    return service.jiraRuns(groupId, before, sopId);
   }
 }

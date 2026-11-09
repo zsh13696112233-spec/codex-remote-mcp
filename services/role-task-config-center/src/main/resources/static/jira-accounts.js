@@ -46,7 +46,7 @@ document.addEventListener('click',async event=>{
   if(button.dataset.jiraAccountDelete&&!confirm(`删除账号“${account.name}”？被引用的账号不能删除。`))return;
   button.disabled=true;
   try{
-    if(button.dataset.jiraAccountTest)await api(`/api/jira-accounts/${id}/test`,{method:'POST',body:JSON.stringify({version:account.version})});
+    if(button.dataset.jiraAccountTest){const result=await api(`/api/jira-accounts/${id}/test`,{method:'POST',body:JSON.stringify({version:account.version})});if(typeof sopJiraCatalogs!=='undefined')sopJiraCatalogs.clear();toast(result.optionsMessage||(result.testStatus==='passed'?'账号检测通过':result.testMessage||'账号检测失败'))}
     else if(button.dataset.jiraAccountDelete)await api(`/api/jira-accounts/${id}?version=${account.version}`,{method:'DELETE'});
     else await api(`/api/jira-accounts/${id}`,{method:'PUT',body:JSON.stringify({groupId:account.groupId,name:account.name,server:account.server,enabled:!account.enabled,version:account.version})});
     if(state.page==='jira-accounts')await renderJiraAccounts();

@@ -1698,9 +1698,9 @@ async def register_workflow_task_bindings(request: Request) -> Response:
         body = await request.json()
         if not isinstance(body, dict):
             raise ValueError("请求体必须是 JSON 对象。")
-        await _database_call(gateway.store.register_task_bindings,
-                                body.get("taskDefinitionId"), body.get("workflowIds"))
-        return JSONResponse({"registered": True})
+        confirmed = await _database_call(gateway.store.register_task_bindings,
+                                body.get("taskDefinitionId"), body.get("workflowIds"), body.get("sopContexts"))
+        return JSONResponse({"registered": True, "sopRegisteredWorkflowIds": confirmed})
     except (ValueError, json.JSONDecodeError) as error:
         return _error_response(error, 400)
 

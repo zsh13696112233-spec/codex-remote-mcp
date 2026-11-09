@@ -21,12 +21,30 @@ public class ConfigService {
   private static final Set<String> SUPPORTED_MODELS = Set.of("gpt-6-astra", "gpt-6.1-sol");
   private static final Set<String> EXECUTOR_TYPES = Set.of("local", "remote");
   private static final Set<String> ADVANCE_MODES = Set.of("automatic", "semi_automatic");
+  private static final String JIRA_VALUE_PATTERN =
+      "\"(?:\\\\[\"\\\\]|[^\"\\\\])+\"|'(?:\\\\['\\\\]|[^'\\\\])+'|[\\p{L}\\p{N}_-]+";
+  private static final Pattern JIRA_VALUE = Pattern.compile(JIRA_VALUE_PATTERN);
+  private static final String JIRA_SELECTION_PATTERN =
+      "(?:=\\s*(?:"
+          + JIRA_VALUE_PATTERN
+          + ")|IN\\s*\\(\\s*(?:"
+          + JIRA_VALUE_PATTERN
+          + ")(?:\\s*,\\s*(?:"
+          + JIRA_VALUE_PATTERN
+          + "))*\\s*\\))";
   private static final Pattern JIRA_CLAIM_QUERY =
       Pattern.compile(
-          "project\\s*=\\s*(\"(?:\\\\[\"\\\\]|[^\"\\\\])+\"|'(?:\\\\['\\\\]|[^'\\\\])+'|[\\p{L}\\p{N}_-]+)"
-              + "\\s+AND\\s+status\\s*=\\s*(\"(?:\\\\[\"\\\\]|[^\"\\\\])+\"|'(?:\\\\['\\\\]|[^'\\\\])+'|[\\p{L}\\p{N}_-]+)"
-              + "\\s+AND\\s+assignee\\s*=\\s*currentUser\\(\\s*\\)"
-              + "(?:\\s+AND\\s+\"处理角色\"\\s*=\\s*\"Planner\")?",
+          "project\\s*=\\s*("
+              + JIRA_VALUE_PATTERN
+              + ")\\s+AND\\s+status\\s*("
+              + JIRA_SELECTION_PATTERN
+              + ")\\s+AND\\s+assignee\\s*=\\s*currentUser\\(\\s*\\)"
+              + "(?:\\s+AND\\s+\"处理角色\"\\s*("
+              + JIRA_SELECTION_PATTERN
+              + "))?"
+              + "(?:\\s+AND\\s+issuetype\\s*("
+              + JIRA_SELECTION_PATTERN
+              + "))?",
           Pattern.CASE_INSENSITIVE);
   private static final Set<String> PERMISSION_PROFILES =
       Set.of("read_only", "workspace_write", "auto_review", "full_access");
@@ -327,25 +345,57 @@ public class ConfigService {
       var query = JIRA_CLAIM_QUERY.matcher(sop.jiraJql);
       if (!query.matches())
         throw new IllegalArgumentException(
-            "Jira 领取条件只能指定项目和单个状态，负责人固定为当前 Jira 登录账号，处理角色固定为 Planner。");
+            "Jira 领取条件只能指定项目和状态（多个值用 IN），负责人固定为当前 Jira 登录账号，可指定处理角色（多个值用 IN）和工单类型。");
       String project = query.group(1);
       if ((project.startsWith("\"") || project.startsWith("'"))
           && project.substring(1, project.length() - 1).isBlank())
         throw new IllegalArgumentException("请填写 Jira 项目名称。");
-      String status = query.group(2);
-      String statusValue =
-          status.startsWith("\"") || status.startsWith("'")
-              ? status.substring(1, status.length() - 1)
-              : status;
-      if (statusValue.isBlank()) throw new IllegalArgumentException("请填写 Jira 状态。");
-      // 保留默认待办的编号兼容，其他状态按用户输入查询。
-      if (statusValue.equals("待办") || statusValue.equals("10205")) status = "10205";
+      String statusClause = query.group(2).replaceFirst("(?i)^(?:=\\s*|IN\\s*\\(\\s*)", "");
+      var statusValues = new java.util.LinkedHashSet<String>();
+      var statusMatches = JIRA_VALUE.matcher(statusClause);
+      while (statusMatches.find()) {
+        String value = statusMatches.group();
+        String decoded =
+            value.startsWith("\"") || value.startsWith("'")
+                ? value.substring(1, value.length() - 1)
+                : value;
+        if (decoded.isBlank()) throw new IllegalArgumentException("请填写 Jira 状态。");
+        statusValues.add(decoded.equals("待办") || decoded.equals("10205") ? "10205" : value);
+      }
+      String status =
+          statusValues.size() == 1
+              ? "= " + statusValues.iterator().next()
+              : "IN (" + String.join(", ", statusValues) + ")";
+      String roles = query.group(3);
+      if (roles != null) {
+        var values = JIRA_VALUE.matcher(roles);
+        while (values.find()) {
+          String value = values.group();
+          if ((value.startsWith("\"") || value.startsWith("'"))
+              && value.substring(1, value.length() - 1).isBlank())
+            throw new IllegalArgumentException("处理角色不能为空。");
+        }
+      }
+      String issueType = query.group(4);
+      if (issueType != null && !issueType.stripLeading().startsWith("="))
+        throw new IllegalArgumentException("工单类型只能选择一个。");
+      if (issueType != null) {
+        var values = JIRA_VALUE.matcher(issueType);
+        while (values.find()) {
+          String value = values.group();
+          if ((value.startsWith("\"") || value.startsWith("'"))
+              && value.substring(1, value.length() - 1).isBlank())
+            throw new IllegalArgumentException("工单类型不能为空；不限制类型时请省略该条件。");
+        }
+      }
       sop.jiraJql =
           "project = "
               + project
-              + " AND status = "
+              + " AND status "
               + status
-              + " AND assignee = currentUser() AND \"处理角色\" = \"Planner\"";
+              + " AND assignee = currentUser() AND \"处理角色\" "
+              + (roles == null ? "= \"Planner\"" : roles)
+              + (issueType == null ? "" : " AND issuetype " + issueType);
     }
     if ("fixed".equals(mode)) {
       if (normalizeNullable(body.supervisorAgentId()) == null

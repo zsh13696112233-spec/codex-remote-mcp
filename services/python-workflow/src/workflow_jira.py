@@ -121,6 +121,7 @@ def node_instruction(db, workflow_id):
                   "不得将审核失败当作验证受限通过，也不得为获得分类而改变 Jira 流转或提交准入标准。"
                   "这两类回执的步骤 outcome 为 success，表示本步骤交接完成，不改变依赖执行及人工确认规则；"
                   "提交失败、要求提交却未提交、交接失败或结果不明须如实按原规则报告，不能使用这两类。\n")
+    extra += "流程完成与提交分类独立。普通 completed 回执不会阻止流程计为通过；无需为获得通过分类额外声明无需提交。实际要求的操作失败仍必须如实报告。\n"
     return extra + ("\n【本轮 Jira 任务，优先于角色中自行领取任务的要求】\n"
             f"本轮唯一工单：{row['issue_key']}。所有步骤只处理此工单，不重新搜索或领取其他工单。\n"
             f"通过 PowerShell 调用本轮专属入口 {json.dumps(row['launcher_path'], ensure_ascii=False)}，"
@@ -186,7 +187,48 @@ def delivery_version(db, workflow_id):
     return db.execute("SELECT delivery_version FROM workflow_jira_runs WHERE workflow_id=?", (workflow_id,)).fetchone()[0]
 
 
+def _manually_cancelled(db, workflow_id):
+    import zlib
+    events = db.execute("SELECT payload_json,payload_zlib FROM workflow_events WHERE workflow_id=? AND event_type='workflow.cancelled'", (workflow_id,))
+    return any(json.loads(zlib.decompress(e['payload_zlib']) if e['payload_zlib'] else e['payload_json']).get('reason') in ('user_requested', 'chat_control') for e in events)
+
+
 def execution_result(db, workflow_id):
+    """流程完成与提交分类独立；保留旧交付分类供历史接口兼容。"""
+    result = _delivery_result(db, workflow_id)
+    if result is None:
+        return None
+    row = db.execute("SELECT status,termination_json FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+    termination = json.loads(row["termination_json"] or "{}")
+    flow = None
+    if row["status"] in ("completed", "failed", "cancelled"):
+        if termination.get("outcome") == "no_task":
+            flow = "no_task"
+        elif row["status"] == "cancelled":
+            flow = "cancelled" if _manually_cancelled(db, workflow_id) else "blocked"
+        elif row["status"] == "completed" and not termination.get("outcome"):
+            flow = "passed"
+        else:
+            flow = "blocked"
+    submission = {"fully_submitted": "full", "limited_submitted": "limited",
+                  "completed_no_submission": "none"}.get(result["status"], "unknown")
+    if result['status'] == 'rework_required' and result.get('source') == 'manual_review' and not result['commits']:
+        submission = 'none'
+    if result['commits'] and result['recorded'] and submission == 'unknown':
+        submitted = db.execute("SELECT submission_type FROM workflow_jira_deliveries WHERE workflow_id=? AND status='submitted'", (workflow_id,)).fetchall()
+        unresolved = db.execute("SELECT 1 FROM workflow_jira_deliveries d WHERE workflow_id=? AND status='unknown' AND attempt=(SELECT MAX(x.attempt) FROM workflow_jira_deliveries x WHERE x.workflow_id=d.workflow_id AND x.node_id=d.node_id) LIMIT 1", (workflow_id,)).fetchone()
+        if submitted and not unresolved and all(r[0] in ('full', 'limited') for r in submitted):
+            submission = 'limited' if any(r[0] == 'limited' for r in submitted) else 'full'
+    if not result["commits"] and result["recorded"]:
+        receipts = db.execute("SELECT node_id,attempt,status FROM workflow_jira_deliveries WHERE workflow_id=? ORDER BY attempt", (workflow_id,)).fetchall()
+        latest = {r["node_id"]: r["status"] for r in receipts}
+        nodes = {r[0] for r in db.execute("SELECT node_id FROM workflow_nodes WHERE workflow_id=?", (workflow_id,))}
+        if nodes and nodes == set(latest) and set(latest.values()) <= {"completed", "completed_no_submission", "rework_required", "not_applicable", "not_submitted", "blocked"}:
+            submission = "none"
+    return {**result, "flowStatus": flow, "submissionStatus": submission}
+
+
+def _delivery_result(db, workflow_id):
     from workflow_monitor import public_text
     row = db.execute("SELECT w.status,w.termination_json,j.delivery_version FROM workflows w JOIN workflow_jira_runs j USING(workflow_id) WHERE workflow_id=?", (workflow_id,)).fetchone()
     if row is None:
@@ -244,10 +286,7 @@ def execution_result(db, workflow_id):
                 status = 'completed_no_submission'
                 note = '；'.join(latest[n]['summary'] for n in sorted(leaves))
     if row['delivery_version'] >= 2 and row['status'] == 'cancelled':
-        import zlib
-        events = db.execute("SELECT payload_json,payload_zlib FROM workflow_events WHERE workflow_id=? AND event_type='workflow.cancelled'", (workflow_id,))
-        manual = any(json.loads(zlib.decompress(e['payload_zlib']) if e['payload_zlib'] else e['payload_json']).get('reason') in ('user_requested', 'chat_control') for e in events)
-        if not manual:
+        if not _manually_cancelled(db, workflow_id):
             status = 'abnormal'
     return {'status': status, 'commits': commits, 'recorded': row['delivery_version'] >= 2,
             **({'note': public_text(note)} if note else {})}
@@ -390,7 +429,10 @@ class JiraStore:
             self._add_event_with_connection(db, workflow_id, None, "supervisor", "jira." + result["state"], result, now)
             return result
 
-    def jira_runs(self, group_id, *, before=None, limit=50):
+    def jira_runs(self, group_id, *, before=None, limit=50, sop_id=""):
+        if sop_id:
+            import uuid
+            uuid.UUID(sop_id)
         group_id = group_id or None
         if group_id is not None and (not isinstance(group_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", group_id)):
             raise ValueError("请选择有效分组。")
@@ -403,7 +445,8 @@ class JiraStore:
                 JOIN workflow_allocations a USING(workflow_id) LEFT JOIN workflow_task_bindings b USING(workflow_id)
                 LEFT JOIN registered_agents supervisor ON supervisor.id=a.supervisor_id
                 LEFT JOIN registered_agents executor ON executor.id=a.executor_id WHERE (? IS NULL OR a.group_id=?) AND (? IS NULL OR j.rowid<?)
-                ORDER BY j.rowid DESC LIMIT ?""", (group_id, group_id, before, before, limit + 1)).fetchall()
+                AND (?='' OR EXISTS (SELECT 1 FROM workflow_sop_context s WHERE s.workflow_id=j.workflow_id AND s.sop_id=?))
+                ORDER BY j.rowid DESC LIMIT ?""", (group_id, group_id, before, before, sop_id, sop_id, limit + 1)).fetchall()
             result = []
             for row in rows[:limit]:
                 deliveries = [dict(r) for r in db.execute("SELECT node_id AS nodeId,attempt,status,reference,summary,recorded_at AS recordedAt FROM workflow_jira_deliveries WHERE workflow_id=? ORDER BY recorded_at,node_id,attempt", (row["workflow_id"],))]
@@ -412,7 +455,8 @@ class JiraStore:
                 from jira_pool import rework_history, execution_history
                 reworks = rework_history(db, row["server_key"], row["issue_key"])
                 executions = execution_history(db, row["server_key"], row["issue_key"])
-                result.append({"retryCount": max(0, len(executions) - 1), "executions": executions, "reworkCount": len(reworks), "reworks": reworks, "workflowId": row["workflow_id"], "taskDefinitionId": row["task_definition_id"],
+                from jira_sop import context
+                result.append({**context(db, row["workflow_id"]), "executionCount": len(executions), "retryCount": max(0, len(executions) - 1), "executions": executions, "reworkCount": len(reworks), "reworks": reworks, "workflowId": row["workflow_id"], "taskDefinitionId": row["task_definition_id"],
                     "name": row["name"], "groupId": row["group_id"], "issueKey": row["issue_key"], "claimState": row["state"],
                     "status": row["status"], "outcome": termination["outcome"] if termination else None,
                     "waitingFor": waiting["kind"] if waiting else None,

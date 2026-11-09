@@ -76,19 +76,23 @@ interface TaskRunRepository extends JpaRepository<TaskRunEntity, String> {
 
   @Query(
       "SELECT r.workflowId FROM TaskRunEntity r WHERE r.taskDefinition.id = :taskId "
-          + "AND r.runtimeScopeRegistered = false ORDER BY r.workflowId")
+          + "AND (r.runtimeScopeRegistered = false OR (r.runtimeSopRegistered = false AND r.status <> 'submitting')) ORDER BY r.workflowId")
   List<String> pendingScopes(@Param("taskId") String taskId, Pageable pageable);
 
   boolean existsByTaskDefinitionIdAndRuntimeScopeRegisteredFalseAndWorkflowIdNot(
       String taskDefinitionId, String workflowId);
 
   @Query(
-      "SELECT DISTINCT r.taskDefinition.id FROM TaskRunEntity r WHERE r.runtimeScopeRegistered = false ORDER BY r.taskDefinition.id")
+      "SELECT DISTINCT r.taskDefinition.id FROM TaskRunEntity r WHERE r.runtimeScopeRegistered = false OR (r.runtimeSopRegistered = false AND r.status <> 'submitting') ORDER BY r.taskDefinition.id")
   List<String> pendingScopeTasks(Pageable pageable);
 
   @Modifying
   @Query("UPDATE TaskRunEntity r SET r.runtimeScopeRegistered = true WHERE r.workflowId IN :ids")
   void markScopes(@Param("ids") List<String> ids);
+
+  @Modifying
+  @Query("UPDATE TaskRunEntity r SET r.runtimeSopRegistered = true WHERE r.workflowId IN :ids")
+  void markSopScopes(@Param("ids") List<String> ids);
 
   @Modifying
   @Query(

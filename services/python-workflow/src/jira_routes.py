@@ -29,7 +29,7 @@ async def jira_runs(request):
         before = request.query_params.get("before")
         return JSONResponse(await _database_call(request.app.state.gateway.store.jira_runs,
             request.query_params.get("groupId"), before=int(before) if before is not None else None,
-            limit=int(request.query_params.get("limit", "50"))))
+            limit=int(request.query_params.get("limit", "50")), sop_id=request.query_params.get("sopId", "")))
     except (ValueError, RuntimeError) as error:
         return _internal_error_response(error)
 
@@ -86,6 +86,7 @@ def jira_routes():
             Route('/jira-polling', jira_polling, methods=['POST']),
             Route('/jira-accounts', jira_accounts, methods=['GET', 'POST']),
             Route('/jira-accounts/{account_id}', jira_accounts, methods=['GET', 'PUT', 'DELETE']),
+            Route('/jira-accounts/{account_id}/options', jira_account_options, methods=['GET']),
             Route('/jira-accounts/{account_id}/test', jira_accounts, methods=['POST']),
             Route('/jira-collections', jira_collection, methods=['POST']),
             Route('/jira-collections/{request_id}', jira_collection, methods=['GET', 'DELETE']),
@@ -134,7 +135,7 @@ async def jira_pool_board(request):
         before = request.query_params.get('before')
         return JSONResponse(await _database_call(board, request.app.state.gateway.store,
             request.query_params.get('groupId', ''), int(before) if before else None, 50,
-            request.query_params.get('project', ''), request.query_params.get('task', ''), request.query_params.get('state', '')))
+            request.query_params.get('project', ''), request.query_params.get('task', ''), request.query_params.get('state', ''), request.query_params.get('sopId', '')))
     except (ValueError, RuntimeError) as error:
         return _internal_error_response(error)
 
@@ -195,7 +196,21 @@ async def jira_statistics(request):
         q = request.query_params
         return JSONResponse(await _database_call(statistics, request.app.state.gateway.store,
             q.get('groupId', ''), q.get('project', ''), items=request.url.path.endswith('/items'),
-            category=q.get('category', ''), developer=q.get('developer', ''),
+            sop_id=q.get('sopId', ''), category=q.get('category', ''), developer=q.get('developer', ''),
             before=int(q['before']) if 'before' in q else None))
+    except (ValueError, RuntimeError) as error:
+        return _internal_error_response(error)
+
+
+async def jira_account_options(request):
+    from workflow_gateway import _database_call, _internal_error_response
+    from jira_options import options
+    try:
+        refresh = request.query_params.get('refresh', 'false')
+        if refresh not in ('true', 'false'):
+            raise ValueError('刷新参数无效。')
+        return JSONResponse(await _database_call(options, request.app.state.gateway.store,
+            request.path_params['account_id'], request.query_params.get('project', ''),
+            request.query_params.get('issueType', ''), refresh == 'true'))
     except (ValueError, RuntimeError) as error:
         return _internal_error_response(error)

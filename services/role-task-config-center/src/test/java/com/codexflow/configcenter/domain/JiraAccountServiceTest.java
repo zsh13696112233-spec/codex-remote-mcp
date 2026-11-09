@@ -19,6 +19,17 @@ class JiraAccountServiceTest extends GroupedFixtureSupport {
   @Autowired JdbcTemplate jdbc;
 
   @Test
+  void optionsAreProxiedWithEncodedProjectAndType() {
+    String id = UUID.randomUUID().toString();
+    var response = JsonNodeFactory.instance.objectNode();
+    String path = "/jira-accounts/" + id + "/options?project=A%26B&issueType=6&refresh=true";
+    when(groupGateway.get(path)).thenReturn(response);
+    assertThat(accounts.options(id, "A&B", "6", true)).isSameAs(response);
+    assertThatThrownBy(() -> accounts.options("invalid", "TEST", "6", false))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void validatesGroupAndUsabilityForSopSelection() {
     String id = UUID.randomUUID().toString();
     var row =

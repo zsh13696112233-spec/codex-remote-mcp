@@ -33,6 +33,15 @@ public class JiraAccountController {
     return accounts.test(id, body);
   }
 
+  @GetMapping("/{id}/options")
+  public JsonNode options(
+      @PathVariable String id,
+      @RequestParam(defaultValue = "") String project,
+      @RequestParam(defaultValue = "") String issueType,
+      @RequestParam(defaultValue = "false") boolean refresh) {
+    return accounts.options(id, project, issueType, refresh);
+  }
+
   @DeleteMapping("/{id}")
   public JsonNode delete(@PathVariable String id, @RequestParam long version) {
     return accounts.delete(id, version);

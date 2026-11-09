@@ -97,12 +97,21 @@ public class WorkflowRunService {
   }
 
   public JsonNode jiraRuns(String groupId, Long before) {
+    return jiraRuns(groupId, before, "");
+  }
+
+  public JsonNode jiraRuns(String groupId, Long before, String sopId) {
+    if (!sopId.isEmpty()) java.util.UUID.fromString(sopId);
     if (groupId == null
         || !groupId.isEmpty()
             && !java.util.UUID.fromString(groupId).toString().equalsIgnoreCase(groupId)
         || before != null && before < 1) throw new IllegalArgumentException("分组或分页参数无效。");
     JsonNode result =
-        gateway.get("/jira-runs?groupId=" + groupId + (before == null ? "" : "&before=" + before));
+        gateway.get(
+            "/jira-runs?groupId="
+                + groupId
+                + (sopId.isEmpty() ? "" : "&sopId=" + sopId)
+                + (before == null ? "" : "&before=" + before));
     for (JsonNode item : result.path("items"))
       if (item instanceof ObjectNode row)
         row.put("monitorUrl", store.monitorUrl(row.path("workflowId").asText()));
@@ -247,8 +256,21 @@ public class WorkflowRunService {
                 .put("taskDefinitionId", taskId);
         var array = request.putArray("workflowIds");
         ids.forEach(array::add);
-        gateway.post("/workflow-task-bindings", request);
+        request.set("sopContexts", store.frozenSopContexts(ids));
+        JsonNode response = gateway.post("/workflow-task-bindings", request);
+        JsonNode confirmed = response.path("sopRegisteredWorkflowIds");
+        List<String> confirmedIds = new ArrayList<>();
+        if (!confirmed.isMissingNode()) {
+          if (!confirmed.isArray()) throw new GatewayFailure(502, "运行归属登记响应格式错误。");
+          for (JsonNode id : confirmed) {
+            if (!id.isTextual() || !ids.contains(id.asText())) {
+              throw new GatewayFailure(502, "运行归属登记响应包含无效编号。");
+            }
+            confirmedIds.add(id.asText());
+          }
+        }
         store.markRuntimeScopes(ids);
+        store.markRuntimeSopScopes(confirmedIds);
       } catch (RuntimeException error) {
         LOGGER.warn("历史运行归属登记失败，下轮重试，taskDefinitionId={}。", taskId, error);
       }

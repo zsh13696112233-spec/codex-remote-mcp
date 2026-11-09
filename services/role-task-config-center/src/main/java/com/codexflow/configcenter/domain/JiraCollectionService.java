@@ -27,12 +27,14 @@ public class JiraCollectionService {
     var tasks = body.putArray("tasks");
     for (var row :
         jdbc.queryForList(
-            "SELECT t.id,t.name,t.group_id,s.jira_jql,s.jira_connection_id FROM codex_sop_task_definitions t JOIN codex_sop_sops s ON s.id=t.sop_id WHERE t.deleted=FALSE AND t.enabled=TRUE AND s.deleted=FALSE AND s.enabled=TRUE AND s.dispatch_mode='group' AND t.group_id=s.group_id AND s.jira_connection_id IS NOT NULL AND s.jira_jql IS NOT NULL")) {
+            "SELECT t.id,t.name,t.group_id,s.id AS sop_id,s.name AS sop_name,s.jira_jql,s.jira_connection_id FROM codex_sop_task_definitions t JOIN codex_sop_sops s ON s.id=t.sop_id WHERE t.deleted=FALSE AND t.enabled=TRUE AND s.deleted=FALSE AND s.enabled=TRUE AND s.dispatch_mode='group' AND t.group_id=s.group_id AND s.jira_connection_id IS NOT NULL AND s.jira_jql IS NOT NULL")) {
       var task =
           tasks
               .addObject()
               .put("taskDefinitionId", row.get("id").toString())
               .put("name", row.get("name").toString())
+              .put("sopId", row.get("sop_id").toString())
+              .put("sopName", row.get("sop_name").toString())
               .put("groupId", row.get("group_id").toString());
       task.putObject("jira")
           .put("connectionId", row.get("jira_connection_id").toString())

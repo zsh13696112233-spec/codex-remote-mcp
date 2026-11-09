@@ -28,6 +28,9 @@ class AccountsTests(unittest.TestCase):
             db.execute('CREATE TABLE agent_groups(id TEXT PRIMARY KEY,name TEXT,deleted_at TEXT)')
             db.execute('INSERT INTO agent_groups VALUES(?,?,NULL)', (self.group, 'group'))
         self.body = dict(groupId=self.group, name='测试账号', server='http://jira.test/', token='fixture-secret', enabled=True)
+        options_patch = patch('jira_options.options', return_value={'projects': []})
+        options_patch.start()
+        self.addCleanup(options_patch.stop)
 
     def create(self):
         return accounts.save(self.store, None, self.body)
@@ -196,13 +199,21 @@ class HttpTests(unittest.TestCase):
         for value in ({'issues':[], 'total':2, 'startAt':0}, {'issues':[], 'total':0, 'startAt':1}, {}):
             with patch.object(client, 'request', return_value=value), self.assertRaises(JiraHttpError): client.search('project=TEST')
 
+    def test_status_details_are_observed_and_do_not_expose_raw_fields(self):
+        from jira_http import issue_details
+        value = issue_details({'status': {'id': '100', 'name': ' 待验收 '}})['jiraStatus']
+        self.assertEqual((value['id'], value['name']), ('100', '待验收'))
+        self.assertTrue(value['checkedAt'])
+        self.assertIsNone(issue_details({'status': {'id': {'unexpected': 'value'}, 'name': '待验收'}})['jiraStatus']['id'])
+        self.assertIsNone(issue_details({'status': {'name': ' '}})['jiraStatus'])
+
     def test_search_requests_all_personnel_fields_once(self):
         client = JiraClient('http://jira.test', 'fixture')
         with patch.object(client, 'request', return_value={'issues':[{'key':'TEST-1','fields':{'summary':'标题','assignee':{'displayName':'甲'},'customfield_1':None,'issuetype':{'name':'sub-bug'},'priority':{'name':'P4'}}}], 'total':1,'startAt':0}) as request:
             result = client.search('project=TEST', 'customfield_1')
         self.assertEqual(result['TEST-1'][1]['assignee'], '甲')
-        self.assertEqual(result['TEST-1'][2], {'issueType':'sub-bug', 'priority':'P4'})
-        self.assertEqual(request.call_args.args[1]['fields'], ['summary','assignee','issuetype','priority','customfield_1'])
+        self.assertEqual(result['TEST-1'][2], {'jiraStatus':None, 'issueType':'sub-bug', 'priority':'P4'})
+        self.assertEqual(request.call_args.args[1]['fields'], ['summary','assignee','issuetype','priority','status','customfield_1'])
 
     def test_redirects_are_not_followed(self):
         from jira_http import NoRedirect

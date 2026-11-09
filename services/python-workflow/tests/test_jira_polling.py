@@ -37,6 +37,47 @@ class PollingTests(unittest.TestCase):
         identifier = identifier or str(uuid.uuid4())
         return request_collection(self.store, {**self.task, 'requestId': identifier, 'source': 'schedule'})
 
+    def test_sop_transition_retains_history_but_updates_current_sources(self):
+        repair, acceptance = str(uuid.uuid4()), str(uuid.uuid4())
+        self.task.update(sopId=repair, sopName='修复')
+        self.collect(self.sync())
+        before = board(self.store)['items'][0]
+        self.assertEqual(before['currentSources'][0]['sopId'], repair)
+        self.task.update(sopId=acceptance, sopName='验收')
+        self.due()
+        self.collect(self.sync())
+        after = board(self.store)['items'][0]
+        self.assertEqual(after['id'], before['id'])
+        self.assertEqual([s['sopId'] for s in after['currentSources']], [acceptance])
+        self.assertEqual({s['sopId'] for s in after['sources']}, {repair, acceptance})
+        self.assertEqual(len(board(self.store, sop_id=repair)['items']), 1)
+        self.assertEqual(len(board(self.store, sop_id=str(uuid.uuid4()))['items']), 0)
+        self.sync([])
+        self.assertEqual(board(self.store)['items'][0]['currentSources'], [])
+
+    def test_manual_acceptance_entry_needs_no_repair_history(self):
+        self.task.update(sopId=str(uuid.uuid4()), sopName='验收')
+        self.collect(self.sync())
+        item = board(self.store)['items'][0]
+        self.assertEqual(item['currentSources'][0]['sopName'], '验收')
+        self.assertEqual(item['executionCount'], 0)
+        request = self.dispatch()
+        self.due()
+        self.collect(self.sync())
+        ready = self.dispatch(request['requestId'])
+        self.assertEqual(reserve(self.store, ready['requestId'], str(uuid.uuid4()))['issueKey'], 'TEST-1')
+
+    def test_failed_scan_keeps_known_sop_and_marks_staleness(self):
+        self.task.update(sopId=str(uuid.uuid4()), sopName='修复')
+        self.collect(self.sync())
+        self.due()
+        failed = self.sync()
+        with patch.object(JiraClient, 'identity', side_effect=JiraHttpError('查询失败')):
+            collect_sync(self.store, failed)
+        source = board(self.store)['items'][0]['currentSources'][0]
+        self.assertEqual(source['sopName'], '修复')
+        self.assertEqual(source['collectionState'], 'failed')
+
     def test_polling_never_authorizes_run_and_repeated_sync_does_not_overlap(self):
         first = self.sync()
         self.due()
@@ -282,7 +323,7 @@ class PollingTests(unittest.TestCase):
     def test_invalid_or_absent_display_fields_are_nullable(self):
         from jira_http import issue_details
         for value in (None, {}, {'name':''}, {'name':1}, {'name':'x'*161}):
-            self.assertEqual(issue_details({'issuetype':value,'priority':value}), {'issueType':None,'priority':None})
+            self.assertEqual(issue_details({'issuetype':value,'priority':value}), {'jiraStatus':None,'issueType':None,'priority':None})
 
     def test_missing_details_from_another_source_do_not_hide_known_values(self):
         request = self.dispatch()

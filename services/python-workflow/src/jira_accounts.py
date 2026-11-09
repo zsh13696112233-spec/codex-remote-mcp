@@ -20,6 +20,11 @@ def initialize(db):
       identity TEXT, username TEXT, tested_at TEXT, test_message TEXT NOT NULL DEFAULT '',
       version INTEGER NOT NULL DEFAULT 1, deleted_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS jira_account_options (
+      account_id TEXT NOT NULL, account_version INTEGER NOT NULL,
+      project_key TEXT NOT NULL, issue_type TEXT NOT NULL, payload_json TEXT NOT NULL,
+      updated_at REAL NOT NULL, PRIMARY KEY(account_id,project_key,issue_type)
+    );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_jira_account_name
       ON jira_accounts(group_id,name) WHERE deleted_at IS NULL;
     ''')
@@ -156,7 +161,15 @@ def detect(store, identifier, expected):
         version(get(db, identifier), expected)
         db.execute('UPDATE jira_accounts SET identity=?,username=?,executor_alias=?,test_status=?,test_message=?,tested_at=?,version=version+1 WHERE id=?',
                    (identity, username, alias, status, message, utc_now(), identifier))
-        return public(get(db, identifier))
+        result = public(get(db, identifier))
+    if status == 'passed' and result['enabled']:
+        from jira_options import options
+        try:
+            result['projectCount'] = len(options(store, identifier, refresh=True)['projects'])
+            result['optionsMessage'] = '项目列表已更新。'
+        except JiraHttpError as error:
+            result['optionsMessage'] = '账号检测通过，项目列表读取失败：' + str(error)
+    return result
 
 
 def delete(store, identifier, expected):

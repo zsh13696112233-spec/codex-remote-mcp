@@ -751,7 +751,10 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
         retry_of = value.get("jiraRetryOf")
         if retry_of is not None and (not jira or not isinstance(retry_of, str) or not 1 <= len(retry_of) <= 128 or retry_of == workflow_id):
             raise ValueError("Jira 重试来源无效。")
+        from jira_sop import identity
+        sop_id, sop_name = identity(value)
         return {
+            **({"sopId": sop_id, "sopName": sop_name} if sop_id else {}),
             **({"jira": jira, "jiraDeliveryVersion": delivery_version} if jira else {}),
             **({"jiraReservation": binding} if binding else {}),
             **({"jiraRetryOf": retry_of} if retry_of else {}),
@@ -867,6 +870,8 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
             if spec.get("taskDefinitionId"):
                 connection.execute("INSERT INTO workflow_task_bindings VALUES (?, ?)",
                                    (spec["workflowId"], spec["taskDefinitionId"]))
+            from jira_sop import register
+            register(connection, spec["workflowId"], spec)
             for node in spec["nodes"]:
                 connection.execute(
                     """
@@ -921,7 +926,7 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
         if active is not None:
             raise ValueError("当前任务已有其他运行，暂不能启动或返工。")
 
-    def register_task_bindings(self, task_id: str, workflow_ids: list[str]) -> None:
+    def register_task_bindings(self, task_id: str, workflow_ids: list[str], sop_contexts=None) -> list[str]:
         """配置中心升级时补齐历史归属，不修改冻结快照，也不复活已丢失的运行。"""
         if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 128:
             raise ValueError("taskDefinitionId 必须是 1 到 128 个字符。")
@@ -930,6 +935,9 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
         if any(not isinstance(value, str) or not value.strip() or len(value) > 128
                for value in workflow_ids):
             raise ValueError("工作流编号必须是 1 到 128 个字符。")
+        if sop_contexts is not None and (not isinstance(sop_contexts, dict) or not set(sop_contexts) <= set(workflow_ids)):
+            raise ValueError("SOP 归属必须对应本批运行。")
+        confirmed = []
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             for workflow_id in workflow_ids:
@@ -944,6 +952,16 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                     "SELECT workflow_id, ? FROM workflows WHERE workflow_id = ?",
                     (task_id, workflow_id),
                 )
+
+                if sop_contexts and workflow_id in sop_contexts:
+                    from jira_sop import register
+                    register(connection, workflow_id, sop_contexts[workflow_id])
+                    if connection.execute(
+                        "SELECT 1 FROM workflow_sop_context WHERE workflow_id = ?",
+                        (workflow_id,),
+                    ).fetchone():
+                        confirmed.append(workflow_id)
+        return confirmed
 
     def recover_active_workflows_after_restart(self) -> list[str]:
         """阶段 A 不重新附着旧会话，网关重启后直接终止遗留运行。"""

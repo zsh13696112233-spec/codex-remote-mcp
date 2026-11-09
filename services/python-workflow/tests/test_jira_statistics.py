@@ -23,6 +23,10 @@ class StatisticsTests(unittest.TestCase):
               CREATE TABLE jira_execution_history(workflow_id TEXT);
               CREATE TABLE workflow_nodes(workflow_id TEXT,job_id TEXT);
               INSERT INTO jira_collections VALUES('collection','group','2026-01-01');
+              ALTER TABLE jira_collections ADD COLUMN sop_id TEXT;
+              ALTER TABLE jira_collections ADD COLUMN sop_name TEXT;
+              CREATE TABLE workflow_sop_context(workflow_id TEXT PRIMARY KEY,sop_id TEXT,sop_name TEXT);
+              CREATE TABLE workflow_allocations(workflow_id TEXT,group_id TEXT);
             ''')
         self.results = {}
         mock = patch('jira_statistics.execution_result', side_effect=lambda db, wid: self.results[wid])
@@ -39,12 +43,30 @@ class StatisticsTests(unittest.TestCase):
             db.execute('INSERT INTO jira_pool_items(server_key,issue_key,request_id,title) VALUES(?,?,?,?)', (server, 'TEST-'+str(number), 'collection', '标题'))
 
     def execution(self, wid, state, finished, result, developer='甲'):
-        self.results[wid] = {'status':result}
+        self.results[wid] = {'status':result, 'flowStatus': 'passed' if state=='completed' else 'blocked' if state=='failed' else 'cancelled' if state=='cancelled' else None,
+                             'submissionStatus': {'fully_submitted':'full','limited_submitted':'limited','completed_no_submission':'none','rework_required':'none'}.get(result,'unknown')}
         spec = {'jiraReservation':{'people':{'developers':[developer]}}}
         with self.connect() as db:
             db.execute('INSERT INTO workflows VALUES(?,?,?,?,?,?,?)', (wid,state,finished,'{}',json.dumps(spec),None,'{}'))
             db.execute("INSERT INTO workflow_jira_runs VALUES(?,'server','TEST-1')", (wid,))
             db.execute('INSERT INTO jira_execution_history VALUES(?)', (wid,))
+
+    def test_sop_filter_uses_that_sops_latest_run_and_rate_excludes_pending(self):
+        import uuid
+        repair, acceptance = str(uuid.uuid4()), str(uuid.uuid4())
+        self.issue(1)
+        self.issue(2)
+        self.execution('repair', 'completed', '2026-01-01', 'fully_submitted')
+        self.execution('acceptance', 'failed', '2026-01-02', 'abnormal')
+        with self.connect() as db:
+            db.executemany('INSERT INTO workflow_sop_context VALUES(?,?,?)',
+                           [('repair', repair, '修复'), ('acceptance', acceptance, '验收')])
+        overall = statistics(self)['summary']
+        self.assertEqual((overall['total'], overall['blocked'], overall['rateDenominator']), (2, 1, 1))
+        selected = statistics(self, sop_id=repair)
+        self.assertEqual((selected['summary']['total'], selected['summary']['passed']), (1, 1))
+        self.assertEqual(statistics(self, sop_id=repair, items=True)['items'][0]['workflowId'], 'repair')
+        self.assertEqual(statistics(self, sop_id=acceptance)['summary']['blocked'], 1)
 
     def test_latest_ended_and_reprocessing(self):
         self.issue(1)
@@ -57,7 +79,7 @@ class StatisticsTests(unittest.TestCase):
         self.assertTrue(detail['reprocessing'])
         with self.connect() as db:
             db.execute("UPDATE workflows SET status='failed',finished_at='2026-01-02' WHERE workflow_id='b'")
-        self.results['b']['status']='blocked'
+        self.results['b'].update(status='blocked',flowStatus='blocked')
         summary = statistics(self)['summary']
         self.assertEqual((summary['total'],summary['passed'],summary['blocked']),(1,0,1))
 
@@ -134,16 +156,16 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(statistics(self)['summary']['passed'], 1)
         with self.connect() as db:
             db.execute("UPDATE workflows SET status='failed',finished_at='2026-01-02' WHERE workflow_id='retry'")
-        self.results['retry']['status'] = 'abnormal'
+        self.results['retry'].update(status='abnormal',flowStatus='blocked')
         summary = statistics(self)['summary']
-        self.assertEqual((summary['passed'], summary['noSubmission'], summary['other']), (0, 0, 1))
+        self.assertEqual((summary['passed'], summary['noSubmission'], summary['blocked']), (0, 0, 1))
         self.assertEqual(statistics(self, items=True, category='passed')['items'], [])
 
-    def test_review_rework_is_other_and_has_its_own_filter(self):
+    def test_review_rework_is_flow_pass_without_submission(self):
         self.issue(1)
         self.execution('rework', 'completed', '2026-01-01', 'rework_required')
         result = statistics(self)
         for counts in [result['summary'], *result['groups'], *result['developers']]:
-            self.assertEqual((counts['passed'], counts['other'], counts['blocked']), (0, 1, 0))
-        self.assertEqual(statistics(self, items=True, category='passed')['items'], [])
-        self.assertEqual(len(statistics(self, items=True, category='rework_required')['items']), 1)
+            self.assertEqual((counts['passed'], counts['other'], counts['blocked']), (1, 0, 0))
+        self.assertEqual(len(statistics(self, items=True, category='passed')['items']), 1)
+        self.assertEqual(len(statistics(self, items=True, category='completed_no_submission')['items']), 1)

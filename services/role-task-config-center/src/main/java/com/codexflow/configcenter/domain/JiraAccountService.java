@@ -43,6 +43,19 @@ public class JiraAccountService {
     return gateway.post("/jira-accounts/" + id + "/test", body);
   }
 
+  public JsonNode options(String id, String project, String issueType, boolean refresh) {
+    GroupService.validateId(id);
+    return gateway.get(
+        "/jira-accounts/"
+            + id
+            + "/options?project="
+            + java.net.URLEncoder.encode(project, java.nio.charset.StandardCharsets.UTF_8)
+            + "&issueType="
+            + java.net.URLEncoder.encode(issueType, java.nio.charset.StandardCharsets.UTF_8)
+            + "&refresh="
+            + refresh);
+  }
+
   @Transactional
   public JsonNode delete(String id, long version) {
     GroupService.validateId(id);

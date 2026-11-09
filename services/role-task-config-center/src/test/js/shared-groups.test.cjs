@@ -12,7 +12,7 @@ function fixture(search='') {
   const navButtons=['roles','groups','skills'].map(page=>({...element(),dataset:{page}}));
   const document={querySelector(selector){if(!nodes.has(selector))nodes.set(selector,element());return nodes.get(selector)},querySelectorAll(selector){return selector==='nav button'?navButtons:[]},addEventListener(){},createElement:element};
   const context=vm.createContext({document,window:{addEventListener(){}},location:{search,href:'http://localhost/'+search},history:{replaceState(){}},URL,URLSearchParams,HTMLElement:class {},console,queueMicrotask(){},setInterval(){},setTimeout(){},confirm(){return false},fetch(){throw Error('Unexpected network request')}});
-  for(const name of ['groups.js','machines.js','run-catalog.js','task-schedules.js','skills.js','jira-accounts.js','app.js']) {
+  for(const name of ['groups.js','machines.js','run-catalog.js','task-schedules.js','skills.js','jira-accounts.js','jira-sop-options.js','app.js']) {
     let script=fs.readFileSync(path.join(__dirname,'../../main/resources/static',name),'utf8');
     if(name==='app.js')script=script.slice(0,script.indexOf('const initialPage='))+script.slice(script.indexOf('const effortCatalogs ='));
     vm.runInContext(script,context,{filename:name});
@@ -33,19 +33,19 @@ test('Jira status defaults to pending and is editable after reload',()=>{
   const {run}=jiraFixture();
   run("Object.assign(state.sop.draft,{jiraEnabled:true,jiraProject:' 产品研发 A ',jiraConnectionId:'central'})");
   assert.equal(run('validateSop()'),'');
-  assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner"');
+  assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner" AND issuetype = "sub-bug"');
   assert.equal(run('sopPayload().jira.connectionId'),'central');
   const html=run('workflowInspectorHtml()');
   assert.match(html,/data-sop-field="jiraProject"/);
-  assert.match(html,/data-sop-field="jiraStatus"/);
-  assert.match(html,/只领取该 Jira 登录账号负责、符合所填状态且处理角色为 Planner 的工单/);
+  assert.match(html,/data-jira-menu="jiraStatus"/);
+  assert.match(html,/仅领取所选账号负责的工单/);
   assert.doesNotMatch(html,/data-sop-field="jiraJql"/);
   run("setDraft({...sopPayload(),id:'saved'})");
   assert.equal(run('state.sop.draft.jiraProject'),'产品研发 A');
   assert.equal(run('state.sop.draft.jiraStatus'),"待办");
   assert.equal(run('isSopDirty()'),false);
   run("state.sop.draft.jiraStatus='Closed';state.sop.draft.jiraJql='project = OTHER AND status = Closed'");
-  assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = "Closed" AND assignee = currentUser() AND "处理角色" = "Planner"');
+  assert.equal(run('sopPayload().jira.jql'),'project = "产品研发 A" AND status = "Closed" AND assignee = currentUser() AND "处理角色" = "Planner" AND issuetype = "sub-bug"');
   assert.equal(run('isSopDirty()'),true);
   run("setDraft({...sopPayload(),id:'saved'})");
   assert.equal(run('state.sop.draft.jiraStatus'),'Closed');
@@ -56,7 +56,7 @@ test('Jira names containing quotes and backslashes stay within quoted values',()
   context.project='研发 "A"\\B';
   context.issueStatus='Closed';
   run('Object.assign(state.sop.draft,{jiraEnabled:true,jiraProject:project,jiraStatus:issueStatus})');
-  assert.equal(run('sopPayload().jira.jql'),'project = "研发 \\"A\\"\\\\B" AND status = "Closed" AND assignee = currentUser() AND "处理角色" = "Planner"');
+  assert.equal(run('sopPayload().jira.jql'),'project = "研发 \\"A\\"\\\\B" AND status = "Closed" AND assignee = currentUser() AND "处理角色" = "Planner" AND issuetype = "sub-bug"');
   run("setDraft({...sopPayload(),id:'saved'})");
   assert.equal(run('state.sop.draft.jiraProject'),context.project);
   assert.equal(run('state.sop.draft.jiraStatus'),context.issueStatus);
@@ -85,12 +85,12 @@ test('legacy pending query gains the assignee filter and fixed query reloads unc
 test('complex legacy Jira queries require a project before replacement or can be disabled',()=>{
   const query='project = PROJ AND status in (Open, "In Progress") AND assignee = currentUser() ORDER BY created ASC';
   const {run}=jiraFixture({jql:query,account:'bot'});
-  assert.match(run('workflowInspectorHtml()'),/请填写项目名称后保存/);
+  assert.match(run('workflowInspectorHtml()'),/请重新选择领取条件/);
   run("state.sop.draft.name='新名称'");
-  assert.match(run('validateSop()'),/请填写 Jira 项目名称/);
+  assert.match(run('validateSop()'),/请选择 Jira 项目/);
   run("state.sop.draft.jiraProject='NEW'");
   assert.equal(run('validateSop()'),'');
-  assert.equal(run('sopPayload().jira.jql'),'project = "NEW" AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner"');
+  assert.equal(run('sopPayload().jira.jql'),'project = "NEW" AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner" AND issuetype = "sub-bug"');
   run('state.sop.draft.jiraEnabled=false');
   assert.equal(run('sopPayload().jira'),null);
 });
@@ -98,7 +98,7 @@ test('complex legacy Jira queries require a project before replacement or can be
 test('Jira project is required and rejects controls or oversized generated queries',()=>{
   const {run,context}=jiraFixture();
   run('state.sop.draft.jiraEnabled=true');
-  assert.match(run('validateSop()'),/请填写 Jira 项目名称/);
+  assert.match(run('validateSop()'),/请选择 Jira 项目/);
   context.badStatus='Open\nOR status = Closed';
   run('state.sop.draft.jiraProject=badStatus');
   assert.match(run('validateSop()'),/控制字符/);
@@ -110,7 +110,7 @@ test('Jira project is required and rejects controls or oversized generated queri
 test('Jira status rejects empty and control input and safely quotes query text',()=>{
   const {run,context}=jiraFixture();
   run("Object.assign(state.sop.draft,{jiraEnabled:true,jiraProject:'TEST',jiraStatus:' '})");
-  assert.match(run('validateSop()'),/请填写 Jira 状态/);
+  assert.match(run('validateSop()'),/请选择 Jira 状态/);
   context.status='Open\nOR status = Closed';
   run('state.sop.draft.jiraStatus=status');
   assert.match(run('validateSop()'),/控制字符/);
@@ -439,14 +439,50 @@ test('deleted group selection returns to all groups after reload',async()=>{
   assert.doesNotMatch(run('groupOptions()'),/value="a"/);
 });
 
-test('Jira Planner filter round-trips and other roles are not accepted as simple queries',()=>{
+test('Jira processing role filter round-trips and rejects injected clauses',()=>{
   const {run,context}=jiraFixture({jql:'project = ZJSG AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner"',account:'bot'});
   assert.equal(run('state.sop.draft.jiraProject'),'ZJSG');
   assert.equal(run('state.sop.draft.jiraStatus'),'待办');
   assert.equal(run('isSopDirty()'),false);
   assert.equal(run('sopPayload().jira.jql'),'project = "ZJSG" AND status = 10205 AND assignee = currentUser() AND "处理角色" = "Planner"');
-  for(const suffix of ['"Reviewer"','"Planner" OR project = OTHER']){
+  for(const suffix of ['"Planner" OR project = OTHER']){
     context.query='project = ZJSG AND status = 10205 AND assignee = currentUser() AND "处理角色" = '+suffix;
     assert.equal(run('jiraFieldsFromQuery(query)'),null);
   }
+});
+
+test('Jira roles accept comma-separated values and optional type round-trips',()=>{
+ const {run,context}=jiraFixture({jql:'project = TEST AND status = Open AND assignee = currentUser()',account:'bot'});
+ run("state.sop.draft.jiraRoles='Planner， Reviewer,Planner';state.sop.draft.jiraIssueType='sub-bug'");
+ const query=run('sopPayload().jira.jql');
+ assert.match(query,/"处理角色" IN \("Planner", "Reviewer"\) AND issuetype = "sub-bug"$/);
+ context.query=query;
+ assert.equal(run('jiraFieldsFromQuery(query).roles'),'Planner, Reviewer');
+ assert.equal(run('jiraFieldsFromQuery(query).issueType'),'sub-bug');
+ run("state.sop.draft.jiraIssueType='6, 7'");
+ assert.match(run('validateSopJira(state.sop.draft)'),/只能选择一个/);
+ run("state.sop.draft.jiraIssueType=''");
+ assert.doesNotMatch(run('sopPayload().jira.jql'),/issuetype/);
+ run("state.sop.draft.jiraRoles='， , '");
+ assert.match(run('validateSopJira(state.sop.draft)'),/至少一个处理角色/);
+ assert.equal(run('blankSop().jiraIssueType'),'sub-bug');
+});
+
+test('multiple Jira statuses round-trip with roles and reject empty selections',()=>{
+ const {run,context}=jiraFixture();
+ run("Object.assign(state.sop.draft,{jiraEnabled:true,jiraProject:'NY',jiraStatus:'1， 4, 1',jiraRoles:'Planner, Reviewer',jiraIssueType:'sub-bug'})");
+ context.query=run('sopPayload().jira.jql');
+ assert.match(context.query,/status IN \("1", "4"\)/);
+ assert.match(context.query,/"处理角色" IN \("Planner", "Reviewer"\)/);
+ assert.equal(run('jiraFieldsFromQuery(query).status'),'1, 4');
+ run("setDraft({...sopPayload(),id:'saved'})");
+ assert.equal(run('state.sop.draft.jiraStatus'),'1, 4');
+ assert.equal(run('isSopDirty()'),false);
+ run("state.sop.draft.jiraStatus='Open, In Progress'");
+ context.query=run('sopPayload().jira.jql');
+ assert.equal(run('jiraFieldsFromQuery(query).status'),'Open, In Progress');
+ run("state.sop.draft.jiraStatus='， , '");
+ assert.match(run('validateSopJira(state.sop.draft)'),/请选择 Jira 状态/);
+ run("state.sop.draft.jiraStatus='待办, 10205, 完成'");
+ assert.match(run('sopPayload().jira.jql'),/status IN \(10205, "完成"\)/);
 });

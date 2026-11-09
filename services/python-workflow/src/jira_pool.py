@@ -39,6 +39,9 @@ def initialize(db):
         if column not in columns:
             db.execute(f'ALTER TABLE jira_pool_items ADD COLUMN {column} TEXT')
     db.commit()
+    from jira_sop import initialize as initialize_sop
+    initialize_sop(db)
+    db.commit()
 
 def validate_people(value):
     from datetime import datetime
@@ -67,6 +70,7 @@ def sync_polling(store, body):
     from workflow_store import utc_now
     if not isinstance(body, dict) or set(body) != {'tasks'} or not isinstance(body['tasks'], list):
         raise ValueError('采集任务列表无效。')
+    from jira_sop import identity
     tasks = {}
     for item in body['tasks']:
         task = str(uuid.UUID(item['taskDefinitionId']))
@@ -77,22 +81,25 @@ def sync_polling(store, body):
         name = item['name']
         if not isinstance(name, str) or len(name) > 1000:
             raise ValueError('任务名称无效。')
-        tasks[task] = (group, json.dumps(config, sort_keys=True), name)
+        tasks[task] = (group, json.dumps(config, sort_keys=True), name, *identity(item))
     now = utc_now()
     with store._connect() as db:
         db.execute('BEGIN IMMEDIATE')
+        db.execute('DELETE FROM jira_polling_scopes')
+        db.executemany('INSERT INTO jira_polling_scopes(task_id,group_id,config_json,sop_id,sop_name) VALUES(?,?,?,?,?)',
+                       [(task, v[0], v[1], v[3], v[4]) for task, v in tasks.items()])
         for row in db.execute("SELECT * FROM jira_collections WHERE source='poll' AND (state IN ('waiting','collecting') OR (state='ready' AND EXISTS (SELECT 1 FROM jira_pool_items p WHERE p.request_id=jira_collections.request_id AND p.state='pending')))").fetchall():
             target = tasks.get(row['task_id'])
-            if not target or target[:2] != (row['group_id'], row['config_json']):
+            if not target or (target[0], target[1], target[3]) != (row['group_id'], row['config_json'], row['sop_id']):
                 db.execute("UPDATE jira_collections SET state='cancelled',reason='任务已停用或查询配置已变化。' WHERE request_id=?", (row['request_id'],))
                 db.execute("UPDATE jira_pool_items SET state='cancelled' WHERE request_id=? AND state='pending'", (row['request_id'],))
-        for task, (group, config, name) in tasks.items():
+        for task, (group, config, name, sop_id, sop_name) in tasks.items():
             last = db.execute("SELECT * FROM jira_collections WHERE task_id=? AND source='poll' AND state<>'cancelled' ORDER BY created_at DESC LIMIT 1", (task,)).fetchone()
             if last and (last['state'] in ('waiting', 'collecting') or
                     (datetime.now(timezone.utc) - datetime.fromisoformat(last['created_at'])).total_seconds() < 30):
                 continue
-            db.execute("INSERT INTO jira_collections(request_id,task_id,group_id,name,source,config_json,state,created_at) VALUES(?,?,?,?,'poll',?,'waiting',?)",
-                       (str(uuid.uuid4()), task, group, name, config, now))
+            db.execute("INSERT INTO jira_collections(request_id,task_id,group_id,name,source,config_json,state,created_at,sop_id,sop_name) VALUES(?,?,?,?,'poll',?,'waiting',?,?,?)",
+                       (str(uuid.uuid4()), task, group, name, config, now, sop_id, sop_name))
     return {'synchronized': len(tasks)}
 
 
@@ -100,8 +107,8 @@ def materialize_dispatch(db, row):
     """启动请求仅复制触发后完成的采集快照，绝不自行查询 Jira。"""
     from jira_accounts import usable
     account = usable(db, json.loads(row['config_json']).get('connectionId'), row['group_id'])
-    latest = db.execute("SELECT * FROM jira_collections WHERE source='poll' AND task_id=? AND group_id=? AND config_json=? AND state='ready' AND finished_at>=? AND account_id=? AND account_alias=? ORDER BY finished_at DESC LIMIT 1",
-                        (row['task_id'], row['group_id'], row['config_json'], row['created_at'], account['identity'], account['executor_alias'])).fetchone()
+    latest = db.execute("SELECT * FROM jira_collections WHERE source='poll' AND task_id=? AND group_id=? AND config_json=? AND sop_id IS ? AND state='ready' AND finished_at>=? AND account_id=? AND account_alias=? ORDER BY finished_at DESC LIMIT 1",
+                        (row['task_id'], row['group_id'], row['config_json'], row['sop_id'], row['created_at'], account['identity'], account['executor_alias'])).fetchone()
     if not latest:
         return
     db.execute("UPDATE jira_collections SET state='ready',server_key=?,account_id=?,account_alias=?,count=?,finished_at=? WHERE request_id=?",
@@ -123,8 +130,8 @@ def publish_poll(db, row, server, found):
     # 自动采集只保留每个任务/工单的当前候选，复用 ID 保持分页和等待时间稳定。
     # 每次采集的结果/数量仍保留；派发和运行使用独立的不可变快照。
     for issue, (title, people_json, details_json) in found.items():
-        old = db.execute("SELECT p.*,c.finished_at FROM jira_pool_items p JOIN jira_collections c USING(request_id) WHERE c.source='poll' AND c.task_id=? AND p.server_key=? AND p.issue_key=? ORDER BY p.id DESC LIMIT 1",
-                         (row['task_id'], server, issue)).fetchone()
+        old = db.execute("SELECT p.*,c.finished_at FROM jira_pool_items p JOIN jira_collections c USING(request_id) WHERE c.source='poll' AND c.task_id=? AND p.server_key=? AND p.issue_key=? AND c.sop_id IS ? ORDER BY p.id DESC LIMIT 1",
+                         (row['task_id'], server, issue, row['sop_id'])).fetchone()
         state = 'pending' if issue_available(db, server, issue) else 'consumed'
         queued_at = (old['candidate_queued_at'] or old['finished_at']) if old and old['state'] == 'pending' else now
         if old:
@@ -148,18 +155,20 @@ def request_collection(store, body):
     name = body.get('name', '')
     if not isinstance(name, str) or len(name) > 1000:
         raise ValueError('任务名称无效。')
+    from jira_sop import identity
+    sop_id, sop_name = identity(body)
     encoded = json.dumps(config, sort_keys=True)
     with store._connect() as db:
         db.execute('BEGIN IMMEDIATE')
         old = db.execute('SELECT * FROM jira_collections WHERE request_id=?', (request_id,)).fetchone()
         if old:
-            if (old['task_id'], old['group_id'], old['config_json'], old['source']) != (body['taskDefinitionId'], body['groupId'], encoded, body['source']):
+            if (old['task_id'], old['group_id'], old['config_json'], old['source'], old['sop_id']) != (body['taskDefinitionId'], body['groupId'], encoded, body['source'], sop_id):
                 raise ValueError('采集请求编号已用于其他配置。')
         else:
             from jira_accounts import usable
             usable(db, config.get("connectionId"), body["groupId"])
-            db.execute('''INSERT INTO jira_collections(request_id,task_id,group_id,name,source,config_json,state,created_at)
-                VALUES(?,?,?,?,?,?,'waiting',?)''', (request_id, body['taskDefinitionId'], body['groupId'], name, body['source'], encoded, utc_now()))
+            db.execute('''INSERT INTO jira_collections(request_id,task_id,group_id,name,source,config_json,state,created_at,sop_id,sop_name)
+                VALUES(?,?,?,?,?,?,'waiting',?,?,?)''', (request_id, body['taskDefinitionId'], body['groupId'], name, body['source'], encoded, utc_now(), sop_id, sop_name))
         current = db.execute('SELECT * FROM jira_collections WHERE request_id=?', (request_id,)).fetchone()
         if current['state'] == 'waiting':
             materialize_dispatch(db, current)
@@ -230,14 +239,15 @@ def bind(db, spec):
         from workflow_allocation import decode
         source = db.execute('SELECT w.spec_json,w.spec_zlib FROM workflows w JOIN workflow_task_bindings b USING(workflow_id) WHERE w.workflow_id=? AND b.task_definition_id=?', (spec['jiraRetryOf'], spec.get('taskDefinitionId'))).fetchone()
         original = decode(source) if source else {}
-        if not binding or original.get('jiraReservation') != binding or original.get('jira') != spec['jira']:
+        if not binding or original.get('jiraReservation') != binding or original.get('jira') != spec['jira'] or original.get('sopId') != spec.get('sopId'):
             raise ValueError('重试必须沿用原运行的账号和固定工单快照。')
         return
     if not binding:
         raise ValueError('新 Jira 运行必须先预约工单。')
-    item = db.execute('''SELECT p.*,c.task_id,c.group_id,c.config_json,c.account_id,c.account_alias FROM jira_pool_items p
+    item = db.execute('''SELECT p.*,c.task_id,c.group_id,c.config_json,c.account_id,c.account_alias,c.sop_id FROM jira_pool_items p
         JOIN jira_collections c USING(request_id) WHERE reservation_id=?''', (binding['reservationId'],)).fetchone()
     if (not item or item['state'] != 'reserved' or item['task_id'] != spec.get('taskDefinitionId')
+            or item['sop_id'] != spec.get('sopId')
             or item['group_id'] != spec.get('groupId') or json.loads(item['config_json']) != spec['jira'] or item['issue_key'] != binding['issueKey']
             or item['server_key'] != binding['server'] or item['account_id'] != binding['accountId']
             or binding.get('connectionId') != account['id'] or binding.get('accountAlias') != item['account_alias']
@@ -330,7 +340,9 @@ def collect_sync(store, request_id):
             db.execute("UPDATE jira_collections SET state='failed',reason=?,finished_at=? WHERE request_id=? AND state='collecting'", (str(error),utc_now(),request_id))
 
 
-def board(store, group_id='', before=None, limit=50, project='', task='', state=''):
+def board(store, group_id='', before=None, limit=50, project='', task='', state='', sop_id=''):
+    if sop_id:
+        uuid.UUID(sop_id)
     from workflow_monitor import public_text
     if group_id:
         uuid.UUID(group_id)
@@ -342,7 +354,7 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
     # 游标使用首次入池 ID，重复采集、返工不会把已翻过的工单移到另一页。
     query = '''WITH ranked AS (
         SELECT p.*,c.name,c.group_id,c.task_id,c.created_at,c.finished_at,c.source,
-            MIN(p.id) OVER issue AS issue_id,
+            (SELECT MIN(all_items.id) FROM jira_pool_items all_items WHERE all_items.server_key=p.server_key AND all_items.issue_key=p.issue_key) AS issue_id,
             MAX(c.finished_at) OVER issue AS collected_at,
             MIN(CASE WHEN p.state IN ('pending','reserved') AND c.state='ready'
                 THEN COALESCE(p.candidate_queued_at,c.finished_at,c.created_at) END) OVER issue AS queued_at,
@@ -363,9 +375,21 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
                 END,c.finished_at DESC,p.id DESC) AS position
         FROM jira_pool_items p JOIN jira_collections c USING(request_id)
         LEFT JOIN workflows w ON w.workflow_id=p.workflow_id
+        WHERE (:sop_id='' OR c.sop_id=:sop_id OR (c.sop_id IS NULL AND EXISTS (
+            SELECT 1 FROM workflow_jira_runs j JOIN workflow_sop_context s USING(workflow_id)
+            JOIN workflow_task_bindings t USING(workflow_id) JOIN workflow_allocations a USING(workflow_id)
+            WHERE j.server_key=p.server_key AND j.issue_key=p.issue_key AND s.sop_id=:sop_id
+                AND t.task_definition_id=c.task_id AND a.group_id=c.group_id)))
         WINDOW issue AS (PARTITION BY p.server_key,p.issue_key)
     ), current_items AS (
         SELECT r.*,CASE
+                WHEN :sop_id<>'' THEN (
+                    SELECT j.workflow_id FROM workflow_jira_runs j JOIN workflows sw USING(workflow_id)
+                    JOIN workflow_sop_context ss USING(workflow_id)
+                    WHERE j.server_key=r.server_key AND j.issue_key=r.issue_key AND ss.sop_id=:sop_id
+                    ORDER BY (sw.status NOT IN ('completed','failed','cancelled') OR EXISTS (
+                        SELECT 1 FROM workflow_machine_claims m WHERE m.workflow_id=sw.workflow_id)) DESC,
+                        sw.created_at DESC,j.rowid DESC LIMIT 1)
                 WHEN w.status NOT IN ('completed','failed','cancelled') OR EXISTS (
                     SELECT 1 FROM workflow_machine_claims m WHERE m.workflow_id=claim.workflow_id)
                     THEN claim.workflow_id
@@ -378,7 +402,7 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
         WHERE r.position=1
     ), board_items AS (
         SELECT r.issue_id AS id,r.request_id,r.server_key,r.issue_key,r.latest_title AS title,r.latest_people AS people_json,r.latest_details AS details_json,
-            CASE WHEN w.workflow_id IS NOT NULL THEN 'bound' ELSE r.state END AS state,
+            CASE WHEN w.workflow_id IS NOT NULL THEN 'bound' WHEN :sop_id<>'' AND r.state='bound' THEN 'consumed' ELSE r.state END AS state,
             r.reservation_id,w.workflow_id,r.name,r.group_id,r.task_id,r.created_at,r.finished_at,
             r.collected_at,r.queued_at,r.source,w.status AS run_status,w.finished_at AS run_finished_at,
             w.termination_json,h.started_at,
@@ -395,18 +419,21 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
             AND EXISTS (SELECT 1 FROM jira_pool_items p JOIN jira_collections c USING(request_id)
                 WHERE p.server_key=b.server_key AND p.issue_key=b.issue_key
                     AND (:group_id='' OR c.group_id=:group_id)
-                    AND (:task='' OR c.name LIKE :task_pattern))
+                    AND (:task='' OR c.name LIKE :task_pattern) AND (:sop_id='' OR c.sop_id=:sop_id OR EXISTS (
+                        SELECT 1 FROM workflow_jira_runs j JOIN workflow_sop_context s USING(workflow_id)
+                        JOIN workflow_task_bindings t USING(workflow_id) JOIN workflow_allocations a USING(workflow_id)
+                        WHERE t.task_definition_id=c.task_id AND a.group_id=c.group_id AND j.server_key=b.server_key AND j.issue_key=b.issue_key AND s.sop_id=:sop_id)))
     ) '''
     params = {'group_id': group_id, 'project': project, 'task': task, 'task_pattern': '%'+task+'%',
-              'state': state, 'before': before, 'limit': limit + 1}
+              'sop_id': sop_id, 'state': state, 'before': before, 'limit': limit + 1}
     with store._connect() as db:
         # 页面、汇总与来源读取同一快照，避免采集或绑定途中出现不一致。
         db.execute('BEGIN')
         rows = db.execute(query + '''SELECT * FROM filtered WHERE (:before IS NULL OR id<:before)
             ORDER BY id DESC LIMIT :limit''', params).fetchall()
-        collections = db.execute('''SELECT request_id AS requestId,name,group_id AS groupId,source,state,reason,count,
+        collections = db.execute('''SELECT request_id AS requestId,name,group_id AS groupId,sop_id AS sopId,sop_name AS sopName,source,state,reason,count,
             created_at AS createdAt,finished_at AS finishedAt FROM jira_collections
-            WHERE (?='' OR group_id=?) ORDER BY created_at DESC LIMIT 50''', (group_id, group_id)).fetchall()
+            WHERE (?='' OR group_id=?) AND (?='' OR sop_id=?) ORDER BY created_at DESC LIMIT 50''', (group_id, group_id, sop_id, sop_id)).fetchall()
         projects = db.execute(query + '''SELECT substr(issue_key,1,instr(issue_key,'-')-1) AS project,
             MAX(collected_at) AS lastCollectedAt,
             SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending,
@@ -415,7 +442,15 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
         items = []
         for row in rows[:limit]:
             item = dict(row)
-            item.update(json.loads(item.pop('details_json') or '{}'))
+            details = item.pop('details_json')
+            if sop_id:
+                # Jira 属性来自最新采集，与执行结果的 SOP 范围独立。
+                latest = db.execute("""SELECT details_json FROM jira_pool_items
+                    WHERE server_key=? AND issue_key=? AND details_json IS NOT NULL
+                    ORDER BY details_checked_at DESC,id DESC LIMIT 1""", (row['server_key'], row['issue_key'])).fetchone()
+                if latest:
+                    details = latest[0]
+            item.update(json.loads(details or '{}'))
             item.setdefault('issueType', None)
             item.setdefault('priority', None)
             people_value = item.pop('people_json')
@@ -425,21 +460,43 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
             item['outcome'] = termination.get('outcome')
             item['reason'] = public_text(termination.get('reason'))
             item['stop_pending'] = bool(item['stop_pending'])
-            item['sources'] = [dict(source) for source in db.execute('''SELECT taskId,groupId,name FROM (
-                SELECT c.task_id AS taskId,c.group_id AS groupId,c.name,
-                    ROW_NUMBER() OVER (PARTITION BY c.task_id,c.group_id ORDER BY c.finished_at DESC,p.id DESC) AS position
+            item['sources'] = [dict(source) for source in db.execute('''SELECT taskId,groupId,name,sopId,sopName FROM (
+                SELECT c.task_id AS taskId,c.group_id AS groupId,c.name,c.sop_id AS sopId,c.sop_name AS sopName,
+                    ROW_NUMBER() OVER (PARTITION BY c.task_id,c.group_id,c.sop_id ORDER BY c.finished_at DESC,p.id DESC) AS position
                 FROM jira_pool_items p JOIN jira_collections c USING(request_id)
                 WHERE p.server_key=? AND p.issue_key=? AND (?='' OR c.group_id=?)
             ) WHERE position=1 ORDER BY name,taskId,groupId''',
                 (row['server_key'], row['issue_key'], group_id, group_id))]
+            from jira_sop import current_sources, context
+            item['currentSources'] = current_sources(db, row['server_key'], row['issue_key'], group_id)
+            if sop_id:
+                item['sources'] = [s for s in item['sources'] if s['sopId'] == sop_id]
+                item['currentSources'] = [s for s in item['currentSources'] if s['sopId'] == sop_id]
+            item['currentSop'] = context(db, item['workflow_id'])
+            item['occupiedByOtherSop'] = None
+            if sop_id:
+                occupied = db.execute("""SELECT w.workflow_id FROM jira_issue_claims c
+                    JOIN workflows w USING(workflow_id) LEFT JOIN workflow_sop_context s USING(workflow_id)
+                    WHERE c.server_key=? AND c.issue_key=? AND (s.sop_id IS NULL OR s.sop_id<>?)
+                    AND (w.status NOT IN ('completed','failed','cancelled') OR EXISTS (
+                        SELECT 1 FROM workflow_machine_claims m WHERE m.workflow_id=w.workflow_id))""",
+                    (row['server_key'], row['issue_key'], sop_id)).fetchone()
+                if occupied:
+                    item['occupiedByOtherSop'] = context(db, occupied[0])
             item['reworks'] = rework_history(db, row['server_key'], row['issue_key'])
             item['reworkCount'] = len(item['reworks'])
             item['executions'] = execution_history(db, row['server_key'], row['issue_key'])
+            if sop_id:
+                item['executions'] = [e for e in item['executions'] if e['sopId'] == sop_id]
+                item['reworks'] = [e for e in item['reworks'] if context(db, e['workflowId'])['sopId'] == sop_id]
+                item['reworkCount'] = len(item['reworks'])
+            item['executionCount'] = len(item['executions'])
             item['retryCount'] = max(0, len(item['executions']) - 1)
             from workflow_jira import execution_result
             item['executionResult'] = execution_result(db, item['workflow_id'])
             items.append(item)
-        return {'projects': [dict(r) for r in projects], 'items': items, 'collections': [dict(r) for r in collections],
+        from jira_sop import options
+        return {'sops': options(db, group_id), 'projects': [dict(r) for r in projects], 'items': items, 'collections': [dict(r) for r in collections],
                 'nextCursor': rows[limit - 1]['id'] if len(rows) > limit else None}
 
 
@@ -504,6 +561,7 @@ def execution_history(db, server, issue):
         ORDER BY COALESCE(h.started_at,(SELECT MIN(n.started_at) FROM workflow_nodes n
             WHERE n.workflow_id=w.workflow_id),w.created_at),w.created_at,w.workflow_id''', (server, issue)).fetchall()
     executions, rework_number = [], 0
+    sop_counts = {}
     for row in rows:
         entry = dict(row)
         tracked = entry.pop('tracked') is not None
@@ -526,6 +584,13 @@ def execution_history(db, server, issue):
         else:
             entry['reworkNumber'] = None
             entry['kind'] = 'first' if tracked and not executions else 'execution' if tracked else 'legacy'
+        from jira_sop import context
+        entry.update(context(db, entry['workflowId']))
+        entry['executionNumber'] = len(executions) + 1
+        sop = entry['sopId']
+        entry['sopRetryNumber'] = sop_counts.get(sop, 0) if sop else None
+        if sop:
+            sop_counts[sop] = entry['sopRetryNumber'] + 1
         entry['retryNumber'] = len(executions)
         from workflow_jira import execution_result
         entry['executionResult'] = execution_result(db, entry['workflowId'])
@@ -604,6 +669,7 @@ def execution_detail(store, workflow_id):
             for key in ('reference', 'summary'):
                 delivery[key] = public_text(delivery[key])
         from workflow_jira import execution_result
-        return {'executionResult': execution_result(db, workflow_id), 'workflowId': workflow_id, 'status': row['status'], 'summary': public_text(row['response']),
+        from jira_sop import context
+        return {**context(db, workflow_id), 'executionResult': execution_result(db, workflow_id), 'workflowId': workflow_id, 'status': row['status'], 'summary': public_text(row['response']),
                 'reason': public_text(termination.get('reason')), 'steps': steps, 'deliveries': deliveries,
                 'allocation': allocation_snapshot(db, workflow_id), 'resources': resource_snapshot(db, workflow_id)}

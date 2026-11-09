@@ -16,7 +16,7 @@ class BranchMigrationCompatibilityTest {
             + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
     Flyway.configure().dataSource(url, "sa", "").target("29").load().migrate();
     var flyway = Flyway.configure().dataSource(url, "sa", "").load();
-    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(19);
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(21);
     try (var connection = DriverManager.getConnection(url, "sa", "");
         var statement = connection.createStatement()) {
       statement.executeUpdate(
@@ -60,7 +60,7 @@ class BranchMigrationCompatibilityTest {
       }
     }
     var flyway = Flyway.configure().dataSource(url, "sa", "").load();
-    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(3);
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(5);
     try (var c = DriverManager.getConnection(url, "sa", "");
         var q = c.createStatement();
         var r =
@@ -70,9 +70,46 @@ class BranchMigrationCompatibilityTest {
       while (r.next()) {
         count++;
         assertThat(r.getString(3)).isNull();
-        assertThat(r.getString(2)).isEqualTo(r.getString(1).equals("planner-3") ? null : planner);
+        assertThat(r.getString(2))
+            .isEqualTo(
+                r.getString(1).equals("planner-3")
+                    ? null
+                    : planner + " AND issuetype = \"sub-bug\"");
       }
       assertThat(count).isEqualTo(4);
+    }
+    assertThat(flyway.migrate().migrationsExecuted).isZero();
+  }
+
+  @Test
+  void defaultIssueTypeMigrationPreservesExplicitTypes() throws Exception {
+    String url =
+        "jdbc:h2:mem:issue-types-"
+            + UUID.randomUUID()
+            + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
+    Flyway.configure().dataSource(url, "sa", "").target("49").load().migrate();
+    String base = "project = TEST AND status = Open AND assignee = currentUser()";
+    String custom = base + " AND issuetype = \"Acceptance-bug\"";
+    try (var c = DriverManager.getConnection(url, "sa", "");
+        var q =
+            c.prepareStatement(
+                "INSERT INTO codex_sop_sops(id,name,supervisor_agent_id,default_step_model,jira_jql) VALUES(?,?,'local','test',?)")) {
+      for (String id : java.util.List.of("missing", "custom")) {
+        q.setString(1, id);
+        q.setString(2, id);
+        q.setString(3, id.equals("missing") ? base : custom);
+        q.executeUpdate();
+      }
+    }
+    var flyway = Flyway.configure().dataSource(url, "sa", "").load();
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(1);
+    try (var c = DriverManager.getConnection(url, "sa", "");
+        var q = c.createStatement();
+        var r = q.executeQuery("SELECT id,jira_jql FROM codex_sop_sops")) {
+      while (r.next())
+        assertThat(r.getString(2))
+            .isEqualTo(
+                r.getString(1).equals("custom") ? custom : base + " AND issuetype = \"sub-bug\"");
     }
     assertThat(flyway.migrate().migrationsExecuted).isZero();
   }

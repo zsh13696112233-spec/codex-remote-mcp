@@ -11,6 +11,8 @@ function jiraCommitHtml(row) {
   return (row.executionResult?.source==='historical_review'?'<small>历史核对</small>':row.executionResult?.source==='manual_review'?'<small>人工核对</small>':'') + (row.executionResult?.commits||[]).map(c=>`<small>${esc(c.repository)} ${esc(c.revision)}</small>`).join('');
 }
 function jiraRunStatus(row) {
+  const flowLabels={passed:'流程通过',blocked:'流程阻断',cancelled:'人工取消',no_task:'无待处理任务',unknown:'结果未确认'};
+  if(flowLabels[row.executionResult?.flowStatus])return flowLabels[row.executionResult.flowStatus];
   const resultLabels={rework_required:'审核不通过（待返工）',completed_no_submission:'正常结束（无提交）',fully_submitted:'完整提交',limited_submitted:'受限提交',blocked:'阻断结束',abnormal:'异常',unknown:'历史结果未确认'};
   if(resultLabels[row.executionResult?.status])return resultLabels[row.executionResult.status];
   if (row.outcome === 'no_task') return '无可领取工单';
@@ -28,6 +30,8 @@ function jiraClaimStatus(row) {
   return {waiting_claim:'等待领取',claimed:'已领取，正在下发',ready:'已下发',no_task:'无可领取工单'}[row.claimState]||'领取状态未知';
 }
 function jiraStatusKind(row) {
+  const flow=row.executionResult?.flowStatus;
+  if(flow)return {passed:'success',blocked:'failed',cancelled:'muted',no_task:'muted',unknown:'muted'}[flow]||'muted';
   if(row.executionResult?.status==='completed_no_submission')return 'success';
   if(['limited_submitted','rework_required'].includes(row.executionResult?.status))return 'waiting';
   if(['blocked','abnormal'].includes(row.executionResult?.status))return 'failed';
@@ -40,8 +44,8 @@ function jiraStopPending(row) {
   return ['occupied','review'].includes(row.resourceState)&&['completed','failed','cancelled'].includes(row.status);
 }
 function jiraRowHtml(row) {
-  return `<td><strong>${esc(row.name||'历史任务')}</strong><small>${esc(groupName(row.groupId))}</small></td>
-    <td><strong>${esc(row.issueKey||'尚未领取')}</strong><small>重试 ${Number(row.retryCount||0)} 次</small></td>
+  return `<td><strong>${esc(row.sopName||'历史 SOP 未记录')}</strong><small>${esc(row.name||'历史任务')}</small><small>${esc(groupName(row.groupId))}</small></td>
+    <td><strong>${esc(row.issueKey||'尚未领取')}</strong><small>累计执行 ${Number(row.executionCount??row.executions?.length??0)} 轮</small></td>
     <td><span class="jira-status ${row.claimState==='ready'?'success':'muted'}">${esc(jiraClaimStatus(row))}</span></td>
     <td><span>监督机：${esc(row.supervisorAgentId?(row.supervisorRemark?.trim()||'未填写备注'):'等待分配')}</span><span>执行机：${esc(row.executorAgentId?(row.executorRemark?.trim()||'未填写备注'):'等待分配')}</span></td>
     <td><span class="jira-status ${jiraStatusKind(row)}">${esc(jiraRunStatus(row))}</span>${jiraCommitHtml(row)}${jiraStopPending(row)?'<small class="jira-warning">等待确认执行已停止</small>':''}${row.reason?'<small>原因见详情</small>':''}</td>
@@ -74,7 +78,7 @@ function updateJiraRows(rows) {
   existing.forEach(tr=>tr.remove());
 }
 function jiraDetailHtml(row) {
-  return `<p class="meta">${esc(row.name||'历史任务')} · ${esc(row.issueKey||'尚未领取')}</p><dl><dt>下发状态</dt><dd>${esc(jiraClaimStatus(row))}</dd><dt>运行状态</dt><dd>${esc(jiraRunStatus(row))}${jiraStopPending(row)?' · 等待确认执行已停止':''}</dd><dt>领取时间</dt><dd>${row.claimedAt?esc(time(row.claimedAt)):'尚未领取'}</dd><dt>开始时间</dt><dd>${esc(time(row.createdAt))}</dd><dt>结束时间</dt><dd>${row.finishedAt?esc(time(row.finishedAt)):'尚未结束'}</dd><dt>原因说明</dt><dd>${esc(row.reason||'暂无')}</dd></dl><h3>重试 ${Number(row.retryCount||0)} 次</h3><p class="meta">按同一工单实际执行轮数减 1 统计；启动失败且未执行步骤不计，同一运行内重跑步骤不重复计数。</p>${(row.executions||[]).slice(1).map(r=>`<article class="jira-receipt"><strong>第 ${r.retryNumber} 次重试 · ${esc(time(r.startedAt))}</strong><p>${esc(r.reason)}</p></article>`).join('')}<h3>交付回执</h3>${jiraCommitHtml(row)}${row.executionResult?.note?`<p>${esc(row.executionResult.note)}</p>`:''}${row.executionResult?.recorded===false?'<p class="meta">提交类型未记录</p>':''}${row.deliveries?.length?row.deliveries.map(d=>`<article class="jira-receipt"><strong>${esc(jiraDeliveryLabels[d.status]||'结果待核实')}</strong><small>${esc(time(d.recordedAt))}</small><p>${esc(d.summary||'')}</p>${d.reference?`<p>凭证：${esc(d.reference)}</p>`:''}</article>`).join(''):'<p class="meta">尚无交付回执</p>'}`;
+  return `<p class="meta">${esc(row.name||'历史任务')} · ${esc(row.issueKey||'尚未领取')}</p><dl><dt>下发状态</dt><dd>${esc(jiraClaimStatus(row))}</dd><dt>运行状态</dt><dd>${esc(jiraRunStatus(row))}${jiraStopPending(row)?' · 等待确认执行已停止':''}</dd><dt>领取时间</dt><dd>${row.claimedAt?esc(time(row.claimedAt)):'尚未领取'}</dd><dt>开始时间</dt><dd>${esc(time(row.createdAt))}</dd><dt>结束时间</dt><dd>${row.finishedAt?esc(time(row.finishedAt)):'尚未结束'}</dd><dt>原因说明</dt><dd>${esc(row.reason||'暂无')}</dd></dl><h3>累计执行 ${Number(row.executionCount??row.executions?.length??0)} 轮</h3><p class="meta">总轮数包含各 SOP 的实际执行；同 SOP 再次执行才计重试。启动失败且未执行步骤不计，同一运行内重跑步骤不重复计数。</p>${(row.executions||[]).map(r=>`<article class="jira-receipt"><strong>${esc(jiraExecutionLabel(r))} · ${esc(time(r.startedAt))}</strong><p>${esc(r.reason)}</p></article>`).join('')}<h3>交付回执</h3>${jiraCommitHtml(row)}${row.executionResult?.note?`<p>${esc(row.executionResult.note)}</p>`:''}${row.executionResult?.recorded===false?'<p class="meta">提交类型未记录</p>':''}${row.deliveries?.length?row.deliveries.map(d=>`<article class="jira-receipt"><strong>${esc(jiraDeliveryLabels[d.status]||'结果待核实')}</strong><small>${esc(time(d.recordedAt))}</small><p>${esc(d.summary||'')}</p>${d.reference?`<p>凭证：${esc(d.reference)}</p>`:''}</article>`).join(''):'<p class="meta">尚无交付回执</p>'}`;
 }
 function updateJiraDetails() {
   const dialog=$('#jiraDetails'),row=jiraItems.find(item=>item.workflowId===jiraDetailId);
@@ -93,7 +97,8 @@ function openJiraDetails(id) {
   jiraDetailId=id;dialog.showModal();updateJiraDetails();
 }
 let jiraView = typeof location !== 'undefined' && new URL(location.href).searchParams.get('jiraView') === 'statistics' ? 'statistics' : 'pool';
-let poolFilters = {project:'',task:'',state:''};
+let poolFilters = {project:'',task:'',state:'',sopId:''};
+let poolSopInitialized = false;
 function jiraCenterHtml() {
   return `<section class="jira-overview" aria-label="领取概览">
     <div class="jira-center-heading"><div><h2>领取概览</h2><p>按当前分组查看工单领取与执行进度</p></div><div class="jira-refresh-actions"><span>每 10 秒自动更新</span><button id="jiraRefresh" type="button">刷新</button></div></div>
@@ -111,7 +116,7 @@ function jiraCenterHtml() {
     <section id="jiraPool" class="jira-view-panel" aria-label="工单池">
       <form id="poolFilters" class="run-filters jira-pool-filters">
         <label>项目编号<input id="poolProject" type="search" maxlength="160" placeholder="输入项目编号"></label>
-        <label>任务名称<input id="poolTask" type="search" maxlength="160" placeholder="输入任务名称"></label>
+        <label>SOP 流程<select id="poolSop"><option value="">全部 SOP</option></select></label><label>任务名称<input id="poolTask" type="search" maxlength="160" placeholder="输入任务名称"></label>
         <label>工单状态<select id="poolState"><option value="">全部状态</option><option value="pending">待分配</option><option value="reserved">启动中</option><option value="running">执行中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="invalid">已不符合条件</option></select></label>
         <div class="actions"><button id="poolFilter" class="primary" type="submit">查询</button><button id="poolReset" type="button">重置</button></div>
       </form>
@@ -126,7 +131,7 @@ function jiraCenterHtml() {
     <section id="jiraHistoryPanel" class="jira-view-panel" aria-label="运行历史" hidden>
       <div class="jira-section-heading"><h3>运行历史</h3><span>领取 · 机器分配 · 交付结果</span></div>
       <p class="jira-section-note">流程完成不代表已提交，提交凭证和返工理由可在详情中查看。</p>
-      <p id="jiraNotice" role="status">正在加载…</p><div id="jiraRows" class="jira-table-scroll"></div>
+      <label>SOP 流程<select id="jiraHistorySop"><option value="">全部 SOP</option></select></label><p id="jiraNotice" role="status">正在加载…</p><div id="jiraRows" class="jira-table-scroll"></div>
       <footer class="jira-pagination"><span>按运行时间倒序排列</span><div class="actions"><button id="jiraPrevious" disabled>上一页</button><button id="jiraNext" disabled>下一页</button></div></footer>
     </section>
     <dialog id="jiraBlockedReason" aria-labelledby="jiraBlockedReasonTitle">
@@ -149,7 +154,7 @@ function showJiraView(view) {
 async function renderJiraRuns() {
   $('#jiraDetails')?.close();jiraDetailId=null;
   jiraCursor=null;jiraNextCursor=null;jiraPages.length=0;jiraItems=[];jiraLoaded=false;
-  poolBefore=null;poolNext=null;poolLoaded=false;poolFilters={project:'',task:'',state:''};
+  poolBefore=null;poolNext=null;poolLoaded=false;poolSopInitialized=false;poolFilters={project:'',task:'',state:'',sopId:''};
   $('#content').className='content run-catalog jira-catalog';
   $('.toolbar').classList.add('hidden');
   $('#content').innerHTML=jiraCenterHtml();
@@ -157,8 +162,10 @@ async function renderJiraRuns() {
   if(typeof bindJiraStatistics === 'function')bindJiraStatistics();
   showJiraView(jiraView);
   $('#jiraRefresh').onclick=()=>Promise.all([loadJiraRuns(),loadJiraPool()]);
-  $('#poolFilters').onsubmit=event=>{event.preventDefault();poolFilters={project:$('#poolProject').value.trim(),task:$('#poolTask').value.trim(),state:$('#poolState').value};loadJiraPool(null)};
-  $('#poolReset').onclick=()=>{$('#poolFilters').reset();poolFilters={project:'',task:'',state:''};loadJiraPool(null)};
+  $('#jiraHistorySop').onchange=()=>{$('#jiraDetails')?.close();jiraDetailId=null;jiraCursor=null;jiraPages.length=0;loadJiraRuns()};
+  $('#poolFilters').onsubmit=event=>{event.preventDefault();poolSopInitialized=true;poolFilters={project:$('#poolProject').value.trim(),task:$('#poolTask').value.trim(),state:$('#poolState').value,sopId:$('#poolSop').value};loadJiraPool(null)};
+  $('#poolSop').onchange=()=>{poolSopInitialized=true;poolFilters={...poolFilters,sopId:$('#poolSop').value};loadJiraPool(null)};
+  $('#poolReset').onclick=()=>{poolSopInitialized=true;$('#poolFilters').reset();poolFilters={project:'',task:'',state:'',sopId:''};loadJiraPool(null)};
   $('#poolFirst').onclick=()=>loadJiraPool(null);
   $('#poolNext').onclick=()=>loadJiraPool(poolNext);
   $('#poolItems').onclick=event=>{const button=event.target.closest('[data-pool-executions]');if(button)openJiraPoolExecution(button.dataset.poolExecutions)};
@@ -177,7 +184,7 @@ async function loadJiraRuns({background=false,cursor=jiraCursor,direction=null}=
     $('#jiraNotice').textContent='正在读取最新任务下发情况…';
   }
   try {
-    const params=new URLSearchParams({groupId:group});
+    const params=new URLSearchParams({groupId:group,sopId:$('#jiraHistorySop')?.value||''});
     if(cursor!==null)params.set('before',String(cursor));
     const result=await api('/api/jira-runs?'+params);
     if(!current())return;
@@ -213,7 +220,9 @@ let poolRequest=0;
 let poolItems=[];
 let poolExecutionItemId=null;
 function jiraExecutionLabel(execution) {
-  return execution.retryNumber===0?'首次执行':`第 ${execution.retryNumber} 次重试`;
+  if(execution.sopRetryNumber===null)return `第 ${execution.executionNumber} 轮 · 历史 SOP 未记录`;
+  const retry=execution.sopRetryNumber??execution.retryNumber;
+  return `${execution.sopName||''}${execution.sopName?' · ':''}${retry===0?'首次执行':`第 ${retry} 次重试`}`;
 }
 function jiraExecutionDetailHtml(row,execution) {
   const commits=jiraCommitHtml(execution);
@@ -221,7 +230,7 @@ function jiraExecutionDetailHtml(row,execution) {
     ${execution.executionResult?.note?`<p class="jira-execution-review">${execution.executionResult.source==='manual_review'?'人工核对：':'结果说明：'}${esc(execution.executionResult.note)}</p>`:''}
     ${execution.stopPending?'<p class="jira-execution-warning">等待确认执行已停止</p>':''}
     <div class="jira-execution-times"><div><span>开始时间</span><strong>${execution.startedAt?esc(time(execution.startedAt)):'未记录'}</strong></div><div><span>结束时间</span><strong>${execution.finishedAt?esc(time(execution.finishedAt)):'尚未结束'}</strong></div></div><dl class="jira-execution-reasons">
-    ${execution.outcome==='blocked'?`<div class="jira-reason-block blocked"><dt>本轮阻断原因</dt><dd>${esc(execution.reason||'未记录具体原因，请查看运行过程。')}</dd></div>`:''}
+    ${(execution.executionResult?.flowStatus==='blocked'||execution.outcome==='blocked')?`<div class="jira-reason-block blocked"><dt>本轮阻断原因</dt><dd>${esc(execution.reason||'未记录具体原因，请查看运行过程。')}</dd></div>`:''}
     </dl><div class="jira-execution-machines"><div><span>监督机</span><strong>${esc(execution.machines?.supervisorAgentId?(execution.machines.supervisorRemark||'未填写备注'):'未记录分配')}${execution.machines?.supervisorDeleted?'（已删除）':''}</strong></div><div><span>执行机</span><strong>${esc(execution.machines?.executorAgentId?(execution.machines.executorRemark||'未填写备注'):'未记录分配')}${execution.machines?.executorDeleted?'（已删除）':''}</strong></div></div>${commits?`<div class="jira-execution-commits"><span>提交记录</span><div>${commits}</div></div>`:''}${execution.monitorUrl?`<a class="jira-execution-process" href="${esc(execution.monitorUrl)}" target="_blank" rel="noopener">查看本轮过程 <span aria-hidden="true">↗</span></a>`:''}`;
 }
 function jiraExecutionListHtml(row) {
@@ -235,9 +244,9 @@ function updateJiraPoolExecution() {
   if(!row)return;
   const body=dialog.querySelector('[data-execution-body]'),html=jiraExecutionListHtml(row);
   if(body.jiraMarkup!==html){
-    const top=dialog.scrollTop;
+    const top=body.scrollTop;
     body.innerHTML=html;body.jiraMarkup=html;
-    dialog.scrollTop=top;
+    body.scrollTop=top;
   }
 }
 function openJiraPoolExecution(id) {
@@ -261,23 +270,23 @@ function jiraPoolCommitsHtml(row) {
   const commits=row.executionResult?.commits||[];
   return commits.length?`<div class="jira-pool-commits">${commits.map(c=>`<span><span class="jira-repository">${esc(c.repository)}</span><code>${esc(c.revision)}</code></span>`).join('')}</div>`:'<span class="jira-execution-empty">—</span>';
 }
-function jiraPoolRowHtml(row) {
+function jiraPoolRowHtml(row, scoped = false) {
   const run={status:row.run_status,outcome:row.outcome,waitingFor:row.waitingFor,executionResult:row.executionResult};
   const labels={invalid:'已不符合条件',pending:'待分配',reserved:'启动中',bound:'已创建运行',consumed:'本次未派发',cancelled:'来源已失效'};
   const waiting=!row.run_status&&['pending','reserved'].includes(row.state);
   const collectedAt=row.collected_at||row.created_at;
   const sources=row.sources||[{name:row.name,groupId:row.group_id}];
   const issueUrl=/^https?:\/\//i.test(row.server_key||'')?`${row.server_key.replace(/\/+$/, '')}/browse/${encodeURIComponent(row.issue_key)}`:null;
-  return `<tr><td>${esc(row.issue_key.split('-')[0])} / ${issueUrl?`<a href="${esc(issueUrl)}" target="_blank" rel="noopener">${esc(row.issue_key)}</a>`:esc(row.issue_key)}<small class="jira-issue-title" title="${esc(row.title||'')}">${esc(row.title||'')}</small></td>
+  return `<tr><td>${esc(row.issue_key.split('-')[0])} / ${issueUrl?`<a href="${esc(issueUrl)}" target="_blank" rel="noopener">${esc(row.issue_key)}</a>`:esc(row.issue_key)}<small class="jira-issue-title" title="${esc(row.title||'')}">${esc(row.title||'')}</small><small title="最近成功采集的 Jira 状态">Jira：${esc(row.jiraStatus?.name||'未获取')}</small></td>
     <td><span class="jira-type-priority">${row.issueType==='sub-bug'?'<img src="jira-sub-bug.png" width="16" height="16" alt="sub-bug" title="sub-bug">':esc(row.issueType||'未获取')} / ${esc(row.priority||'未获取')}</span></td>
     <td>${esc(row.people?.developers?.join('、')||'未获取')}</td>
-    <td>${sources.map(s=>`<div>${esc(s.name)}<small>${esc(groupName(s.groupId))}</small></div>`).join('')}</td>
+    ${scoped?'':`<td class="jira-sop-cell">${row.workflow_id?`<div class="jira-sop-line"><strong title="${esc(row.currentSop?.sopName||'历史 SOP 未记录')}">${esc(row.currentSop?.sopName||'历史 SOP 未记录')}</strong><span class="jira-sop-caption">${row.run_status&&(!['completed','failed','cancelled'].includes(row.run_status)||row.stop_pending)?'当前执行':'最近执行'}</span></div>`:''}${(row.currentSources||[]).filter(s=>!(row.workflow_id&&(!['completed','failed','cancelled'].includes(row.run_status)||row.stop_pending)&&s.sopId&&s.sopId===row.currentSop?.sopId)).map(s=>`<div class="jira-sop-source"><div class="jira-sop-line"><strong title="${esc(s.sopName||'SOP 未记录')}">${esc(s.sopName||'SOP 未记录')}</strong><span class="jira-sop-caption">待处理</span></div><small>${esc(s.name)}${s.collectionState==='failed'?' · 更新失败，保留上次采集':''}</small></div>`).join('')||(!row.workflow_id?'<span class="jira-sop-caption">暂无有效待处理流程</span>':'')}<details class="jira-sop-history"><summary>历史来源</summary>${sources.map(s=>`<div class="jira-sop-source"><strong title="${esc(s.sopName||'历史 SOP 未记录')}">${esc(s.sopName||'历史 SOP 未记录')}</strong><small>${esc(s.name)} · ${esc(groupName(s.groupId))}</small></div>`).join('')}</details></td>`}
     <td>${jiraPoolTimeHtml(collectedAt)}${waiting?`<small>已等待 ${Math.max(0,Math.floor((Date.now()-Date.parse(row.queued_at||collectedAt))/60000))} 分钟</small>`:''}</td>
-    <td><span class="jira-status ${row.run_status?jiraStatusKind(run):waiting?'waiting':'muted'}">${esc(row.run_status?jiraRunStatus(run):labels[row.state]||'等待处理')}</span>${row.stop_pending?'<small class="jira-warning">等待确认执行已停止</small>':''}</td>
+    <td><span class="jira-status ${row.run_status?jiraStatusKind(run):waiting?'waiting':'muted'}">${esc(row.run_status?jiraRunStatus(run):labels[row.state]||'等待处理')}</span>${row.stop_pending?'<small class="jira-warning">等待确认执行已停止</small>':''}${row.occupiedByOtherSop?`<small class="jira-warning">正在由${esc(row.occupiedByOtherSop.sopName||'其他流程')}处理，暂不可领取</small>`:''}</td>
     <td>${jiraPoolCommitsHtml(row)}</td>
     <td>${row.started_at?jiraPoolTimeHtml(row.started_at):row.workflow_id?'尚未开始':'未创建运行'}</td>
     <td>${jiraPoolDuration(row)}</td>
-    <td>${Number(row.retryCount||0)} 次</td>
+    <td>${Number(row.executionCount??row.executions?.length??0)} 轮</td>
     <td class="jira-executions-cell">${row.executions?.length?`<button class="jira-executions-view" type="button" data-pool-executions="${esc(row.id)}" aria-label="查看 ${esc(row.issue_key)} 的执行记录">查看</button>`:'<span class="jira-execution-empty">暂无记录</span>'}</td></tr>`;
 }
 async function loadJiraPool(before=poolBefore,{background=false}={}) {
@@ -288,19 +297,32 @@ async function loadJiraPool(before=poolBefore,{background=false}={}) {
   const current=()=>request===poolRequest&&state.page==='jira'&&group===groupState.selected&&panel===$('#jiraPool');
   poolLoading=true;
   try {
-    const result=await api('/api/jira-pool?'+new URLSearchParams({groupId:group,...poolFilters,...(before?{before}:{})}));
+    let result=await api('/api/jira-pool?'+new URLSearchParams({groupId:group,...poolFilters,...(before?{before}:{})}));
     if(!current())return;
+    if(!poolSopInitialized) {
+      poolSopInitialized=true;
+      if(group&&!poolFilters.sopId&&result.sops?.length===1) {
+        poolFilters={...poolFilters,sopId:result.sops[0].sopId};
+        updateJiraSopOptions('#poolSop',result.sops);
+        $('#poolSop').value=poolFilters.sopId;
+        result=await api('/api/jira-pool?'+new URLSearchParams({groupId:group,...poolFilters}));
+        if(!current())return;
+        before=null;
+      }
+    }
     if(!background)$('#jiraBlockedReason')?.close();
     poolItems=result.items;
+    updateJiraSopOptions('#poolSop',result.sops||[]);
+    updateJiraSopOptions('#jiraHistorySop',result.sops||[]);
     poolBefore=before;poolNext=result.nextCursor;$('#poolNext').disabled=poolNext===null;
     const projects=result.projects||[];
     const projectsOpen=$('#poolProjects').querySelector('details')?.open;
     const schedulesOpen=$('#poolSchedules').querySelector('details')?.open;
     $('#poolProjects').innerHTML=`<div><span>项目</span><strong>${projects.length}</strong></div><div><span>待分配工单</span><strong>${projects.reduce((sum,p)=>sum+Number(p.pending||0),0)}</strong></div><div><span>执行中</span><strong>${projects.reduce((sum,p)=>sum+Number(p.running||0),0)}</strong></div>${projects.length?`<details class="jira-project-list"${projectsOpen?' open':''}><summary>项目明细</summary>${projects.map(p=>`<p><strong>${esc(p.project)}</strong><span>待分配 ${Number(p.pending)} · 执行中 ${Number(p.running)}</span><small>最近采集 ${esc(time(p.lastCollectedAt))}</small></p>`).join('')}</details>`:''}`;
     $('#poolSchedules').innerHTML=(result.schedules||[]).length?`<details${schedulesOpen?' open':''}><summary>SOP 定时运行 <span>${result.schedules.length} 条规则</span></summary>${result.schedules.map(s=>`<p><strong>${esc(s.name)}</strong><span>下次触发 ${s.nextAt?esc(time(s.nextAt)):'未安排'}</span></p>`).join('')}</details>`:'<span>当前分组暂无启用的 SOP 定时运行规则</span>';
-    $('#poolItems').innerHTML=result.items.length?`<table class="jira-table jira-pool-table"><thead><tr><th>项目 / 工单</th><th>类型 / 优先级</th><th>开发人</th><th>来源任务</th><th>最近采集</th><th>当前状态</th><th>提交编号</th><th>执行开始</th><th title="最近一轮实际执行的耗时，包含开始后的等待时间，不含开始前排队；按整分钟显示">最近运行耗时</th><th>重试次数</th><th>执行记录</th></tr></thead><tbody>${result.items.map(jiraPoolRowHtml).join('')}</tbody></table>`:'<div class="empty jira-empty"><strong>暂无符合条件的工单</strong><span>可调整筛选条件，或等待每 30 秒自动采集更新。</span></div>';
+    $('#poolItems').innerHTML=result.items.length?`<table class="jira-table jira-pool-table${poolFilters.sopId?' jira-pool-scoped':''}"><thead><tr><th>项目 / 工单</th><th>类型 / 优先级</th><th>开发人</th>${poolFilters.sopId?'':'<th>SOP 流程 / 来源</th>'}<th>最近采集</th><th>流程状态</th><th>提交编号</th><th>执行开始</th><th title="最近一轮实际执行的耗时，包含开始后的等待时间，不含开始前排队；按整分钟显示">最近运行耗时</th><th>执行轮数</th><th>执行记录</th></tr></thead><tbody>${result.items.map(row=>jiraPoolRowHtml(row,Boolean(poolFilters.sopId))).join('')}</tbody></table>`:'<div class="empty jira-empty"><strong>暂无符合条件的工单</strong><span>可调整筛选条件，或等待每 30 秒自动采集更新。</span></div>';
     const batchLabels={waiting:'等待采集',collecting:'正在查询',ready:'采集完成',failed:'采集失败',cancelled:'已停止派发'};
-    $('#poolCollections').innerHTML=result.collections.length?`<table class="jira-table jira-collection-table"><thead><tr><th>任务</th><th>触发时间</th><th>完成时间</th><th>结果</th><th>工单数</th></tr></thead><tbody>${result.collections.map(r=>`<tr><td>${esc(r.name)}<small>${esc(({poll:"自动采集",schedule:"定时派发批次",web:"手动派发批次",dingtalk:"钉钉派发批次"})[r.source]||"历史采集")}</small></td><td>${esc(time(r.createdAt))}</td><td>${r.finishedAt?esc(time(r.finishedAt)):'尚未完成'}</td><td><span class="jira-status ${r.state==='ready'?'success':r.state==='failed'?'failed':'waiting'}">${esc(batchLabels[r.state]||'状态未知')}</span><small>${esc(r.reason)}</small></td><td>${Number(r.count)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty jira-empty"><strong>暂无采集记录</strong><span>启用 Jira 任务后，每 30 秒自动采集，结果会显示在这里。</span></div>';
+    $('#poolCollections').innerHTML=result.collections.length?`<table class="jira-table jira-collection-table"><thead><tr><th>任务</th><th>触发时间</th><th>完成时间</th><th>结果</th><th>工单数</th></tr></thead><tbody>${result.collections.map(r=>`<tr><td>${esc(r.sopName||'历史 SOP 未记录')}<small>${esc(r.name)}</small><small>${esc(({poll:"自动采集",schedule:"定时派发批次",web:"手动派发批次",dingtalk:"钉钉派发批次"})[r.source]||"历史采集")}</small></td><td>${esc(time(r.createdAt))}</td><td>${r.finishedAt?esc(time(r.finishedAt)):'尚未完成'}</td><td><span class="jira-status ${r.state==='ready'?'success':r.state==='failed'?'failed':'waiting'}">${esc(batchLabels[r.state]||'状态未知')}</span><small>${esc(r.reason)}</small></td><td>${Number(r.count)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty jira-empty"><strong>暂无采集记录</strong><span>启用 Jira 任务后，每 30 秒自动采集，结果会显示在这里。</span></div>';
     updateJiraPoolExecution();
     poolLoaded=true;$('#poolNotice').textContent='';
   }catch(error){
@@ -330,4 +352,13 @@ async function watchJiraStart(taskId,requestId) {
 for(let i=0;typeof sessionStorage!=='undefined'&&i<sessionStorage.length;i++){
   const key=sessionStorage.key(i);
   if(key.startsWith('jira-start:'))watchJiraStart(key.slice(11),sessionStorage.getItem(key));
+}
+
+function updateJiraSopOptions(selector,sops) {
+  const select=$(selector);if(!select)return;
+  const selected=select.value||'';
+  const options=[...sops];
+  if(selected&&!options.some(s=>s.sopId===selected))options.push({sopId:selected,sopName:'历史 SOP'});
+  const html='<option value="">全部 SOP</option>'+options.map(s=>`<option value="${esc(s.sopId)}">${esc(s.sopName)}</option>`).join('');
+  if(select.innerHTML!==html){select.innerHTML=html;select.value=selected}
 }

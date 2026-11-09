@@ -26,6 +26,10 @@ import tools.jackson.databind.node.ObjectNode;
 
 @SpringBootTest
 class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
+  // 测试显式触发服务；禁止真实定时任务跨用例访问已重置的网关模拟对象。
+  @org.springframework.test.context.bean.override.mockito.MockitoBean(name = "taskScheduler")
+  org.springframework.scheduling.TaskScheduler taskScheduler;
+
   @Autowired JiraRequestStore requests;
   @Autowired JiraCollectionService collections;
   @Autowired ConfigService config;
@@ -49,6 +53,16 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
               return task.objectNode();
             });
     collections.synchronize();
+    var collected =
+        captured
+            .get()
+            .path("tasks")
+            .valueStream()
+            .filter(row -> row.path("taskDefinitionId").asText().equals(taskId))
+            .findFirst()
+            .orElseThrow();
+    assertThat(collected.path("sopId").asText()).isEqualTo(task.path("sopId").asText());
+    assertThat(collected.path("sopName").asText()).isEqualTo(task.path("sopName").asText());
     assertThat(
             captured
                 .get()
@@ -74,15 +88,16 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
   }
 
   private ObjectNode task(String query) {
-    when(groupGateway.get("/jira-accounts/" + GROUP))
-        .thenReturn(
+    org.mockito.Mockito.doReturn(
             tools.jackson.databind.node.JsonNodeFactory.instance
                 .objectNode()
                 .put("id", GROUP)
                 .put("groupId", GROUP)
                 .put("enabled", true)
                 .put("testStatus", "passed")
-                .put("executorAlias", "bot"));
+                .put("executorAlias", "bot"))
+        .when(groupGateway)
+        .get("/jira-accounts/" + GROUP);
     String role =
         jdbc.queryForObject(
             "SELECT id FROM codex_sop_roles ORDER BY created_at LIMIT 1", String.class);
@@ -135,6 +150,10 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
     jdbc.update(
         "UPDATE codex_sop_sops SET jira_jql='project = CHANGED',jira_account='other' WHERE id=?",
         task.path("sopId").asText());
+    jdbc.update("UPDATE codex_sop_sops SET name='改名后的流程' WHERE id=?", task.path("sopId").asText());
+    var frozen = runs.frozenSopContexts(List.of(first.workflowId())).path(first.workflowId());
+    assertThat(frozen.path("sopName").asText()).isEqualTo(task.path("sopName").asText());
+    assertThat(frozen.path("sopId").asText()).isEqualTo(task.path("sopId").asText());
     var retry = runs.prepareRetry(first.workflowId());
     assertThat(first.payload().path("jiraDeliveryVersion").asInt()).isEqualTo(3);
     assertThat(retry.payload().path("jiraDeliveryVersion").asInt()).isEqualTo(3);
@@ -148,19 +167,75 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
   }
 
   @Test
-  void jiraQueryCannotBypassSingleStatusAndCurrentAssignee() {
+  void metadataSyncBeforeSubmissionMustNotMarkSopAsRegistered() {
+    var task = task();
+    var prepared = launches.reserveLatest(task.path("id").asText()).prepared();
+    var legacyPayload = prepared.payload().deepCopy();
+    legacyPayload.remove("sopId");
+    legacyPayload.remove("sopName");
+    jdbc.update(
+        "UPDATE codex_sop_task_runs SET submitted_json=? WHERE workflow_id=?",
+        legacyPayload.toString(),
+        prepared.workflowId());
+    var frozen = runs.getPrepared(prepared.workflowId()).payload().deepCopy();
+    var snapshot =
+        jdbc.queryForObject(
+            "SELECT snapshot_json FROM codex_sop_task_runs WHERE workflow_id=?",
+            String.class,
+            prepared.workflowId());
+    when(groupGateway.post(eq("/workflow-task-bindings"), any()))
+        .thenAnswer(
+            call -> {
+              // 网关跳过尚不存在的运行后，提交恰好完成，再写入登记标记。
+              runs.recordGatewayStatus(
+                  prepared.workflowId(), task.objectNode().put("status", "queued"), "queued");
+              var response = task.objectNode().put("registered", true);
+              response.putArray("sopRegisteredWorkflowIds");
+              return response;
+            });
+    service.synchronizeRuntimeScopes();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT runtime_sop_registered FROM codex_sop_task_runs WHERE workflow_id=?",
+                Boolean.class,
+                prepared.workflowId()))
+        .isFalse();
+    assertThat(runs.pendingRuntimeScopes(task.path("id").asText())).contains(prepared.workflowId());
+    var confirmed = task.objectNode().put("registered", true);
+    confirmed.putArray("sopRegisteredWorkflowIds").add(prepared.workflowId());
+    when(groupGateway.post(eq("/workflow-task-bindings"), any())).thenReturn(confirmed);
+    service.synchronizeRuntimeScopes();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT runtime_sop_registered FROM codex_sop_task_runs WHERE workflow_id=?",
+                Boolean.class,
+                prepared.workflowId()))
+        .isTrue();
+    assertThat(runs.pendingRuntimeScopes(task.path("id").asText()))
+        .doesNotContain(prepared.workflowId());
+    assertThat(runs.getPrepared(prepared.workflowId()).payload()).isEqualTo(frozen);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT snapshot_json FROM codex_sop_task_runs WHERE workflow_id=?",
+                String.class,
+                prepared.workflowId()))
+        .isEqualTo(snapshot);
+  }
+
+  @Test
+  void jiraQueryCannotBypassStatusAndCurrentAssignee() {
     for (String query :
         List.of(
             "project = TEST",
             "project = TEST AND status = 10205",
-            "project = TEST AND status in (待办, Closed) AND assignee = currentUser()",
+            "project = TEST AND status IN () AND assignee = currentUser()",
             "project = TEST AND status = 待办 AND assignee = currentUser() OR project = OTHER",
             "project = TEST AND status = 待办 AND assignee = other",
             "project = TEST AND status = 待办 AND assignee = \"currentUser()\"",
             "project = TEST AND status = 待办 AND assignee = currentUser() AND priority = High")) {
       assertThatThrownBy(() -> task(query))
           .isInstanceOf(IllegalArgumentException.class)
-          .hasMessageContaining("只能指定项目和单个状态");
+          .hasMessageContaining("只能指定项目和状态");
     }
     assertThatThrownBy(() -> task("project = \"   \" AND status = 待办 AND assignee = currentUser()"))
         .isInstanceOf(IllegalArgumentException.class)
@@ -181,6 +256,68 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
     assertThatThrownBy(() -> task("project = TEST AND status = '   ' AND assignee = currentUser()"))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("Jira 状态");
+  }
+
+  @Test
+  void multipleJiraStatusesAndRolesArePreservedInFrozenRetries() {
+    for (String statuses :
+        List.of("IN (\"Open\", \"重新打开\")", "IN (1, 4)", "IN (\"In Progress\", \"Closed\")")) {
+      String query =
+          "project = TEST AND status "
+              + statuses
+              + " AND assignee = currentUser() AND \"处理角色\" IN (\"Planner\", \"Reviewer\") AND issuetype = \"sub-bug\"";
+      var definition = task(query);
+      var run = launches.reserveLatest(definition.path("id").asText()).prepared();
+      assertThat(run.payload().path("jira").path("jql").asText()).isEqualTo(query);
+      assertThat(runs.prepareRetry(run.workflowId()).payload().path("jira").path("jql").asText())
+          .isEqualTo(query);
+    }
+    for (String statuses :
+        List.of("IN ()", "IN (1,)", "IN (1, \" \")", "IN (1,4) OR project = OTHER")) {
+      assertThatThrownBy(
+              () -> task("project = TEST AND status " + statuses + " AND assignee = currentUser()"))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+    var definition =
+        task("project = TEST AND status IN (待办, 10205, Closed) AND assignee = currentUser()");
+    assertThat(
+            launches
+                .reserveLatest(definition.path("id").asText())
+                .prepared()
+                .payload()
+                .path("jira")
+                .path("jql")
+                .asText())
+        .contains("status IN (10205, Closed)");
+  }
+
+  @Test
+  void jiraRolesAndOptionalIssueTypeAreFrozenInRuns() {
+    String base = "project = TEST AND status = Open AND assignee = currentUser()";
+    for (String role : List.of("= \"Reviewer\"", "IN (\"Planner\", \"Reviewer\")")) {
+      for (String type :
+          List.of("", " AND issuetype = \"sub-bug\"", " AND issuetype = \"Acceptance-bug\"")) {
+        String query = base + " AND \"处理角色\" " + role + type;
+        var definition = task(query);
+        var run = launches.reserveLatest(definition.path("id").asText()).prepared();
+        assertThat(run.payload().path("jira").path("jql").asText()).isEqualTo(query);
+        assertThat(runs.prepareRetry(run.workflowId()).payload().path("jira").path("jql").asText())
+            .isEqualTo(query);
+      }
+    }
+    for (String suffix :
+        List.of(
+            " AND \"处理角色\" IN ()",
+            " AND \"处理角色\" = \" \"",
+            " AND \"处理角色\" IN (\"Planner\", \" \")",
+            " AND issuetype = \" \"",
+            " AND issuetype IN ()",
+            " AND issuetype IN (\"6\", \"7\")",
+            " AND issuetype IN (\"6\", \" \")",
+            " AND \"处理角色\" = \"Reviewer\" OR project = OTHER",
+            " AND issuetype = \"sub-bug\" OR project = OTHER")) {
+      assertThatThrownBy(() -> task(base + suffix)).isInstanceOf(IllegalArgumentException.class);
+    }
   }
 
   @Test
@@ -207,15 +344,14 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
   }
 
   @Test
-  void plannerConditionIsPreservedAndCannotSelectOtherRoles() {
+  void plannerConditionIsPreservedAndCannotInjectOtherClauses() {
     String query =
         "project = TEST AND status = 10205 AND assignee = currentUser() AND \"处理角色\" = \"Planner\"";
     var task = task(query);
     var run = launches.reserveLatest(task.path("id").asText()).prepared();
     assertThat(run.payload().path("jira").path("jql").asText()).isEqualTo(query);
     for (String suffix :
-        List.of(
-            "\"Reviewer\"", "\"Planner\" OR project = OTHER", "\"Planner\" AND priority = High")) {
+        List.of("\"Planner\" OR project = OTHER", "\"Planner\" AND priority = High")) {
       assertThatThrownBy(
               () ->
                   task(
