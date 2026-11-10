@@ -387,6 +387,9 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
                     SELECT j.workflow_id FROM workflow_jira_runs j JOIN workflows sw USING(workflow_id)
                     JOIN workflow_sop_context ss USING(workflow_id)
                     WHERE j.server_key=r.server_key AND j.issue_key=r.issue_key AND ss.sop_id=:sop_id
+                        AND (r.state NOT IN ('pending','reserved','invalid','cancelled')
+                            OR sw.status NOT IN ('completed','failed','cancelled') OR EXISTS (
+                                SELECT 1 FROM workflow_machine_claims m WHERE m.workflow_id=sw.workflow_id))
                     ORDER BY (sw.status NOT IN ('completed','failed','cancelled') OR EXISTS (
                         SELECT 1 FROM workflow_machine_claims m WHERE m.workflow_id=sw.workflow_id)) DESC,
                         sw.created_at DESC,j.rowid DESC LIMIT 1)

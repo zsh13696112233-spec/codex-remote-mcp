@@ -349,6 +349,8 @@ Codex 返回执行失败、连接/握手失败、调用超时或无法确认结�
 
 ## 监督机统一领取 Jira
 
+指定 SOP 查询工单池时，已重新采集的待领取、已预约、失效或已撤销候选保留当前状态，不被该 SOP 已结束且资源已释放的历史运行覆盖；旧结果仍保留在执行记录中。仍在执行或停止待核实的运行继续优先展示。此修复需重启中央网关生效，不修改历史数据或自动派发任务。
+
 分组 SOP 新运行冻结 `jira: {"jql": "project = TEST ORDER BY created ASC", "connectionId": "中央账号记录 UUID"}`。JQL 最多 4000 字符；中央账号 ID 与实际 Jira 身份分别保存。旧账号别名格式仅供历史读取，网关拒绝新增缺少中央账号的运行；旧 SOP 必须手动绑定账号。历史数据不做账号关联迁移。
 
 新启动使用中央任务池：`POST /jira-collections` 持久化派发请求并等待独立采集快照，`GET /jira-collections/{requestId}` 查询结果，`DELETE /jira-collections/{requestId}` 撤销经配置中心确认尚未创建运行的来源，`POST /jira-reservations` 幂等预约并重新核验具体工单，`GET /jira-pool` 查询待办及采集记录。配置中心是唯一启动编排方；浏览器不直接调用这些接口。

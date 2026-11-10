@@ -126,6 +126,42 @@ class PoolTests(unittest.TestCase):
         self.assertIsNone(board(self.store, sop_id=repair)['items'][0]['occupiedByOtherSop'])
         self.assertEqual(board(self.store, sop_id=repair, before=item['id'])['items'], [])
 
+    def test_board_sop_recollected_issue_keeps_candidate_state_and_history(self):
+        sop = str(uuid.uuid4())
+        first = self.batch(['TEST-1'])
+        self.bind_run(first, 'blocked', 'failed')
+        self.store.register_task_bindings(self.task, ['blocked'],
+                                          {'blocked': {'sopId': sop, 'sopName': '验收'}})
+        retry = self.batch(['TEST-1'])
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_collections SET sop_id=?,sop_name=?', (sop, '验收'))
+            db.execute("UPDATE workflows SET termination_json=? WHERE workflow_id='blocked'",
+                       (json.dumps({'outcome': 'blocked', 'reason': '旧的阻断原因'}),))
+        for state in ('pending', 'reserved', 'invalid', 'cancelled'):
+            with self.subTest(state=state):
+                with self.store._connect() as db:
+                    db.execute('UPDATE jira_pool_items SET state=? WHERE request_id=?', (state, retry))
+                    db.execute("UPDATE jira_collections SET finished_at='2099-01-01' WHERE request_id=?", (retry,))
+                result = board(self.store, sop_id=sop, state=state)
+                self.assertEqual(len(result['items']), 1)
+                item = result['items'][0]
+                self.assertEqual(item['state'], state)
+                for key in ('workflow_id', 'run_status', 'started_at', 'executionResult'):
+                    self.assertIsNone(item[key])
+                self.assertEqual(item['reason'], '')
+                self.assertEqual(item['executions'][0]['workflowId'], 'blocked')
+                self.assertEqual(item['executions'][0]['reason'], '旧的阻断原因')
+                self.assertEqual(result['projects'][0]['pending'], int(state == 'pending'))
+                self.assertEqual(board(self.store, sop_id=sop, state='failed')['items'], [])
+
+        # 未确认停止的旧运行仍优先展示，不能被新候选掩盖。
+        with self.store._connect() as db:
+            db.execute("UPDATE jira_pool_items SET state='pending' WHERE request_id=?", (retry,))
+            db.execute("INSERT INTO workflow_machine_claims VALUES('s','blocked',?,'occupied')", (utc_now(),))
+        item = board(self.store, sop_id=sop)['items'][0]
+        self.assertEqual(item['workflow_id'], 'blocked')
+        self.assertTrue(item['stop_pending'])
+
     def test_frozen_sop_backfill_is_idempotent_and_retry_is_per_sop(self):
         repair, acceptance = str(uuid.uuid4()), str(uuid.uuid4())
         for index, sop in enumerate((repair, acceptance, repair)):
