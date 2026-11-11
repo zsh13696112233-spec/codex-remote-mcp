@@ -8,11 +8,11 @@ class OutcomeInstructionTests(unittest.TestCase):
         for version in (1, 2, 3):
             with self.subTest(version=version):
                 prompt = instruction("w", "n", False, version, advance_mode="automatic")
-                self.assertLess(prompt.index("最终输出前检查"), prompt.index("【仅在确认真实阻断后"))
+                self.assertLess(prompt.index("最终输出前检查"), prompt.index("正式阻断收尾的业务操作"))
                 for text in ("不能认定完成不等于不能继续执行", "实际修正调用", "不无限重试",
                              "已成功不重复执行", "不降低证据标准", "不授权恢复已结束的工作流",
-                             "不覆盖职责的自主处理要求、阻断判定及权限约束", "最小外部恢复条件",
-                             "评论未确认成功不得转交", "存在该标记则复用"):
+                             "保留 SOP 的硬性停止条件", "最小外部恢复条件",
+                             "平台不指定业务动作、接收人或执行顺序", "存在该标记则复用"):
                     self.assertIn(text, prompt)
                 self.assertNotIn("blocked（必要条件不满足", prompt)
 
@@ -47,23 +47,26 @@ class OutcomeInstructionTests(unittest.TestCase):
                         for heading in ("【处理结论】", "【人工待办】", "【继续处理的条件】", "【当前状态】"):
                             self.assertNotIn(heading, prompt)
 
-    def test_report_format_does_not_authorize_comments_during_waiting(self):
+    def test_jira_business_policy_belongs_to_sop_in_all_prompt_branches(self):
         for version in (1, 2, 3, 4, 5):
-            with self.subTest(version=version):
-                prompt = instruction("w", "n", False, version)
-                self.assertIn("Jira 阻断评论也以 SOP 的业务结论和本轮实际提交结果开头", prompt)
-                self.assertIn("本轮因阻断停止，补齐条件不会自动恢复本轮", prompt)
-                self.assertIn("不因此新增评论或业务操作", prompt)
-                self.assertIn("评论先于负责人转交", prompt)
-                self.assertIn("不得提前宣称转交成功或把未来操作写成已经尝试", prompt)
-                self.assertIn("实际转交结果在最终 summary 和 jiraComment.detail 说明", prompt)
-                self.assertIn("新评论将标记独立放在正文末尾", prompt)
-                self.assertIn("存在该标记则复用", prompt)
-                self.assertIn("评论未确认成功不得转交", prompt)
-                self.assertIn("不为更新汇报格式修改或重复追加已有评论", prompt)
-                waiting = instruction("w", "n", False, version, defer_blocked=True)
-                self.assertIn("等待人工处理、本轮尚未结束", waiting)
-                self.assertIn("禁止执行停止评论和负责人转交", waiting)
-                self.assertNotIn("本次为正式阻断收尾", waiting)
-                self.assertNotIn("先写入阻断评论并回查确认成功", waiting)
-                self.assertNotIn("SOP-STOP-", waiting)
+            for mode in (None, "automatic", "semi_automatic"):
+                for waiting in (False, True):
+                    with self.subTest(version=version, mode=mode, waiting=waiting):
+                        prompt = instruction("w", "n", False, version,
+                                             advance_mode=mode, defer_blocked=waiting)
+                        self.assertIn("平台不指定业务动作、接收人或执行顺序", prompt)
+                        self.assertIn("该字段不要求新增评论", prompt)
+                        for policy in ("Public.Jira.Manager", "Natural Person", "唯一开发人作为目标负责人",
+                                       "评论未确认成功不得转交", "仅更新负责人", "Jira 状态和处理角色保持不变",
+                                       "Jira 阻断评论也以", "之后必须在原授权内尝试转交负责人",
+                                       "已获授权的 Jira 评论沿用"):
+                            self.assertNotIn(policy, prompt)
+                        if waiting:
+                            self.assertIn("等待人工处理、本轮尚未结束", prompt)
+                            self.assertIn("禁止执行停止评论和负责人转交", prompt)
+                            self.assertNotIn("SOP-STOP-", prompt)
+                            self.assertNotIn("本次返回 blocked 为正式阻断结束", prompt)
+                        else:
+                            self.assertIn("本轮因阻断停止，补齐条件不会自动恢复本轮", prompt)
+                            self.assertIn("存在该标记则复用", prompt)
+                            self.assertIn("提供标记不构成新增评论的要求或授权", prompt)

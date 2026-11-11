@@ -22,7 +22,7 @@ function fixture({machineError=false}={}){
       return [];
     },toast(){},render:async()=>{},URL,console});
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../../main/resources/static/task-schedules.js'),'utf8'),context);
-  return {form,nodes,requests,run:code=>vm.runInContext(code,context)};
+  return {dialog,form,nodes,requests,run:code=>vm.runInContext(code,context)};
 }
 
 test('editing legacy schedule removes check controls and saves without machine lookup',async()=>{
@@ -48,4 +48,14 @@ test('new daily schedule preserves time controls without check fields',async()=>
   assert.equal(payload.dailyTime,'09:00');
   assert.equal(payload.intervalMinutes,null);
   assert.equal('preCheck' in payload,false);
+});
+
+
+test('one minute interval can be edited and submitted',async()=>{
+  const {dialog,form,requests,run}=fixture();
+  await run(`openSchedule({id:'r',name:'每分钟',groupId:'g',sopId:'s',taskDefinitionId:'t',mode:'interval',intervalMinutes:1})`);
+  assert.match(dialog.innerHTML,/name="intervalMinutes"[^>]*min="1"/);
+  await form.onsubmit({preventDefault(){}});
+  const payload=JSON.parse(requests.find(x=>x.options).options.body);
+  assert.equal(payload.intervalMinutes,1);
 });

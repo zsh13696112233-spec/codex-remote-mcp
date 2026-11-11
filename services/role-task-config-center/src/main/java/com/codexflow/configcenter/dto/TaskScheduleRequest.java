@@ -8,7 +8,7 @@ public record TaskScheduleRequest(
     @NotBlank String taskDefinitionId,
     @NotBlank @Pattern(regexp = "daily|interval") String mode,
     @Pattern(regexp = "([01]\\d|2[0-3]):[0-5]\\d") String dailyTime,
-    @Min(5) @Max(1440) Integer intervalMinutes,
+    @Min(1) @Max(1440) Integer intervalMinutes,
     @NotNull Boolean enabled,
     @NotBlank @Size(max = 36) String groupId) {
   public TaskScheduleRequest(

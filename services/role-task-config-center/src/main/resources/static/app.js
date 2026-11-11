@@ -499,7 +499,7 @@ function nodeInspectorHtml(s){
 
 function addRoleNode(roleId,index){
   const role=roleById(roleId);if(!role||!role.enabled)return;
-  const node=normalizeStep({roleId:role.id,roleName:role.name,roleDuty:role.duty,displayName:role.name,instruction:""});
+  const node=normalizeStep({roleId:role.id,roleName:role.name,roleDuty:role.duty,displayName:role.name,instruction:"",timeoutSec:3600,permissionProfile:"full_access"});
   state.sop.draft.steps.splice(index,0,node);state.sop.selectedNodeId=node._clientId;state.sop.tab="node";renderSopWorkspace();
 }
 function moveNode(nodeId,index){

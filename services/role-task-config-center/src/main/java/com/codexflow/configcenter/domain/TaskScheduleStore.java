@@ -147,8 +147,8 @@ public class TaskScheduleStore {
       time = b.dailyTime();
     } else if ("interval".equals(b.mode())) {
       minutes = b.intervalMinutes();
-      if (minutes == null || minutes < 5 || minutes > 1440)
-        throw new IllegalArgumentException("间隔分钟数必须在 5 到 1440 之间。");
+      if (minutes == null || minutes < 1 || minutes > 1440)
+        throw new IllegalArgumentException("间隔分钟数必须在 1 到 1440 之间。");
     } else throw new IllegalArgumentException("请选择每天定时或分钟间隔。");
     boolean changed =
         old == null

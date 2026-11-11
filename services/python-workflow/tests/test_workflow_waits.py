@@ -473,6 +473,14 @@ class WaitExecutionTests(unittest.IsolatedAsyncioTestCase):
             service = WaitService(gateway)
             target = fixture.store.prepare_wait_execution("serial-demo", gate["gateId"])
             await asyncio.wait_for(service.execute("serial-demo", gate["gateId"], target), 10)
+            turn = next(r for r in server.requests if r["method"] == "turn/start")
+            sent = json.dumps(turn["params"], ensure_ascii=False)
+            self.assertNotIn("按平台规则读取开发人及转交负责人", sent)
+            self.assertNotIn("保持 Jira 状态和处理角色不变", sent)
+            if closing:
+                self.assertIn("按当前步骤职责中的正式阻断收尾要求处理", sent)
+            else:
+                self.assertIn("禁止执行停止评论和负责人转交", sent)
             self.assertEqual(sum(r["method"] == "turn/start" for r in server.requests), 1)
             self.assertEqual(sum(r["method"] == "thread/start" for r in server.requests), 0)
             return fixture.store.get_workflow("serial-demo"), gate

@@ -1,10 +1,12 @@
 from reasoning_effort import ModelsUnavailable
 import argparse
 import asyncio
+import errno
 import hmac
 import json
 import logging
 import os
+import socket
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -2413,7 +2415,9 @@ def create_app(
     return app
 
 
-app = create_app()
+# 命令行先占用监听端口，再初始化运行库；保留 ASGI 导入入口。
+if __name__ != "__main__":
+    app = create_app()
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -2427,12 +2431,31 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = build_argument_parser().parse_args()
-    uvicorn.run(
-        create_app(db_path=args.db),
+    parser = build_argument_parser()
+    args = parser.parse_args()
+    config = uvicorn.Config(
+        lambda: create_app(db_path=args.db),
+        factory=True,
         host=args.host,
         port=args.port,
     )
+    family = socket.AF_INET6 if ":" in args.host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as listener:
+        if os.name == "nt":
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            listener.bind((args.host, args.port))
+            listener.listen(config.backlog)
+        except OSError as error:
+            if error.errno == errno.EADDRINUSE:
+                parser.exit(1, f"网关未启动：端口 {args.port} 已被占用。请先检查已有网关；如需重启，请在确认无运行任务后正常停止旧进程。不要删除运行库或锁文件。\n")
+            parser.exit(1, "网关未启动：无法绑定监听地址，请检查地址、端口及监听权限。\n")
+        server = uvicorn.Server(config)
+        server.run(sockets=[listener])
+        if not server.started:
+            raise SystemExit(3)
 
 
 if __name__ == "__main__":

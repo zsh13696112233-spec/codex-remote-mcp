@@ -261,7 +261,8 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.start()
         other = SkillDeployment(self.manager.gateway, self.config, self.remote)
         try:
-            with self.assertRaises(RuntimeError): await other.start()
+            with self.assertRaisesRegex(RuntimeError, "请先正常停止旧进程"):
+                await other.start()
         finally: await self.manager.stop()
         await other.start(); await other.stop()
 

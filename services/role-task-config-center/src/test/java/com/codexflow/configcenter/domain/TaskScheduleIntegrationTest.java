@@ -287,6 +287,55 @@ class TaskScheduleIntegrationTest extends com.codexflow.configcenter.GroupedFixt
   }
 
   @Test
+  void oneMinuteIntervalValidatesAndClaimsOncePerMinute() {
+    ObjectNode task = createTask(false, null, false);
+    var request =
+        grouped(
+            new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                "一分钟",
+                task.path("sopId").asText(),
+                task.path("id").asText(),
+                "interval",
+                null,
+                1,
+                true));
+    try (var factory = jakarta.validation.Validation.buildDefaultValidatorFactory()) {
+      var validator = factory.getValidator();
+      assertThat(validator.validate(request)).isEmpty();
+      for (int minutes : List.of(0, 1441)) {
+        var invalid =
+            new com.codexflow.configcenter.dto.TaskScheduleRequest(
+                request.name(),
+                request.sopId(),
+                request.taskDefinitionId(),
+                "interval",
+                null,
+                minutes,
+                true,
+                request.groupId());
+        assertThat(validator.validate(invalid)).isNotEmpty();
+        assertThatThrownBy(() -> schedules.save(null, invalid))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("1 到 1440");
+      }
+    }
+    Instant before = Instant.now();
+    var saved = schedules.save(null, request);
+    Instant after = Instant.now();
+    Instant due = Instant.parse((String) saved.get("nextScheduleAt"));
+    assertThat(due).isBetween(before.plusSeconds(60), after.plusSeconds(60));
+    String id = (String) saved.get("id");
+    jdbc.update("update codex_task_schedules set enabled=false where id<>?", id);
+    var time = due.atZone(ZoneId.of("Asia/Shanghai"));
+    assertThat(schedules.claim(time.minusSeconds(1))).isEmpty();
+    assertThat(schedules.claim(time)).containsExactly(request.taskDefinitionId());
+    schedules.requireEnabled(request.taskDefinitionId());
+    assertThat(schedules.claim(time.plusSeconds(30))).isEmpty();
+    assertThat(schedules.claim(time.plusSeconds(60))).containsExactly(request.taskDefinitionId());
+    schedules.delete(id);
+  }
+
+  @Test
   void dailyClaimsOnceAndDeletedRulesCannotLaunch() {
     ObjectNode task = createTask(false, null, false);
     String taskId = task.path("id").asText(), sopId = task.path("sopId").asText();
@@ -323,7 +372,7 @@ class TaskScheduleIntegrationTest extends com.codexflow.configcenter.GroupedFixt
                     null,
                     grouped(
                         new com.codexflow.configcenter.dto.TaskScheduleRequest(
-                            "错误", sopId, taskId, "interval", null, 4, true))))
+                            "错误", sopId, taskId, "interval", null, 0, true))))
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(
             () ->

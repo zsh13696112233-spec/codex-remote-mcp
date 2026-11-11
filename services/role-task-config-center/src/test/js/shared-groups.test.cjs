@@ -22,6 +22,31 @@ function fixture(search='') {
   return {run,nodes,context,navButtons};
 }
 
+test('new SOP nodes use full access and 3600 seconds and survive reload',()=>{
+  const {run}=fixture('?groupId=a');
+  run('setDraft(blankSop());addRoleNode("ra",0)');
+  assert.equal(run('selectedStep().timeoutSec'),3600);
+  assert.equal(run('selectedStep().permissionProfile'),'full_access');
+  assert.equal(run('sopPayload().steps[0].writeEnabled'),true);
+  assert.equal(run('sopPayload().supervisorTimeoutSec'),7200);
+  assert.match(run('nodeInspectorHtml(selectedStep())'),/value="full_access" selected/);
+  run('setDraft({...sopPayload(),id:"saved"})');
+  assert.equal(run('sopPayload().steps[0].timeoutSec'),3600);
+  assert.equal(run('sopPayload().steps[0].permissionProfile'),'full_access');
+});
+
+test('adding a node preserves existing and legacy node settings',()=>{
+  const {run}=fixture('?groupId=a');
+  run('setDraft({...blankSop(),id:"saved",steps:[{roleId:"ra",timeoutSec:90,permissionProfile:"read_only"},{roleId:"ra",writeEnabled:true},{roleId:"ra",writeEnabled:false}]});addRoleNode("ra",3)');
+  assert.equal(run('sopPayload().steps[0].timeoutSec'),90);
+  assert.equal(run('sopPayload().steps[0].permissionProfile'),'read_only');
+  assert.equal(run('sopPayload().steps[1].timeoutSec'),1800);
+  assert.equal(run('sopPayload().steps[1].permissionProfile'),'workspace_write');
+  assert.equal(run('sopPayload().steps[2].permissionProfile'),'read_only');
+  assert.equal(run('sopPayload().steps[3].timeoutSec'),3600);
+  assert.equal(run('sopPayload().steps[3].permissionProfile'),'full_access');
+});
+
 function jiraFixture(jira=null){
   const h=fixture('?groupId=a');
   h.context.savedJira=jira;

@@ -128,7 +128,7 @@ class DiscussionService:
             if target.get("waitPolicy"):
                 prompt += ("\n本轮可能是遇阻后的讨论或最后一步确认。讨论不代表当前步骤已经成功，不自动操作流程。"
                            "遇阻时只按明确要求补充信息或修订产物，剩余正式业务由用户点击‘重新执行’后处理。"
-                           "等待期间禁止执行阻断停止评论或转交人工等收尾；只有平台明确宣布超时阻断后才允许。")
+                           "等待期间禁止执行阻断停止评论或转交人工等收尾；等待讨论不构成正式终止收尾授权。")
             output_schema = SCHEMA
             if multi:
                 from workflow_documents import SEMI_DOCUMENTS_SCHEMA

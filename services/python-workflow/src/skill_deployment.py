@@ -224,7 +224,7 @@ class SkillDeployment:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             lock.close()
-            raise RuntimeError("已有 Skill 下发进程使用此中央运行库。") from None
+            raise RuntimeError("已有网关或 Skill 下发进程使用此中央运行库，请先正常停止旧进程后再启动。不同网关须使用独立运行库；不要删除锁文件或运行库。") from None
         self.lock_file = lock
         try:
             await storage_call(self.store.recover)
