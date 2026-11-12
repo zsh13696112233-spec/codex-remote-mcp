@@ -122,6 +122,84 @@ class ResourceTests(unittest.TestCase):
                 self.store.finish_workflow(key, supervisor_status="failed", response=None, error="启动失败")
                 self.assertEqual("s1" in self.store.machine_claims(), not stopped)
 
+    def pending_restart(self, supervisor_pending=False):
+        self.create("restart")
+        self.store.claim_next_workflow("s1")
+        if supervisor_pending:
+            self.store.prepare_supervisor_execution("restart")
+        self.store.prepare_node_dispatch("restart", "one")
+        self.store.attach_node_job("restart", "one", {
+            "job_id": "job", "thread_id": "thread", "turn_id": None, "status": "running"})
+        self.store.finish_workflow("restart", supervisor_status="failed", response=None, error="启动请求超时")
+        claim = self.store.machine_claims()["e1"]
+        return {"workflowId": "restart", "acquiredAt": claim["acquiredAt"], "confirmation": "machine_restarted"}
+
+    def test_restart_confirmation_releases_missing_turn_and_is_idempotent(self):
+        body = self.pending_restart()
+        self.assertTrue(self.store.machine_claims()["e1"]["stopConfirmationRequired"])
+        self.assertFalse(self.store.machine_claims()["s1"]["stopConfirmationRequired"])
+        # This is the incident: the automatic turn checker has no execution ID to query.
+        self.assertEqual(self.store.unresolved_resource_executions(), [])
+        with ThreadPoolExecutor(2) as pool:
+            results = list(pool.map(lambda _: self.store.confirm_machine_restarted("e1", body), range(2)))
+        self.assertEqual(sum(not r["alreadyConfirmed"] for r in results), 1)
+        self.assertTrue(all(r["resources"]["state"] == "released" for r in results))
+        self.assertEqual(self.store.get_workflow("restart")["status"], "failed")
+        with self.store._connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM workflow_events WHERE event_type='workflow.machine_restart_confirmed'").fetchone()[0], 1)
+            guard = db.execute("SELECT turn_id,stopped FROM workflow_execution_guards WHERE execution_key='node:one'").fetchone()
+            self.assertEqual(tuple(guard), (None, 1))
+
+    def test_restart_confirmation_does_not_confirm_other_machine(self):
+        body = self.pending_restart(supervisor_pending=True)
+        result = self.store.confirm_machine_restarted("e1", body)
+        self.assertEqual(result["resources"]["state"], "review")
+        claims = self.store.machine_claims()
+        self.assertFalse(claims["e1"]["stopConfirmationRequired"])
+        self.assertTrue(claims["s1"]["stopConfirmationRequired"])
+        self.assertEqual(self.store.confirm_machine_restarted("s1", body)["resources"]["state"], "released")
+
+    def test_restart_confirmation_rejects_invalid_or_stale_requests(self):
+        body = self.pending_restart()
+        claims = self.store.machine_claims()
+        for invalid in ({}, {**body, "confirmation": False}, {**body, "confirmation": "service_online"},
+                        {**body, "extra": True}, {**body, "acquiredAt": "old"},
+                        {**body, "workflowId": []}, {**body, "workflowId": "unknown"}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.store.confirm_machine_restarted("e1", invalid)
+            self.assertEqual(self.store.machine_claims(), claims)
+        with self.assertRaises(ValueError):
+            self.store.confirm_machine_restarted("e2", body)
+        self.store.confirm_machine_restarted("e1", body)
+        self.create("new")
+        self.store.claim_next_workflow("s1")
+        self.store.prepare_node_dispatch("new", "one")
+        # Even an already-confirmed historical request cannot release a newer claim.
+        with self.assertRaisesRegex(ValueError, "占用已变化"):
+            self.store.confirm_machine_restarted("e1", body)
+        current = self.store.machine_claims()["e1"]
+        with self.assertRaisesRegex(ValueError, "运行中的任务请先取消"):
+            self.store.confirm_machine_restarted("e1", {**body, "workflowId": "new", "acquiredAt": current["acquiredAt"]})
+        self.assertEqual(self.store.machine_claims()["e1"], current)
+
+    def test_restart_confirmation_http_contract_and_queue_wakeup(self):
+        from starlette.applications import Starlette
+        from starlette.routing import Route
+        from starlette.testclient import TestClient
+        from workflow_gateway import manage_machines
+        body = self.pending_restart()
+        app = Starlette(routes=[Route("/agents/{agent_id}/confirm-restarted", manage_machines, methods=["POST"])])
+        scheduler = AsyncMock()
+        app.state.gateway = SimpleNamespace(store=self.store, registry=None, _schedule_pending=scheduler)
+        with TestClient(app) as client:
+            self.assertEqual(client.post("/agents/e1/confirm-restarted", json=[]).status_code, 400)
+            self.assertEqual(client.post("/agents/e1/confirm-restarted", json={}).status_code, 400)
+            scheduler.assert_not_awaited()
+            response = client.post("/agents/e1/confirm-restarted", json=body)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["resources"]["state"], "released")
+            scheduler.assert_awaited_once()
+
     def test_group_assignment_uses_global_supervisor_and_freezes_all_steps_directory(self):
         group = str(uuid.uuid4())
         with self.store._connect() as db:

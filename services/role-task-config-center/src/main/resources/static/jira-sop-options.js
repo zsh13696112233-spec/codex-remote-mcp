@@ -14,23 +14,23 @@ function sopJiraSelect(field,label,values,value,empty){
 function sopJiraMulti(field,label,values,value){
   const selected=sopJiraSelected(value),choices=sopJiraChoices(field,values,selected);
   const names=choices.filter(item=>selected.includes(item.value)).map(item=>item.name+(item.missing?'（待确认）':''));
-  return `<div class="jira-option-field"><span>${label}</span><details class="jira-option-multi" data-jira-menu="${field}"><summary>${esc(names.join('、')||'请选择')}</summary><div role="group" aria-label="${label}">${choices.length?choices.map(item=>`<label><input type="checkbox" data-jira-choice="${field}" value="${esc(item.value)}" ${selected.includes(item.value)?'checked':''}>${esc(item.name)}${item.missing?'（待确认）':''}</label>`).join(''):'<small>暂无可用选项</small>'}</div></details></div>`;
+  return `<div class="jira-option-field"><span>${label}</span><details class="jira-option-multi" data-jira-menu="${field}"><summary>${esc(names.join('、')||(field==='jiraIssueType'?'不限类型':'请选择'))}</summary><div role="group" aria-label="${label}">${choices.length?choices.map(item=>`<label><input type="checkbox" data-jira-choice="${field}" value="${esc(item.value)}" ${selected.includes(item.value)?'checked':''}>${esc(item.name)}${item.missing?'（待确认）':''}</label>`).join(''):'<small>暂无可用选项</small>'}</div></details></div>`;
 }
 function sopJiraOptionsBody(d){
   const entry=sopJiraCatalogs.get(sopJiraKey(d))||{},data=entry.data||{};
   const message=entry.loading?'正在读取 Jira 选项…':entry.error||data.rolesError||(!d.jiraConnectionId?'请先选择账号。':!d.jiraProject?'请选择项目。':'');
   const missing=entry.projects&&!entry.loading&&[
     ['jiraProject',entry.projects,d.jiraProject?[d.jiraProject]:[]],
-    ['jiraIssueType',data.issueTypes||[],d.jiraIssueType?[d.jiraIssueType]:[]],
+    ['jiraIssueType',data.issueTypes||[],sopJiraSelected(d.jiraIssueType)],
     ['jiraStatus',data.statuses||[],sopJiraSelected(d.jiraStatus)],
     ['jiraRoles',data.roles||[],sopJiraSelected(d.jiraRoles)]
   ].some(([field,values,selected])=>sopJiraChoices(field,values,selected).some(item=>item.missing));
   return `<label>Jira 账号<select data-sop-field="jiraConnectionId" data-jira-select="jiraConnectionId">${jiraAccountOptions(d.groupId,d.jiraConnectionId)}</select><small>仅领取所选账号负责的工单。</small></label>
     ${sopJiraSelect('jiraProject','Jira 项目 *',entry.projects||[],d.jiraProject,'请选择项目')}
-    ${sopJiraSelect('jiraIssueType','工单类型',data.issueTypes||[],d.jiraIssueType,'不限类型')}
+    ${sopJiraMulti('jiraIssueType','工单类型',data.issueTypes||[],d.jiraIssueType)}
     ${sopJiraMulti('jiraStatus','Jira 状态 *',data.statuses||[],d.jiraStatus)}
     ${sopJiraMulti('jiraRoles','处理角色 *',data.roles||[],d.jiraRoles)}
-    <div class="jira-options-actions"><small>状态、处理角色可多选。</small><button type="button" data-jira-options-refresh ${!d.jiraConnectionId||entry.loading?'disabled':''}>刷新选项</button></div>
+    <div class="jira-options-actions"><small>工单类型、状态、处理角色可多选；不选类型表示不限。</small><button type="button" data-jira-options-refresh ${!d.jiraConnectionId||entry.loading?'disabled':''}>刷新选项</button></div>
     ${message?`<p class="meta" role="status">${esc(message)}</p>`:''}
     ${missing?'<small>“待确认”为原配置值，请核对后选择。</small>':''}`;
 }
@@ -67,9 +67,12 @@ function handleSopJiraChange(event){
   const d=state.sop.draft;if(!d)return false;
   const choice=event.target.dataset.jiraChoice,field=event.target.dataset.jiraSelect;
   if(choice){
+    const previous=sopJiraCatalogs.get(sopJiraKey(d));
     const values=new Set(sopJiraSelected(d[choice]));
     if(event.target.checked)values.add(event.target.value);else values.delete(event.target.value);
-    d[choice]=[...values].join(', ');syncDirtyUi();refreshSopJiraOptionsView(d);return true;
+    d[choice]=[...values].join(', ');
+    if(choice==='jiraIssueType'&&previous&&!sopJiraCatalogs.has(sopJiraKey(d)))sopJiraCatalogs.set(sopJiraKey(d),{projects:previous.projects,data:{issueTypes:previous.data?.issueTypes||[]}});
+    syncDirtyUi();refreshSopJiraOptionsView(d);if(choice==='jiraIssueType')loadSopJiraOptions();return true;
   }
   if(field){d[field]=event.target.value;syncDirtyUi();refreshSopJiraOptionsView(d);loadSopJiraOptions();return true}
   return false;

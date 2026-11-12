@@ -219,12 +219,12 @@ try {
     } elseif ($JiraArgs[$offset] -match '^--(output|lang)=') { $offset++ }
     else { break }
   }
-  if ($offset -ge $JiraArgs.Count -or $JiraArgs[$offset] -notin @('issue','attachment','field','user')) { throw 'command' }
+  if ($offset -ge $JiraArgs.Count -or $JiraArgs[$offset] -notin @('issue','attachment','field','user','api')) { throw 'command' }
   if ($offset+1 -ge $JiraArgs.Count) { throw 'subcommand' }
   $pair=$JiraArgs[$offset]+' '+$JiraArgs[$offset+1]
   if ($pair -eq 'issue search') { throw 'only assigned issue' }
   if ($supervisorReadOnly -or $account.readOnly) {
-    if ($pair -notin @('issue get','issue transitions','issue transition-meta','attachment list','attachment download','field list','user get','user search')) { throw 'read only' }
+    if ($pair -notin @('issue get','issue transitions','issue transition-meta','attachment list','attachment download','field list','user get','user search','api get')) { throw 'read only' }
   }
 
   $authArgs=@('--user',$accountAlias)

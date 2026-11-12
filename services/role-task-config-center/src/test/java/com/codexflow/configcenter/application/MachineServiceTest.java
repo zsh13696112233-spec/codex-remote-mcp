@@ -73,6 +73,23 @@ class MachineServiceTest {
   }
 
   @Test
+  void restartConfirmationPreservesClaimIdentityAndPropagatesRejection() {
+    var body =
+        JsonNodeFactory.instance
+            .objectNode()
+            .put("workflowId", "old-run")
+            .put("acquiredAt", "2026-11-12T02:14:00Z")
+            .put("confirmation", "machine_restarted");
+    service.confirmRestarted("worker/a", body);
+    verify(gateway).post("/agents/worker%2Fa/confirm-restarted", body);
+    when(gateway.post("/agents/worker/confirm-restarted", body))
+        .thenThrow(new IllegalStateException("机器占用已变化"));
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> service.confirmRestarted("worker", body))
+        .hasMessageContaining("占用已变化");
+  }
+
+  @Test
   void managementUsesGatewayAndEncodesIdentifiers() {
     var body = JsonNodeFactory.instance.objectNode().put("name", "第一组");
     service.createGroup(body);

@@ -344,7 +344,7 @@ async function watchJiraStart(taskId,requestId) {
     const result=await api('/api/jira-requests/'+encodeURIComponent(requestId));
     if(['started','empty','failed','cancelled'].includes(result.state)) {
       sessionStorage.removeItem('jira-start:'+taskId);
-      toast(result.state==='started'?'Jira 任务已启动，请在领取中心查看':result.reason||'本次未启动任务');
+      toast(result.state==='started'?'Jira 任务已启动，请在分发中心查看':result.reason||'本次未启动任务');
     }else setTimeout(()=>watchJiraStart(taskId,requestId),5000);
   }catch(error){setTimeout(()=>watchJiraStart(taskId,requestId),10000)}
   finally{jiraStartWatching.delete(requestId)}

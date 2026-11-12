@@ -1808,6 +1808,9 @@ async def manage_machines(request: Request) -> Response:
             result = await _database_call(registry.delete_agent, key)
         elif path.endswith("/remark"):
             result = await _database_call(registry.save_remark, body, key)
+        elif path.endswith("/confirm-restarted"):
+            result = await _database_call(gateway.store.confirm_machine_restarted, key, body)
+            await gateway._schedule_pending()
         elif path.endswith("/test"):
             if key not in registry.rows():
                 raise ValueError("找不到机器。")
@@ -2316,6 +2319,7 @@ def create_app(
             Route("/agents/validate", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}/models", agent_models, methods=["GET"]),
             Route("/agents/{agent_id}/test", manage_machines, methods=["POST"]),
+            Route("/agents/{agent_id}/confirm-restarted", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}/remark", manage_machines, methods=["PUT"]),
             Route("/agents/{agent_id}", manage_machines, methods=["PUT", "DELETE"]),
             Route("/internal/v1/agents", internal_group_agents, methods=["GET"]),

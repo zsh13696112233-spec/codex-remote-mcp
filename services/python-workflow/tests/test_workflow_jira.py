@@ -417,7 +417,7 @@ class JiraRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 
-def launcher_probe_script(credentials, arguments, *, read_only=False, account_alias="fixed-planner"):
+def launcher_probe_script(credentials, arguments, *, read_only=False, account_alias="fixed-planner", supervisor_read_only=False):
     """真实 PowerShell 执行入口；用内存函数代替账号文件和 Jira，不读写远端文件。"""
     def literal(value):
         return "'" + value.replace("'", "''") + "'"
@@ -435,10 +435,35 @@ def launcher_probe_script(credentials, arguments, *, read_only=False, account_al
             "function jira_cli { if (!(" + checks + ")) { throw 'unexpected arguments' }; "
             "Write-Output 'AUTH_OK'; " + "; ".join("Write-Output " + literal(value) for value in secrets)
             + "; $global:LASTEXITCODE=0 }\n"
-            + "& {\n$env:USERPROFILE='C:\\Windows'\n" + local_launcher(account_alias, False) + "\n} " + " ".join(literal(arg) for arg in arguments))
+            + "& {\n$env:USERPROFILE='C:\\Windows'\n" + local_launcher(account_alias, supervisor_read_only) + "\n} " + " ".join(literal(arg) for arg in arguments))
 
 
 class JiraLauncherTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("pwsh"), "需要真实 PowerShell 7")
+    def test_launcher_api_access_preserves_account_and_read_only_restrictions(self):
+        query = "/user/assignable/search?issueKey=TEST-1&username=reviewer"
+        for read_only, supervisor_read_only in ((False, False), (True, False), (False, True)):
+            for arguments, success in (
+                    (["api", "get", query], True),
+                    (["--output", "json", "api", "get", query], True),
+                    (["api", "post", "/issue/TEST-1/comment"], not (read_only or supervisor_read_only)),
+                    (["api", "put", "/issue/TEST-1/assignee"], not (read_only or supervisor_read_only)),
+                    (["api", "delete", "/issue/TEST-1"], not (read_only or supervisor_read_only)),
+                    (["api", "get", query, "--user", "other"], False),
+                    (["api", "get", query, "--base-url=https://other.test"], False),
+                    (["api", "get", query, "--token=override"], False),
+                    (["api"], False)):
+                with self.subTest(arguments=arguments, read_only=read_only, supervisor_read_only=supervisor_read_only):
+                    script = launcher_probe_script({"token": "fixture-token"}, arguments,
+                        read_only=read_only, supervisor_read_only=supervisor_read_only)
+                    result = subprocess.run([shutil.which("pwsh"), "-NoProfile", "-NonInteractive",
+                        "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode()],
+                        capture_output=True, timeout=30)
+                    output = result.stdout.decode("utf-8-sig")
+                    self.assertEqual(result.returncode, 0 if success else 1, output)
+                    self.assertEqual("AUTH_OK" in output, success)
+                    self.assertNotIn("fixture-token", output)
+
     @unittest.skipUnless(shutil.which("pwsh") and os.name == "nt", "需要 Windows PowerShell 7 权限模块")
     def test_initialize_with_foreign_module_search_path(self):
         with tempfile.TemporaryDirectory() as temporary:

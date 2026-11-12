@@ -61,6 +61,30 @@ class JiraOptionsTests(unittest.TestCase):
         self.assertEqual(len(result['issueTypes']), 2)
         self.assertTrue(result['rolesError'])
 
+    def test_multiple_types_union_options_cache_and_reject_partial_matches(self):
+        result = options(self.store, self.account, 'TEST', 'sub-bug, 7')
+        self.assertEqual({s['id'] for s in result['statuses']}, {'1', '2'})
+        self.assertEqual(len(result['roles']), 2)
+        calls = len(self.calls)
+        self.assertEqual(options(self.store, self.account, 'TEST', 'sub-bug, 7'), result)
+        self.assertEqual(len(self.calls), calls)
+        self.assertEqual(len(options(self.store, self.account, 'TEST', '6')['statuses']), 1)
+        invalid = options(self.store, self.account, 'TEST', '6, removed')
+        self.assertTrue(invalid['rolesError'])
+        self.assertEqual(invalid['statuses'], [])
+        self.assertEqual(invalid['roles'], [])
+
+    def test_multiple_types_do_not_return_partial_roles_on_failure(self):
+        def partial(path, body=None):
+            if '/issuetypes/7?' in path:
+                raise JiraHttpError('无法读取角色选项。')
+            return self.request(path, body)
+        self.mock.side_effect = partial
+        result = options(self.store, self.account, 'TEST', '6, 7')
+        self.assertTrue(result['rolesError'])
+        self.assertEqual(result['roles'], [])
+        self.assertEqual(len(result['statuses']), 2)
+
     def test_version_change_and_disable_invalidate_cache(self):
         options(self.store, self.account)
         with self.store._connect() as db:
@@ -133,5 +157,9 @@ class JiraOptionsTests(unittest.TestCase):
         response = asyncio.run(jira_account_options(request))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body)['statuses'][0]['id'], '1')
+        request.query_params['issueType'] = '6, 7'
+        response = asyncio.run(jira_account_options(request))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(json.loads(response.body)['statuses']), 2)
         request.query_params['refresh'] = 'invalid'
         self.assertEqual(asyncio.run(jira_account_options(request)).status_code, 400)

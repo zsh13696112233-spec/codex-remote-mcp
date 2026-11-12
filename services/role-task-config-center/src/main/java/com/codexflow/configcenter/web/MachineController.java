@@ -63,4 +63,9 @@ public class MachineController {
   public JsonNode testMachine(@PathVariable String id) {
     return service.testMachine(id);
   }
+
+  @PostMapping("/agents/{id}/confirm-restarted")
+  public JsonNode confirmRestarted(@PathVariable String id, @RequestBody JsonNode body) {
+    return service.confirmRestarted(id, body);
+  }
 }

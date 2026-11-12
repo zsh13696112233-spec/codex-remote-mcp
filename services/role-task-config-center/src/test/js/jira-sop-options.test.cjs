@@ -72,14 +72,39 @@ test('unavailable account and empty lists do not invent options',async()=>{
  assert.match(html,/暂无可用选项/);
 });
 
-test('issue type is a single select with an unrestricted option',async()=>{
- const h=fixture();await h.run('loadSopJiraOptions()');
- assert.match(h.panel.innerHTML,/data-jira-select="jiraIssueType"/);
- assert.doesNotMatch(h.panel.innerHTML,/data-jira-choice="jiraIssueType"/);
- h.ctx.event={target:{dataset:{jiraSelect:'jiraIssueType'},value:''}};
+test('issue types support multiple selections, linked reload and unrestricted selection',async()=>{
+ const h=fixture();h.data.issueTypes.push({id:'7',name:'任务'});
+ await h.run('loadSopJiraOptions()');
+ assert.doesNotMatch(h.panel.innerHTML,/data-jira-select="jiraIssueType"/);
+ assert.match(h.panel.innerHTML,/data-jira-choice="jiraIssueType"/);
+ h.ctx.event={target:{dataset:{jiraChoice:'jiraIssueType'},value:'7',checked:true}};
  h.run('handleSopJiraChange(event)');
  await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(h.draft.jiraIssueType,'sub-bug, 7');
+ assert.match(h.calls.at(-1),/issueType=sub-bug%2C\+7/);
+ assert.match(h.panel.innerHTML,/value="sub-bug" checked/);
+ assert.match(h.panel.innerHTML,/value="7" checked/);
+ assert.doesNotMatch(h.panel.innerHTML,/待确认/);
+ for(const value of ['sub-bug','7']){
+   h.ctx.event={target:{dataset:{jiraChoice:'jiraIssueType'},value,checked:false}};
+   h.run('handleSopJiraChange(event)');
+   await new Promise(resolve=>setImmediate(resolve));
+ }
  assert.equal(h.draft.jiraIssueType,'');
- assert.match(h.panel.innerHTML,/>不限类型<\/option>/);
+ assert.match(h.panel.innerHTML,/>不限类型<\/summary>/);
  assert.match(h.calls.at(-1),/issueType=&/);
+});
+
+test('type choices remain available while linked options are loading',async()=>{
+ const h=fixture();h.data.issueTypes.push({id:'7',name:'任务'});
+ await h.run('loadSopJiraOptions()');
+ let resolve;h.ctx.api=()=>new Promise(r=>{resolve=r});
+ h.ctx.event={target:{dataset:{jiraChoice:'jiraIssueType'},value:'7',checked:true}};
+ h.run('handleSopJiraChange(event)');
+ assert.match(h.panel.innerHTML,/value="sub-bug" checked/);
+ assert.match(h.panel.innerHTML,/value="7" checked/);
+ assert.match(h.panel.innerHTML,/正在读取/);
+ h.ctx.api=async()=>h.data;resolve(h.root);
+ await new Promise(r=>setImmediate(r));
+ assert.doesNotMatch(h.panel.innerHTML,/正在读取/);
 });

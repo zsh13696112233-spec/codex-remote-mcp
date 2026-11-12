@@ -93,8 +93,19 @@ function machineDetailReadOnly(a){
   return `<dl><dt>地址</dt><dd>${esc(a.ip)}:${a.port}</dd>${executor?`<dt>分组</dt><dd>${esc(groupState.items.find(g=>g.id===a.groupId)?.name||'分组不可用')}</dd>`:''}<dt>工作目录</dt><dd>${esc(a.defaultCwd||"尚未配置")}</dd><dt>占用</dt><dd>${machineOccupation(a).label}</dd><dt>角色</dt><dd>${a.capabilities.map(c=>c==='supervisor'?'主监督机':'执行机').join(' / ')}</dd><dt>启停</dt><dd>${a.enabled?'启用中':'已停用'}</dd><dt>连接状态</dt><dd>${connection.label}</dd><dt>检测结果</dt><dd>${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}</dd><dt>最近检测</dt><dd>${esc(time(a.testedAt))}</dd></dl>${executor?`<h3>Skill 安装设置</h3><p>下发：${a.skillInstallation?.enabled?'已授权':'未授权'}</p><p>${esc(a.skillInstallation?.root||'尚未配置安装目录')}</p><p>${esc(a.skillInstallation?.checkMessage||'尚未检测目录')}</p>${a.skillInstallation?.checkedAt?`<p>${esc(time(a.skillInstallation.checkedAt))}</p>`:''}`:''}`;
 }
 function machineDetailActions(a){
-  const actions=['test','edit',...((a.capabilities||[]).includes('executor')?['skill-check']:[]),'toggle','delete'];
-  return actions.map(action=>`<button data-machine-action="${action}" data-id="${esc(a.agentId)}" ${pendingMachineActions.has(a.agentId)?'disabled':''}>${action==='test'?'检测连接':action==='edit'?'编辑':action==='skill-check'?'检测 Skill 目录':action==='delete'?'删除':a.enabled?'停用':'启用'}</button>`).join('');
+  const actions=['test','edit',...((a.capabilities||[]).includes('executor')?['skill-check']:[]),...(a.occupation?.state==='review'&&a.occupation.stopConfirmationRequired?['confirm-restarted']:[]),'toggle','delete'];
+  return actions.map(action=>`<button data-machine-action="${action}" data-id="${esc(a.agentId)}" ${pendingMachineActions.has(a.agentId)?'disabled':''}>${action==='test'?'检测连接':action==='edit'?'编辑':action==='skill-check'?'检测 Skill 目录':action==='confirm-restarted'?'重启后确认释放':action==='delete'?'删除':a.enabled?'停用':'启用'}</button>`).join('');
+}
+async function confirmMachineRestart(a){
+  if(pendingMachineActions.has(a.agentId)||a.occupation?.state!=='review'||!a.occupation.stopConfirmationRequired)return;
+  const body={workflowId:a.occupation.workflowId,acquiredAt:a.occupation.acquiredAt,confirmation:'machine_restarted'};
+  if(!confirm(`请确认：你已重启“${a.remark||'这台机器'}”整台机器，旧任务及其子进程均已停止。\n\n仅恢复网络、模型服务或检测连接成功不算重启确认。此操作不会重启机器或重新运行原任务，只确认本机旧执行已停止；同轮其他机器仍须分别核实。释放后已有排队任务可能自动开始。\n\n确定已完成重启并确认释放？`))return;
+  pendingMachineActions.add(a.agentId);machineView.version++;updateMachineDetails();
+  try{
+    const result=await api(`/api/agents/${encodeURIComponent(a.agentId)}/confirm-restarted`,{method:'POST',body:JSON.stringify(body)});
+    toast(result.resources?.state==='released'?'旧运行占用已释放，可以重新运行。':'本机已确认停止，同轮其他机器仍待核实。');
+    await refreshMachineStatuses(true);
+  }catch(error){toast(error.message)}finally{pendingMachineActions.delete(a.agentId);machineView.refreshing=false;updateMachineDetails()}
 }
 function openMachineDetails(a,trigger){
   machineView.selected=a.agentId;machineView.returnTo={id:a.agentId,role:trigger.dataset.role};
@@ -214,6 +225,7 @@ document.addEventListener('click',async event=>{
   const action=button.dataset.machineAction,id=button.dataset.id,a=state.agents.find(x=>x.agentId===id);
   if(action==='details'){openMachineDetails(a,button);return}
   if(action==='close-details'){closeMachineDetails();return}
+  if(action==='confirm-restarted'){await confirmMachineRestart(a);return}
   if(pendingMachineActions.has(id))return;
   if(action==='delete'&&!confirm('确定删除这台机器？删除后将从机器管理和可选列表隐藏，历史记录保留。'))return;
   if(action==='group-select'){await selectGroup(id);return}

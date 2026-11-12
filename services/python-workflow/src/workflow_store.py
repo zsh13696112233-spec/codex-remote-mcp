@@ -3577,6 +3577,47 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                 (execution["workflow_id"], execution["execution_key"], execution["job_id"], execution["thread_id"], execution["turn_id"]))
             release_if_stopped(connection, execution["workflow_id"])
 
+    def confirm_machine_restarted(self, agent_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """人工确认整机重启，仅处理页面所见的终态运行占用。"""
+        from workflow_resources import release_if_stopped, snapshot
+        if set(body) != {"workflowId", "acquiredAt", "confirmation"} or body.get("confirmation") != "machine_restarted":
+            raise ValueError("请明确确认已重启这台机器，旧执行及其子进程均已停止。")
+        for key in ("workflowId", "acquiredAt"):
+            if not isinstance(body.get(key), str) or not body[key].strip() or len(body[key]) > 128:
+                raise ValueError("占用信息无效，请刷新机器列表。")
+        workflow_id, acquired_at = body["workflowId"], body["acquiredAt"]
+        event_id = "machine-restart:" + hashlib.sha256(
+            json.dumps([agent_id, workflow_id, acquired_at]).encode("utf-8")
+        ).hexdigest()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            workflow = connection.execute("SELECT status FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            if not workflow or workflow["status"] not in {"completed", "failed", "cancelled"}:
+                raise ValueError("只能确认已结束运行的遗留占用；运行中的任务请先取消。")
+            claim = connection.execute("SELECT * FROM workflow_machine_claims WHERE agent_id=?", (agent_id,)).fetchone()
+            if claim and (claim["workflow_id"] != workflow_id or claim["acquired_at"] != acquired_at or claim["state"] != "review"):
+                raise ValueError("机器占用已变化，请刷新列表后核实，不能释放新的运行。")
+            confirmed = connection.execute("SELECT 1 FROM workflow_events WHERE workflow_id=? AND external_event_id=?", (workflow_id, event_id)).fetchone()
+            if confirmed:
+                return {"confirmed": True, "alreadyConfirmed": True, "resources": snapshot(connection, workflow_id)}
+            if not claim:
+                raise ValueError("未找到对应的待核实占用，请刷新机器列表。")
+            changed = connection.execute("""UPDATE workflow_execution_guards SET stopped=1
+                WHERE workflow_id=? AND agent_id=? AND stopped=0""", (workflow_id, agent_id)).rowcount
+            if not changed:
+                raise ValueError("这台机器的旧执行已确认停止，请核实同轮其他机器。")
+            released = release_if_stopped(connection, workflow_id)
+            if not released:
+                connection.execute("UPDATE workflows SET state_version=state_version+1 WHERE workflow_id=?", (workflow_id,))
+            self._add_event_with_connection(connection, workflow_id, None, "gateway",
+                "workflow.machine_restart_confirmed", {
+                    "agentId": agent_id, "acquiredAt": acquired_at,
+                    "confirmationSource": "user_confirmed_machine_reboot",
+                    "reason": "用户确认已重启该机器，旧执行及其子进程均已停止。仅确认该机器，全部旧执行确认停止后释放整轮占用。",
+                    "released": released,
+                }, utc_now(), external_event_id=event_id)
+            return {"confirmed": True, "alreadyConfirmed": False, "resources": snapshot(connection, workflow_id)}
+
     def pending_allocation_specs(self):
         from workflow_allocation import decode
         with self._connect() as connection:
@@ -3586,8 +3627,12 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
 
     def machine_claims(self) -> dict[str, Any]:
         with self._connect() as connection:
-            claims = {row["agent_id"]: {"workflowId": row["workflow_id"], "state": row["state"], "acquiredAt": row["acquired_at"]}
-                    for row in connection.execute("SELECT * FROM workflow_machine_claims")}
+            claims = {row["agent_id"]: {"workflowId": row["workflow_id"], "state": row["state"], "acquiredAt": row["acquired_at"],
+                        "stopConfirmationRequired": row["state"] == "review" and bool(row["unconfirmed"])}
+                    for row in connection.execute("""SELECT c.*, EXISTS (
+                        SELECT 1 FROM workflow_execution_guards g WHERE g.workflow_id=c.workflow_id
+                        AND g.agent_id=c.agent_id AND g.stopped=0) AS unconfirmed
+                        FROM workflow_machine_claims c""")}
             claims.update({row["agent_id"]: {"workflowId": None, "state": row["state"], "acquiredAt": row["acquired_at"], "kind": "jira_collection" if row["operation_id"].startswith("jira") else "schedule_check"}
                            for row in connection.execute("SELECT * FROM machine_check_claims")})
             return claims

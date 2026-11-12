@@ -1,4 +1,4 @@
-"""领取中心按工单最后结束结果统计，不修改历史数据。"""
+"""分发中心按工单最后结束结果统计，不修改历史数据。"""
 import json
 import uuid
 from collections import Counter

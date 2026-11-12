@@ -485,7 +485,12 @@ test('Jira roles accept comma-separated values and optional type round-trips',()
  assert.equal(run('jiraFieldsFromQuery(query).roles'),'Planner, Reviewer');
  assert.equal(run('jiraFieldsFromQuery(query).issueType'),'sub-bug');
  run("state.sop.draft.jiraIssueType='6, 7'");
- assert.match(run('validateSopJira(state.sop.draft)'),/只能选择一个/);
+ assert.equal(run('validateSopJira(state.sop.draft)'),'');
+ context.query=run('sopPayload().jira.jql');
+ assert.match(context.query,/issuetype IN \("6", "7"\)$/);
+ run("setDraft({...sopPayload(),id:'saved'})");
+ assert.equal(run('state.sop.draft.jiraIssueType'),'6, 7');
+ assert.equal(run('isSopDirty()'),false);
  run("state.sop.draft.jiraIssueType=''");
  assert.doesNotMatch(run('sopPayload().jira.jql'),/issuetype/);
  run("state.sop.draft.jiraRoles='， , '");

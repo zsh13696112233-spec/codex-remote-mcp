@@ -377,8 +377,6 @@ public class ConfigService {
         }
       }
       String issueType = query.group(4);
-      if (issueType != null && !issueType.stripLeading().startsWith("="))
-        throw new IllegalArgumentException("工单类型只能选择一个。");
       if (issueType != null) {
         var values = JIRA_VALUE.matcher(issueType);
         while (values.find()) {

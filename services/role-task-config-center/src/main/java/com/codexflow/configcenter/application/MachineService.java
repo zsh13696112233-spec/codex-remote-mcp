@@ -73,6 +73,10 @@ public class MachineService {
     return gateway.post("/agents/" + segment(id) + "/test", JsonNodeFactory.instance.objectNode());
   }
 
+  public JsonNode confirmRestarted(String id, JsonNode body) {
+    return gateway.post("/agents/" + segment(id) + "/confirm-restarted", body);
+  }
+
   public void validateSop(SopSaveRequest body) {
     var request =
         JsonNodeFactory.instance

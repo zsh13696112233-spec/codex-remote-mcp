@@ -298,11 +298,10 @@ function sopJiraQuery(d){
   const quote=value=>'"'+value.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"';
   const statuses=[...new Set((d.jiraStatus||'').split(/[,，]/).map(v=>v.trim()).filter(Boolean).map(v=>v==='待办'||v==='10205'?'10205':quote(v)))];
   const status=statuses.length===1?'= '+statuses[0]:'IN ('+statuses.join(', ')+')';
-  const roles=jiraRoleValues(d.jiraRoles),issueType=(d.jiraIssueType||'').trim();
-  return 'project = '+quote(project)+' AND status '+status+' AND assignee = currentUser() AND "处理角色" '+(roles.length===1?'= '+quote(roles[0]):'IN ('+roles.map(quote).join(', ')+')')+(issueType?' AND issuetype = '+quote(issueType):'');
+  const roles=jiraRoleValues(d.jiraRoles),issueTypes=jiraRoleValues(d.jiraIssueType||'');
+  return 'project = '+quote(project)+' AND status '+status+' AND assignee = currentUser() AND "处理角色" '+(roles.length===1?'= '+quote(roles[0]):'IN ('+roles.map(quote).join(', ')+')')+(issueTypes.length?' AND issuetype '+(issueTypes.length===1?'= '+quote(issueTypes[0]):'IN ('+issueTypes.map(quote).join(', ')+')'):'');
 }
 function validateSopJira(d){
-  if(d.jiraEnabled&&/[,，]/.test(d.jiraIssueType||''))return "工单类型只能选择一个，请重新选择。";
   if(!d.jiraEnabled)return "";
   const project=(d.jiraProject||"").trim();
   if(/[\u0000-\u001f]/.test(d.jiraProject||""))return "Jira 项目名称不能包含换行或控制字符。";
@@ -591,7 +590,7 @@ $("#content").addEventListener("click",async e=>{
       if(a==="edit-task")openTask(await api(`/api/task-definitions/${id}`));
       if(a.startsWith("delete-")&&confirm("确定删除？")){const path=a==="delete-role"?`roles/${id}`:`task-definitions/${id}`;await api(`/api/${path}`,{method:"DELETE"});toast("已删除");await render()}
       if(a==="copy-task"){await api(`/api/task-definitions/${id}/copy`,{method:"POST"});toast("已创建副本");await render()}
-      if(a==="run-task"){action.disabled=true;const r=await api(`/api/task-definitions/${id}/runs`,{method:"POST"});if(r.requestId){sessionStorage.setItem("jira-start:"+id,r.requestId);toast("正在查找 Jira 工单，可在领取中心查看进度");watchJiraStart(id,r.requestId)}else{toast("任务已提交");window.open(r.monitorUrl,"_blank","noopener");}action.disabled=false}
+      if(a==="run-task"){action.disabled=true;const r=await api(`/api/task-definitions/${id}/runs`,{method:"POST"});if(r.requestId){sessionStorage.setItem("jira-start:"+id,r.requestId);toast("正在查找 Jira 工单，可在分发中心查看进度");watchJiraStart(id,r.requestId)}else{toast("任务已提交");window.open(r.monitorUrl,"_blank","noopener");}action.disabled=false}
       if(a==="runs")showRuns(id,action.dataset.name);return;
     }
     const del=e.target.closest("[data-sop-delete]");
@@ -755,7 +754,7 @@ async function navigateToPage(b,retry=false){
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
   if(state.page==="schedules"){const url=new URL(location.href);url.searchParams.set("page","schedules");history.replaceState(null,"",url)}
   {const url=new URL(location.href);url.searchParams.set("page",state.page);history.replaceState(null,"",url)}
-  const map={"jira-accounts":["Jira 账号管理","＋ 新增账号"],jira:["Jira 领取中心",""],mcps:["MCP 管理",""],skills:["Skill 管理",""],groups:["分组管理","＋ 新建分组"],schedules:["定时任务管理","＋ 新建定时任务"],runs:["任务运行",""],machines:["机器管理",""],roles:["角色管理","＋ 新建角色"],sops:["SOP 工作流","＋ 新建 SOP"],tasks:["任务定义","＋ 新建任务"],runtime:["运行状态",""],dingtalk:["钉钉机器人",""],"dingtalk-targets":["钉钉通知对象",""]};
+  const map={"jira-accounts":["Jira 账号管理","＋ 新增账号"],jira:["Jira 分发中心",""],mcps:["MCP 管理",""],skills:["Skill 管理",""],groups:["分组管理","＋ 新建分组"],schedules:["定时任务管理","＋ 新建定时任务"],runs:["任务运行",""],machines:["机器管理",""],roles:["角色管理","＋ 新建角色"],sops:["SOP 工作流","＋ 新建 SOP"],tasks:["任务定义","＋ 新建任务"],runtime:["运行状态",""],dingtalk:["钉钉机器人",""],"dingtalk-targets":["钉钉通知对象",""]};
   [$("#title").textContent,$("#create").textContent]=map[state.page];
   $("#create").classList.toggle("hidden",["jira","runs","machines","skills","mcps","runtime","dingtalk","dingtalk-targets"].includes(state.page));
   await render();

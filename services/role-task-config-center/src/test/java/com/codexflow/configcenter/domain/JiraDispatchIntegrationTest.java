@@ -296,7 +296,11 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
     String base = "project = TEST AND status = Open AND assignee = currentUser()";
     for (String role : List.of("= \"Reviewer\"", "IN (\"Planner\", \"Reviewer\")")) {
       for (String type :
-          List.of("", " AND issuetype = \"sub-bug\"", " AND issuetype = \"Acceptance-bug\"")) {
+          List.of(
+              "",
+              " AND issuetype = \"sub-bug\"",
+              " AND issuetype = \"Acceptance-bug\"",
+              " AND issuetype IN (\"6\", \"7\")")) {
         String query = base + " AND \"处理角色\" " + role + type;
         var definition = task(query);
         var run = launches.reserveLatest(definition.path("id").asText()).prepared();
@@ -312,7 +316,6 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
             " AND \"处理角色\" IN (\"Planner\", \" \")",
             " AND issuetype = \" \"",
             " AND issuetype IN ()",
-            " AND issuetype IN (\"6\", \"7\")",
             " AND issuetype IN (\"6\", \" \")",
             " AND \"处理角色\" = \"Reviewer\" OR project = OTHER",
             " AND issuetype = \"sub-bug\" OR project = OTHER")) {

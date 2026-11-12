@@ -100,3 +100,37 @@ test('status refresh preserves horizontal position in each machine list',()=>{
   h.machine.testedAt='2026-10-30T02:00:00Z';h.run('updateMachineBoard()');
   assert.deepEqual(lists.map(list=>list.scrollLeft),[120,250]);
 });
+
+test('restart confirmation is offered only for this machines unresolved workflow execution',()=>{
+  const h=fixture();
+  h.machine.occupation={state:'review',workflowId:'old',acquiredAt:'time',stopConfirmationRequired:true};
+  assert.match(h.run('machineDetailActions(machine)'),/重启后确认释放/);
+  for(const occupation of [null,{state:'review'},{state:'review',stopConfirmationRequired:false},{state:'occupied',stopConfirmationRequired:true}]){
+    h.machine.occupation=occupation;
+    assert.doesNotMatch(h.run('machineDetailActions(machine)'),/重启后确认释放/);
+  }
+});
+test('restart confirmation requires consent and prevents duplicate submission while preserving claim identity',async()=>{
+  const h=fixture(),calls=[];let finish;
+  h.machine.occupation={state:'review',workflowId:'old',acquiredAt:'time',stopConfirmationRequired:true};
+  h.run('updateMachineDetails=()=>{};refreshMachineStatuses=async()=>{}');
+  h.c.confirm=()=>false;
+  h.c.api=async(...args)=>{calls.push(args);return new Promise(resolve=>finish=resolve)};
+  await h.run('confirmMachineRestart(machine)');assert.equal(calls.length,0);
+  h.c.confirm=()=>true;
+  const pending=h.run('confirmMachineRestart(machine)');
+  await h.run('confirmMachineRestart(machine)');assert.equal(calls.length,1);
+  assert.equal(calls[0][0],'/api/agents/one/confirm-restarted');
+  assert.deepEqual(JSON.parse(calls[0][1].body),{workflowId:'old',acquiredAt:'time',confirmation:'machine_restarted'});
+  finish({resources:{state:'released'}});await pending;
+  assert.equal(h.run('pendingMachineActions.size'),0);
+});
+test('restart rejection does not pretend to release the machine and remains retryable',async()=>{
+  const h=fixture(),messages=[];
+  h.machine.occupation={state:'review',workflowId:'old',acquiredAt:'time',stopConfirmationRequired:true};
+  h.run('updateMachineDetails=()=>{}');h.c.confirm=()=>true;h.c.toast=m=>messages.push(m);
+  h.c.api=async()=>{throw Error('机器占用已变化')};
+  await h.run('confirmMachineRestart(machine)');
+  assert.deepEqual(messages,['机器占用已变化']);
+  assert.equal(h.machine.occupation.state,'review');assert.equal(h.run('pendingMachineActions.size'),0);
+});

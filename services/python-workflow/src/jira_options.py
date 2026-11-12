@@ -61,8 +61,12 @@ def project_options(client, project, issue_type):
         raise JiraHttpError('Jira 项目响应格式无效。')
     project_value = named([data], '项目')[0] | {'key': data['key']}
     types = named(data.get('issueTypes'), '工单类型')
-    selected = types if not issue_type else [t for t in types if issue_type == t['id'] or issue_type.casefold() == t['name'].casefold()]
-    if not selected:
+    requested = [value.strip() for value in issue_type.split(',')] if issue_type else []
+    matches = [[t for t in types if value == t['id'] or value.casefold() == t['name'].casefold()]
+               for value in requested]
+    selected_ids = {t['id'] for group in matches for t in group}
+    selected = [t for t in types if not requested or t['id'] in selected_ids]
+    if not selected or any(not group for group in matches):
         return {'project': project_value, 'issueTypes': types, 'statuses': [], 'roles': [],
                 'rolesError': '原工单类型不属于此项目，请重新选择。'}
     status_data = client.request('project/' + quote(data['key'], safe='') + '/statuses')
@@ -77,7 +81,7 @@ def project_options(client, project, issue_type):
                 roles[role['id']] = role
         except JiraHttpError as error:
             errors.append(str(error))
-    # 类型不限时必须展示完整候选集合，不能把部分成功的角色伪装为完整列表。
+    # 多选或类型不限时必须展示完整候选集合，不能把部分成功的角色伪装为完整列表。
     return {'project': project_value,
             'issueTypes': types, 'statuses': statuses, 'roles': [] if errors else list(roles.values()),
             'rolesError': errors[0] if errors else '' if roles else '所选类型未提供可用的处理角色选项。'}
