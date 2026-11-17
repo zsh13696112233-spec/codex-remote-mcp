@@ -31,6 +31,41 @@ class JiraPoolServiceTest {
   }
 
   @Test
+  void numberedPagesAreForwardedWithoutChangingFilters() {
+    when(gateway.get(anyString()))
+        .thenReturn(node().put("total", 61).put("page", 2).put("pageSize", 20));
+    when(requests.scheduleOverview("")).thenReturn(JsonNodeFactory.instance.arrayNode());
+    var result =
+        service.board(
+            "",
+            null,
+            "TEST",
+            "任务",
+            "pending",
+            "",
+            new JiraPagination(2, 20),
+            new JiraPagination(3, 50));
+    assertEquals(61, result.path("total").asInt());
+    verify(gateway)
+        .get(
+            "/jira-pool?groupId=&project=TEST&task=%E4%BB%BB%E5%8A%A1&state=pending&page=2&pageSize=20&collectionPage=3&collectionPageSize=50");
+    service.statistics("", "TEST", "passed", "A&B", null, true, "", new JiraPagination(3, 100));
+    verify(gateway)
+        .get(
+            "/jira-statistics/items?groupId=&project=TEST&category=passed&developer=A%26B&page=3&pageSize=100");
+  }
+
+  @Test
+  void invalidPaginationIsRejected() {
+    org.junit.jupiter.api.Assertions.assertThrows(
+        IllegalArgumentException.class, () -> new JiraPagination(0, 20));
+    org.junit.jupiter.api.Assertions.assertThrows(
+        IllegalArgumentException.class, () -> new JiraPagination(1, 101));
+    org.junit.jupiter.api.Assertions.assertThrows(
+        IllegalArgumentException.class, () -> new JiraPagination(1, 20).query(5L));
+  }
+
+  @Test
   void statisticsEncodesFiltersAndLinksSelectedResultOnly() {
     var result = node();
     result.putArray("items").addObject().put("workflowId", "final");
@@ -67,6 +102,43 @@ class JiraPoolServiceTest {
         board.path("items").get(0).path("executions").get(1).path("monitorUrl").asText());
     assertEquals(
         "首次阻断", board.path("items").get(0).path("executions").get(0).path("reason").asText());
+  }
+
+  @Test
+  void continuousFailuresWarnOncePerRequestAndWarnAgainAfterRecovery() {
+    var logger =
+        (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(JiraPoolService.class);
+    var appender =
+        new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+    appender.start();
+    logger.addAppender(appender);
+    try {
+      var request = setup(0);
+      var error = new IllegalStateException("private details");
+      when(requests.status("r"))
+          .thenThrow(error)
+          .thenThrow(error)
+          .thenReturn(request)
+          .thenThrow(error);
+      when(requests.status("other")).thenThrow(error);
+      service.advance("r");
+      service.advance("r");
+      assertEquals(1, appender.list.size());
+      service.advance("other");
+      assertEquals(2, appender.list.size());
+      service.advance("r");
+      service.advance("r");
+      assertEquals(3, appender.list.size());
+      verify(requests, times(4)).status("r");
+      verify(requests).state("r", "empty", "没有待分配工单。");
+      for (var event : appender.list) {
+        org.junit.jupiter.api.Assertions.assertFalse(
+            event.getFormattedMessage().contains("private details"));
+      }
+    } finally {
+      logger.detachAppender(appender);
+      appender.stop();
+    }
   }
 
   @Test

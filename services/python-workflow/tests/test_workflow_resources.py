@@ -200,6 +200,38 @@ class ResourceTests(unittest.TestCase):
             self.assertEqual(response.json()["resources"]["state"], "released")
             scheduler.assert_awaited_once()
 
+    def test_debug_priority_selection_fallback_and_frozen_assignment(self):
+        from agent_registry import AgentRegistry
+        registry = AgentRegistry(self.store)
+        group = str(uuid.uuid4())
+        with self.store._connect() as db:
+            db.execute("INSERT INTO agent_groups(id,name) VALUES(?,?)", (group, "调试组"))
+            db.execute("UPDATE registered_agents SET group_id=? WHERE id IN ('e1','e2')", (group,))
+        registry.save_debug_priority({"debugPriority": True}, "e2")
+        def create(key):
+            self.store.create_workflow({"workflowId": key, "dispatchMode": "group", "groupId": group,
+                                        "nodes": [{"id": "a", "prompt": "工作"}]})
+        create("preferred")
+        self.assertEqual(self.store.claim_next_workflow("s1")["nodes"][0]["agentId"], "e2")
+        # Busy preferred executor must not prevent another task from using the ordinary executor.
+        create("fallback")
+        self.assertEqual(self.store.claim_next_workflow("s2")["nodes"][0]["agentId"], "e1")
+        registry.save_debug_priority({"debugPriority": False}, "e2")
+        registry.save_debug_priority({"debugPriority": True}, "e1")
+        self.assertEqual(self.store.get_spec("preferred")["nodes"][0]["agentId"], "e2")
+
+    def test_debug_priority_still_respects_eligibility(self):
+        from agent_registry import AgentRegistry
+        registry = AgentRegistry(self.store)
+        group = str(uuid.uuid4())
+        with self.store._connect() as db:
+            db.execute("INSERT INTO agent_groups(id,name) VALUES(?,?)", (group, "调试组"))
+            db.execute("UPDATE registered_agents SET group_id=? WHERE id IN ('e1','e2')", (group,))
+        registry.save_debug_priority({"debugPriority": True}, "e2")
+        self.store.create_workflow({"workflowId": "eligible", "dispatchMode": "group", "groupId": group,
+                                    "nodes": [{"id": "a", "prompt": "工作"}]})
+        self.assertEqual(self.store.claim_next_workflow("s1", eligible_executors={"eligible": {"e1"}})["nodes"][0]["agentId"], "e1")
+
     def test_group_assignment_uses_global_supervisor_and_freezes_all_steps_directory(self):
         group = str(uuid.uuid4())
         with self.store._connect() as db:

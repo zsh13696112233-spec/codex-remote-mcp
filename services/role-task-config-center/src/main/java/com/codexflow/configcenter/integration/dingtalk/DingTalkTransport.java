@@ -7,6 +7,8 @@ import java.util.function.Consumer;
 
 /** 隔离钉钉官方 SDK，便于业务测试使用内存替身。 */
 interface DingTalkTransport {
+  /** 已越过发送窗口，尚未发起消息投递。 */
+  class DeliveryExpired extends RuntimeException {}
 
   default byte[] downloadImage(String downloadCode) {
     throw new UnsupportedOperationException("当前通道不支持图片下载。");

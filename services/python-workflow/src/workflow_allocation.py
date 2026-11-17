@@ -40,7 +40,7 @@ def select_executor(db: sqlite3.Connection, workflow_id: str, supervisor_id: str
     if spec.get("jira") and not compatible_agent(supervisor_config):
         return False
     candidates = db.execute("""SELECT * FROM registered_agents WHERE group_id=?
-        AND deleted_at IS NULL AND test_status='passed' AND id<>? ORDER BY id""",
+        AND deleted_at IS NULL AND test_status='passed' AND id<>? ORDER BY debug_priority DESC, id""",
                             (allocation["group_id"], supervisor_id)).fetchall()
     compatible = False
     for candidate in candidates:

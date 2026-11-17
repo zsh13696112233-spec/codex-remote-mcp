@@ -126,6 +126,8 @@ def release_if_stopped(db: sqlite3.Connection, workflow_id: str) -> bool:
     workflow = db.execute("SELECT status FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
     if not workflow or workflow["status"] not in {"completed", "failed", "cancelled"}:
         return False
+    if db.execute("SELECT 1 FROM document_chat_messages WHERE workflow_id=? AND state='running'", (workflow_id,)).fetchone():
+        return False
     if db.execute("SELECT 1 FROM workflow_execution_guards WHERE workflow_id=? AND stopped=0",
                   (workflow_id,)).fetchone():
         changed = db.execute("UPDATE workflow_machine_claims SET state='review' WHERE workflow_id=? AND state<>'review'", (workflow_id,)).rowcount

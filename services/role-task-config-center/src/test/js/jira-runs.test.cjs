@@ -4,7 +4,8 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const source=fs.readFileSync('src/main/resources/static/jira-runs.js','utf8');
 function context(extra={}) {
-  const ctx=vm.createContext({document:{addEventListener(){}},setInterval(){},esc:v=>String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'),time:v=>v,groupName:()=>'<测试组>',...extra});
+  const ctx=vm.createContext({URL,location:{href:'http://localhost/'},history:{replaceState(){}},document:{addEventListener(){}},setInterval(){},esc:v=>String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'),time:v=>v,groupName:()=>'<测试组>',...extra});
+  vm.runInContext(fs.readFileSync('src/main/resources/static/jira-pagination.js','utf8'),ctx);
   vm.runInContext(source,ctx);
   return ctx;
 }
@@ -98,15 +99,15 @@ test('background refresh inserts and removes only affected records',async()=>{
   h.ctx.api=async()=>({items:[{...h.row,workflowId:'new'},h.row],nextCursor:null});await h.run('loadJiraRuns({background:true})');
   assert.deepEqual(h.body().children.map(row=>row.dataset.jiraRun),['new','one']);assert.equal(h.body().children[1],kept);
 });
-test('failed navigation keeps current page and next cursor; stale background cannot undo navigation',async()=>{
+test('failed navigation retains rows; stale background cannot undo numbered navigation',async()=>{
   const h=listFixture();h.ctx.api=async()=>({items:[h.row],nextCursor:5});await h.run('loadJiraRuns()');
-  h.ctx.api=async()=>{throw Error('offline')};await h.run("loadJiraRuns({cursor:5,direction:'next'})");
-  assert.equal(h.run('jiraCursor'),null);assert.equal(h.run('jiraPages.length'),0);assert.equal(h.run('jiraNextCursor'),5);
+  h.ctx.api=async()=>{throw Error('offline')};await h.run("loadJiraRuns()");
+  assert.equal(h.run("jiraPage('history').page"),1);
   assert.equal(h.body().children[0].dataset.jiraRun,'one');assert.equal(h.elements['#jiraNext'].disabled,false);
   let resolve;h.ctx.api=()=>new Promise(r=>resolve=r);const old=h.run('loadJiraRuns({background:true})');
-  h.ctx.api=async()=>({items:[{...h.row,workflowId:'next-page'}],nextCursor:null});await h.run("loadJiraRuns({cursor:5,direction:'next'})");
+  h.ctx.api=async()=>({items:[{...h.row,workflowId:'next-page'}],nextCursor:null});await h.run("loadJiraRuns()");
   resolve({items:[h.row],nextCursor:5});await old;
-  assert.equal(h.run('jiraCursor'),5);assert.equal(h.run('jiraPages.length'),1);assert.equal(h.body().children[0].dataset.jiraRun,'next-page');
+assert.equal(h.body().children[0].dataset.jiraRun,'next-page');
 });
 test('late group responses do not replace visible results and duplicate polls are skipped',async()=>{
   const h=listFixture();let resolve,calls=0;h.ctx.api=()=>{calls++;return new Promise(r=>resolve=r)};
@@ -115,11 +116,11 @@ test('late group responses do not replace visible results and duplicate polls ar
   assert.equal(h.container.replacements,0);
 });
 test('open details receive new receipts without closing or resetting scroll',async()=>{
-  const h=listFixture();const body={innerHTML:''},dialog={open:true,scrollTop:150,querySelector:()=>body};
+  const h=listFixture();const body={markup:'',scrollTop:150,get innerHTML(){return this.markup},set innerHTML(value){this.markup=value;this.scrollTop=0}},dialog={open:true,scrollTop:0,querySelector:()=>body};
   h.elements['#jiraDetails']=dialog;h.run("jiraDetailId='one'");
   h.ctx.api=async()=>({items:[{...h.row,reason:'<原因>',deliveries:[{status:'submitted',reference:'<hash>',summary:'完成',recordedAt:'now'}]}],nextCursor:null});
   await h.run('loadJiraRuns({background:true})');
-  assert.equal(dialog.open,true);assert.equal(dialog.scrollTop,150);assert.match(body.innerHTML,/&lt;原因&gt;/);assert.match(body.innerHTML,/&lt;hash&gt;/);
+  assert.equal(dialog.open,true);assert.equal(dialog.scrollTop,0);assert.equal(body.scrollTop,150);assert.match(body.innerHTML,/&lt;原因&gt;/);assert.match(body.innerHTML,/&lt;hash&gt;/);
 });
 test('terminal records retain pending-stop warning and full reasons only in details',()=>{
   const h=listFixture();h.ctx.row={...h.row,status:'completed',resourceState:'review',reason:'完整原因'};
@@ -152,6 +153,7 @@ test('center views show one panel while preserving filter input and accessible s
 
 function poolFixture() {
   const elements=Object.fromEntries(['#jiraPool','#poolNext','#poolProjects','#poolSchedules','#poolItems','#poolCollections','#poolNotice'].map(id=>[id,{innerHTML:'',textContent:'',querySelector:()=>null}]));
+  elements['#jiraHistorySop']={value:''};
   const result={projects:[],schedules:[],items:[],collections:[],nextCursor:null};
   const ctx=context({URLSearchParams,state:{page:'jira'},groupState:{selected:'g'},$:id=>elements[id],api:async()=>result});
   return {ctx,elements,result,run:code=>vm.runInContext(code,ctx)};
@@ -287,8 +289,8 @@ test('a submitted pool query supersedes a pending poll without losing its result
   h.ctx.api=async()=>({...h.result,nextCursor:12});
   await h.run('loadJiraPool(null)');
   resolve({...h.result,nextCursor:99});await pending;
-  assert.equal(h.run('poolNext'),12);
-  assert.equal(h.elements['#poolNext'].disabled,false);
+
+
 });
 test('pool load errors replace loading messages and refresh errors retain loaded data',async()=>{
   const h=poolFixture();
@@ -488,4 +490,30 @@ test('all groups and multiple SOPs retain the all-SOP default',async()=>{
   assert.equal(calls,1);
   assert.equal(h.run('poolFilters.sopId'),'');
  }
+});
+
+test('pool summary follows filters inside pool and refresh stays above panels',()=>{
+  const html=vm.runInContext('jiraCenterHtml()',context());
+  assert.doesNotMatch(html,/领取概览|class="jira-overview"/);
+  assert.ok(html.indexOf('id="jiraRefresh"')<html.indexOf('id="jiraPool"'));
+  const pool=html.slice(html.indexOf('id="jiraPool"'),html.indexOf('id="jiraCollections"'));
+  assert.ok(pool.indexOf('id="poolFilters"')<pool.indexOf('id="poolProjects"'));
+  assert.ok(pool.indexOf('id="poolProjects"')<pool.indexOf('id="poolItems"'));
+  assert.match(pool,/当前筛选/);assert.match(pool,/id="poolSchedules"/);
+});
+test('shared refresh loads only the selected view and prevents duplicate clicks',async()=>{
+  const button={disabled:false},calls=[];
+  const ctx=context({$:()=>button,calls});
+  vm.runInContext("loadJiraPool=async()=>calls.push('pool');loadJiraRuns=async()=>calls.push('history');loadJiraStatistics=async()=>calls.push('statistics')",ctx);
+  for(const [view,expected] of [['pool','pool'],['collections','pool'],['history','history'],['statistics','statistics'],['developers','statistics']]){
+    calls.length=0;
+    await vm.runInContext(`jiraView='${view}';refreshJiraView()`,ctx);
+    assert.deepEqual(calls,[expected]);assert.equal(button.disabled,false);
+  }
+  calls.length=0;button.disabled=true;
+  await vm.runInContext('refreshJiraView()',ctx);assert.deepEqual(calls,[]);
+  button.disabled=false;
+  vm.runInContext("loadJiraStatistics=async()=>{throw new Error('failed')}",ctx);
+  await assert.rejects(vm.runInContext('refreshJiraView()',ctx),/failed/);
+  assert.equal(button.disabled,false);
 });

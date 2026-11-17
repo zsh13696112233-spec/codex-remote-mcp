@@ -51,6 +51,19 @@ class StatisticsTests(unittest.TestCase):
             db.execute("INSERT INTO workflow_jira_runs VALUES(?,'server','TEST-1')", (wid,))
             db.execute('INSERT INTO jira_execution_history VALUES(?)', (wid,))
 
+    def test_detail_pages_preserve_summary_and_filter_totals(self):
+        for i in range(55):
+            self.issue(i)
+        first = statistics(self, items=True, page=1, limit=20, category='pending')
+        third = statistics(self, items=True, page=3, limit=20, category='pending')
+        self.assertEqual((first['total'], third['total'], len(third['items'])), (55, 55, 15))
+        self.assertFalse({r['id'] for r in first['items']} & {r['id'] for r in third['items']})
+        empty = statistics(self, items=True, page=9, category='passed')
+        self.assertEqual((empty['total'], empty['page'], empty['items']), (0, 1, []))
+        self.assertEqual(statistics(self)['summary']['total'], 55)
+        with self.assertRaises(ValueError):
+            statistics(self, items=True, page=1, before=5)
+
     def test_sop_filter_uses_that_sops_latest_run_and_rate_excludes_pending(self):
         import uuid
         repair, acceptance = str(uuid.uuid4()), str(uuid.uuid4())

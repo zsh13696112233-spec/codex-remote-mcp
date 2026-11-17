@@ -65,6 +65,10 @@ public class MachineService {
     return groups.modelCatalog(id);
   }
 
+  public JsonNode updateDebugPriority(String id, JsonNode body) {
+    return gateway.put("/agents/" + segment(id) + "/debug-priority", body);
+  }
+
   public JsonNode updateRemark(String id, JsonNode body) {
     return gateway.put("/agents/" + segment(id) + "/remark", body);
   }

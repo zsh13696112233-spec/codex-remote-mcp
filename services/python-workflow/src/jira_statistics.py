@@ -8,7 +8,9 @@ from workflow_jira import execution_result
 from workflow_store import utc_now
 
 
-def statistics(store, group='', project='', *, items=False, category='', developer='', before=None, sop_id=''):
+def statistics(store, group='', project='', *, items=False, category='', developer='', before=None, sop_id='', page=None, limit=50):
+    from jira_pagination import validate_page, page_window
+    validate_page(page, limit, before)
     if sop_id:
         uuid.UUID(sop_id)
     if group:
@@ -17,8 +19,6 @@ def statistics(store, group='', project='', *, items=False, category='', develop
         raise ValueError('统计筛选参数无效。')
     if category not in ('', 'passed', 'other', 'completed_no_submission', 'rework_required', 'fully_submitted', 'limited_submitted', 'blocked', 'abnormal', 'cancelled', 'unknown', 'pending', 'submission_unknown', 'no_task'):
         raise ValueError('统计结果分类无效。')
-    if before is not None and (type(before) is not int or before < 1):
-        raise ValueError('分页参数无效。')
     with store._connect() as db:
         db.execute('BEGIN')
         rows = db.execute('''WITH issues AS (
@@ -84,7 +84,9 @@ def statistics(store, group='', project='', *, items=False, category='', develop
                         (not category or (r['flowStatus']=='passed' if category=='passed' else
                          r['flowStatus'] not in ('passed','blocked') if category=='other' else r['status']==category)) and
                         (before is None or r['id']<before)]
-            return {**metadata, 'items':selected[:50],'nextCursor':selected[49]['id'] if len(selected)>50 else None,'generatedAt':generated}
+            pagination, offset = page_window(len(selected), page, limit) if page is not None else ({}, 0)
+            selected = selected[offset:]
+            return {**metadata, **pagination, 'items':selected[:limit],'nextCursor':selected[limit-1]['id'] if len(selected)>limit else None,'generatedAt':generated}
         groups = sorted({g for r in data for g in r['groupIds']})
         developers = sorted({r['developer'] for r in data})
         return {**metadata, 'summary':counts(data),'groups':[{'groupId':g,**counts([r for r in data if g in r['groupIds']])} for g in groups],

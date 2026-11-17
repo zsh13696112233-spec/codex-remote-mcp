@@ -40,6 +40,45 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
   @Autowired com.codexflow.configcenter.application.WorkflowRunService service;
 
   @Test
+  void repeatedEmptyRequestsShareImmutableSnapshotAndLegacyRequestsRemainReadable() {
+    String taskId = task().path("id").asText();
+    var first = requests.enqueue(taskId, "web", null);
+    String firstId = first.path("requestId").asText();
+    requests.state(firstId, "empty", "没有待分配工单。");
+    var second = requests.enqueue(taskId, "web", null);
+    String secondId = second.path("requestId").asText();
+    assertThat(secondId).isNotEqualTo(firstId);
+    assertThat(second.path("spec")).isEqualTo(first.path("spec"));
+    assertThat(
+            jdbc.queryForList(
+                "SELECT DISTINCT spec_snapshot_id FROM codex_jira_requests WHERE task_definition_id=?",
+                String.class,
+                taskId))
+        .hasSize(1)
+        .doesNotContainNull();
+    assertThat(
+            jdbc.queryForList(
+                "SELECT spec_json FROM codex_jira_requests WHERE task_definition_id=?",
+                String.class,
+                taskId))
+        .containsOnly("{}");
+    requests.validate(secondId);
+    // 已部署版本留下的内联快照仍可读取和校验。
+    jdbc.update(
+        "UPDATE codex_jira_requests SET spec_snapshot_id=NULL,spec_json=? WHERE id=?",
+        second.path("spec").toString(),
+        secondId);
+    requests.validate(secondId);
+    assertThat(requests.status(secondId).path("spec")).isEqualTo(first.path("spec"));
+    requests.state(secondId, "empty", "没有待分配工单。");
+    jdbc.update("UPDATE codex_sop_task_definitions SET name=? WHERE id=?", "变更后的任务", taskId);
+    var third = requests.enqueue(taskId, "web", null);
+    assertThat(third.path("spec")).isNotEqualTo(first.path("spec"));
+    assertThat(requests.status(firstId).path("spec")).isEqualTo(first.path("spec"));
+    assertThatThrownBy(() -> requests.validate(secondId)).isInstanceOf(ConflictFailure.class);
+  }
+
+  @Test
   void independentCollectionIncludesEnabledTasksWithoutScheduleAndCreatesNoLaunch() {
     var task = task();
     var taskId = task.path("id").asText();
@@ -427,6 +466,13 @@ class JiraDispatchIntegrationTest extends GroupedFixtureSupport {
               .orElseThrow();
       assertThat(service.runScheduled(taskId, later.token()).path("requestId").asText())
           .isNotEqualTo(queuedRequest.path("requestId").asText());
+      assertThat(
+              jdbc.queryForList(
+                  "SELECT DISTINCT spec_snapshot_id FROM codex_jira_requests WHERE task_definition_id=?",
+                  String.class,
+                  taskId))
+          .hasSize(1)
+          .doesNotContainNull();
 
       assertThatThrownBy(() -> service.runScheduled(taskId, second.token()))
           .isInstanceOf(ConflictFailure.class);

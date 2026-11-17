@@ -1847,8 +1847,9 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                 connection.execute(
                     "SELECT (SELECT COUNT(*) FROM workflow_artifacts WHERE workflow_id = ?) "
                     "+ (SELECT COUNT(*) FROM workflow_attempt_artifacts WHERE workflow_id = ?) "
-                    "+ (SELECT COUNT(*) FROM workflow_input_images WHERE workflow_id = ?)",
-                    (workflow_id, workflow_id, workflow_id),
+                    "+ (SELECT COUNT(*) FROM workflow_input_images WHERE workflow_id = ?) "
+                    "+ (SELECT COUNT(*) FROM document_chat_files WHERE workflow_id = ?)",
+                    (workflow_id, workflow_id, workflow_id, workflow_id),
                 ).fetchone()[0]
             )
             if count >= ARTIFACTS_PER_WORKFLOW_LIMIT:
@@ -2226,6 +2227,8 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                 if discussion.get("documentResult") is not None:
                     from workflow_documents import save as save_documents
                     save_documents(connection, workflow_id, target["nodeId"], "discussion:" + message_id, discussion["documentResult"], now)
+                from workflow_document_chat import bind
+                bind(connection, workflow_id, target['nodeId'], None, {'cwd': target['cwd'], 'model': target['model'], 'thread_id': target['threadId']}, discussion)
                 summary = discussion["summary"]
                 if summary is not None:
                     if not isinstance(summary, str) or not summary.strip() or len(summary) > RESULT_LIMIT:
@@ -3375,6 +3378,9 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                         raise ValueError("文档采集结果与交付清单不一致。")
                 save_many(connection, workflow_id, node_id,
                           "job:" + str(snapshot.get("job_id") or old["job_id"]), snapshot.get("documents", []), utc_now())
+            if outcome is not None:
+                from workflow_document_chat import bind
+                bind(connection, workflow_id, node_id, old, snapshot, outcome)
             if outcome is not None and outcome["outcome"] == "blocked" and self._wait_policy(connection, workflow_id):
                 if snapshot.get("cwd") or snapshot.get("model"):
                     connection.execute("INSERT INTO workflow_node_runtime(workflow_id,node_id,attempt_number,cwd,model) SELECT workflow_id,node_id,attempt_count,?,? FROM workflow_nodes WHERE workflow_id=? AND node_id=? ON CONFLICT(workflow_id,node_id,attempt_number) DO UPDATE SET cwd=COALESCE(excluded.cwd,cwd),model=COALESCE(excluded.model,model)", (snapshot.get("cwd"), snapshot.get("model"), workflow_id, node_id))
@@ -3409,6 +3415,9 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
                     return
                 from workflow_documents import save as save_documents
                 save_documents(connection, workflow_id, node_id, "job:" + str(snapshot.get("job_id") or old["job_id"]), snapshot["document"], utc_now())
+                if outcome is not None:
+                    from workflow_document_chat import bind
+                    bind(connection, workflow_id, node_id, old, snapshot, outcome)
             if snapshot.get("cwd") or snapshot.get("model"):
                 connection.execute(
                     "INSERT INTO workflow_node_runtime(workflow_id,node_id,attempt_number,cwd,model) "
@@ -3565,6 +3574,7 @@ class WorkflowStore(InputImageStore, WaitStore, JiraStore):
             return [dict(row) for row in connection.execute("""SELECT g.* FROM workflow_execution_guards g
                 JOIN workflows w USING(workflow_id) WHERE g.stopped=0 AND g.thread_id IS NOT NULL
                 AND g.turn_id IS NOT NULL AND w.status IN ('completed','failed','cancelled')
+                AND NOT EXISTS (SELECT 1 FROM document_chat_messages d WHERE d.workflow_id=g.workflow_id AND g.execution_key='document:' || d.message_id AND d.state='running')
                 AND (g.workflow_id,g.execution_key)>(?,?)
                 ORDER BY g.workflow_id,g.execution_key LIMIT 16""", after)]
 

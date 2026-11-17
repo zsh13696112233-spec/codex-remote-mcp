@@ -86,11 +86,46 @@ function machineOccupation(a){
 }
 function machineCard(a,role){
   const connection=machineConnection(a),occupation=machineOccupation(a);
-  return `<tr class="machine-row ${a.enabled?'':'disabled'}"><td><strong>${esc(a.remark||'未填写备注')}</strong></td><td>${esc(a.ip)}:${a.port}</td><td>${esc(role==='supervisor'?'全局':groupState.items.find(g=>g.id===a.groupId)?.name||'分组不可用')}</td><td><span class="badge ${a.enabled?'':'off'}">${a.enabled?'启用中':'已停用'}</span></td><td><span class="machine-state ${connection.kind}">${connection.label}</span></td><td><span class="machine-occupation ${occupation.kind}">${occupation.label}</span></td><td><span class="machine-state ${a.testStatus==='passed'?'online':a.testStatus==='failed'?'offline':'unknown'}">${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}</span></td><td class="machine-tested-at">${esc(time(a.testedAt))}</td><td><button type="button" data-machine-action="details" data-id="${esc(a.agentId)}" data-role="${role}" aria-label="查看${esc(a.remark||a.ip)}详情">详情</button></td></tr>`;
+  return `<tr class="machine-row ${a.enabled?'':'disabled'}"><td><strong>${esc(a.remark||'未填写备注')}</strong>${role==='executor'&&a.debugPriority?' <span class="badge">调试优先</span>':''}</td><td>${esc(a.ip)}:${a.port}</td><td>${esc(role==='supervisor'?'全局':groupState.items.find(g=>g.id===a.groupId)?.name||'分组不可用')}</td><td><span class="badge ${a.enabled?'':'off'}">${a.enabled?'启用中':'已停用'}</span></td><td><span class="machine-state ${connection.kind}">${connection.label}</span></td><td><span class="machine-occupation ${occupation.kind}">${occupation.label}</span></td><td><span class="machine-state ${a.testStatus==='passed'?'online':a.testStatus==='failed'?'offline':'unknown'}">${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}</span></td><td class="machine-tested-at">${esc(time(a.testedAt))}</td><td><button type="button" data-machine-action="details" data-id="${esc(a.agentId)}" data-role="${role}" aria-label="查看${esc(a.remark||a.ip)}详情">详情</button></td></tr>`;
 }
+function machineDebugPriorityHtml(a){
+  if(!(a.capabilities||[]).includes('executor'))return '';
+  return `<div class="machine-debug-setting"><label class="check"><input type="checkbox" data-machine-debug-priority="${esc(a.agentId)}" ${a.debugPriority?'checked':''} ${pendingMachineActions.has(a.agentId)?'disabled':''}>调试优先</label><p class="machine-muted">空闲且满足任务要求时优先分配，仅影响后续任务。</p></div>`;
+}
+async function saveMachineDebugPriority(input){
+  const id=input.dataset.machineDebugPriority;
+  if(pendingMachineActions.has(id))return;
+  const value=input.checked;
+  pendingMachineActions.add(id);machineView.version++;input.disabled=true;
+  try{
+    const saved=await api(`/api/agents/${encodeURIComponent(id)}/debug-priority`,{method:'PUT',body:JSON.stringify({debugPriority:value})});
+    const current=state.agents.find(a=>a.agentId===id);if(current)current.debugPriority=saved.debugPriority;
+  }catch(error){toast(`调试优先保存失败：${error.message}`)}
+  finally{input.checked=!!state.agents.find(a=>a.agentId===id)?.debugPriority;input.disabled=false;pendingMachineActions.delete(id);machineView.version++;machineView.refreshing=false;updateMachineBoard()}
+}
+document.addEventListener('change',event=>{if(event.target.matches('[data-machine-debug-priority]'))return saveMachineDebugPriority(event.target)});
 function machineDetailReadOnly(a){
-  const connection=machineConnection(a),executor=(a.capabilities||[]).includes('executor');
-  return `<dl><dt>地址</dt><dd>${esc(a.ip)}:${a.port}</dd>${executor?`<dt>分组</dt><dd>${esc(groupState.items.find(g=>g.id===a.groupId)?.name||'分组不可用')}</dd>`:''}<dt>工作目录</dt><dd>${esc(a.defaultCwd||"尚未配置")}</dd><dt>占用</dt><dd>${machineOccupation(a).label}</dd><dt>角色</dt><dd>${a.capabilities.map(c=>c==='supervisor'?'主监督机':'执行机').join(' / ')}</dd><dt>启停</dt><dd>${a.enabled?'启用中':'已停用'}</dd><dt>连接状态</dt><dd>${connection.label}</dd><dt>检测结果</dt><dd>${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}</dd><dt>最近检测</dt><dd>${esc(time(a.testedAt))}</dd></dl>${executor?`<h3>Skill 安装设置</h3><p>下发：${a.skillInstallation?.enabled?'已授权':'未授权'}</p><p>${esc(a.skillInstallation?.root||'尚未配置安装目录')}</p><p>${esc(a.skillInstallation?.checkMessage||'尚未检测目录')}</p>${a.skillInstallation?.checkedAt?`<p>${esc(time(a.skillInstallation.checkedAt))}</p>`:''}`:''}`;
+  const connection=machineConnection(a),occupation=machineOccupation(a),executor=(a.capabilities||[]).includes('executor');
+  return `${machineDebugPriorityHtml(a)}
+    <section class="machine-detail-section"><h3>基本信息</h3><dl>
+      <dt>地址</dt><dd>${esc(a.ip)}:${a.port}</dd>
+      ${executor?`<dt>分组</dt><dd>${esc(groupState.items.find(g=>g.id===a.groupId)?.name||'分组不可用')}</dd>`:''}
+      <dt>工作目录</dt><dd>${esc(a.defaultCwd||'尚未配置')}</dd>
+      <dt>角色</dt><dd>${a.capabilities.map(c=>c==='supervisor'?'主监督机':'执行机').join(' / ')}</dd>
+    </dl></section>
+    <section class="machine-detail-section"><h3>运行状态</h3><dl>
+      <dt>占用</dt><dd><span class="machine-occupation ${occupation.kind}">${occupation.label}</span></dd>
+      <dt>启停</dt><dd><span class="badge ${a.enabled?'':'off'}">${a.enabled?'启用中':'已停用'}</span></dd>
+      <dt>连接状态</dt><dd><span class="machine-state ${connection.kind}">${connection.label}</span></dd>
+      <dt>检测结果</dt><dd><span class="machine-state ${a.testStatus==='passed'?'online':a.testStatus==='failed'?'offline':'unknown'}">${a.testStatus==='passed'?'检测通过':a.testStatus==='failed'?'检测失败':'未检测'}</span></dd>
+      <dt>最近检测</dt><dd>${esc(time(a.testedAt))}</dd>
+    </dl></section>
+    ${executor?`<section class="machine-detail-section"><h3>Skill 安装设置</h3><dl>
+      <dt>下发授权</dt><dd><span class="badge ${a.skillInstallation?.enabled?'':'off'}">${a.skillInstallation?.enabled?'已授权':'未授权'}</span></dd>
+      <dt>安装目录</dt><dd>${esc(a.skillInstallation?.root||'尚未配置安装目录')}</dd>
+      <dt>目录检测</dt><dd>${esc(a.skillInstallation?.checkMessage||'尚未检测目录')}</dd>
+      ${a.skillInstallation?.checkedAt?`<dt>最近检测</dt><dd>${esc(time(a.skillInstallation.checkedAt))}</dd>`:''}
+    </dl></section>`:''}`;
 }
 function machineDetailActions(a){
   const actions=['test','edit',...((a.capabilities||[]).includes('executor')?['skill-check']:[]),...(a.occupation?.state==='review'&&a.occupation.stopConfirmationRequired?['confirm-restarted']:[]),'toggle','delete'];
@@ -114,7 +149,7 @@ function openMachineDetails(a,trigger){
     dialog=document.createElement('dialog');dialog.id='machineDetails';dialog.setAttribute('aria-labelledby','machineDetailsTitle');document.body.append(dialog);
     dialog.addEventListener('close',()=>{machineView.selected=null;const target=machineView.returnTo;machineView.returnTo=null;if(target)[...document.querySelectorAll('[data-machine-action="details"]')].find(b=>b.dataset.id===target.id&&b.dataset.role===target.role)?.focus({preventScroll:true})});
   }
-  dialog.innerHTML=`<header><h2 id="machineDetailsTitle">机器详情</h2><button type="button" class="dialog-close" data-machine-action="close-details" aria-label="关闭机器详情" title="关闭" autofocus>×</button></header><label>备注${machineRemarkHtml(a)}</label><div data-machine-detail-info></div><div class="machine-card-actions"></div>`;
+  dialog.innerHTML=`<header><h2 id="machineDetailsTitle">机器详情</h2><button type="button" class="dialog-close" data-machine-action="close-details" aria-label="关闭机器详情" title="关闭" autofocus>×</button></header><div class="machine-detail-body"><label class="machine-detail-remark">备注${machineRemarkHtml(a)}</label><div data-machine-detail-info></div></div><footer class="machine-card-actions"></footer>`;
   updateMachineDetails();dialog.showModal();
 }
 function closeMachineDetails(){machineView.selected=null;document.querySelector('#machineDetails')?.close()}

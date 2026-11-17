@@ -214,7 +214,10 @@ def reserve(store, request_id, reservation_id):
         if not old:
             if batch['source'] != 'schedule' and db.execute('SELECT 1 FROM jira_pool_items WHERE request_id=? AND reservation_id IS NOT NULL', (request_id,)).fetchone():
                 return None
-            for item in db.execute("SELECT * FROM jira_pool_items WHERE request_id=? AND state='pending' ORDER BY id", (request_id,)).fetchall():
+            for item in db.execute("""SELECT * FROM jira_pool_items WHERE request_id=? AND state='pending'
+                    ORDER BY CASE UPPER(TRIM(json_extract(details_json,'$.priority')))
+                        WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2
+                        WHEN 'P3' THEN 3 WHEN 'P4' THEN 4 ELSE 5 END, id""", (request_id,)).fetchall():
                 if not issue_available(db, item['server_key'], item['issue_key']):
                     continue
                 db.execute("UPDATE jira_pool_items SET state='reserved',reservation_id=? WHERE id=?", (reservation_id, item['id']))
@@ -340,16 +343,17 @@ def collect_sync(store, request_id):
             db.execute("UPDATE jira_collections SET state='failed',reason=?,finished_at=? WHERE request_id=? AND state='collecting'", (str(error),utc_now(),request_id))
 
 
-def board(store, group_id='', before=None, limit=50, project='', task='', state='', sop_id=''):
+def board(store, group_id='', before=None, limit=50, project='', task='', state='', sop_id='', *, page=None, collection_page=None, collection_limit=20):
     if sop_id:
         uuid.UUID(sop_id)
     from workflow_monitor import public_text
     if group_id:
         uuid.UUID(group_id)
-    if type(limit) is not int or not 1 <= limit <= 100 or before is not None and (type(before) is not int or before < 1):
-        raise ValueError('分页参数无效。')
     if any(not isinstance(v, str) or len(v) > 160 for v in (project, task, state)):
         raise ValueError('筛选参数无效。')
+    from jira_pagination import validate_page, page_window
+    validate_page(page, limit, before)
+    validate_page(collection_page, collection_limit)
     # 采集记录仍各自承担派发资格；这里只投影每张工单的当前状态。
     # 游标使用首次入池 ID，重复采集、返工不会把已翻过的工单移到另一页。
     query = '''WITH ranked AS (
@@ -432,11 +436,22 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
     with store._connect() as db:
         # 页面、汇总与来源读取同一快照，避免采集或绑定途中出现不一致。
         db.execute('BEGIN')
+        pagination = {}
+        offset = 0
+        if page is not None:
+            total = db.execute(query + 'SELECT COUNT(*) FROM filtered', params).fetchone()[0]
+            pagination, offset = page_window(total, page, limit)
+        params['offset'] = offset
         rows = db.execute(query + '''SELECT * FROM filtered WHERE (:before IS NULL OR id<:before)
-            ORDER BY id DESC LIMIT :limit''', params).fetchall()
+            ORDER BY id DESC LIMIT :limit OFFSET :offset''', params).fetchall()
+        collection_pagination = {}
+        collection_offset = 0
+        if collection_page is not None:
+            total = db.execute("SELECT COUNT(*) FROM jira_collections WHERE (?='' OR group_id=?) AND (?='' OR sop_id=?)", (group_id, group_id, sop_id, sop_id)).fetchone()[0]
+            collection_pagination, collection_offset = page_window(total, collection_page, collection_limit)
         collections = db.execute('''SELECT request_id AS requestId,name,group_id AS groupId,sop_id AS sopId,sop_name AS sopName,source,state,reason,count,
             created_at AS createdAt,finished_at AS finishedAt FROM jira_collections
-            WHERE (?='' OR group_id=?) AND (?='' OR sop_id=?) ORDER BY created_at DESC LIMIT 50''', (group_id, group_id, sop_id, sop_id)).fetchall()
+            WHERE (?='' OR group_id=?) AND (?='' OR sop_id=?) ORDER BY created_at DESC,request_id DESC LIMIT ? OFFSET ?''', (group_id, group_id, sop_id, sop_id, collection_limit if collection_page is not None else 50, collection_offset)).fetchall()
         projects = db.execute(query + '''SELECT substr(issue_key,1,instr(issue_key,'-')-1) AS project,
             MAX(collected_at) AS lastCollectedAt,
             SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending,
@@ -499,7 +514,7 @@ def board(store, group_id='', before=None, limit=50, project='', task='', state=
             item['executionResult'] = execution_result(db, item['workflow_id'])
             items.append(item)
         from jira_sop import options
-        return {'sops': options(db, group_id), 'projects': [dict(r) for r in projects], 'items': items, 'collections': [dict(r) for r in collections],
+        return {**pagination, 'collectionPagination': collection_pagination, 'sops': options(db, group_id), 'projects': [dict(r) for r in projects], 'items': items, 'collections': [dict(r) for r in collections],
                 'nextCursor': rows[limit - 1]['id'] if len(rows) > limit else None}
 
 

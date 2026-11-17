@@ -12,6 +12,21 @@ class DeliveryTests(unittest.TestCase):
     create = fixtures.JiraStoreTests.create
     ready = fixtures.JiraStoreTests.ready
     claim = fixtures.JiraStoreTests.claim
+    def test_numbered_run_pages_and_group_filter(self):
+        for i in range(5):
+            self.store.create_workflow({'workflowId': 'paged-' + str(i), 'dispatchMode': 'group',
+                'groupId': self.groups[0], 'jira': {'jql': 'project = TEST', 'account': 'bot'},
+                'nodes': [{'id': 'one', 'prompt': 'task'}]})
+        first = self.store.jira_runs('', page=1, limit=2)
+        last = self.store.jira_runs('', page=999, limit=2)
+        self.assertEqual((first['total'], len(first['items']), last['page'], len(last['items'])), (5, 2, 3, 1))
+        self.assertFalse({r['workflowId'] for r in first['items']} & {r['workflowId'] for r in last['items']})
+        import uuid
+        empty = self.store.jira_runs(str(uuid.uuid4()), page=3, limit=2)
+        self.assertEqual((empty['total'], empty['page']), (0, 1))
+        with self.assertRaises(ValueError):
+            self.store.jira_runs('', page=1, before=5)
+
     def test_new_protocol_and_old_snapshot(self):
         value = outcome(status='submitted', reference='r42')
         validate(value, 2, jira=True)

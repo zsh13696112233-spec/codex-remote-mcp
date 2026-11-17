@@ -35,6 +35,28 @@ class RegistryTests(unittest.TestCase):
         return self.registry.save_agent({"ip": ip, "port": 4500, "groupId": group or self.group,
                                          "capabilities": capabilities or ["supervisor"]})
 
+    def test_debug_priority_contract_persistence_and_upgrade(self):
+        machine = self.machine(capabilities=["executor"])
+        key = machine["agentId"]
+        self.assertFalse(machine["debugPriority"])
+        url = f"/agents/{key}/debug-priority"
+        for body in ({}, {"debugPriority": 1}, {"debugPriority": "true"}, {"debugPriority": True, "enabled": True}):
+            self.assertEqual(self.client.put(url, json=body).status_code, 400)
+        self.registry.record_test(key, True)
+        with self.gateway.store._connect() as db:
+            db.execute("DROP INDEX registered_agents_active_endpoint")
+            db.execute("CREATE UNIQUE INDEX legacy_endpoint ON registered_agents(ip,port)")
+        self.assertEqual(self.client.put(url, json={"debugPriority": True}).status_code, 200)
+        restored = AgentRegistry(self.gateway.store)
+        saved = next(a for a in restored.public() if a["agentId"] == key)
+        self.assertTrue(saved["debugPriority"])
+        self.assertEqual(saved["testStatus"], "passed")
+        supervisor = self.machine(ip="127.0.0.2")
+        self.assertEqual(self.client.put(f'/agents/{supervisor["agentId"]}/debug-priority', json={"debugPriority": True}).status_code, 400)
+        self.assertEqual(self.client.put(url, json={"debugPriority": False}).json()["debugPriority"], False)
+        self.registry.delete_agent(key)
+        self.assertEqual(self.client.put(url, json={"debugPriority": True}).status_code, 400)
+
     def test_single_role_and_deleted_endpoint_reuse(self):
         for roles in (["supervisor", "executor"], ["executor", "executor"], []):
             with self.assertRaisesRegex(ValueError, "一种职责"):

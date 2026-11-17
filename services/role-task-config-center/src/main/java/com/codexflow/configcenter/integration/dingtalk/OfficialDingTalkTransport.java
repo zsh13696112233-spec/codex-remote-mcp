@@ -441,6 +441,11 @@ class OfficialDingTalkTransport implements DingTalkTransport {
     } catch (RuntimeException error) {
       throw new BlockedNotificationService.NotSentFailure(true);
     }
+    // 获取访问凭证也可能跨越时间窗口；在真正投递前执行最后一道截止检查。
+    Object sendBefore = data.get("_sendBefore");
+    if (sendBefore instanceof String deadline
+        && !java.time.Instant.now().isBefore(java.time.Instant.parse(deadline)))
+      throw new DingTalkTransport.DeliveryExpired();
     // 单次调用，不复用会自动重发的传输包装；错误响应只保留分类，不回显内容。
     try {
       var request =
@@ -478,6 +483,8 @@ class OfficialDingTalkTransport implements DingTalkTransport {
       throw new BlockedNotificationService.NotSentFailure(false);
     var parameters = new java.util.LinkedHashMap<>(data);
     Object displayName = parameters.remove("_atDisplayName");
+    boolean emptyReminder = Boolean.TRUE.equals(parameters.remove("_emptyReminder"));
+    parameters.remove("_sendBefore");
     String name = displayName == null ? "开发人" : String.valueOf(displayName);
     if (name.isBlank()) name = "开发人";
     // 卡片内 @ 必须同时提供 cardAtUserIds 和 Markdown 的 atId 标签。
@@ -489,7 +496,7 @@ class OfficialDingTalkTransport implements DingTalkTransport {
             + org.springframework.web.util.HtmlUtils.htmlEscape(personId)
             + "\">"
             + org.springframework.web.util.HtmlUtils.htmlEscape(name)
-            + "</a> 查看任务结果。");
+            + (emptyReminder ? "</a> 检查是否需要补充分配任务。" : "</a> 查看任务结果。"));
     ObjectNode body = waitingCardBody(cardId, "GROUP", groupId, personId, parameters);
     body.putArray("cardAtUserIds").add(personId);
     ((ObjectNode) body.path("imGroupOpenDeliverModel").path("atUserIds")).put(personId, name);

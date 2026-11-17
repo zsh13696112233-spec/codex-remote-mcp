@@ -97,6 +97,54 @@ public class GatewayClient {
         null);
   }
 
+  public BinaryResponse documentWorkspace(
+      String workflowId, String documentId, String query, String method, byte[] body) {
+    try {
+      var request =
+          HttpRequest.newBuilder(
+                  gatewayBaseUri.resolve(
+                      "/workflows/"
+                          + pathSegment(workflowId)
+                          + "/documents/"
+                          + pathSegment(documentId)
+                          + "/workspace"
+                          + (query == null ? "" : "?" + query)))
+              .timeout(Duration.ofSeconds(30))
+              .method(
+                  method,
+                  body == null
+                      ? HttpRequest.BodyPublishers.noBody()
+                      : HttpRequest.BodyPublishers.ofByteArray(body))
+              .build();
+      var response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+      if (response.statusCode() >= 300)
+        throw new GatewayException(
+            response.statusCode(), new String(response.body(), StandardCharsets.UTF_8));
+      return new BinaryResponse(
+          response.body(),
+          response.headers().firstValue("Content-Type").orElse("application/json"),
+          "attachment");
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      throw new GatewayException(502, "文档资料请求中断。", error);
+    } catch (IOException error) {
+      throw new GatewayException(502, "无法读取文档资料。", error);
+    }
+  }
+
+  public JsonNode documentMessages(
+      String workflowId, String documentId, long after, JsonNode body) {
+    return exchange(
+        body == null ? "GET" : "POST",
+        "/workflows/"
+            + pathSegment(workflowId)
+            + "/documents/"
+            + pathSegment(documentId)
+            + "/messages?after="
+            + after,
+        body);
+  }
+
   public JsonNode document(String workflowId, String documentId) {
     return exchange(
         "GET",

@@ -101,6 +101,10 @@ public class WorkflowRunService {
   }
 
   public JsonNode jiraRuns(String groupId, Long before, String sopId) {
+    return jiraRuns(groupId, before, sopId, new JiraPagination(null, 50));
+  }
+
+  public JsonNode jiraRuns(String groupId, Long before, String sopId, JiraPagination pagination) {
     if (!sopId.isEmpty()) java.util.UUID.fromString(sopId);
     if (groupId == null
         || !groupId.isEmpty()
@@ -111,7 +115,8 @@ public class WorkflowRunService {
             "/jira-runs?groupId="
                 + groupId
                 + (sopId.isEmpty() ? "" : "&sopId=" + sopId)
-                + (before == null ? "" : "&before=" + before));
+                + (before == null ? "" : "&before=" + before)
+                + pagination.query(before));
     for (JsonNode item : result.path("items"))
       if (item instanceof ObjectNode row)
         row.put("monitorUrl", store.monitorUrl(row.path("workflowId").asText()));

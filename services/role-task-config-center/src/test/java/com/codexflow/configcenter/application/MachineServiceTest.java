@@ -17,6 +17,14 @@ class MachineServiceTest {
   private final MachineService service = new MachineService(gateway, groups);
 
   @Test
+  void debugPriorityUsesDedicatedGatewayUpdate() {
+    var body = JsonNodeFactory.instance.objectNode().put("debugPriority", true);
+    service.updateDebugPriority("worker", body);
+    verify(gateway).put("/agents/worker/debug-priority", body);
+    verifyNoInteractions(groups);
+  }
+
+  @Test
   void registrySopSaveValidatesBothSides() {
     var body = mock(SopSaveRequest.class);
     var step = mock(SopStepRequest.class);

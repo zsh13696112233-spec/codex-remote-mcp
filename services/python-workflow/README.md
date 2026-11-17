@@ -24,6 +24,8 @@ python-workflow/
 
 ## 增量查询与任务互斥
 
+监控详情公开文本的凭据字段前缀仅从词首匹配，避免长工具输出引发正则平方级回溯、占住解释器并拖慢健康检查与服务退出；仍先完成脱敏再截断展示，原始审计事件不变。
+
 - 配置中心提交携带可选 `taskDefinitionId`。普通任务在中央写事务中保持任务级互斥；启用 `jira` 的分组 SOP 允许同一任务并行处理不同工单，仍以机器独占和 Jira 领取锁保证互斥。普通运行与 Jira 运行不能绕过彼此的任务占用。
 - `POST /workflow-task-bindings` 接收 `taskDefinitionId` 和最多 200 个 `workflowIds`，只用于配置中心补齐历史归属。重复绑定幂等、归属不可改、缺失运行不创建；原始快照不变。`POST /workflow-statuses` 按最多 200 个 `workflowIds` 批量返回 `{statuses: {workflowId: status}}`，不加载结果和提示词。
 - `GET /workflows/{workflowId}` 返回 `revision` 和各步骤 `resultRevision`。可携带 `knownRevision` 与 JSON 数组形式的 `knownResults`（按步骤顺序，最多 100 项）。无状态变化时返回 `{unchanged: true, revision, lastEventSequence}`；步骤结果版本相同时省略该步骤的 `response/error/artifacts` 并返回 `resultUnchanged: true`，调用方复用缓存。缺省参数仍返回完整状态。
@@ -176,6 +178,8 @@ SQLite 兼容增加 `workflow_discussions` 保存消息对应的步骤、执行�
 ```
 
 也可使用已有 Python 环境运行 `src/workflow_gateway.py --host 0.0.0.0 --port 8080`。数据库路径由服务配置提供；本机编排进程运行 `src/codex_orchestrator_mcp.py`，必须使用同一配置文件和同一运行库。不再接受 `--agents`。
+
+命令行网关正常停止时，HTTP 请求及 SSE 长连接最多等待 10 秒，超时取消剩余请求后继续执行后台任务与事件写入器的正常清理；不强杀进程，也不跳过执行停止核实。清理本身仍可能耗时，测试脚本 30 秒超时后应检查日志并等待旧进程退出，再重试重启。
 
 命令行启动先绑定并保留监听端口，再初始化运行库和后台任务；重复启动时提示端口已被占用，不初始化第二份网关，也不自动停止已有进程。需要重启时先确认无运行任务，再在原启动终端正常停止旧进程。不同端口仍不能共用同一中央运行库的下发进程锁；遇到占用提示应核对旧网关，不删除锁文件或数据库来绕过保护。
 
@@ -339,6 +343,8 @@ Codex 返回执行失败、连接/握手失败、调用超时或无法确认结�
 
 ## 分组调度与整项机器占用
 
+执行机支持“调试优先”：`PUT /agents/{id}/debug-priority` 仅接受布尔字段 `{debugPriority}`，机器列表同步返回该字段。中央 SQLite 增量增加 `debug_priority`，旧机器默认关闭；仅有效执行机可设置，执行中也可切换，不改变检测结果、权限或当前分配。分组调度在原有资格和占用校验内优先选择开启者，同级按机器 ID 升序；优先机器不可用时继续尝试普通机器，不等待或抢占。适用于组内普通及 Jira SOP 的后续分配，历史固定机器运行不受影响；改为监督机时清除此标识。更新中央网关和配置中心即可使用，无需 MySQL 迁移或升级远程执行机。
+
 新提交可使用 `dispatchMode: "group"` 和 `groupId`，省略 `supervisorAgentId`、步骤 `agentId` / `executor.agentId` 及 `cwd`。分组模式只接受由 `dependsOn` 明确连接的单条串行链，不根据节点数组位置推断依赖。提交不占机器；网关从已启用、通过连接检测且在线的全局监督机池选择一台监督机，再从目标组选择满足全部步骤权限、模型和思考强度的空闲执行机。模型查询在后台进行，不能阻塞 Sidecar 心跳续租；没有合适机器时保持排队。
 
 监督机与执行机必须是不同登记机器。两台机器在同一 SQLite 写事务中领取，不会只占监督机却没有可用执行机。所有步骤使用同一执行机及其登记目录。提交 JSON 保持不变，实际分配单独持久化在 `workflow_allocations`；`GET /workflows/{id}` 返回 `allocation`（分组、监督机、执行机、工作目录、分配时间、等待原因）和 `resources`（占用状态及机器）。分配信息及 Jira 台账条目新增 `supervisorRemark`、`executorRemark`，按原机器 ID 查询当前备注（含逻辑删除记录），缺失时为空字符串；原 ID 字段和快照不变。内部执行规格叠加实际分配，后续步骤不重新选机或重新读取目录。
@@ -471,7 +477,7 @@ SQLite 自动增量增加可空 `jira_pool_items.people_json`。可选 `people` 
 
 结果统计支持分组、项目和 SOP 筛选。全部视图按 Jira 服务和编号去重，采用最后一轮已结束的实际业务执行；选定 SOP 后仅采用该流程最后一轮结果。新一轮执行中保留上轮结果并标注重新处理，未执行单列。开发人使用该轮冻结人员记录，不用当前人员追溯改写；统计页每 10 秒更新，失败保留已有结果。
 
-只读接口为配置中心 `GET /api/jira-statistics` 和 `/api/jira-statistics/items`，代理中央网关同名接口。共同筛选 `groupId/project/sopId`；明细另支持 `category/developer/before`，每页 50 条。汇总返回 `summary/groups/developers/generatedAt`，`passed` 按流程正常完成统计，`blocked` 包含业务遇阻和系统异常。人工取消、无任务和待处理等计入 `other`。`rateDenominator=passed+blocked`，流程通过率为 `passed/rateDenominator`，零分母显示“—”；提交细分占比仍以全部工单为分母。
+只读接口为配置中心 `GET /api/jira-statistics` 和 `/api/jira-statistics/items`，代理中央网关同名接口。共同筛选 `groupId/project/sopId`；明细另支持 `category/developer/before`，历史游标模式默认每页 50 条。页码模式增加 `page/pageSize`（从 1 开始，每页 1–100 条），返回 `total/page/pageSize`，不可与 `before` 同传；页码越界收敛到最后一页，空结果为第 1 页。`/jira-pool`、`/jira-runs` 同样支持页码模式；工单池另用 `collectionPage/collectionPageSize` 独立查询采集历史，返回 `collectionPagination`，不再受最近 50 条限制。总数与当页数据在同一只读事务中读取；保留旧 `before/nextCursor` 契约。汇总返回 `summary/groups/developers/generatedAt`，`passed` 按流程正常完成统计，`blocked` 包含业务遇阻和系统异常。人工取消、无任务和待处理等计入 `other`。`rateDenominator=passed+blocked`，流程通过率为 `passed/rateDenominator`，零分母显示“—”；提交细分占比仍以全部工单为分母。
 
 通过大类细分为 `full/limited/noSubmission/submissionUnknown`，四项合计为通过数。明细包含 `flowStatus/submissionStatus/sopId/sopName`；`category=passed/blocked/other` 按新口径筛选，提交子类使用 `fully_submitted/limited_submitted/completed_no_submission/submission_unknown`。审核返工不再单独占用流程结果类别。接口返回 `sops` 筛选选项及 `sopMetadataPending`，提示历史 SOP 信息尚不完整；缺失归属进入整体统计，不猜测归入某个 SOP。
 
@@ -496,6 +502,8 @@ SQLite 自动增量增加可空 `jira_pool_items.people_json`。可选 `people` 
 
 中央采集的同一次 Jira 查询同时请求 `issuetype` 和 `priority`，工单池接口新增可空 `issueType`、`priority`，使用 Jira 返回的名称，不硬编码类型或优先级列表。缺失、空值或无效名称显示“未获取”。正常采集继续更新这两个展示字段，不影响领取资格或运行快照。
 
+同一 SOP 本次派发请求内，预约待处理工单按最近保存的优先级名称 `P0 → P1 → P2 → P3 → P4` 选择（忽略大小写及首尾空格），缺失或其他名称排最后；同级保持入池记录顺序，已被占用的工单仍跳过。不跨 SOP 或派发请求统一排序，不替换已预约或执行中的工单，重复预约仍返回原工单；手动和钉钉启动仍最多一轮。优先级变更需经采集或字段补齐保存后才参与后续预约。此排序仅需更新并重启中央网关，无需数据库迁移，不改变工单池页面的分页顺序。
+
 中央 SQLite 自动增量添加 `jira_pool_items.details_json` 和 `details_checked_at`，已有数据保留。网关后台按同分组、同 Jira 服务的可用中央账号，每轮最多补齐 50 张旧工单，按编号查询而非原 JQL，因此已完成、来源任务已停用或不再符合原条件的工单也会处理。一个账号查询不到时尝试同组同服务的其他可用账号；没有可用账号时保持待补齐。分页全部成功且账号版本未变后才保存，不覆盖期间正常采集写入的字段。
 
 已删除或所有可用账号均不可见的工单记录为空值，不重复查询；以后再次进入正常采集时仍可更新。连接、查询或账号核验失败记录日志，未补齐记录至少延后 5 分钟再处理，其他批次仍可推进；补齐进度持久保存，重启后继续。此流程仅补充工单池展示字段，不改写人员、领取状态、运行快照或实际 Jira。更新并重启 8080 网关和 8091 配置中心后，现存工单由后台逐批补齐，无需更新 8090 或远程执行机，也无需 MySQL 迁移。
@@ -505,3 +513,25 @@ SQLite 自动增量增加可空 `jira_pool_items.people_json`。可选 `people` 
 账号检测成功后读取 Jira 可访问项目列表，返回 `projectCount/optionsMessage`；项目元数据读取失败不冒充认证失败，账号保持检测通过并明确提示读取失败。SOP 使用 `GET /jira-accounts/{id}/options?project=&issueType=&refresh=false` 按需读取，浏览器通过配置中心同名 `/api` 接口代理。无项目参数返回 `projects: [{id,key,name}]`；指定项目返回 `project/issueTypes/statuses/roles/rolesError`，候选值为 `{id,name}`。项目类型来自 `project/{key}`，状态来自 `project/{key}/statuses`，处理角色来自分页 `issue/createmeta/{key}/issuetypes/{id}` 中名称为“处理角色”的字段 `allowedValues`，不从历史工单推测候选值。`issueType` 为类型编号或名称，多个值用英文逗号分隔；多选时合并所选类型的状态和角色候选，未指定类型时合并全部适用类型的候选集合；角色读取部分失败时返回明确 `rolesError`，不把部分结果当作完整列表。原类型不属于新项目时仍返回可选类型并提示重新选择。
 
 实测当前 Jira 支持项目、类型和状态编号查询，处理角色选项编号不能直接用于 JQL，因此角色仍按官方候选名称保存。分页未完成、响应异常或权限不足都明确报错，不返回认证头、凭据或原始响应。只有未删除、启用且检测通过的账号可读取选项。SQLite 自动新增 `jira_account_options`，按账号版本、项目、类型缓存十分钟，刷新参数绕过缓存；外部读取后再次核对账号版本，防止改密钥或停用期间写入过期结果。缓存仅保存过滤后的候选信息，不含凭据；失败不覆盖旧缓存，用户可手动重试。已有配置与运行快照不因读取选项而改变。
+
+### Jira 账号采集状态
+
+`GET /jira-accounts/{id}/collection-status` 供 8091 的缺任务提醒读取中央采集结果，不新增 Jira 请求、不授予派发资格。返回 `state/scopeVersion/collectedAt/lastNonemptyAt/scopeCount`；状态为 `empty/available/unknown/unconfigured/disabled/deleted`。有效账号没有启用采集范围为 `unconfigured`；删除账号返回 `deleted` 以停止提醒检查，不返回账号凭据或历史业务消息。无效编号或不存在的账号沿用现有输入错误语义。
+
+按当前账号和启用任务的查询范围汇总：只有所有范围最近完成的查询均成功、成功时间不超过 120 秒且数量全部为零，才返回 `empty`。正在分页的批次不发布部分结果，可使用仍新鲜的上一份完整结果；最近完成批次失败时不能沿用先前空结果。任一范围有新鲜的非空结果即为 `available`，其他失败或缺失情况为 `unknown`。使用采集数量而非候选剩余数量，已领取工单不能因此误判为空。
+
+`scopeVersion` 是账号版本及当前范围的摘要；`collectedAt` 为所有范围均有新鲜成功结果时最早的完成时间，否则为 null；`lastNonemptyAt` 为当前范围最近成功非空结果时间，保留短暂补入任务的重置信号。查询在 SQLite 只读事务内获得一致视图，历史非空时间通过数据库聚合读取，不加载完整历史或 Token。提醒配置、时间窗口和通知状态仅由 8091 持久化管理，见[配置中心提醒规则](../role-task-config-center/README.md#jira-账号缺任务提醒)。升级需先更新网关再更新配置中心，旧账号及运行快照不变。
+
+## 结束后的文档沟通
+
+新采集文档记录原执行机、原会话和文件位置，旧文档不补录。任务完成、失败或取消且原执行已确认停止后，可从文档页“继续沟通”。网关提供 `GET/POST /workflows/{workflowId}/documents/{documentId}/messages`，发送正文为 `{messageId, text}`，文本最多 4000 字；读取支持 `after` 消息序号，每页最多 200 条，返回可用性、处理中状态和消息记录。
+
+每轮恢复原会话和原权限，结束关闭连接；仅占用目标执行机，忙碌时拒绝受理。同一消息编号幂等，不确定执行不自动重发，重启后按现有执行保护核实停止。正常文档沟通不被终态清理中断。修改后采集当前文档，链接稳定，不改变原任务结论；上传由用户在对话中要求执行者处理，平台不校验上传回执或自动重传。来源与消息保存在中央 SQLite，远程组件不访问数据库。支持文字、TXT 和图片，不改变半自动等待行为。
+
+部署更新中央网关和监控中心，新采集记录生效；无需配置中心业务或钉钉模板变更。已发送旧文档仍保持只读。真实执行机原会话恢复、修改与上传需要部署后验收。
+
+### 文档沟通资料与版本
+
+文档范围的 `GET/POST/DELETE /workflows/{workflowId}/documents/{documentId}/workspace` 由监控中心代理：默认 GET 查询资料与版本元数据，POST 幂等保存起始版本；`action=upload&name=文件名` POST 二进制上传，`action=file&id=附件编号` GET 读取或 DELETE 移除未发送附件，`action=version&version=版本号` GET 读取历史正文。已发送附件不可删除。消息增加可选 `attachmentIds`，与文字共同参与幂等校验，允许只发送附件。
+
+TXT 必须为 UTF-8（允许 BOM），单文件及每消息正文合计最多 40,000 字符；图片沿用 PNG/JPEG/WebP 校验，每消息最多 5 个附件、图片合计 20 MB。新增文件计入每工作流 50 个文件配额。附件上传只保存，发送后 TXT 全文作为参考资料输入、图片使用原图输入能力。中央 SQLite 自动增加资料与不可变版本存储；历史缺失的正文版本不补造。部署中央网关和监控中心后生效，真实执行机仍需验收。

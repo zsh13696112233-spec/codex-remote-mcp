@@ -155,6 +155,7 @@ class InputImageStore:
                 count = connection.execute("SELECT COUNT(*) FROM workflow_input_images WHERE workflow_id = ?", (workflow_id,)).fetchone()[0]
                 count += connection.execute("SELECT COUNT(*) FROM workflow_artifacts WHERE workflow_id = ?", (workflow_id,)).fetchone()[0]
                 count += connection.execute("SELECT COUNT(*) FROM workflow_attempt_artifacts WHERE workflow_id = ?", (workflow_id,)).fetchone()[0]
+                count += connection.execute("SELECT COUNT(*) FROM document_chat_files WHERE workflow_id = ?", (workflow_id,)).fetchone()[0]
                 if count >= 50:
                     raise ValueError("工作流文件数量已达到 50 个上限。")
                 connection.execute("INSERT INTO workflow_input_images VALUES (?, ?, ?, ?)", (image_id, workflow_id, media_type, content))

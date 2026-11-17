@@ -1,5 +1,6 @@
 package com.codexflow.configcenter.web;
 
+import com.codexflow.configcenter.application.JiraPagination;
 import com.codexflow.configcenter.application.WorkflowRunService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -32,6 +33,8 @@ public class JiraRunController {
       @RequestParam(defaultValue = "") String category,
       @RequestParam(defaultValue = "") String developer,
       @RequestParam(required = false) Long before,
+      @RequestParam(required = false) Integer page,
+      @RequestParam(defaultValue = "10") int pageSize,
       jakarta.servlet.http.HttpServletRequest request) {
     if (!groupId.isEmpty()) java.util.UUID.fromString(groupId);
     if (before != null && before < 1) throw new IllegalArgumentException("分页参数无效。");
@@ -42,7 +45,8 @@ public class JiraRunController {
         developer,
         before,
         request.getRequestURI().endsWith("/items"),
-        sopId);
+        sopId,
+        new JiraPagination(page, pageSize));
   }
 
   @GetMapping("/api/jira-pool")
@@ -52,10 +56,22 @@ public class JiraRunController {
       @RequestParam(defaultValue = "") String project,
       @RequestParam(defaultValue = "") String sopId,
       @RequestParam(defaultValue = "") String task,
-      @RequestParam(defaultValue = "") String state) {
+      @RequestParam(defaultValue = "") String state,
+      @RequestParam(required = false) Integer page,
+      @RequestParam(defaultValue = "10") int pageSize,
+      @RequestParam(required = false) Integer collectionPage,
+      @RequestParam(defaultValue = "10") int collectionPageSize) {
     if (!groupId.isEmpty()) java.util.UUID.fromString(groupId);
     if (before != null && before < 1) throw new IllegalArgumentException("分页参数无效。");
-    return pool.board(groupId, before, project, task, state, sopId);
+    return pool.board(
+        groupId,
+        before,
+        project,
+        task,
+        state,
+        sopId,
+        new JiraPagination(page, pageSize),
+        new JiraPagination(collectionPage, collectionPageSize));
   }
 
   @GetMapping("/api/jira-runs/{workflowId}")
@@ -67,7 +83,9 @@ public class JiraRunController {
   public JsonNode list(
       @RequestParam(defaultValue = "") String groupId,
       @RequestParam(required = false) Long before,
-      @RequestParam(defaultValue = "") String sopId) {
-    return service.jiraRuns(groupId, before, sopId);
+      @RequestParam(defaultValue = "") String sopId,
+      @RequestParam(required = false) Integer page,
+      @RequestParam(defaultValue = "10") int pageSize) {
+    return service.jiraRuns(groupId, before, sopId, new JiraPagination(page, pageSize));
   }
 }

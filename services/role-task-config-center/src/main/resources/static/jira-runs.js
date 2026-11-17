@@ -1,8 +1,5 @@
 let jiraRequest = 0;
 let jiraBusy = false;
-let jiraCursor = null;
-const jiraPages = [];
-let jiraNextCursor = null;
 let jiraLoaded = false;
 let jiraItems = [];
 let jiraDetailId = null;
@@ -78,39 +75,40 @@ function updateJiraRows(rows) {
   existing.forEach(tr=>tr.remove());
 }
 function jiraDetailHtml(row) {
-  return `<p class="meta">${esc(row.name||'历史任务')} · ${esc(row.issueKey||'尚未领取')}</p><dl><dt>下发状态</dt><dd>${esc(jiraClaimStatus(row))}</dd><dt>运行状态</dt><dd>${esc(jiraRunStatus(row))}${jiraStopPending(row)?' · 等待确认执行已停止':''}</dd><dt>领取时间</dt><dd>${row.claimedAt?esc(time(row.claimedAt)):'尚未领取'}</dd><dt>开始时间</dt><dd>${esc(time(row.createdAt))}</dd><dt>结束时间</dt><dd>${row.finishedAt?esc(time(row.finishedAt)):'尚未结束'}</dd><dt>原因说明</dt><dd>${esc(row.reason||'暂无')}</dd></dl><h3>累计执行 ${Number(row.executionCount??row.executions?.length??0)} 轮</h3><p class="meta">总轮数包含各 SOP 的实际执行；同 SOP 再次执行才计重试。启动失败且未执行步骤不计，同一运行内重跑步骤不重复计数。</p>${(row.executions||[]).map(r=>`<article class="jira-receipt"><strong>${esc(jiraExecutionLabel(r))} · ${esc(time(r.startedAt))}</strong><p>${esc(r.reason)}</p></article>`).join('')}<h3>交付回执</h3>${jiraCommitHtml(row)}${row.executionResult?.note?`<p>${esc(row.executionResult.note)}</p>`:''}${row.executionResult?.recorded===false?'<p class="meta">提交类型未记录</p>':''}${row.deliveries?.length?row.deliveries.map(d=>`<article class="jira-receipt"><strong>${esc(jiraDeliveryLabels[d.status]||'结果待核实')}</strong><small>${esc(time(d.recordedAt))}</small><p>${esc(d.summary||'')}</p>${d.reference?`<p>凭证：${esc(d.reference)}</p>`:''}</article>`).join(''):'<p class="meta">尚无交付回执</p>'}`;
+  return `<p class="meta">${esc(row.name||'历史任务')} · ${esc(row.issueKey||'尚未领取')}</p><dl><dt>下发状态</dt><dd><span class="jira-status ${row.claimState==='ready'?'success':'muted'}">${esc(jiraClaimStatus(row))}</span></dd><dt>运行状态</dt><dd><span class="jira-status ${jiraStatusKind(row)}">${esc(jiraRunStatus(row))}</span>${jiraStopPending(row)?' · 等待确认执行已停止':''}</dd><dt>领取时间</dt><dd>${row.claimedAt?esc(time(row.claimedAt)):'尚未领取'}</dd><dt>开始时间</dt><dd>${esc(time(row.createdAt))}</dd><dt>结束时间</dt><dd>${row.finishedAt?esc(time(row.finishedAt)):'尚未结束'}</dd><dt>原因说明</dt><dd>${esc(row.reason||'暂无')}</dd></dl><h3>累计执行 ${Number(row.executionCount??row.executions?.length??0)} 轮</h3><p class="meta">总轮数包含各 SOP 的实际执行；同 SOP 再次执行才计重试。启动失败且未执行步骤不计，同一运行内重跑步骤不重复计数。</p>${jiraPageSlice('historyExecutions',row.executions||[]).map(r=>`<article class="jira-receipt"><strong>${esc(jiraExecutionLabel(r))} · ${esc(time(r.startedAt))}</strong><p>${esc(r.reason)}</p></article>`).join('')}<div id="historyExecutionPager" class="jira-pagination"></div><h3>交付回执</h3>${jiraCommitHtml(row)}${row.executionResult?.note?`<p>${esc(row.executionResult.note)}</p>`:''}${row.executionResult?.recorded===false?'<p class="meta">提交类型未记录</p>':''}${row.deliveries?.length?jiraPageSlice('receipts',row.deliveries).map(d=>`<article class="jira-receipt"><strong>${esc(jiraDeliveryLabels[d.status]||'结果待核实')}</strong><small>${esc(time(d.recordedAt))}</small><p>${esc(d.summary||'')}</p>${d.reference?`<p>凭证：${esc(d.reference)}</p>`:''}</article>`).join(''):'<p class="meta">尚无交付回执</p>'}<div id="receiptPager" class="jira-pagination"></div>`;
 }
 function updateJiraDetails() {
   const dialog=$('#jiraDetails'),row=jiraItems.find(item=>item.workflowId===jiraDetailId);
   if(!dialog?.open||!row)return;
   const body=dialog.querySelector('[data-jira-detail-body]'),html=jiraDetailHtml(row);
-  if(body.jiraMarkup!==html){const top=dialog.scrollTop;body.innerHTML=html;body.jiraMarkup=html;dialog.scrollTop=top}
+  if(body.jiraMarkup!==html){const top=body.scrollTop;body.innerHTML=html;body.jiraMarkup=html;body.scrollTop=top}
+  mountJiraPager('historyExecutions','#historyExecutionPager',jiraPage('historyExecutions'),()=>{updateJiraDetails();return true});
+  mountJiraPager('receipts','#receiptPager',jiraPage('receipts'),()=>{updateJiraDetails();return true});
 }
 function openJiraDetails(id) {
   if(!jiraItems.some(row=>row.workflowId===id))return;
   let dialog=$('#jiraDetails');
   if(!dialog){
     dialog=document.createElement('dialog');dialog.id='jiraDetails';dialog.setAttribute('aria-labelledby','jiraDetailsTitle');
-    dialog.innerHTML='<button type="button" class="dialog-close" data-dialog-close aria-label="关闭详情">×</button><h2 id="jiraDetailsTitle">任务下发详情</h2><div data-jira-detail-body></div><footer><button type="button" data-dialog-close>关闭</button></footer>';
+    dialog.innerHTML='<header><button type="button" class="dialog-close" data-dialog-close aria-label="关闭详情">×</button><h2 id="jiraDetailsTitle">任务下发详情</h2></header><div data-jira-detail-body></div><footer><button type="button" data-dialog-close>关闭</button></footer>';
     dialog.addEventListener('close',()=>{jiraDetailId=null});document.body.append(dialog);
   }
-  jiraDetailId=id;dialog.showModal();updateJiraDetails();
+  resetJiraPage('historyExecutions');resetJiraPage('receipts');jiraDetailId=id;dialog.showModal();updateJiraDetails();dialog.querySelector('[data-jira-detail-body]').scrollTop=0;
 }
-let jiraView = typeof location !== 'undefined' && new URL(location.href).searchParams.get('jiraView') === 'statistics' ? 'statistics' : 'pool';
+let jiraView = typeof location !== 'undefined' && ['pool','statistics','developers','collections','history'].includes(new URL(location.href).searchParams.get('jiraView')) ? new URL(location.href).searchParams.get('jiraView') : 'pool';
 let poolFilters = {project:'',task:'',state:'',sopId:''};
 let poolSopInitialized = false;
 function jiraCenterHtml() {
-  return `<section class="jira-overview" aria-label="领取概览">
-    <div class="jira-center-heading"><div><h2>领取概览</h2><p>按当前分组查看工单领取与执行进度</p></div><div class="jira-refresh-actions"><span>每 10 秒自动更新</span><button id="jiraRefresh" type="button">刷新</button></div></div>
-    <div id="poolProjects" class="jira-metrics"><div><span>项目</span><strong>—</strong></div><div><span>待分配工单</span><strong>—</strong></div><div><span>执行中</span><strong>—</strong></div></div>
-    <div id="poolSchedules" class="jira-schedules"></div>
-  </section>
-  <section class="jira-workspace">
+  return `<section class="jira-workspace">
+    <div class="jira-workspace-header">
     <div class="jira-view-tabs" aria-label="领取记录分类">
       <button type="button" data-jira-view="pool" aria-pressed="true" aria-controls="jiraPool">工单池</button>
-      <button type="button" data-jira-view="statistics" aria-pressed="false" aria-controls="jiraStatistics">结果统计</button>
+      <button type="button" data-jira-view="statistics" aria-pressed="false" aria-controls="jiraStatistics">工程统计</button>
+      <button type="button" data-jira-view="developers" aria-pressed="false" aria-controls="jiraStatistics">开发人统计</button>
       <button type="button" data-jira-view="collections" aria-pressed="false" aria-controls="jiraCollections">采集记录</button>
       <button type="button" data-jira-view="history" aria-pressed="false" aria-controls="jiraHistoryPanel">运行历史</button>
+    </div>
+    <div class="jira-refresh-actions"><span>每 10 秒自动更新</span><button id="jiraRefresh" type="button">刷新</button></div>
     </div>
     ${typeof jiraStatisticsHtml === 'function' ? jiraStatisticsHtml() : ''}
     <section id="jiraPool" class="jira-view-panel" aria-label="工单池">
@@ -120,24 +118,29 @@ function jiraCenterHtml() {
         <label>工单状态<select id="poolState"><option value="">全部状态</option><option value="pending">待分配</option><option value="reserved">启动中</option><option value="running">执行中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="invalid">已不符合条件</option></select></label>
         <div class="actions"><button id="poolFilter" class="primary" type="submit">查询</button><button id="poolReset" type="button">重置</button></div>
       </form>
+      <section class="jira-pool-summary" aria-label="当前筛选工单摘要">
+        <span class="jira-summary-label">当前筛选</span>
+        <div id="poolProjects" class="jira-metrics"><div><span>项目</span><strong>—</strong></div><div><span>待分配工单</span><strong>—</strong></div><div><span>执行中</span><strong>—</strong></div></div>
+        <div id="poolSchedules" class="jira-schedules"></div>
+      </section>
       <div id="poolItems" class="jira-table-scroll"><div class="empty">正在加载工单…</div></div>
-      <div class="jira-pagination"><div class="actions"><button id="poolFirst" type="button">最新工单</button><button id="poolNext" type="button" disabled>更早工单</button></div></div>
+      <div id="poolPager" class="jira-pagination"></div>
     </section>
     <section id="jiraCollections" class="jira-view-panel" aria-label="采集记录" hidden>
-      <div class="jira-section-heading"><h3>采集记录</h3><span>最近 50 次</span></div>
+      <div class="jira-section-heading"><h3>采集记录</h3><span>按采集时间倒序排列</span></div>
       <p class="jira-section-note">查看每次查询的时间、结果和发现的工单数量。</p>
-      <div id="poolCollections" class="jira-table-scroll"><div class="empty">正在加载采集记录…</div></div>
+      <div id="poolCollections" class="jira-table-scroll"><div class="empty">正在加载采集记录…</div></div><div id="collectionPager" class="jira-pagination"></div>
     </section>
     <section id="jiraHistoryPanel" class="jira-view-panel" aria-label="运行历史" hidden>
       <div class="jira-section-heading"><h3>运行历史</h3><span>领取 · 机器分配 · 交付结果</span></div>
       <p class="jira-section-note">流程完成不代表已提交，提交凭证和返工理由可在详情中查看。</p>
-      <label>SOP 流程<select id="jiraHistorySop"><option value="">全部 SOP</option></select></label><p id="jiraNotice" role="status">正在加载…</p><div id="jiraRows" class="jira-table-scroll"></div>
-      <footer class="jira-pagination"><span>按运行时间倒序排列</span><div class="actions"><button id="jiraPrevious" disabled>上一页</button><button id="jiraNext" disabled>下一页</button></div></footer>
+      <label class="jira-history-filter"><select id="jiraHistorySop" aria-label="SOP 流程"><option value="">全部 SOP</option></select></label><p id="jiraNotice" role="status">正在加载…</p><div id="jiraRows" class="jira-table-scroll"></div>
+      <footer id="historyPager" class="jira-pagination"></footer>
     </section>
     <dialog id="jiraBlockedReason" aria-labelledby="jiraBlockedReasonTitle">
       <button type="button" class="dialog-close" data-dialog-close aria-label="关闭执行记录">×</button>
       <h2 id="jiraBlockedReasonTitle">执行记录</h2><div data-execution-body></div>
-      <footer><button type="button" data-dialog-close>关闭</button></footer>
+      <footer><div id="executionPager" class="jira-pagination"></div><button type="button" data-dialog-close>关闭</button></footer>
     </dialog>
     <p id="poolNotice" class="jira-pool-notice" role="status" aria-live="polite"></p>
   </section>`;
@@ -145,75 +148,98 @@ function jiraCenterHtml() {
 function showJiraView(view) {
   jiraView=view;
   const panels={pool:'jiraPool',collections:'jiraCollections',history:'jiraHistoryPanel'};
-  if(typeof loadJiraStatistics === 'function'){panels.statistics='jiraStatistics';$('.jira-overview').hidden=view==='statistics';if(view!=='statistics')$('#jiraStatsDetails')?.close();saveJiraStatsUrl();if(view==='statistics')loadJiraStatistics()}
+  const stats=['statistics','developers'].includes(view);
+  if(typeof loadJiraStatistics === 'function'){$('#jiraStatistics').hidden=!stats;$('#jiraStatsDetails')?.close();saveJiraStatsUrl();if(stats){$('#jiraStatsBody').innerHTML='';loadJiraStatistics()}}
   for(const [name,id] of Object.entries(panels))$('#'+id).hidden=name!==view;
   document.querySelectorAll('[data-jira-view]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.jiraView===view)));
   if(view!=='history')$('#jiraDetails')?.close();
   if(view!=='pool')$('#jiraBlockedReason')?.close();
 }
+async function refreshJiraView() {
+  const button=$('#jiraRefresh');
+  if(button.disabled)return;
+  button.disabled=true;
+  button.refreshPending=true;
+  try {
+    if(['statistics','developers'].includes(jiraView))await loadJiraStatistics();
+    else if(jiraView==='history')await loadJiraRuns();
+    else await loadJiraPool();
+  } finally {button.refreshPending=false;button.disabled=false}
+}
+let jiraPageGroup;
+function saveJiraListFilters() {
+  const u=new URL(location.href);
+  for(const [key,value] of Object.entries(poolFilters)) {if(value)u.searchParams.set('jiraPool_'+key,value);else u.searchParams.delete('jiraPool_'+key)}
+  if(poolSopInitialized)u.searchParams.set('jiraPoolInitialized','1');else u.searchParams.delete('jiraPoolInitialized');
+  const sop=$('#jiraHistorySop').value;
+  if(sop)u.searchParams.set('jiraHistorySop',sop);else u.searchParams.delete('jiraHistorySop');
+  history.replaceState(null,'',u);saveJiraPages();
+}
 async function renderJiraRuns() {
+  const changed=jiraPageGroup!==undefined&&jiraPageGroup!==groupState.selected;
+  if(changed)for(const key of ['pool','collections','history','groups','developers','projects','schedules','executions','historyExecutions','receipts','statDetails'])resetJiraPage(key);
+  jiraPageGroup=groupState.selected;
   $('#jiraDetails')?.close();jiraDetailId=null;
-  jiraCursor=null;jiraNextCursor=null;jiraPages.length=0;jiraItems=[];jiraLoaded=false;
-  poolBefore=null;poolNext=null;poolLoaded=false;poolSopInitialized=false;poolFilters={project:'',task:'',state:'',sopId:''};
+  jiraItems=[];jiraLoaded=false;
+  poolLoaded=false;poolSopInitialized=false;poolFilters={project:'',task:'',state:'',sopId:''};
+  const saved=new URL(location.href).searchParams;
+  if(!changed)for(const key of Object.keys(poolFilters))poolFilters[key]=saved.get('jiraPool_'+key)||'';
+  poolSopInitialized=!changed&&saved.has('jiraPoolInitialized');
   $('#content').className='content run-catalog jira-catalog';
   $('.toolbar').classList.add('hidden');
   $('#content').innerHTML=jiraCenterHtml();
+  $('#poolProject').value=poolFilters.project;$('#poolTask').value=poolFilters.task;$('#poolState').value=poolFilters.state;
+  if(poolFilters.sopId){updateJiraSopOptions('#poolSop',[{sopId:poolFilters.sopId,sopName:'所选 SOP'}]);$('#poolSop').value=poolFilters.sopId}
+  if(!changed&&saved.get('jiraHistorySop')){updateJiraSopOptions('#jiraHistorySop',[{sopId:saved.get('jiraHistorySop'),sopName:'所选 SOP'}]);$('#jiraHistorySop').value=saved.get('jiraHistorySop')}
+  if(changed)saveJiraListFilters();
   document.querySelectorAll('[data-jira-view]').forEach(button=>button.onclick=()=>showJiraView(button.dataset.jiraView));
   if(typeof bindJiraStatistics === 'function')bindJiraStatistics();
   showJiraView(jiraView);
-  $('#jiraRefresh').onclick=()=>Promise.all([loadJiraRuns(),loadJiraPool()]);
-  $('#jiraHistorySop').onchange=()=>{$('#jiraDetails')?.close();jiraDetailId=null;jiraCursor=null;jiraPages.length=0;loadJiraRuns()};
+  $('#jiraRefresh').onclick=refreshJiraView;
+  $('#jiraHistorySop').onchange=()=>{resetJiraPage('history');$('#jiraDetails')?.close();jiraDetailId=null;saveJiraListFilters();loadJiraRuns()};
   $('#poolFilters').onsubmit=event=>{event.preventDefault();poolSopInitialized=true;poolFilters={project:$('#poolProject').value.trim(),task:$('#poolTask').value.trim(),state:$('#poolState').value,sopId:$('#poolSop').value};loadJiraPool(null)};
   $('#poolSop').onchange=()=>{poolSopInitialized=true;poolFilters={...poolFilters,sopId:$('#poolSop').value};loadJiraPool(null)};
   $('#poolReset').onclick=()=>{poolSopInitialized=true;$('#poolFilters').reset();poolFilters={project:'',task:'',state:'',sopId:''};loadJiraPool(null)};
-  $('#poolFirst').onclick=()=>loadJiraPool(null);
-  $('#poolNext').onclick=()=>loadJiraPool(poolNext);
   $('#poolItems').onclick=event=>{const button=event.target.closest('[data-pool-executions]');if(button)openJiraPoolExecution(button.dataset.poolExecutions)};
-  $('#jiraPrevious').onclick=()=>{if(jiraPages.length)loadJiraRuns({cursor:jiraPages.at(-1),direction:'previous'})};
-  $('#jiraNext').onclick=()=>{if(jiraNextCursor!==null)loadJiraRuns({cursor:jiraNextCursor,direction:'next'})};
   $('#jiraRows').onclick=event=>{const button=event.target.closest('[data-jira-details]');if(button)openJiraDetails(button.dataset.jiraDetails)};
   await Promise.all([loadJiraRuns(),loadJiraPool()]);
 }
-async function loadJiraRuns({background=false,cursor=jiraCursor,direction=null}={}) {
+async function loadJiraRuns({background=false}={}) {
   if(background&&jiraBusy)return;
   const request=++jiraRequest,group=groupState.selected;
   const current=()=>request===jiraRequest&&state.page==='jira'&&group===groupState.selected;
   jiraBusy=true;
   if(!background){
-    $('#jiraRefresh').disabled=true;$('#jiraPrevious').disabled=true;$('#jiraNext').disabled=true;
+    $('#jiraRefresh').disabled=true;
     $('#jiraNotice').textContent='正在读取最新任务下发情况…';
   }
   try {
     const params=new URLSearchParams({groupId:group,sopId:$('#jiraHistorySop')?.value||''});
-    if(cursor!==null)params.set('before',String(cursor));
+    for(const [key,value] of Object.entries(jiraPageParams('history')))params.set(key,value);
     const result=await api('/api/jira-runs?'+params);
-    if(!current())return;
-    if(direction){
-      if(direction==='next')jiraPages.push(jiraCursor);else jiraPages.pop();
-      $('#jiraDetails')?.close();jiraDetailId=null;
-    }
-    jiraCursor=cursor;jiraNextCursor=result.nextCursor;jiraItems=result.items;
+    if(!current())return false;
+    if(!background){$('#jiraDetails')?.close();jiraDetailId=null}
+    jiraItems=result.items;
     updateJiraRows(result.items);updateJiraDetails();jiraLoaded=true;
-    if(background&&$('#jiraPool'))loadJiraPool(poolBefore,{background:true});
-    $('#jiraNotice').textContent='';
+    if(background&&$('#jiraPool'))loadJiraPool(undefined,{background:true});
+    mountJiraPager('history','#historyPager',result,()=>loadJiraRuns());
+    $('#jiraNotice').textContent='';return true;
   }catch(error){
     if(current()){
       $('#jiraNotice').textContent=jiraLoaded?'更新失败，当前为上次结果。请稍后刷新重试。':'Jira 台账暂时无法读取，请刷新重试。';
       if(!jiraLoaded)$('#jiraRows').innerHTML='<div class="empty">领取记录加载失败</div>';
     }
+    return false;
   }finally{
     if(request===jiraRequest)jiraBusy=false;
     if(current()){
-      $('#jiraRefresh').disabled=false;
-      $('#jiraPrevious').disabled=jiraPages.length===0;
-      $('#jiraNext').disabled=jiraNextCursor===null;
+      if(!$('#jiraRefresh').refreshPending)$('#jiraRefresh').disabled=false;
+
     }
   }
 }
 setInterval(()=>{if(typeof state!=='undefined'&&state.page==='jira'&&!document.hidden&&!jiraBusy)loadJiraRuns({background:true})},10000);
 
-let poolBefore=null;
-let poolNext=null;
 let poolLoading=false;
 let poolLoaded=false;
 let poolRequest=0;
@@ -235,7 +261,7 @@ function jiraExecutionDetailHtml(row,execution) {
 }
 function jiraExecutionListHtml(row) {
   const executions=[...(row.executions||[])].reverse();
-  return `<div class="jira-execution-summary"><span class="jira-execution-issue">${esc(row.issue_key)}</span><span>共 ${executions.length} 条</span></div>${executions.length?`<ol class="jira-execution-records">${executions.map(execution=>`<li>${jiraExecutionDetailHtml(row,execution)}</li>`).join('')}</ol>`:'<p class="jira-execution-empty">暂无记录</p>'}`;
+  return `<div class="jira-execution-summary"><span class="jira-execution-issue">${esc(row.issue_key)}</span><span>共 ${executions.length} 条</span></div>${executions.length?`<ol class="jira-execution-records">${jiraPageSlice('executions',executions).map(execution=>`<li>${jiraExecutionDetailHtml(row,execution)}</li>`).join('')}</ol>`:'<p class="jira-execution-empty">暂无记录</p>'}`;
 }
 function updateJiraPoolExecution() {
   const dialog=$('#jiraBlockedReason');
@@ -248,10 +274,11 @@ function updateJiraPoolExecution() {
     body.innerHTML=html;body.jiraMarkup=html;
     body.scrollTop=top;
   }
+  mountJiraPager('executions','#executionPager',jiraPage('executions'),()=>{updateJiraPoolExecution();return true});
 }
 function openJiraPoolExecution(id) {
   if(!poolItems.some(row=>String(row.id)===id&&row.executions?.length))return;
-  poolExecutionItemId=id;$('#jiraBlockedReason').querySelector('[data-execution-body]').jiraMarkup=null;$('#jiraBlockedReason').querySelector('[data-execution-body]').innerHTML='';$('#jiraBlockedReason').showModal();updateJiraPoolExecution();
+  resetJiraPage('executions');poolExecutionItemId=id;$('#jiraBlockedReason').querySelector('[data-execution-body]').jiraMarkup=null;$('#jiraBlockedReason').querySelector('[data-execution-body]').innerHTML='';$('#jiraBlockedReason').showModal();updateJiraPoolExecution();
 }
 function jiraPoolTimeHtml(value) {
   return `<span class="jira-pool-time">${esc(time(value)).replace(/\s+/, '<br>')}</span>`;
@@ -289,7 +316,8 @@ function jiraPoolRowHtml(row, scoped = false) {
     <td>${Number(row.executionCount??row.executions?.length??0)} 轮</td>
     <td class="jira-executions-cell">${row.executions?.length?`<button class="jira-executions-view" type="button" data-pool-executions="${esc(row.id)}" aria-label="查看 ${esc(row.issue_key)} 的执行记录">查看</button>`:'<span class="jira-execution-empty">暂无记录</span>'}</td></tr>`;
 }
-async function loadJiraPool(before=poolBefore,{background=false}={}) {
+async function loadJiraPool(before=undefined,{background=false}={}) {
+  if(before===null){resetJiraPage("pool");resetJiraPage("collections");resetJiraPage("projects");resetJiraPage("schedules");saveJiraListFilters()}
   if(state.page!=='jira'||(background&&poolLoading))return;
   const panel=$('#jiraPool');
   if(!panel)return;
@@ -297,34 +325,37 @@ async function loadJiraPool(before=poolBefore,{background=false}={}) {
   const current=()=>request===poolRequest&&state.page==='jira'&&group===groupState.selected&&panel===$('#jiraPool');
   poolLoading=true;
   try {
-    let result=await api('/api/jira-pool?'+new URLSearchParams({groupId:group,...poolFilters,...(before?{before}:{})}));
-    if(!current())return;
+    let result=await api('/api/jira-pool?'+new URLSearchParams({groupId:group,...poolFilters,...jiraPageParams('pool'),collectionPage:jiraPage('collections').page,collectionPageSize:jiraPage('collections').pageSize}));
+    if(!current())return false;
     if(!poolSopInitialized) {
       poolSopInitialized=true;
       if(group&&!poolFilters.sopId&&result.sops?.length===1) {
         poolFilters={...poolFilters,sopId:result.sops[0].sopId};
         updateJiraSopOptions('#poolSop',result.sops);
         $('#poolSop').value=poolFilters.sopId;
-        result=await api('/api/jira-pool?'+new URLSearchParams({groupId:group,...poolFilters}));
-        if(!current())return;
-        before=null;
+        resetJiraPage('pool');resetJiraPage('collections');saveJiraListFilters();
+        result=await api('/api/jira-pool?'+new URLSearchParams({groupId:group,...poolFilters,...jiraPageParams('pool'),collectionPage:jiraPage('collections').page,collectionPageSize:jiraPage('collections').pageSize}));
+        if(!current())return false;
       }
     }
     if(!background)$('#jiraBlockedReason')?.close();
     poolItems=result.items;
     updateJiraSopOptions('#poolSop',result.sops||[]);
     updateJiraSopOptions('#jiraHistorySop',result.sops||[]);
-    poolBefore=before;poolNext=result.nextCursor;$('#poolNext').disabled=poolNext===null;
     const projects=result.projects||[];
     const projectsOpen=$('#poolProjects').querySelector('details')?.open;
     const schedulesOpen=$('#poolSchedules').querySelector('details')?.open;
-    $('#poolProjects').innerHTML=`<div><span>项目</span><strong>${projects.length}</strong></div><div><span>待分配工单</span><strong>${projects.reduce((sum,p)=>sum+Number(p.pending||0),0)}</strong></div><div><span>执行中</span><strong>${projects.reduce((sum,p)=>sum+Number(p.running||0),0)}</strong></div>${projects.length?`<details class="jira-project-list"${projectsOpen?' open':''}><summary>项目明细</summary>${projects.map(p=>`<p><strong>${esc(p.project)}</strong><span>待分配 ${Number(p.pending)} · 执行中 ${Number(p.running)}</span><small>最近采集 ${esc(time(p.lastCollectedAt))}</small></p>`).join('')}</details>`:''}`;
-    $('#poolSchedules').innerHTML=(result.schedules||[]).length?`<details${schedulesOpen?' open':''}><summary>SOP 定时运行 <span>${result.schedules.length} 条规则</span></summary>${result.schedules.map(s=>`<p><strong>${esc(s.name)}</strong><span>下次触发 ${s.nextAt?esc(time(s.nextAt)):'未安排'}</span></p>`).join('')}</details>`:'<span>当前分组暂无启用的 SOP 定时运行规则</span>';
+    $('#poolProjects').innerHTML=`<div><span>项目</span><strong>${projects.length}</strong></div><div><span>待分配工单</span><strong>${projects.reduce((sum,p)=>sum+Number(p.pending||0),0)}</strong></div><div><span>执行中</span><strong>${projects.reduce((sum,p)=>sum+Number(p.running||0),0)}</strong></div>${projects.length?`<details class="jira-project-list"${projectsOpen?' open':''}><summary>项目明细</summary>${jiraPageSlice('projects',projects).map(p=>`<p><strong>${esc(p.project)}</strong><span>待分配 ${Number(p.pending)} · 执行中 ${Number(p.running)}</span><small>最近采集 ${esc(time(p.lastCollectedAt))}</small></p>`).join('')}<div id="projectPager" class="jira-pagination"></div></details>`:''}`;
+    $('#poolSchedules').innerHTML=(result.schedules||[]).length?`<details${schedulesOpen?' open':''}><summary>SOP 定时运行 <span>${result.schedules.length} 条规则</span></summary>${jiraPageSlice('schedules',result.schedules).map(s=>`<p><strong>${esc(s.name)}</strong><span>下次触发 ${s.nextAt?esc(time(s.nextAt)):'未安排'}</span></p>`).join('')}<div id="schedulePager" class="jira-pagination"></div></details>`:'<span>当前分组暂无启用的 SOP 定时运行规则</span>';
     $('#poolItems').innerHTML=result.items.length?`<table class="jira-table jira-pool-table${poolFilters.sopId?' jira-pool-scoped':''}"><thead><tr><th>项目 / 工单</th><th>类型 / 优先级</th><th>开发人</th>${poolFilters.sopId?'':'<th>SOP 流程 / 来源</th>'}<th>最近采集</th><th>流程状态</th><th>提交编号</th><th>执行开始</th><th title="最近一轮实际执行的耗时，包含开始后的等待时间，不含开始前排队；按整分钟显示">最近运行耗时</th><th>执行轮数</th><th>执行记录</th></tr></thead><tbody>${result.items.map(row=>jiraPoolRowHtml(row,Boolean(poolFilters.sopId))).join('')}</tbody></table>`:'<div class="empty jira-empty"><strong>暂无符合条件的工单</strong><span>可调整筛选条件，或等待每 30 秒自动采集更新。</span></div>';
     const batchLabels={waiting:'等待采集',collecting:'正在查询',ready:'采集完成',failed:'采集失败',cancelled:'已停止派发'};
     $('#poolCollections').innerHTML=result.collections.length?`<table class="jira-table jira-collection-table"><thead><tr><th>任务</th><th>触发时间</th><th>完成时间</th><th>结果</th><th>工单数</th></tr></thead><tbody>${result.collections.map(r=>`<tr><td>${esc(r.sopName||'历史 SOP 未记录')}<small>${esc(r.name)}</small><small>${esc(({poll:"自动采集",schedule:"定时派发批次",web:"手动派发批次",dingtalk:"钉钉派发批次"})[r.source]||"历史采集")}</small></td><td>${esc(time(r.createdAt))}</td><td>${r.finishedAt?esc(time(r.finishedAt)):'尚未完成'}</td><td><span class="jira-status ${r.state==='ready'?'success':r.state==='failed'?'failed':'waiting'}">${esc(batchLabels[r.state]||'状态未知')}</span><small>${esc(r.reason)}</small></td><td>${Number(r.count)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty jira-empty"><strong>暂无采集记录</strong><span>启用 Jira 任务后，每 30 秒自动采集，结果会显示在这里。</span></div>';
     updateJiraPoolExecution();
-    poolLoaded=true;$('#poolNotice').textContent='';
+    mountJiraPager('pool','#poolPager',result,()=>loadJiraPool());
+    mountJiraPager('collections','#collectionPager',result.collectionPagination,()=>loadJiraPool());
+    mountJiraPager('projects','#projectPager',jiraPage('projects'),()=>loadJiraPool());
+    mountJiraPager('schedules','#schedulePager',jiraPage('schedules'),()=>loadJiraPool());
+    poolLoaded=true;$('#poolNotice').textContent='';return true;
   }catch(error){
     if(current()){
       $('#poolNotice').textContent=poolLoaded?'更新失败，保留上次结果，请稍后重试。':'领取信息暂时无法读取，请稍后刷新重试。';
@@ -333,6 +364,7 @@ async function loadJiraPool(before=poolBefore,{background=false}={}) {
         $('#poolCollections').innerHTML='<div class="empty">采集记录加载失败</div>';
       }
     }
+    return false;
   }finally{if(request===poolRequest)poolLoading=false}
 }
 

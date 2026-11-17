@@ -18,6 +18,8 @@ public class JiraPoolService {
 
   private final WorkflowRunStore runs;
   private final BoundedWork worker = new BoundedWork("jira-pool", 1, 1);
+  // 仅由单个派发 worker 使用；只保留当前待处理批次的连续失败记录。
+  private final java.util.Set<String> warnedRequests = new java.util.HashSet<>();
   private static final org.slf4j.Logger LOGGER =
       org.slf4j.LoggerFactory.getLogger(JiraPoolService.class);
 
@@ -50,6 +52,26 @@ public class JiraPoolService {
 
   public JsonNode board(
       String group, Long before, String project, String task, String state, String sopId) {
+    return board(
+        group,
+        before,
+        project,
+        task,
+        state,
+        sopId,
+        new JiraPagination(null, 50),
+        new JiraPagination(null, 50));
+  }
+
+  public JsonNode board(
+      String group,
+      Long before,
+      String project,
+      String task,
+      String state,
+      String sopId,
+      JiraPagination pagination,
+      JiraPagination collections) {
     if (!sopId.isEmpty()) java.util.UUID.fromString(sopId);
     String filters =
         "&project="
@@ -65,7 +87,14 @@ public class JiraPoolService {
                 "/jira-pool?groupId="
                     + group
                     + (before == null ? "" : "&before=" + before)
-                    + filters);
+                    + filters
+                    + pagination.query(before)
+                    + (collections.page() == null
+                        ? ""
+                        : "&collectionPage="
+                            + collections.page()
+                            + "&collectionPageSize="
+                            + collections.pageSize()));
     for (JsonNode item : result.path("items")) {
       if (item.hasNonNull("workflow_id"))
         ((ObjectNode) item).put("monitorUrl", runs.monitorUrl(item.path("workflow_id").asText()));
@@ -90,6 +119,19 @@ public class JiraPoolService {
       Long before,
       boolean items,
       String sopId) {
+    return statistics(
+        group, project, category, developer, before, items, sopId, new JiraPagination(null, 50));
+  }
+
+  public JsonNode statistics(
+      String group,
+      String project,
+      String category,
+      String developer,
+      Long before,
+      boolean items,
+      String sopId,
+      JiraPagination pagination) {
     if (!sopId.isEmpty()) java.util.UUID.fromString(sopId);
     ObjectNode result =
         (ObjectNode)
@@ -105,7 +147,8 @@ public class JiraPoolService {
                     + "&developer="
                     + encode(developer)
                     + (sopId.isEmpty() ? "" : "&sopId=" + sopId)
-                    + (before == null ? "" : "&before=" + before));
+                    + (before == null ? "" : "&before=" + before)
+                    + pagination.query(before));
     for (JsonNode item : result.path("items")) {
       if (item.hasNonNull("workflowId"))
         ((ObjectNode) item).put("monitorUrl", runs.monitorUrl(item.path("workflowId").asText()));
@@ -122,7 +165,9 @@ public class JiraPoolService {
     worker.submit(
         "dispatch",
         () -> {
-          for (String id : requests.pending()) advance(id);
+          var pending = requests.pending();
+          warnedRequests.retainAll(pending);
+          for (String id : pending) advance(id);
         });
   }
 
@@ -132,6 +177,7 @@ public class JiraPoolService {
   }
 
   void advance(String id) {
+    boolean failed = false;
     try {
       ObjectNode request = requests.status(id);
       if (!request.hasNonNull("workflowId")) requests.validate(id);
@@ -198,7 +244,14 @@ public class JiraPoolService {
         requests.state(id, "cancelled", "配置已变化或提交失败，旧来源停止派发。");
       }
     } catch (RuntimeException error) {
-      LOGGER.warn("Jira 派发尚未完成，requestId={}，异常类型={}", id, error.getClass().getSimpleName());
+      failed = true;
+      if (warnedRequests.add(id))
+        LOGGER.warn(
+            "Jira 派发尚未完成，requestId={}，异常类型={}；后台将继续重试，连续失败不再重复警告。",
+            id,
+            error.getClass().getSimpleName());
+    } finally {
+      if (!failed) warnedRequests.remove(id);
     }
   }
 }

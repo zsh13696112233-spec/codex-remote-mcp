@@ -31,3 +31,54 @@ dialog button.dialog-close:focus-visible { outline:2px solid var(--p); outline-o
 dialog button.dialog-close:disabled { opacity:.45; cursor:not-allowed; }
 
 #machineDialog [hidden]{display:none!important}
+
+/* Jira 账号缺任务提醒：沿用管理弹窗配色、控件及关闭按钮。 */
+#jiraReminderDialog{width:min(640px,94vw);max-height:88dvh;overflow:hidden;font-size:13px}
+#jiraReminderDialog .jira-reminder-form{display:flex;flex-direction:column;max-height:88dvh;padding:0;overflow:hidden}
+#jiraReminderDialog .jira-reminder-header{position:relative;display:block;flex:none;padding:22px 24px 18px;border-bottom:1px solid #eeeff5}
+#jiraReminderDialog h2{margin:0;color:#384356;font-size:18px;line-height:1.5}
+#jiraReminderDialog .jira-reminder-header p{margin:5px 44px 0 0;color:#8791a3;overflow-wrap:anywhere}
+#jiraReminderDialog .jira-reminder-body{min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:20px 24px;scrollbar-gutter:stable}
+#jiraReminderDialog p{font-size:12px;line-height:1.8;color:#737c8e}
+#jiraReminderDialog .jira-reminder-hint{margin:0 0 16px}
+#jiraReminderDialog label{margin:0;color:#596177;font-size:13px;font-weight:500;min-width:0}
+#jiraReminderDialog .check{display:inline-flex;align-items:center;gap:7px;margin:0;white-space:nowrap}
+#jiraReminderDialog input[type=checkbox]{width:15px;height:15px;flex:none;margin:0;accent-color:var(--p)}
+#jiraReminderDialog .jira-reminder-enabled{margin-bottom:20px}
+#jiraReminderDialog .jira-reminder-targets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+#jiraReminderDialog select,#jiraReminderDialog input[type=time]{width:100%;min-width:0;height:40px;border-radius:8px;padding:8px 10px;font-size:13px;color:#494f62;background:#fff}
+#jiraReminderDialog select{margin:8px 0 0}
+#jiraReminderDialog .jira-reminder-person{min-width:0}
+#jiraReminderDialog [data-reminder-person-search]{width:100%;min-width:0;height:40px;margin:8px 0 0;padding:8px 10px;border-radius:8px;font-size:13px;color:#494f62}
+#jiraReminderDialog [data-reminder-person-matches]{display:block;margin-top:6px;font-size:12px;color:#8791a3}
+#jiraReminderDialog [data-reminder-person-matches]:empty{display:none}
+#jiraReminderDialog fieldset{min-width:0;border:0;padding:0;margin:22px 0 0}
+#jiraReminderDialog legend{padding:0;margin-bottom:12px;color:#596177;font-size:13px;font-weight:600}
+#jiraReminderDialog legend span{margin-left:6px;color:#9298a7;font-size:12px;font-weight:400}
+#jiraReminderDialog .jira-reminder-days{display:flex;flex-wrap:wrap;gap:12px 18px}
+#jiraReminderDialog [data-reminder-window]{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto;align-items:center;gap:10px;margin-bottom:10px;color:#9298a7}
+#jiraReminderDialog [data-reminder-window] input{margin:0}
+#jiraReminderDialog button:not(.dialog-close){min-height:36px;padding:8px 14px;font-size:13px;border-radius:8px;color:#596177}
+#jiraReminderDialog [data-remove-window]{color:#8791a3!important}
+#jiraReminderDialog [data-add-window]{color:var(--p)!important;background:#faf9ff;border-color:#e4e1f0}
+#jiraReminderDialog fieldset .jira-reminder-hint{margin:10px 0 0}
+#jiraReminderDialog .jira-reminder-status{display:flex;align-items:flex-start;gap:12px;margin-top:22px;padding:14px;border:1px solid #eeeff5;border-radius:10px;background:#f8f9fc}
+#jiraReminderDialog [data-reminder-status]{flex:1;min-width:0;margin:0;overflow-wrap:anywhere}
+#jiraReminderDialog [data-refresh-status]{flex:none}
+#jiraReminderDialog [role=alert]{color:#b42318;margin:12px 0 0}
+#jiraReminderDialog [role=alert]:empty{display:none}
+#jiraReminderDialog footer{flex:none;display:flex;justify-content:flex-end;gap:10px;margin:0;padding:16px 24px;border-top:1px solid #eeeff5;background:#fff}
+#jiraReminderDialog footer button{min-width:76px}
+#jiraReminderDialog .jira-reminder-placeholder{padding:24px}
+#jiraReminderDialog button:disabled{opacity:.45;cursor:not-allowed}
+#jiraReminderDialog :is(button,input,select):focus-visible{outline:2px solid var(--p);outline-offset:2px}
+@media(max-width:500px){
+  #jiraReminderDialog .jira-reminder-header{padding:20px}
+  #jiraReminderDialog .jira-reminder-body{padding:18px 20px}
+  #jiraReminderDialog .jira-reminder-targets{grid-template-columns:1fr}
+  #jiraReminderDialog .jira-reminder-days{gap:12px 16px}
+  #jiraReminderDialog [data-reminder-window]{gap:6px}
+  #jiraReminderDialog [data-remove-window]{padding:8px}
+  #jiraReminderDialog .jira-reminder-status{flex-direction:column}
+  #jiraReminderDialog footer{padding:14px 20px}
+}

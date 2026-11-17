@@ -54,6 +54,7 @@ Python 工作流网关（8080）── 主监督 App Server（4500）
 - [Python 工作流服务](services/python-workflow/README.md)
 - [任务运行监控中心](services/workflow-console/README.md)
 - [角色任务配置中心](services/role-task-config-center/README.md)
+- [两个 Java 项目的代码目录与类职责](docs/JAVA_CODE_GUIDE.zh-CN.md)
 - [完整部署指南](docs/DEPLOYMENT_GUIDE.zh-CN.md)
 - [Codex 远程混合机部署与旧版升级执行手册](docs/CODEX_HYBRID_MACHINE_DEPLOYMENT.zh-CN.md)
 

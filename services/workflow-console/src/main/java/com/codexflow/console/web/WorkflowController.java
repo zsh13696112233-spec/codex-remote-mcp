@@ -72,6 +72,47 @@ public class WorkflowController {
     return gatewayClient.events(workflowId, after, limit, view, before, tail);
   }
 
+  @org.springframework.web.bind.annotation.RequestMapping(
+      value = "/workflows/{workflowId}/documents/{documentId}/workspace",
+      method = {
+        org.springframework.web.bind.annotation.RequestMethod.GET,
+        org.springframework.web.bind.annotation.RequestMethod.POST,
+        org.springframework.web.bind.annotation.RequestMethod.DELETE
+      })
+  public ResponseEntity<byte[]> documentWorkspace(
+      @PathVariable String workflowId,
+      @PathVariable String documentId,
+      jakarta.servlet.http.HttpServletRequest request)
+      throws java.io.IOException {
+    byte[] body = request.getInputStream().readNBytes(20_000_001);
+    if (body.length > 20_000_000) throw new IllegalArgumentException("附件不能超过 20 MB。");
+    var result =
+        gatewayClient.documentWorkspace(
+            workflowId, documentId, request.getQueryString(), request.getMethod(), body);
+    return ResponseEntity.ok()
+        .contentType(MediaType.parseMediaType(result.contentType()))
+        .cacheControl(CacheControl.noStore())
+        .header("X-Content-Type-Options", "nosniff")
+        .body(result.body());
+  }
+
+  @GetMapping("/workflows/{workflowId}/documents/{documentId}/messages")
+  public JsonNode documentMessages(
+      @PathVariable String workflowId,
+      @PathVariable String documentId,
+      @RequestParam(defaultValue = "0") long after) {
+    return gatewayClient.documentMessages(workflowId, documentId, after, null);
+  }
+
+  @PostMapping("/workflows/{workflowId}/documents/{documentId}/messages")
+  public ResponseEntity<JsonNode> documentMessage(
+      @PathVariable String workflowId,
+      @PathVariable String documentId,
+      @RequestBody JsonNode body) {
+    return ResponseEntity.accepted()
+        .body(gatewayClient.documentMessages(workflowId, documentId, 0, body));
+  }
+
   @GetMapping("/workflows/{workflowId}/documents/{documentId}")
   public ResponseEntity<JsonNode> document(
       @PathVariable String workflowId, @PathVariable String documentId) {

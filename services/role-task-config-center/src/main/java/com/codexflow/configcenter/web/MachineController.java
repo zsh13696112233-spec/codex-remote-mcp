@@ -54,6 +54,11 @@ public class MachineController {
     return service.models(id);
   }
 
+  @PutMapping("/agents/{id}/debug-priority")
+  public JsonNode updateDebugPriority(@PathVariable String id, @RequestBody JsonNode body) {
+    return service.updateDebugPriority(id, body);
+  }
+
   @PutMapping("/agents/{id}/remark")
   public JsonNode updateRemark(@PathVariable String id, @RequestBody JsonNode body) {
     return service.updateRemark(id, body);

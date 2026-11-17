@@ -67,7 +67,7 @@ public class JiraAccountService {
         > 0) throw new ConflictFailure("账号已被有效 SOP 引用，请先调整 SOP。");
     for (String payload :
         jdbc.queryForList(
-            "SELECT spec_json FROM codex_jira_requests WHERE state IN ('pending','waiting','dispatching')",
+            "SELECT COALESCE(s.spec_json,r.spec_json) FROM codex_jira_requests r LEFT JOIN codex_jira_request_specs s ON s.id=r.spec_snapshot_id WHERE r.state IN ('pending','waiting','dispatching')",
             String.class)) checkReference(id, payload);
     for (String payload :
         jdbc.queryForList(

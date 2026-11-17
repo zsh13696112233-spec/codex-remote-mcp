@@ -754,7 +754,7 @@ async function navigateToPage(b,retry=false){
   document.querySelector("nav .active").classList.remove("active");b.classList.add("active");state.page=b.dataset.page;
   if(state.page==="schedules"){const url=new URL(location.href);url.searchParams.set("page","schedules");history.replaceState(null,"",url)}
   {const url=new URL(location.href);url.searchParams.set("page",state.page);history.replaceState(null,"",url)}
-  const map={"jira-accounts":["Jira 账号管理","＋ 新增账号"],jira:["Jira 分发中心",""],mcps:["MCP 管理",""],skills:["Skill 管理",""],groups:["分组管理","＋ 新建分组"],schedules:["定时任务管理","＋ 新建定时任务"],runs:["任务运行",""],machines:["机器管理",""],roles:["角色管理","＋ 新建角色"],sops:["SOP 工作流","＋ 新建 SOP"],tasks:["任务定义","＋ 新建任务"],runtime:["运行状态",""],dingtalk:["钉钉机器人",""],"dingtalk-targets":["钉钉通知对象",""]};
+  const map={"jira-accounts":["Jira 账号管理","＋ 新增账号"],jira:["Jira 分发中心",""],mcps:["MCP 管理",""],skills:["Skill 管理",""],groups:["总览","＋ 新建分组"],schedules:["定时任务管理","＋ 新建定时任务"],runs:["任务运行",""],machines:["机器管理",""],roles:["角色管理","＋ 新建角色"],sops:["SOP 工作流","＋ 新建 SOP"],tasks:["任务定义","＋ 新建任务"],runtime:["运行状态",""],dingtalk:["钉钉机器人",""],"dingtalk-targets":["钉钉通知对象",""]};
   [$("#title").textContent,$("#create").textContent]=map[state.page];
   $("#create").classList.toggle("hidden",["jira","runs","machines","skills","mcps","runtime","dingtalk","dingtalk-targets"].includes(state.page));
   await render();

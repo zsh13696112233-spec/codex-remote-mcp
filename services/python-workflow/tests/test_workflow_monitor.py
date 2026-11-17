@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +19,26 @@ def event(item, sequence=2, source="worker", completed=True):
 
 
 class MonitorTests(unittest.TestCase):
+    def test_long_tool_text_is_redacted_without_blocking(self):
+        # 独立进程设硬期限；旧正则处理 10 万连续字符会阻塞解释器很久。
+        result = subprocess.run(
+            [sys.executable, '-c',
+             'from workflow_monitor import public_text; '
+             'text = public_text("长" * 100000); '
+             'assert text == "长" * 8000 + "\\n【内容过长，已省略】"'],
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_prefixed_credential_names_still_hide_values(self):
+        for key in ('TOKEN', 'access_token', 'client-secret', '中文password',
+                    'apiKey', 'authorization', 'prefix_thread_id'):
+            for quote in ('', '"', "'"):
+                with self.subTest(key=key, quote=quote):
+                    text = public_text(f'{quote}{key}{quote}: sensitive-value')
+                    self.assertNotIn('sensitive-value', text)
+                    self.assertIn('[已隐藏]', text)
+
     def test_large_completed_tool_retains_identity_after_storage_truncation(self):
         with tempfile.TemporaryDirectory() as directory:
             store = WorkflowStore(Path(directory, "monitor.db"))

@@ -60,7 +60,8 @@ public class BlockedNotificationStore {
     return snapshot(group);
   }
 
-  private ObjectNode target(String id, String type) {
+  @Transactional(readOnly = true)
+  public ObjectNode target(String id, String type) {
     var target = targets.findById(id).orElseThrow(() -> new IllegalArgumentException("通知对象不存在。"));
     // 开发人通知不受人员的普通通知启用开关控制；群聊仍须启用。
     if (!type.equals(target.targetType)

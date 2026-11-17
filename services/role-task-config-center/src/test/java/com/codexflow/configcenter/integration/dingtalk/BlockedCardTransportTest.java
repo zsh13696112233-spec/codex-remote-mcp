@@ -13,6 +13,59 @@ import org.junit.jupiter.api.Test;
 import tools.jackson.databind.ObjectMapper;
 
 class BlockedCardTransportTest {
+  @Test
+  void expiredWindowNeverPostsCardAfterTokenFetch() throws Exception {
+    when(http.send(
+            any(HttpRequest.class),
+            org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any()))
+        .thenAnswer(invocation -> response(200, "{\"accessToken\":\"test-token\"}"));
+    assertThatThrownBy(
+            () ->
+                transport()
+                    .sendBlockedCard(
+                        "expired",
+                        "frozen-client",
+                        "group",
+                        "person",
+                        Map.of(
+                            "_templateId",
+                            "notice.schema",
+                            "_sendBefore",
+                            "2000-01-01T00:00:00Z",
+                            "body",
+                            "暂无工单")))
+        .isInstanceOf(DingTalkTransport.DeliveryExpired.class);
+    verify(http, times(1))
+        .send(
+            any(HttpRequest.class),
+            org.mockito.ArgumentMatchers.<HttpResponse.BodyHandler<String>>any());
+  }
+
+  @Test
+  void emptyReminderUsesRealMentionAndDoesNotAskToViewTaskResult() {
+    var body =
+        transport()
+            .blockedCardBody(
+                "empty",
+                "group",
+                "person",
+                Map.of(
+                    "_templateId",
+                    "notice.schema",
+                    "_emptyReminder",
+                    true,
+                    "_atDisplayName",
+                    "张三",
+                    "body",
+                    "当前暂无待处理工单"));
+    assertThat(body.path("cardAtUserIds").get(0).asText()).isEqualTo("person");
+    var parameters = body.path("cardData").path("cardParamMap");
+    assertThat(parameters.path("body").asText())
+        .contains("补充分配任务", "atId=\"person\"")
+        .doesNotContain("查看任务结果");
+    assertThat(parameters.has("_emptyReminder")).isFalse();
+  }
+
   private final HttpClient http = mock(HttpClient.class);
   private final DingTalkProperties properties = new DingTalkProperties();
   private final ObjectMapper json = new ObjectMapper();

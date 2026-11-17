@@ -40,6 +40,8 @@ class AgentRegistry:
                 db.execute("ALTER TABLE registered_agents ADD COLUMN deleted_at TEXT")
             if "deleted_at" not in {row["name"] for row in db.execute("PRAGMA table_info(agent_groups)")}:
                 db.execute("ALTER TABLE agent_groups ADD COLUMN deleted_at TEXT")
+            if "debug_priority" not in {row["name"] for row in db.execute("PRAGMA table_info(registered_agents)")}:
+                db.execute("ALTER TABLE registered_agents ADD COLUMN debug_priority INTEGER NOT NULL DEFAULT 0")
             # 旧部署授权仅导入一次；此后网页保存的数据库记录是唯一事实来源。
             legacy = setting("skill_deployment", {}).get("agents", {})
             for row in db.execute("SELECT id FROM registered_agents").fetchall():
@@ -61,9 +63,9 @@ class AgentRegistry:
                     id TEXT PRIMARY KEY, group_id TEXT REFERENCES agent_groups(id),
                     ip TEXT NOT NULL, port INTEGER NOT NULL, config TEXT NOT NULL,
                     test_status TEXT NOT NULL DEFAULT 'untested', tested_at TEXT,
-                    remark TEXT NOT NULL DEFAULT '', deleted_at TEXT)""")
+                    remark TEXT NOT NULL DEFAULT '', deleted_at TEXT, debug_priority INTEGER NOT NULL DEFAULT 0)""")
                 db.execute("""INSERT INTO registered_agents_new
-                    SELECT id,group_id,ip,port,config,test_status,tested_at,remark,deleted_at FROM registered_agents""")
+                    SELECT id,group_id,ip,port,config,test_status,tested_at,remark,deleted_at,debug_priority FROM registered_agents""")
                 db.execute("DROP TABLE registered_agents")
                 db.execute("ALTER TABLE registered_agents_new RENAME TO registered_agents")
                 if db.execute("PRAGMA foreign_key_check").fetchone():
@@ -154,7 +156,7 @@ class AgentRegistry:
 
     def public(self) -> list[dict[str, Any]]:
         return [{"agentId": key, "name": row["ip"], "remark": row["remark"], "ip": row["ip"], "port": row["port"],
-                 "groupId": row["group_id"], "testStatus": row["test_status"], "testedAt": row["tested_at"],
+                 "debugPriority": bool(row["debug_priority"]), "groupId": row["group_id"], "testStatus": row["test_status"], "testedAt": row["tested_at"],
                  "defaultCwd": json.loads(row["config"])["cwd"],
                  "enabled": json.loads(row["config"]).get("enabled", True),
                  "skillInstallation": self.skill_settings(key),
@@ -193,6 +195,19 @@ class AgentRegistry:
             db.execute("UPDATE registered_agents SET deleted_at=? WHERE id=?",
                        (datetime.now(timezone.utc).isoformat(), agent_id))
         return {"deleted": True}
+
+    def save_debug_priority(self, body: dict[str, Any], agent_id: str) -> dict[str, Any]:
+        if set(body) != {"debugPriority"} or type(body.get("debugPriority")) is not bool:
+            raise ValueError("调试优先必须为开关值。")
+        with self.store._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT config FROM registered_agents WHERE id=? AND deleted_at IS NULL", (agent_id,)).fetchone()
+            if row is None:
+                raise ValueError("找不到机器。")
+            if "executor" not in json.loads(row["config"]).get("capabilities", []):
+                raise ValueError("只有执行机可以设置调试优先。")
+            db.execute("UPDATE registered_agents SET debug_priority=? WHERE id=?", (int(body["debugPriority"]), agent_id))
+        return {"agentId": agent_id, "debugPriority": body["debugPriority"]}
 
     def save_remark(self, body: dict[str, Any], agent_id: str) -> dict[str, str]:
         if set(body) != {"remark"} or not isinstance(body.get("remark"), str) or len(body["remark"].strip()) > 100:
@@ -352,6 +367,8 @@ class AgentRegistry:
                     "untested" if changed else old["test_status"], None if changed else old["tested_at"], remark))
             except sqlite3.IntegrityError as error:
                 raise ValueError("该 IP 和端口已登记为有效机器。") from error
+            if "executor" not in config["capabilities"]:
+                db.execute("UPDATE registered_agents SET debug_priority=0 WHERE id=?", (agent_id,))
             db.execute("""INSERT INTO agent_skill_settings(agent_id,enabled,root) VALUES(?,?,?)
                 ON CONFLICT(agent_id) DO UPDATE SET enabled=excluded.enabled,root=excluded.root""",
                 (agent_id, int(skill_enabled), skill_root))

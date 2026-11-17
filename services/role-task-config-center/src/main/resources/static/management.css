@@ -129,22 +129,37 @@
 .machine-occupation.review { background:#fff3e5; color:#a56620; }
 .machine-occupation.idle { background:#eaf7f0; color:#16825d; }
 .machine-card-list .machine-role-empty { grid-column:1/-1; border:1px dashed #e3e8ef; border-radius:12px; padding:30px 12px; }
-#machineDetails { position:fixed; inset:0 0 0 auto; margin:0; width:min(400px,100vw); max-width:100vw; height:100dvh; max-height:100dvh; box-sizing:border-box; border:0; border-left:1px solid #e3e8ef; border-radius:0; padding:24px; overflow-y:auto; box-shadow:-10px 0 40px #27344d22; }
+#machineDetails { position:fixed; inset:0 0 0 auto; margin:0; width:min(440px,100vw); max-width:100vw; height:100dvh; max-height:100dvh; box-sizing:border-box; border:0; border-left:1px solid #e8e9f0; border-radius:0; padding:0; overflow:hidden; box-shadow:-10px 0 40px #27344d22; color:#596177; }
+#machineDetails[open] { display:flex; flex-direction:column; }
 #machineDetails::backdrop { background:#1e293b25; }
-#machineDetails header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:24px; }
-#machineDetails h2 { margin:0; font-size:18px; }
-#machineDetails h3 { font-size:14px; margin-top:24px; }
-#machineDetails label { display:block; font-size:13px; }
-#machineDetails .machine-remark { margin-top:8px; }
-#machineDetails dl { display:grid; grid-template-columns:76px minmax(0,1fr); gap:12px; margin:20px 0; font-size:13px; }
-#machineDetails dt { color:#778093; }
-#machineDetails dd { margin:0; overflow-wrap:anywhere; }
-#machineDetails p { font-size:12px; color:#64748b; overflow-wrap:anywhere; }
-#machineDetails .machine-card-actions { display:flex; flex-wrap:wrap; gap:8px; padding-top:20px; margin-top:24px; border-top:1px solid #e3e8ef; }
-#machineDetails .machine-card-actions button { font-size:12px; padding:8px 10px; }
-#machineDetails [data-machine-action="delete"] { color:#b34545; }
-#machineDetails button:focus-visible { outline:2px solid var(--p); outline-offset:2px; }
-@media(max-width:600px) { #machineDetails { width:100vw; } .group-layout .machine-card-list { gap:8px; } }
+#machineDetails header { position:relative; flex:none; padding:22px 24px; border-bottom:1px solid #eeeff5; }
+#machineDetails h2 { margin:0; font-size:18px; color:#384356; }
+#machineDetails .machine-detail-body { min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:24px; scrollbar-gutter:stable; }
+#machineDetails .machine-detail-remark { display:block; margin:0 0 20px; font-size:13px; color:#596177; font-weight:600; }
+#machineDetails .machine-remark { margin-top:10px; }
+#machineDetails .machine-remark input { padding:10px 12px; border:1px solid #e3e6ee; border-radius:8px; background:#fafbfe; color:#384356; font-size:13px; font-weight:400; }
+#machineDetails .machine-remark input:focus { border-color:var(--p); background:#fff; }
+#machineDetails .machine-remark small { margin-top:6px; }
+#machineDetails .machine-debug-setting { padding:14px 16px; border:1px solid #e8e9f0; border-radius:10px; background:#f8f9fc; }
+#machineDetails .check { display:flex; align-items:center; gap:8px; margin:0; font-size:13px; font-weight:600; }
+#machineDetails .check input { width:15px; height:15px; margin:0; flex:none; accent-color:var(--p); }
+#machineDetails p { margin:8px 0 0; font-size:12px; line-height:1.8; color:#8791a3; overflow-wrap:anywhere; }
+#machineDetails .machine-detail-section { margin-top:24px; }
+#machineDetails h3 { margin:0 0 14px; color:#384356; font-size:13px; font-weight:600; }
+#machineDetails dl { display:grid; grid-template-columns:76px minmax(0,1fr); align-items:baseline; gap:14px 16px; margin:0; padding:16px; border:1px solid #e8e9f0; border-radius:10px; font-size:13px; line-height:1.7; }
+#machineDetails dt { color:#8791a3; }
+#machineDetails dd { min-width:0; margin:0; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
+#machineDetails .badge,#machineDetails .machine-occupation { padding:3px 8px; border-radius:6px; font-size:12px; }
+#machineDetails .machine-card-actions { flex:none; display:flex; justify-content:flex-start; flex-wrap:wrap; gap:8px; padding:16px 24px; margin:0; border-top:1px solid #eeeff5; background:#fff; }
+#machineDetails .machine-card-actions button { min-height:36px; font-size:12px; padding:8px 12px; border-radius:8px; color:#596177; }
+#machineDetails .machine-card-actions [data-machine-action="test"] { background:#f5f3fd; border-color:#e4e1f0; color:var(--p); }
+#machineDetails .machine-card-actions [data-machine-action="delete"] { color:#b34545; }
+#machineDetails .machine-card-actions button:hover { background:#f3f2f9; border-color:#c8c4e6; }
+#machineDetails .machine-card-actions [data-machine-action="delete"]:hover { background:#fff0f0; border-color:#efcccc; }
+#machineDetails :is(button,input):disabled { opacity:.45; cursor:not-allowed; }
+#machineDetails :is(button,input):focus-visible { outline:2px solid var(--p); outline-offset:2px; }
+body:has(#machineDetails[open]) { overflow:hidden; }
+@media(max-width:600px) { #machineDetails { width:100vw; } #machineDetails header { padding:20px; } #machineDetails .machine-detail-body { padding:20px; } #machineDetails .machine-card-actions { padding:14px 20px; } .group-layout .machine-card-list { gap:8px; } }
 
 /* Jira dispatch uses the same management palette and quiet list updates. */
 .jira-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; }
@@ -178,13 +193,26 @@
 .jira-times { font-size:11px; color:#778093; }
 .jira-row-actions { display:flex; flex-wrap:nowrap; align-items:center; justify-content:center; gap:6px; }
 .jira-row-actions button,.jira-row-actions a { flex:none; display:inline-flex; align-items:center; justify-content:center; padding:5px 8px; border:1px solid #e3e5ee; border-radius:7px; background:#fff; color:var(--p); font:inherit; line-height:1.5; text-decoration:none; white-space:nowrap; }
+.jira-history-filter { display:block; width:210px; max-width:100%; }
+#jiraHistoryPanel .jira-table { min-width:1100px; }
+#jiraHistoryPanel .jira-row-actions { flex-wrap:wrap; }
 .jira-row-actions button:hover,.jira-row-actions a:hover { background:#f5f3ff; border-color:#c7c2ed; }
 .jira-pagination { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:18px; color:#8791a3; font-size:12px; }
 .jira-pagination .actions { margin:0; }
 .jira-pagination button { font-size:12px; }
 .jira-pagination button:disabled { opacity:.45; cursor:not-allowed; }
-#jiraDetails, #jiraBlockedReason { width:min(720px,94vw); max-height:85vh; padding:24px; overflow-y:auto; }
-#jiraDetails h2, #jiraBlockedReason h2 { margin:0 40px 16px 0; font-size:18px; }
+#jiraBlockedReason { width:min(720px,94vw); max-height:85vh; padding:24px; overflow-y:auto; }
+#jiraBlockedReason h2 { margin:0 40px 16px 0; font-size:18px; }
+#jiraDetails { width:min(720px,94vw); max-height:85dvh; padding:0; overflow:hidden; border:1px solid #e8e9f0; }
+#jiraDetails[open] { display:grid; grid-template-rows:auto minmax(0,1fr) auto; }
+#jiraDetails header { position:relative; display:block; padding:22px 24px; border-bottom:1px solid #eeeff5; }
+#jiraDetails h2 { margin:0; color:#384356; font-size:18px; }
+#jiraDetails [data-jira-detail-body] { min-height:0; padding:24px; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable; color:#596177; line-height:1.8; overflow-wrap:anywhere; }
+#jiraDetails .meta { color:#8791a3; }
+#jiraDetails [data-jira-detail-body]>.meta:first-child { margin-top:0; }
+#jiraDetails footer { margin:0; padding:16px 24px; border-top:1px solid #eeeff5; }
+#jiraDetails footer button { min-width:80px; padding:9px 14px; border-radius:8px; color:#596177; font-size:13px; }
+@media(max-width:500px) { #jiraDetails header, #jiraDetails [data-jira-detail-body] { padding:18px; } #jiraDetails footer { padding:14px 18px; } }
 #jiraDetails h3 { font-size:14px; margin:24px 0 12px; }
 #jiraDetails dl { display:grid; grid-template-columns:80px minmax(0,1fr); gap:12px; font-size:13px; }
 #jiraDetails dt { color:#778093; }
@@ -192,35 +220,35 @@
 #jiraDetails .jira-receipt { padding:14px; margin-top:10px; border:1px solid #e8e9f0; border-radius:10px; background:#fafbfe; font-size:13px; }
 .jira-receipt small { display:block; color:#8791a3; font-size:11px; margin-top:5px; }
 .jira-receipt p { white-space:pre-wrap; overflow-wrap:anywhere; margin:10px 0 0; }
-#jiraDetails footer, #jiraBlockedReason footer { margin-top:20px; }
+#jiraBlockedReason footer { margin-top:20px; }
 
 /* Jira center uses the same management colors, fields and table surfaces. */
 .jira-catalog { display:grid; gap:18px; }
-.jira-overview,.jira-workspace { min-width:0; background:#fff; border:1px solid var(--line); border-radius:12px; }
-.jira-overview { padding:20px 24px; }
-.jira-center-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; }
-.jira-center-heading h2 { margin:0; font-size:16px; font-weight:650; }
-.jira-center-heading p { margin:6px 0 0; color:#8791a3; font-size:12px; }
+.jira-workspace { min-width:0; background:#fff; border:1px solid var(--line); border-radius:12px; }
+.jira-workspace-header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding-right:24px; border-bottom:1px solid #eeeff5; }
+.jira-workspace-header .jira-view-tabs { min-width:0; overflow-x:auto; overflow-y:hidden; border-bottom:0; }
+.jira-pool-summary { margin-bottom:18px; padding:12px 16px; background:#f8f9fc; border-radius:8px; }
+.jira-summary-label { font-size:12px; color:#8791a3; }
 .jira-refresh-actions { display:flex; align-items:center; gap:12px; flex:none; }
 .jira-refresh-actions>span { font-size:12px; color:#8791a3; }
 .jira-refresh-actions button { height:36px; padding:0 14px; font-size:13px; }
-.jira-metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:24px; margin-top:22px; }
+.jira-metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin-top:8px; }
 .jira-metrics>div { padding-left:20px; border-left:1px solid #eeeff5; }
 .jira-metrics>div:first-child { padding-left:0; border:0; }
-.jira-metrics>div>span { display:block; font-size:12px; color:#778093; }
-.jira-metrics>div>strong { display:block; margin-top:6px; color:#465568; font-size:28px; font-weight:650; font-variant-numeric:tabular-nums; }
+.jira-metrics>div>span { display:inline; font-size:12px; color:#778093; }
+.jira-metrics>div>strong { display:inline; margin-left:10px; color:#465568; font-size:18px; font-weight:650; font-variant-numeric:tabular-nums; }
 .jira-metrics>div:nth-child(2)>strong { color:var(--p); }
 .jira-project-list { grid-column:1/-1; }
 .jira-project-list summary,.jira-schedules summary { cursor:pointer; font-size:12px; color:#778093; }
 .jira-project-list p,.jira-schedules p { display:flex; align-items:baseline; flex-wrap:wrap; gap:8px 18px; margin:10px 0 0; font-size:12px; color:#778093; }
 .jira-project-list p strong,.jira-schedules p strong { color:#596177; font-weight:500; }
 .jira-project-list small { margin-left:auto; color:#8791a3; }
-.jira-schedules { margin-top:18px; padding-top:14px; border-top:1px solid #eeeff5; font-size:12px; color:#8791a3; }
+.jira-schedules { margin-top:10px; font-size:12px; color:#8791a3; }
 .jira-schedules summary span { margin-left:8px; color:#9aa2b1; }
 .jira-view-tabs { display:flex; gap:24px; padding:0 24px; border-bottom:1px solid #eeeff5; }
 .jira-view-tabs button { position:relative; padding:16px 2px; border:0; border-radius:0; background:transparent; color:#778093; font-size:13px; white-space:nowrap; }
 .jira-view-tabs button[aria-pressed=true] { color:var(--p); font-weight:650; }
-.jira-view-tabs button[aria-pressed=true]::after { position:absolute; bottom:-1px; left:0; right:0; height:2px; background:var(--p); content:''; }
+.jira-view-tabs button[aria-pressed=true]::after { position:absolute; bottom:0; left:0; right:0; height:2px; background:var(--p); content:''; }
 .jira-view-tabs button:focus-visible { outline:2px solid var(--p); outline-offset:-4px; }
 .jira-view-panel { padding:20px 24px; min-width:0; }
 .jira-view-panel[hidden] { display:none; }
@@ -269,7 +297,8 @@
 .jira-pool-notice:not(:empty) { padding-bottom:20px; }
 #jiraNotice:empty { display:none; }
 @media(max-width:760px) {
-  .jira-overview { padding:16px; }
+  .jira-workspace-header { gap:8px; padding-right:16px; }
+  .jira-metrics>div>strong { display:block; margin:4px 0 0; }
   .jira-view-panel { padding:16px; }
   .jira-view-tabs { padding:0 16px; gap:22px; overflow-x:auto; }
   .jira-refresh-actions>span { display:none; }
@@ -327,18 +356,84 @@ body:has(#jiraBlockedReason[open]) { overflow:hidden; }
 @media(max-width:500px) { .jira-execution-machines { grid-template-columns:1fr; } .jira-execution-commits { flex-direction:column; gap:8px; } }
 
 
-/* Jira accounts use the same cards and empty state as the role catalog. */
-.content.jira-account-content { grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr)); }
+/* Jira accounts share the management palette with a compact information panel. */
+.content.jira-account-content { grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr)); align-items:stretch; }
 .jira-account-note { grid-column:1/-1; margin:0; color:#7a8293; font-size:13px; }
-.jira-account-card .role-card-heading { padding-right:0; }
-.jira-account-facts { display:grid; grid-template-columns:112px minmax(0,1fr); gap:10px 12px; margin:0; font-size:13px; line-height:1.6; }
+.role-grid .jira-account-card { padding:22px; gap:18px; border-radius:14px; }
+.jira-account-heading { display:flex; align-items:flex-start; gap:12px; width:100%; min-width:0; }
+.jira-account-avatar { display:grid; place-items:center; width:40px; height:40px; flex:none; color:var(--p); background:#f1effc; border-radius:11px; }
+.jira-account-avatar svg { width:25px; height:25px; }
+.jira-account-title { flex:1; min-width:0; }
+.jira-account-title h3 { margin:0 0 7px; color:#384356; font-size:16px; line-height:1.5; overflow-wrap:anywhere; }
+.jira-account-title .group-tag { display:inline-block; max-width:100%; margin:0; overflow-wrap:anywhere; font-size:11px; background:#f4f3f9; color:#7b7593; }
+.jira-account-heading>.badge { flex:none; margin-top:2px; padding:4px 8px; font-size:11px; white-space:nowrap; }
+.jira-account-facts { display:grid; grid-template-columns:104px minmax(0,1fr); gap:12px; width:100%; padding:15px; margin:0; border:1px solid #eeeff5; border-radius:10px; background:#fafbfe; font-size:12px; line-height:1.7; }
 .jira-account-facts dt { color:#8791a3; }
 .jira-account-facts dd { margin:0; color:#494f62; overflow-wrap:anywhere; }
-.jira-account-check { margin-top:auto; padding-top:4px; }
-.jira-account-check p { margin:8px 0 0; color:#a54618; font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
-.jira-account-card .role-card-footer { margin-top:0; }
-.jira-account-card .actions { width:100%; flex-wrap:wrap; }
-.jira-account-card .role-delete { margin-left:auto; }
+.jira-account-check { width:100%; }
+.jira-account-state { display:inline-flex; align-items:center; gap:6px; padding:4px 9px; border-radius:6px; color:#7b8494; background:#f2f3f6; font-size:12px; }
+.jira-account-state i { width:6px; height:6px; flex:none; border-radius:50%; background:currentColor; }
+.jira-account-state.passed { color:#278262; background:#edf8f3; }
+.jira-account-state.failed { color:#b45345; background:#fff1ee; }
+.jira-account-check p { margin:8px 0 0; color:#737c8e; font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
+.role-card.jira-account-card .role-card-footer { margin-top:auto; padding-top:16px; }
+.jira-account-card .actions { display:grid; grid-template-columns:minmax(0,1fr); justify-content:stretch; width:100%; gap:10px; }
+.jira-account-primary-actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.jira-account-secondary-actions { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.jira-account-card .role-card-footer .actions button { min-height:34px; padding:7px 12px; border-radius:8px; color:#596177; font-size:12px; }
+.jira-account-card .role-card-footer .actions .jira-account-reminder { color:var(--p); border-color:#e1dcf5; background:#f6f4ff; }
+.jira-account-secondary-actions button { border-color:transparent; background:transparent; }
+.jira-account-secondary-actions button:hover { background:#f5f6fa; }
+.jira-account-card .role-card-footer .role-delete { margin-left:auto; color:#a57a78; }
+.jira-account-card .role-card-footer .role-delete:hover { color:#b43a32; background:#fff3f2; }
+.jira-account-card button:disabled { opacity:.45; cursor:not-allowed; }
+.jira-account-card button:focus-visible { outline:2px solid var(--p); outline-offset:2px; }
+@media(max-width:500px) {
+  .role-grid .jira-account-card { padding:18px; gap:16px; }
+  .jira-account-heading { gap:10px; }
+  .jira-account-avatar { width:34px; height:34px; }
+  .jira-account-facts { grid-template-columns:94px minmax(0,1fr); gap:10px; padding:12px; }
+}
+
+/* Machine assignment details: fixed header and actions, independently scrolling body. */
+#allocationDialog { width:min(680px,94vw); max-height:88dvh; padding:0; overflow:hidden; border:1px solid #e8e9f0; }
+#allocationDialog .allocation-panel { display:flex; flex-direction:column; max-height:88dvh; }
+#allocationDialog .allocation-header { position:relative; flex:none; display:block; padding:22px 24px; border-bottom:1px solid #eeeff5; }
+#allocationDialog h2 { margin:0; color:#384356; font-size:18px; }
+#allocationDialog .allocation-body { min-height:0; padding:24px; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }
+.allocation-resource { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:20px; color:#8791a3; font-size:12px; }
+.allocation-state { display:inline-flex; align-items:center; gap:7px; padding:6px 10px; border-radius:7px; background:#f2f3f6; color:#7b8494; font-size:12px; line-height:1.6; }
+.allocation-state i { width:6px; height:6px; flex:none; border-radius:50%; background:currentColor; }
+.allocation-state.released { color:#278262; background:#edf8f3; }
+.allocation-state.occupied { color:var(--p); background:#f1effc; }
+.allocation-state.review { color:#a56620; background:#fff6e9; }
+.allocation-machines { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.allocation-machine { min-width:0; padding:18px; border:1px solid #e8e9f0; border-radius:12px; background:#fafbfe; }
+.allocation-machine h3 { margin:0 0 12px; color:#8791a3; font-size:12px; font-weight:500; }
+.allocation-machine strong { display:block; color:#384356; font-size:15px; line-height:1.6; font-weight:600; overflow-wrap:anywhere; }
+.allocation-machine small { display:block; margin-top:10px; color:#9298a7; font-size:11px; line-height:1.7; overflow-wrap:anywhere; }
+.allocation-facts { margin:22px 0 0; font-size:13px; }
+.allocation-facts>div { display:grid; grid-template-columns:80px minmax(0,1fr); gap:16px; padding:14px 0; border-bottom:1px solid #eeeff5; }
+.allocation-facts dt { color:#8791a3; line-height:1.8; }
+.allocation-facts dd { margin:0; color:#596177; line-height:1.8; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
+.allocation-facts .allocation-directory { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; }
+#allocationDialog .allocation-note { margin:20px 0 0; padding:12px 14px; border-radius:8px; background:#f8f9fc; color:#8791a3; font-size:12px; line-height:1.8; }
+#allocationDialog .allocation-waiting { margin:16px 0 0; padding:12px 14px; border-radius:8px; background:#fff7eb; color:#a56620; font-size:12px; line-height:1.8; overflow-wrap:anywhere; }
+#allocationDialog .allocation-message { padding:32px 20px; border:1px solid #eeeff5; border-radius:10px; background:#fafbfe; color:#8791a3; text-align:center; font-size:13px; line-height:1.8; }
+#allocationDialog .allocation-message.is-error { color:#b45345; background:#fff6f3; border-color:#f3e4df; }
+#allocationDialog footer { flex:none; display:flex; justify-content:flex-end; gap:10px; margin:0; padding:16px 24px; border-top:1px solid #eeeff5; }
+#allocationDialog footer button { min-width:80px; padding:9px 14px; border-radius:8px; color:#596177; font-size:13px; }
+#allocationDialog button:disabled { opacity:.45; cursor:not-allowed; }
+#allocationDialog button:focus-visible { outline:2px solid var(--p); outline-offset:2px; }
+@media(max-width:500px) {
+  #allocationDialog .allocation-header { padding:20px; }
+  #allocationDialog .allocation-body { padding:20px; }
+  .allocation-machines { grid-template-columns:1fr; }
+  .allocation-resource { align-items:flex-start; }
+  .allocation-resource>span:first-child { flex:none; padding-top:6px; }
+  .allocation-facts>div { gap:12px; grid-template-columns:70px minmax(0,1fr); }
+  #allocationDialog footer { padding:14px 20px; }
+}
 #jiraAccountDialog { width:min(520px,94vw); }
 #jiraAccountDialog [data-account-error]:empty { display:none; }
 #jiraAccountDialog [data-account-error] { color:#b42318; font-size:13px; }
@@ -368,7 +463,9 @@ body:has(#jiraBlockedReason[open]) { overflow:hidden; }
 #jiraStatistics .jira-stats-group-table td { vertical-align:top; line-height:26px; font-variant-numeric:tabular-nums; }
 #jiraStatistics .jira-stats-group-table [data-stat-category] { padding:0 6px; line-height:26px; }
 #jiraStatistics .jira-table .jira-stat-percent { display:block; margin:2px 0 0; color:#9aa1b0; font-size:11px; line-height:16px; }
-#jiraStatsDetails { width:min(1100px,92vw); max-width:92vw; max-height:85dvh; padding:28px; border:1px solid #e8e9f0; overflow-y:auto; }
+#jiraStatsDetails { width:min(1100px,92vw); max-width:92vw; max-height:85dvh; padding:28px; border:1px solid #e8e9f0; overflow:hidden; }
+#jiraStatsDetails[open] { display:grid; grid-template-rows:auto minmax(0,1fr) auto; }
+#jiraStatsItems { min-height:0; overflow:auto; }
 #jiraStatsDetails::backdrop { background:#22203845; backdrop-filter:blur(2px); }
 #jiraStatsDetails h2 { margin:0 0 22px; color:#384356; }
 .jira-stats-detail-toolbar { display:flex; align-items:flex-end; flex-wrap:wrap; gap:12px 20px; margin-bottom:20px; }
@@ -412,3 +509,13 @@ body:has(#jiraBlockedReason[open]) { overflow:hidden; }
 .jira-pool-scoped th:nth-child(8) { width:9%; }
 .jira-pool-scoped th:nth-child(9) { width:6%; }
 .jira-pool-scoped th:last-child { width:7%; }
+
+/* Independent pagers stay outside horizontally scrolling tables. */
+.jira-pagination { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; font-size:13px; }
+.jira-pagination .actions { align-items:center; }
+.jira-pagination label { display:flex; align-items:center; gap:6px; margin:0; width:auto; font-weight:400; }
+.jira-pagination input { width:72px; }
+.jira-pagination select,.jira-pagination input { padding:6px 8px; }
+#jiraStatsDetails footer,#jiraBlockedReason footer { flex-wrap:wrap; }
+#statsDetailPager,#executionPager { flex:1; }
+.jira-project-list .jira-pagination,.jira-schedules .jira-pagination { padding:12px 0; }

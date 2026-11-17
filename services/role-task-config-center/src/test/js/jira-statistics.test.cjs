@@ -3,12 +3,12 @@ const code=fs.readFileSync('src/main/resources/static/jira-statistics.js','utf8'
 function fixture(){
  const nodes=Object.fromEntries(['#jiraStatistics','#jiraStatsBody','#jiraStatsNotice'].map(k=>[k,{innerHTML:'',textContent:''}]));
  const ctx=vm.createContext({URL,URLSearchParams,location:{href:'http://localhost/?page=jira'},history:{replaceState(){}},setInterval(){},state:{page:'jira'},jiraView:'statistics',groupState:{selected:'',items:[]},$:k=>nodes[k],groupName:id=>id,time:v=>v,esc:v=>String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;')});
- vm.runInContext(code,ctx);return {ctx,nodes,run:s=>vm.runInContext(s,ctx)};
+ vm.runInContext(fs.readFileSync('src/main/resources/static/jira-pagination.js','utf8'),ctx);vm.runInContext(code,ctx);return {ctx,nodes,run:s=>vm.runInContext(s,ctx)};
 }
 const result={summary:{total:2,full:1,limited:1,noSubmission:0,passed:2,blocked:0,other:0},groups:[],developers:[{developer:'<甲>',total:3,full:1,limited:1,noSubmission:0,passed:2,blocked:1}],generatedAt:'now'};
 test('passes, empty denominator and escaped developer names',async()=>{
- const h=fixture();h.ctx.api=async()=>result;await h.run('loadJiraStatistics()');
- assert.match(h.nodes['#jiraStatsBody'].innerHTML,/100.0%/);assert.match(h.nodes['#jiraStatsBody'].innerHTML,/&lt;甲>/);assert.equal(h.run('statsPercent(0,0)'),'—');
+ const h=fixture();h.ctx.jiraView='developers';h.ctx.api=async()=>result;await h.run('loadJiraStatistics()');
+ assert.match(h.nodes['#jiraStatsBody'].innerHTML,/&lt;甲>/);assert.equal(h.run('statsPercent(0,0)'),'—');
 });
 test('late group response cannot overwrite new scope',async()=>{
  const h=fixture();let resolve;h.ctx.api=()=>new Promise(r=>resolve=r);const pending=h.run('loadJiraStatistics()');h.ctx.groupState.selected='next';resolve(result);await pending;assert.equal(h.nodes['#jiraStatsBody'].innerHTML,'');
@@ -20,14 +20,14 @@ test('refresh failure retains previous results',async()=>{
 test('hidden statistics do not request data',async()=>{const h=fixture();h.ctx.jiraView='pool';h.ctx.api=async()=>assert.fail('unexpected request');await h.run('loadJiraStatistics()')});
 
 test('developer total includes non-passing issues and opens unfiltered details',async()=>{
- const h=fixture();h.ctx.api=async()=>result;await h.run('loadJiraStatistics()');
+ const h=fixture();h.ctx.jiraView='developers';h.ctx.api=async()=>result;await h.run('loadJiraStatistics()');
  const html=h.nodes['#jiraStatsBody'].innerHTML;
  assert.match(html,/<th>开发人<\/th><th>Jira 总数<\/th>/);
  assert.match(html,/data-stat-category="" data-stat-group="" data-stat-developer="&lt;甲>">3<\/button>/);
 });
 
 test('blocked-only developers remain visible with a filtered detail button',async()=>{
- const h=fixture();h.ctx.api=async()=>({...result,developers:[{developer:'乙',total:2,full:0,limited:0,noSubmission:0,passed:0,blocked:2}]});
+ const h=fixture();h.ctx.jiraView='developers';h.ctx.api=async()=>({...result,developers:[{developer:'乙',total:2,full:0,limited:0,noSubmission:0,passed:0,blocked:2}]});
  await h.run('loadJiraStatistics()');
  const html=h.nodes['#jiraStatsBody'].innerHTML;
  assert.match(html,/<th>流程通过总数<\/th><th>阻断<\/th>/);
@@ -52,9 +52,10 @@ test('manual completion contributes to total and developer passes with its own c
  const html=h.nodes['#jiraStatsBody'].innerHTML;
  assert.match(html,/100.0%/);
  assert.match(html,/data-stat-category="passed" data-stat-group="" data-stat-developer="">3<\/button>/);
- assert.match(html,/data-stat-category="passed" data-stat-group="" data-stat-developer="甲">3<\/button>/);
+ h.ctx.jiraView='developers';await h.run('loadJiraStatistics()');
+ assert.match(h.nodes['#jiraStatsBody'].innerHTML,/data-stat-category="passed" data-stat-group="" data-stat-developer="甲">3<\/button>/);
  assert.match(html,/data-stat-category="completed_no_submission" data-stat-group="group" data-stat-developer="">1<\/button>/);
- assert.match(html,/data-stat-category="completed_no_submission" data-stat-group="" data-stat-developer="甲">1<\/button>/);
+ assert.match(h.nodes['#jiraStatsBody'].innerHTML,/data-stat-category="completed_no_submission" data-stat-group="" data-stat-developer="甲">1<\/button>/);
 });
 
 test('legacy rework remains readable without a business-verdict filter',async()=>{
@@ -75,4 +76,17 @@ test('flow pass rate excludes pending and cancellation and sends SOP filter',asy
  assert.match(url,/sopId=selected-sop/);
  assert.match(h.nodes['#jiraStatsBody'].innerHTML,/66.7%/);
  assert.doesNotMatch(h.nodes['#jiraStatsBody'].innerHTML,/NaN/);
+});
+
+test('developer tab has independent pages and the results tab retains full summary',async()=>{
+ const h=fixture();
+ h.ctx.api=async()=>({...result,developers:Array.from({length:45},(_,i)=>({developer:'开发人'+String(i).padStart(2,'0'),total:1,passed:1}))});
+ await h.run('loadJiraStatistics()');assert.doesNotMatch(h.nodes['#jiraStatsBody'].innerHTML,/<h3>开发人统计/);
+ h.ctx.jiraView='developers';h.run("jiraPage('developers').page=2");await h.run('loadJiraStatistics()');
+ const html=h.nodes['#jiraStatsBody'].innerHTML;
+ assert.match(html,/开发人10/);assert.doesNotMatch(html,/开发人00|开发人20|jira-stats-metrics/);
+ assert.equal(h.run("jiraPage('developers').total"),45);
+ h.ctx.jiraView='statistics';await h.run('loadJiraStatistics()');
+ assert.match(h.nodes['#jiraStatsBody'].innerHTML,/jira-stats-metrics/);
+ assert.equal(h.run("jiraPage('developers').page"),2);
 });

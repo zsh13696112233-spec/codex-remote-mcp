@@ -10,7 +10,8 @@ def public_text(value: Any) -> str:
     # 自由文字中的常见凭据、地址及内部标识不进入监控详情。
     value = re.sub(r"(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", "[已隐藏凭据]", value)
     value = re.sub(r"(?i)\bBearer\s+\S+", "[已隐藏凭据]", value)
-    value = re.sub(r'''(?im)(["']?(?:[\w-]*(?:token|password|passwd|secret|api[_-]?key)|authorization|thread[_-]?id|turn[_-]?id|session[_-]?id|agent[_-]?id)["']?\s*[:=]\s*).*$''', r"\1[已隐藏]", value)
+    # 凭据字段的任意前缀只从词首匹配，避免长工具输出逐字重试产生平方级回溯。
+    value = re.sub(r'''(?im)(["']?(?:(?<![\w-])[\w-]*(?:token|password|passwd|secret|api[_-]?key)|authorization|thread[_-]?id|turn[_-]?id|session[_-]?id|agent[_-]?id)["']?\s*[:=]\s*).*$''', r"\1[已隐藏]", value)
     value = re.sub(r"\bsk-[\w-]+", "[已隐藏凭据]", value)
     value = re.sub(r"(?i)(?:https?|wss?|ssh)://\S+", "[已隐藏地址]", value)
     value = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b", "[已隐藏地址]", value)

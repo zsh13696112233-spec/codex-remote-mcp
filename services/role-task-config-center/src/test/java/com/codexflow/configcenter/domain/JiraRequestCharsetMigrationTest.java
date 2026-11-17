@@ -25,7 +25,7 @@ class JiraRequestCharsetMigrationTest {
       sql.executeUpdate(
           "INSERT INTO codex_jira_dingtalk_requests(client_id,message_id,request_id,message_json) "
               + "VALUES ('client','old-message','old','{}')");
-      var flyway = Flyway.configure().dataSource(url, "sa", "").load();
+      var flyway = Flyway.configure().dataSource(url, "sa", "").target("51").load();
       assertThat(flyway.migrate().migrationsExecuted).isEqualTo(1);
       flyway.validate();
       assertThat(flyway.migrate().migrationsExecuted).isZero();

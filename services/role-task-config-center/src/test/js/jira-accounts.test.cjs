@@ -42,3 +42,114 @@ test('cards and SOP choices show login names instead of stable identifiers or al
   assert.match(h.run("jiraAccountOptions('a','ok')"),/原账号不可用/);
   assert.doesNotMatch(h.run("jiraAccountOptions('a','ok')"),/JIRAUSER123|local-alias/);
 });
+
+test('reminder target choices require available group but allow directory people',()=>{
+  const h=fixture();h.context.targets=[{id:'g',targetType:'GROUP',enabled:true,available:true,displayName:'<群>'},{id:'off',targetType:'GROUP',enabled:false,available:true,displayName:'off'},{id:'p',targetType:'PERSON',enabled:false,available:true,displayName:'人员'},{id:'gone',targetType:'PERSON',available:false}];
+  assert.match(h.run("jiraReminderOptions(targets,'GROUP','g')"),/&lt;群&gt;/);
+  assert.doesNotMatch(h.run("jiraReminderOptions(targets,'GROUP','')"),/off/);
+  assert.match(h.run("jiraReminderOptions(targets,'PERSON','p')"),/人员/);
+  assert.match(h.run("jiraReminderOptions(targets,'PERSON','gone')"),/原对象不可用/);
+});
+test('reminder status shows business wording and explicit timezone',()=>{
+  const h=fixture();
+  assert.match(h.run("jiraReminderStatus({phase:'available'})"),/有任务，已重置/);
+  assert.match(h.run("jiraReminderStatus({phase:'outside'})"),/不在生效时段/);
+  assert.match(h.run("jiraReminderStatus({phase:'unknown'})"),/等待新的完整采集结果/);
+  assert.match(h.run("jiraReminderStatus({phase:'waiting',nextAt:'2026-11-12T01:00:00Z'})"),/09:00:00.*北京时间/);
+  assert.match(h.run("jiraReminderWindowRow({start:'22:00',end:'02:00'})"),/value="22:00".*value="02:00"/);
+});
+test('account card exposes the reminder configuration action',()=>{
+  const h=fixture();assert.match(h.run("jiraAccountCard({id:'account',name:'test'})"),/data-jira-reminder="account"/);
+});
+
+function reminderFixture(){
+  const h=fixture();
+  const fields={enabled:{checked:true},groupId:{value:'group'},personId:{value:'person'}};
+  const controls=Object.fromEntries(['[data-reminder-person-search]','[data-reminder-person-matches]','[data-reminder-close]','[data-add-window]','[data-windows]','[data-refresh-status]','[data-reminder-status]','[data-reminder-error]','[type=submit]'].map(k=>[k,{disabled:false,textContent:''}]));
+  const row={querySelector:selector=>({value:selector==='[data-start]'?'09:00':'18:00'})};
+  const form={elements:{namedItem:name=>fields[name]},querySelector:key=>controls[key],querySelectorAll:key=>key==='[name=day]:checked'?[{value:'1'}]:[row]};
+  const dialog={open:false,innerHTML:'',setAttribute(){},showModal(){this.open=true},close(){this.open=false},querySelector:key=>key==='form'?form:controls[key]};
+  h.context.document.querySelector=()=>dialog;
+  h.context.toast=()=>{};
+  const config={enabled:true,version:2,days:[1],windows:[{start:'09:00',end:'18:00'}],groupId:'group',personId:'person',status:{phase:'waiting'}};
+  h.context.api=async path=>path==='/api/dingtalk/targets'?[]:config;
+  return {...h,form,controls,dialog,config};
+}
+test('reminder form prevents duplicate save and retains input on failure',async()=>{
+  const h=reminderFixture();await h.run("editJiraReminder({id:'account',name:'账号'})");
+  let reject,requests=[];
+  h.context.api=(path,options)=>{requests.push({path,body:JSON.parse(options.body)});return new Promise((resolve,no)=>reject=no)};
+  const pending=h.form.onsubmit({preventDefault(){}});
+  await h.form.onsubmit({preventDefault(){}});
+  assert.equal(requests.length,1);
+  assert.deepEqual(requests[0].body,{version:2,enabled:true,groupId:'group',personId:'person',days:[1],windows:[{start:'09:00',end:'18:00'}]});
+  reject(Error('提醒配置已变化，请刷新后重试。'));await pending;
+  assert.equal(h.dialog.open,true);assert.equal(h.controls['[type=submit]'].disabled,false);
+  assert.match(h.controls['[data-reminder-error]'].textContent,/配置已变化/);
+  assert.equal(h.form.elements.namedItem('personId').value,'person');
+});
+test('closing reminder while loading prevents a late form from reopening it',async()=>{
+  const h=reminderFixture();let finish;
+  h.context.api=path=>path==='/api/dingtalk/targets'?Promise.resolve([]):new Promise(resolve=>finish=resolve);
+  const pending=h.run("editJiraReminder({id:'account',name:'账号'})");h.dialog.close();
+  finish(h.config);await pending;
+  assert.equal(h.dialog.open,false);assert.doesNotMatch(h.dialog.innerHTML,/<form>/);
+});
+
+test('reminder search matches partial names and departments locally with normalized keywords',()=>{
+  const h=fixture();
+  h.context.people=[
+    {id:'zhang',targetType:'PERSON',available:true,displayName:'张小三',departmentDisplay:'游戏研发部'},
+    {id:'alice',targetType:'PERSON',available:true,displayName:'Alice Chen',departmentDisplay:'Planning'},
+    {id:'unavailable',targetType:'PERSON',available:false,displayName:'张小三'},
+    {id:'group',targetType:'GROUP',available:true,enabled:true,displayName:'张小三'}
+  ];
+  const ids=q=>Array.from(h.run(`jiraReminderTargets(people,'PERSON',${JSON.stringify(q)}).map(t=>t.id)`));
+  assert.deepEqual(ids('小三'),['zhang']);
+  assert.deepEqual(ids('  张  研发  '),['zhang']);
+  assert.deepEqual(ids('ｌＩＣＥ'),['alice']);
+  assert.deepEqual(ids('planning chen'),['alice']);
+  assert.deepEqual(ids('张 Planning'),[]);
+  assert.deepEqual(ids('   '),['zhang','alice']);
+});
+test('search preserves selected IDs even when filtered out and distinguishes unavailable people',()=>{
+  const h=fixture();h.context.people=[
+    {id:'one',targetType:'PERSON',available:true,displayName:'张三',departmentDisplay:'研发'},
+    {id:'two',targetType:'PERSON',available:true,displayName:'张三',departmentDisplay:'策划'},
+    {id:'gone',targetType:'PERSON',available:false,displayName:'李四'}
+  ];
+  const html=h.run("jiraReminderOptions(people,'PERSON','one','策划')");
+  assert.match(html,/<option value="one" selected>张三（研发）（已选择）/);
+  assert.match(html,/<option value="two" >张三（策划）/);
+  assert.equal((html.match(/value="one"/g)||[]).length,1);
+  assert.match(h.run("jiraReminderOptions(people,'PERSON','one','无人匹配')"),/未找到匹配人员.*value="one" selected/);
+  assert.match(h.run("jiraReminderOptions(people,'PERSON','gone','张')"),/原对象不可用/);
+});
+test('typing, clearing and Enter never request the backend or change the current recipient',async()=>{
+  const h=reminderFixture();
+  let requests=0;
+  const people=[{id:'person',targetType:'PERSON',available:true,displayName:'张三',departmentDisplay:'研发'},
+    {id:'second',targetType:'PERSON',available:true,displayName:'李四',departmentDisplay:'策划'}];
+  h.context.api=async path=>{requests++;return path==='/api/dingtalk/targets'?people:h.config};
+  await h.run("editJiraReminder({id:'account',name:'账号'})");
+  assert.equal(requests,2);
+  const search=h.controls['[data-reminder-person-search]'],select=h.form.elements.namedItem('personId'),hint=h.controls['[data-reminder-person-matches]'];
+  search.value='策划';search.oninput();
+  assert.match(select.innerHTML,/value="second"/);assert.equal(select.value,'person');
+  assert.equal(hint.textContent,'匹配 1 位人员');
+  search.value='不存在';search.oninput();
+  assert.equal(hint.textContent,'未找到匹配人员');assert.equal(select.value,'person');
+  assert.doesNotMatch(select.innerHTML,/value="second"/);
+  search.value='';search.oninput();
+  assert.equal(hint.textContent,'');assert.match(select.innerHTML,/value="second"/);
+  let prevented=0;search.onkeydown({key:'Enter',isComposing:false,preventDefault(){prevented++}});
+  search.onkeydown({key:'Enter',isComposing:true,preventDefault(){prevented++}});
+  assert.equal(prevented,1);assert.equal(requests,2);
+  select.value='second';search.value='张';search.oninput();
+  assert.equal(select.value,'second');assert.match(select.innerHTML,/value="second" selected/);
+  let submitted;
+  h.context.api=async (path,options)=>{submitted=JSON.parse(options.body);return {...h.config,version:3}};
+  await h.form.onsubmit({preventDefault(){}});
+  assert.equal(submitted.personId,'second');
+  assert.equal(Object.hasOwn(submitted,'keyword'),false);
+});

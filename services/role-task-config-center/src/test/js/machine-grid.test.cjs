@@ -134,3 +134,22 @@ test('restart rejection does not pretend to release the machine and remains retr
   assert.deepEqual(messages,['机器占用已变化']);
   assert.equal(h.machine.occupation.state,'review');assert.equal(h.run('pendingMachineActions.size'),0);
 });
+
+test('debug priority is executor-only and saving is deduplicated with failure rollback',async()=>{
+  const h=fixture();
+  assert.equal(h.run('machineDebugPriorityHtml(machine)'),'');
+  h.machine.capabilities=['executor'];h.machine.debugPriority=true;
+  assert.match(h.run('machineCard(machine,"executor")'),/调试优先/);
+  assert.match(h.run('machineDebugPriorityHtml(machine)'),/checked/);
+  h.c.input={dataset:{machineDebugPriority:'one'},checked:false};
+  let resolve,calls=0;
+  h.c.api=(url,options)=>{calls++;assert.equal(url,'/api/agents/one/debug-priority');assert.deepEqual(JSON.parse(options.body),{debugPriority:false});return new Promise(r=>resolve=r)};
+  const pending=h.run('saveMachineDebugPriority(input)');
+  await h.run('saveMachineDebugPriority(input)');assert.equal(calls,1);
+  resolve({debugPriority:false});await pending;assert.equal(h.machine.debugPriority,false);
+  h.c.api=async()=>{throw Error('offline')};h.c.input.checked=true;
+  await h.run('saveMachineDebugPriority(input)');assert.equal(h.machine.debugPriority,false);assert.equal(h.c.input.checked,false);assert.equal(h.c.input.disabled,false);
+  assert.doesNotMatch(h.run('machineDebugPriorityHtml(machine)'),/checked|disabled/);
+  h.c.api=async()=>({agents:[{...h.machine,debugPriority:true}]});await h.run('refreshMachineStatuses()');
+  assert.equal(h.c.state.agents[0].debugPriority,true);
+});

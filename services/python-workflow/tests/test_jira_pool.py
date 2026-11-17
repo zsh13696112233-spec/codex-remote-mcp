@@ -31,6 +31,68 @@ class PoolTests(unittest.TestCase):
                 db.execute("INSERT INTO jira_pool_items(request_id,server_key,issue_key,title) VALUES(?,'http://jira.test',?,'标题')", (request, key))
         return request
 
+    def test_numbered_pages_keep_full_totals_and_collections_beyond_fifty(self):
+        self.batch([f'TEST-{i}' for i in range(45)])
+        for i in range(52):
+            self.batch([])
+        first = board(self.store, page=1, limit=20, collection_page=1, collection_limit=20)
+        second = board(self.store, page=2, limit=20, collection_page=3, collection_limit=20)
+        self.assertEqual((first['total'], len(first['items']), first['page']), (45, 20, 1))
+        self.assertEqual(second['collectionPagination'], {'total': 53, 'page': 3, 'pageSize': 20})
+        self.assertEqual(len(second['collections']), 13)
+        self.assertFalse({r['id'] for r in first['items']} & {r['id'] for r in second['items']})
+        self.assertEqual(first['projects'], second['projects'])
+        last = board(self.store, page=999, limit=20)
+        self.assertEqual((last['page'], len(last['items'])), (3, 5))
+        empty = board(self.store, page=3, project='NONE')
+        self.assertEqual((empty['total'], empty['page'], empty['items']), (0, 1, []))
+        for kwargs in ({'page': 0}, {'page': 1, 'before': 2}, {'collection_page': -1}, {'collection_limit': 101}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                board(self.store, **kwargs)
+
+    def test_reservation_orders_priorities_then_insertion_order(self):
+        priorities = [None, 'High', 'P4', 'P2', 'P0', 'P3', 'P1', 'P0', ' p1 ', '']
+        keys = [f'TEST-{i + 1}' for i in range(len(priorities))]
+        request = self.batch(keys)
+        with self.store._connect() as db:
+            for key, priority in zip(keys, priorities):
+                if priority is not None:
+                    db.execute('UPDATE jira_pool_items SET details_json=? WHERE request_id=? AND issue_key=?',
+                               (json.dumps({'priority': priority}), request, key))
+        selected = [reserve(self.store, request, str(uuid.uuid4()))['issueKey'] for _ in keys]
+        self.assertEqual(selected, ['TEST-5', 'TEST-8', 'TEST-7', 'TEST-9', 'TEST-4',
+                                    'TEST-6', 'TEST-3', 'TEST-1', 'TEST-2', 'TEST-10'])
+        self.assertIsNone(reserve(self.store, request, str(uuid.uuid4())))
+
+    def test_priority_reservation_skips_occupied_issue_and_keeps_existing_reservation(self):
+        occupied = self.batch(['TEST-1'])
+        reserve(self.store, occupied, str(uuid.uuid4()))
+        request = self.batch(['TEST-3', 'TEST-2', 'TEST-1'])
+        with self.store._connect() as db:
+            for key, priority in [('TEST-1', 'P0'), ('TEST-2', 'P1'), ('TEST-3', 'P2')]:
+                db.execute('UPDATE jira_pool_items SET details_json=? WHERE request_id=? AND issue_key=?',
+                           (json.dumps({'priority': priority}), request, key))
+        identifier = str(uuid.uuid4())
+        selected = reserve(self.store, request, identifier)
+        self.assertEqual(selected['issueKey'], 'TEST-2')
+        with self.store._connect() as db:
+            db.execute('UPDATE jira_pool_items SET details_json=? WHERE request_id=? AND issue_key=?',
+                       (json.dumps({'priority': 'P0'}), request, 'TEST-3'))
+        self.assertEqual(reserve(self.store, request, identifier), selected)
+        self.assertEqual(reserve(self.store, request, str(uuid.uuid4()))['issueKey'], 'TEST-3')
+
+    def test_manual_priority_selection_stays_within_request_and_selects_only_once(self):
+        other = self.batch(['TEST-1'])
+        request = self.batch(['TEST-2', 'TEST-3'], source='web')
+        with self.store._connect() as db:
+            for batch, key, priority in [(other, 'TEST-1', 'P0'), (request, 'TEST-2', 'P4'),
+                                          (request, 'TEST-3', 'P1')]:
+                db.execute('UPDATE jira_pool_items SET details_json=? WHERE request_id=? AND issue_key=?',
+                           (json.dumps({'priority': priority}), batch, key))
+        self.assertEqual(reserve(self.store, request, str(uuid.uuid4()))['issueKey'], 'TEST-3')
+        self.assertIsNone(reserve(self.store, request, str(uuid.uuid4())))
+        self.assertEqual(reserve(self.store, other, str(uuid.uuid4()))['issueKey'], 'TEST-1')
+
     def test_reservation_cannot_be_bound_to_a_different_sop(self):
         request = self.batch(['TEST-1'])
         sop = str(uuid.uuid4())

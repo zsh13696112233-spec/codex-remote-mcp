@@ -4,21 +4,39 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>交付文档</title>
-  <link rel="stylesheet" href="document.css">
+  <link rel="stylesheet" href="document.css?v=20261113-wait-animation-8">
   <script defer src="vendor/marked-17.0.1.js"></script>
   <script defer src="vendor/purify-3.3.3.min.js"></script>
   <script defer src="document.js"></script>
-</head>
+  <script defer src="document-chat.js?v=20261113-wait-animation-8"></script>
+<script defer src="document-workspace.js?v=20261113-preview-scroll-6"></script></head>
 <body>
-  <header><a id="back" href="/">返回运行详情</a><button id="refresh" type="button">刷新文档</button></header>
+  <header><a id="back" href="/">返回运行详情</a><button id="refresh" type="button">刷新文档</button><button id="toggle-resources" type="button">资料</button><button id="discuss" type="button" disabled>继续沟通</button></header>
   <main>
-    <p class="eyebrow">交付文档 · 最新保存版本</p>
+    <p id="jira-info" hidden></p><p class="eyebrow">交付文档 · 最新保存版本</p>
     <h1 id="title">正在读取文档…</h1>
     <p id="metadata"></p>
     <p id="status" role="status">正在加载</p>
     <article id="content" aria-label="文档正文"></article>
-  </main>
+    <section id="discussion" hidden aria-labelledby="discussion-title">
+      <div class="discussion-heading">
+        <span class="discussion-icon" aria-hidden="true">↔</span>
+        <div><h2 id="discussion-title">继续沟通</h2><p>围绕这份文档，向原执行者提问或提出修改</p></div>
+      </div>
+      <p id="chat-status" role="status">正在读取沟通状态…</p>
+      <div id="chat-messages" aria-live="polite" aria-label="沟通记录" tabindex="0"></div>
+      <div class="chat-composer"><input id="upload" type="file" multiple accept=".txt,image/png,image/jpeg,image/webp"><p id="selected-files"></p>
+        <label for="chat-text">你的消息</label>
+        <textarea id="chat-text" maxlength="4000" rows="2" placeholder="描述你的问题，或希望调整的内容…" aria-describedby="chat-hint"></textarea>
+        <div class="chat-composer-footer">
+          <span id="chat-hint">支持 TXT、PNG、JPEG、WebP · Enter 发送，Shift+Enter 换行</span>
+          <button id="chat-send" type="button" disabled>发送消息</button>
+        </div>
+      </div>
+    </section>
+  <aside id="resources" hidden><h2>文档与资料</h2><div id="versions"></div><h3>上传附件</h3><div id="files"></div></aside>
+  </main><dialog id="preview"><div class="preview-toolbar"><button id="close-preview" type="button">关闭预览</button></div><div id="preview-body"></div></dialog>
 </body>
 </html>

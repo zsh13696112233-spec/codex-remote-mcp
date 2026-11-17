@@ -151,6 +151,8 @@ async def collect(client: Any, cwd: str, document: Any, denied_paths=()) -> dict
 
 
 def initialize(connection: sqlite3.Connection) -> None:
+    from workflow_document_chat import initialize
+    initialize(connection)
     columns = {row['name'] for row in connection.execute('PRAGMA table_info(workflow_nodes)')}
     if 'display_documents' not in columns:
         connection.execute('ALTER TABLE workflow_nodes ADD COLUMN display_documents INTEGER NOT NULL DEFAULT 0')
@@ -191,6 +193,8 @@ def save(connection: sqlite3.Connection, workflow_id: str, node_id: str, source_
     old = connection.execute('''SELECT * FROM workflow_documents WHERE workflow_id=? AND node_id=?
         ORDER BY CASE WHEN source_key='@main' THEN 0 ELSE 1 END, removed, rowid LIMIT 1''',
         (workflow_id, node_id)).fetchone()
+    if not old:
+        connection.execute('INSERT OR IGNORE INTO document_chat_origins(workflow_id,document_id) VALUES(?,?)', (workflow_id, str(uuid.uuid5(uuid.NAMESPACE_URL, f'{workflow_id}/{node_id}/@main'))))
     document_id = old['document_id'] if old else str(uuid.uuid5(uuid.NAMESPACE_URL, f'{workflow_id}/{node_id}/@main'))
     content = item.get('content', old['content'] if old else None)
     name = old['name'] if old and item.get('error') else item['name']
@@ -280,6 +284,8 @@ def save_many(connection: sqlite3.Connection, workflow_id: str, node_id: str, so
     for item in items:
         key = '@main' if semi and item['primary'] else hashlib.sha256((node['agent_id'] + '/' + item['sourceKey']).encode()).hexdigest()
         document_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f'{workflow_id}/{node_id}/{key}'))
+        if not connection.execute('SELECT 1 FROM workflow_documents WHERE workflow_id=? AND document_id=?', (workflow_id, document_id)).fetchone():
+            connection.execute('INSERT OR IGNORE INTO document_chat_origins(workflow_id,document_id) VALUES(?,?)', (workflow_id, document_id))
         previous = connection.execute("""SELECT content,format,revision FROM workflow_documents
             WHERE workflow_id=? AND source_key=? AND (? IS NULL OR node_id=?)
             AND content IS NOT NULL ORDER BY updated_at DESC,rowid DESC LIMIT 1""",

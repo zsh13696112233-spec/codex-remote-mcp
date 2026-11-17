@@ -1,4 +1,5 @@
 import contextlib
+import asyncio
 import io
 from pathlib import Path
 import socket
@@ -13,6 +14,65 @@ from workflow_gateway import main
 
 
 class GatewayStartupTests(unittest.TestCase):
+    def test_open_event_stream_does_not_block_application_shutdown(self):
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.responses import StreamingResponse
+        from starlette.routing import Route
+
+        events = []
+        server = None
+        client_task = None
+        server_class = uvicorn.Server
+
+        async def stream(request):
+            async def generate():
+                try:
+                    yield ': keep-alive\n\n'
+                    await asyncio.Event().wait()
+                finally:
+                    events.append('stream_closed')
+            return StreamingResponse(generate(), media_type='text/event-stream')
+
+        async def connect():
+            while not server.started:
+                await asyncio.sleep(0.01)
+            port = server.servers[0].sockets[0].getsockname()[1]
+            reader, writer = await asyncio.open_connection('127.0.0.1', port)
+            try:
+                writer.write(b'GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                await writer.drain()
+                await reader.readuntil(b': keep-alive')
+                server.should_exit = True
+                await asyncio.wait_for(reader.read(), timeout=5)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        @contextlib.asynccontextmanager
+        async def lifespan(app):
+            nonlocal client_task
+            client_task = asyncio.create_task(connect())
+            yield
+            await client_task
+            events.append('stopped')
+
+        def build_server(config):
+            nonlocal server
+            self.assertEqual(config.timeout_graceful_shutdown, 10)
+            config.timeout_graceful_shutdown = 0.1
+            server = server_class(config)
+            return server
+
+        with patch('sys.argv', ['gateway', '--host', '127.0.0.1', '--port', '0']), \
+                patch('workflow_gateway.create_app', return_value=Starlette(
+                    routes=[Route('/events', stream)], lifespan=lifespan)), \
+                patch('workflow_gateway.uvicorn.Server', side_effect=build_server):
+            main()
+        self.assertEqual(events, ['stream_closed', 'stopped'])
+        self.assertTrue(client_task.done())
+        client_task.result()
+
     def test_duplicate_cli_exits_before_creating_database(self):
         with tempfile.TemporaryDirectory() as directory, socket.socket() as occupied:
             occupied.bind(('127.0.0.1', 0))

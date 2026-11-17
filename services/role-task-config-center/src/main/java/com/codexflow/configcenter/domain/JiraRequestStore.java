@@ -3,6 +3,7 @@ package com.codexflow.configcenter.domain;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -66,6 +67,38 @@ public class JiraRequestStore {
     return row.toString();
   }
 
+  private String snapshot(ObjectNode value) {
+    String encoded = value.toString();
+    String id;
+    try {
+      id =
+          java.util.HexFormat.of()
+              .formatHex(
+                  java.security.MessageDigest.getInstance("SHA-256")
+                      .digest(encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    } catch (java.security.NoSuchAlgorithmException error) {
+      throw new IllegalStateException("无法计算派发配置摘要。", error);
+    }
+    // enqueue 已持有全局写锁，相同配置只写一次；快照后续不可修改。
+    if (jdbc.queryForList("SELECT id FROM codex_jira_request_specs WHERE id=?", String.class, id)
+        .isEmpty()) {
+      jdbc.update("INSERT INTO codex_jira_request_specs(id,spec_json) VALUES(?,?)", id, encoded);
+    }
+    return id;
+  }
+
+  private tools.jackson.databind.JsonNode requestSpec(Map<String, Object> row) {
+    Object snapshotId = row.get("spec_snapshot_id");
+    String encoded =
+        snapshotId == null
+            ? row.get("spec_json").toString()
+            : jdbc.queryForObject(
+                "SELECT spec_json FROM codex_jira_request_specs WHERE id=?",
+                String.class,
+                snapshotId);
+    return json.read(encoded);
+  }
+
   @Transactional
   public ObjectNode enqueue(String taskId, String source, String token) {
     jdbc.queryForObject(
@@ -86,11 +119,11 @@ public class JiraRequestStore {
     String id = UUID.randomUUID().toString();
     var now = Timestamp.from(Instant.now());
     jdbc.update(
-        "INSERT INTO codex_jira_requests(id,task_definition_id,source,spec_json,schedule_json,state,created_at,updated_at) VALUES(?,?,?,?,?,'pending',?,?)",
+        "INSERT INTO codex_jira_requests(id,task_definition_id,source,spec_json,spec_snapshot_id,schedule_json,state,created_at,updated_at) VALUES(?,?,?,'{}',?,?,'pending',?,?)",
         id,
         taskId,
         source,
-        value.toString(),
+        snapshot(value),
         scheduleValue,
         now,
         now);
@@ -129,7 +162,7 @@ public class JiraRequestStore {
             .put("source", r.get("source").toString())
             .put("state", r.get("state").toString())
             .put("reason", r.get("reason").toString());
-    out.set("spec", json.read(r.get("spec_json").toString()));
+    out.set("spec", requestSpec(r));
     if (r.get("reservation_id") != null)
       out.put("reservationId", r.get("reservation_id").toString());
     if (r.get("workflow_id") != null) {
@@ -159,8 +192,7 @@ public class JiraRequestStore {
   @Transactional
   public void validate(String id) {
     var r = jdbc.queryForMap("SELECT * FROM codex_jira_requests WHERE id=? FOR UPDATE", id);
-    if (!json.read(r.get("spec_json").toString())
-        .equals(spec(r.get("task_definition_id").toString())))
+    if (!requestSpec(r).equals(spec(r.get("task_definition_id").toString())))
       throw new ConflictFailure("任务配置已变化，旧待办停止派发。");
     if (r.get("schedule_json") != null
         && !r.get("schedule_json").equals(schedule(r.get("task_definition_id").toString())))

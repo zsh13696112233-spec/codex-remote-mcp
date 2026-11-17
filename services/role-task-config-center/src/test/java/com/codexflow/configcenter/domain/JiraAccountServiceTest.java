@@ -82,6 +82,28 @@ class JiraAccountServiceTest extends GroupedFixtureSupport {
   }
 
   @Test
+  void sharedPendingSnapshotPreventsAccountDeletion() {
+    String id = UUID.randomUUID().toString(), request = UUID.randomUUID().toString();
+    String snapshot = UUID.randomUUID().toString();
+    jdbc.update(
+        "INSERT INTO codex_jira_request_specs(id,spec_json) VALUES(?,?)",
+        snapshot,
+        "{\"jira\":{\"connectionId\":\"" + id + "\"}}");
+    jdbc.update(
+        "INSERT INTO codex_jira_requests(id,task_definition_id,source,spec_json,spec_snapshot_id,state) VALUES(?,?,'schedule','{}',?,'waiting')",
+        request,
+        UUID.randomUUID().toString(),
+        snapshot);
+    try {
+      assertThatThrownBy(() -> accounts.delete(id, 1)).hasMessageContaining("待派发");
+      verify(groupGateway, never()).delete("/jira-accounts/" + id + "?version=1");
+    } finally {
+      jdbc.update("DELETE FROM codex_jira_requests WHERE id=?", request);
+      jdbc.update("DELETE FROM codex_jira_request_specs WHERE id=?", snapshot);
+    }
+  }
+
+  @Test
   void forwardsOnlyVersionedDeletionAndNeverStoresTokenInMysql() {
     String id = UUID.randomUUID().toString();
     var response = JsonNodeFactory.instance.objectNode().put("deleted", true);

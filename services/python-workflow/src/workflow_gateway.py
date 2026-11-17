@@ -1806,6 +1806,8 @@ async def manage_machines(request: Request) -> Response:
             result = {"valid": True}
         elif request.method == "DELETE" and path.startswith("/agents/"):
             result = await _database_call(registry.delete_agent, key)
+        elif path.endswith("/debug-priority"):
+            result = await _database_call(registry.save_debug_priority, body, key)
         elif path.endswith("/remark"):
             result = await _database_call(registry.save_remark, body, key)
         elif path.endswith("/confirm-restarted"):
@@ -2290,8 +2292,12 @@ def create_app(
     from mcp_routes import mcp_routes
     mcps = McpDeployment(gateway)
 
+    from workflow_document_chat import messages as document_messages, workspace as document_workspace
+
     @asynccontextmanager
     async def lifespan(_: Starlette):
+        with store._connect() as connection:
+            connection.execute("UPDATE document_chat_messages SET state='uncertain',error='服务已重启，请核对原执行情况；未自动重发。' WHERE state='running'")
         await skills.start()
         try:
             await mcps.start()
@@ -2300,6 +2306,9 @@ def create_app(
         finally:
             await mcps.stop()
             await skills.stop()
+            for task in list(getattr(gateway, '_document_chat_tasks', set())):
+                task.cancel()
+            await asyncio.gather(*getattr(gateway, '_document_chat_tasks', set()), return_exceptions=True)
             await gateway.stop()
             try:
                 await gateway.event_batcher.close()
@@ -2308,6 +2317,8 @@ def create_app(
 
     app = Starlette(
         routes=[
+            Route("/workflows/{workflow_id}/documents/{document_id}/messages", document_messages, methods=["GET", "POST"]),
+            Route("/workflows/{workflow_id}/documents/{document_id}/workspace", document_workspace, methods=["GET", "POST", "DELETE"]),
             Route("/workflows/{workflow_id}/input-images", upload_input_image, methods=["POST"]),
             Route("/workflows/{workflow_id}/input-images/{image_id}", get_input_image, methods=["GET"]),
             Route("/internal/v1/workflows/{workflow_id}/nodes/{node_id}/input-images", internal_node_images, methods=["POST"]),
@@ -2320,6 +2331,7 @@ def create_app(
             Route("/agents/{agent_id}/models", agent_models, methods=["GET"]),
             Route("/agents/{agent_id}/test", manage_machines, methods=["POST"]),
             Route("/agents/{agent_id}/confirm-restarted", manage_machines, methods=["POST"]),
+            Route("/agents/{agent_id}/debug-priority", manage_machines, methods=["PUT"]),
             Route("/agents/{agent_id}/remark", manage_machines, methods=["PUT"]),
             Route("/agents/{agent_id}", manage_machines, methods=["PUT", "DELETE"]),
             Route("/internal/v1/agents", internal_group_agents, methods=["GET"]),
@@ -2442,6 +2454,8 @@ def main() -> None:
         factory=True,
         host=args.host,
         port=args.port,
+        # SSE 可能持续到工作流结束；限制 HTTP 排空等待，随后仍执行 lifespan 清理。
+        timeout_graceful_shutdown=10,
     )
     family = socket.AF_INET6 if ":" in args.host else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as listener:

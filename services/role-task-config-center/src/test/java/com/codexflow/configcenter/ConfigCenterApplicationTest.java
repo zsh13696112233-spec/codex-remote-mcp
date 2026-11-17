@@ -222,7 +222,7 @@ class ConfigCenterApplicationTest extends com.codexflow.configcenter.GroupedFixt
     String script = readClasspath("static/app.js");
 
     assertThat(index)
-        .contains("data-page=\"groups\">分组管理")
+        .contains("data-page=\"groups\">总览")
         .contains("id=\"groupFilter\"")
         .doesNotContain("data-page=\"runtime\"");
     assertThat(script)

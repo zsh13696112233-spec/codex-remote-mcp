@@ -429,16 +429,24 @@ class JiraStore:
             self._add_event_with_connection(db, workflow_id, None, "supervisor", "jira." + result["state"], result, now)
             return result
 
-    def jira_runs(self, group_id, *, before=None, limit=50, sop_id=""):
+    def jira_runs(self, group_id, *, before=None, limit=50, sop_id="", page=None):
         if sop_id:
             import uuid
             uuid.UUID(sop_id)
         group_id = group_id or None
         if group_id is not None and (not isinstance(group_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", group_id)):
             raise ValueError("请选择有效分组。")
-        if type(limit) is not int or not 1 <= limit <= 100 or (before is not None and (type(before) is not int or before < 1)):
-            raise ValueError("分页参数无效。")
+        from jira_pagination import validate_page, page_window
+        validate_page(page, limit, before)
         with self._connect() as db:
+            db.execute('BEGIN')
+            pagination, offset = {}, 0
+            if page is not None:
+                total = db.execute("""SELECT COUNT(*) FROM workflow_jira_runs j JOIN workflows w USING(workflow_id)
+                    JOIN workflow_allocations a USING(workflow_id) WHERE (? IS NULL OR a.group_id=?)
+                    AND (?='' OR EXISTS (SELECT 1 FROM workflow_sop_context s WHERE s.workflow_id=j.workflow_id AND s.sop_id=?))""",
+                    (group_id, group_id, sop_id, sop_id)).fetchone()[0]
+                pagination, offset = page_window(total, page, limit)
             rows = db.execute("""SELECT j.*,j.rowid AS cursor,w.status,w.name,b.task_definition_id,w.created_at,w.finished_at,w.termination_json,
                 a.supervisor_id,a.executor_id,a.cwd,a.group_id,
                 supervisor.remark AS supervisor_remark,executor.remark AS executor_remark FROM workflow_jira_runs j JOIN workflows w USING(workflow_id)
@@ -446,7 +454,7 @@ class JiraStore:
                 LEFT JOIN registered_agents supervisor ON supervisor.id=a.supervisor_id
                 LEFT JOIN registered_agents executor ON executor.id=a.executor_id WHERE (? IS NULL OR a.group_id=?) AND (? IS NULL OR j.rowid<?)
                 AND (?='' OR EXISTS (SELECT 1 FROM workflow_sop_context s WHERE s.workflow_id=j.workflow_id AND s.sop_id=?))
-                ORDER BY j.rowid DESC LIMIT ?""", (group_id, group_id, before, before, sop_id, sop_id, limit + 1)).fetchall()
+                ORDER BY j.rowid DESC LIMIT ? OFFSET ?""", (group_id, group_id, before, before, sop_id, sop_id, limit + 1, offset)).fetchall()
             result = []
             for row in rows[:limit]:
                 deliveries = [dict(r) for r in db.execute("SELECT node_id AS nodeId,attempt,status,reference,summary,recorded_at AS recordedAt FROM workflow_jira_deliveries WHERE workflow_id=? ORDER BY recorded_at,node_id,attempt", (row["workflow_id"],))]
@@ -467,4 +475,4 @@ class JiraStore:
                     "executionResult": execution_result(db, row["workflow_id"]),
                     "claimedAt": row["claimed_at"], "finishedAt": row["finished_at"], "deliveries": deliveries,
                     "resourceState": "occupied" if db.execute("SELECT 1 FROM workflow_machine_claims WHERE workflow_id=?", (row["workflow_id"],)).fetchone() else "released"})
-            return {"items": result, "nextCursor": rows[limit - 1]["cursor"] if len(rows) > limit else None}
+            return {**pagination, "items": result, "nextCursor": rows[limit - 1]["cursor"] if len(rows) > limit else None}

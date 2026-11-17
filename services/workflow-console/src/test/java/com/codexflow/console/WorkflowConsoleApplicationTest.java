@@ -29,7 +29,7 @@ class WorkflowConsoleApplicationTest {
                 entry ->
                     entry.getKey().getPatternValues().stream().anyMatch(p -> p.startsWith("/api/")))
             .toList();
-    assertThat(apiMethods).hasSize(9);
+    assertThat(apiMethods).hasSize(12);
     var getRoutes =
         apiMethods.stream()
             .filter(
@@ -42,12 +42,14 @@ class WorkflowConsoleApplicationTest {
                 entry ->
                     entry.getKey().getMethodsCondition().getMethods().contains(RequestMethod.POST))
             .toList();
-    assertThat(getRoutes).hasSize(6);
-    assertThat(postRoutes).hasSize(3);
+    assertThat(getRoutes).hasSize(8);
+    assertThat(postRoutes).hasSize(5);
     assertThat(postRoutes)
         .flatExtracting(entry -> entry.getKey().getPatternValues())
         .containsExactlyInAnyOrder(
             "/api/workflows/{workflowId}/messages",
+            "/api/workflows/{workflowId}/documents/{documentId}/workspace",
+            "/api/workflows/{workflowId}/documents/{documentId}/messages",
             "/api/workflows/{workflowId}/advance/{gateId}/confirm",
             "/api/workflows/{workflowId}/advance/{gateId}/hold");
     assertThat(apiMethods)
